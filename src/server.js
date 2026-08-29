@@ -1,17 +1,15 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
-const { SessionManager } = require('./sessions');
-const { UserRegistry } = require('./user-registry');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
+const BASE_USERS_DIR = process.env.USERS_DIR ||
+  path.join(process.env.HOME || '/home/vova', 'users');
 
 async function main() {
   const secrets = await loadSecrets();
-  const sessions = new SessionManager();
-  const users = new UserRegistry();
-
-  sessions.loadFromDisk();
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -35,8 +33,9 @@ async function main() {
       const { userId, username, task, context } = payload;
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
 
-      const user = users.get(username);
-      if (!user) return json(res, 404, { error: 'user not found' });
+      const workDir = path.join(BASE_USERS_DIR, username);
+      fs.mkdirSync(workDir, { recursive: true });
+      const user = { id: userId, name: username, username, workDir };
 
       // Accept request immediately, run task in background
       const taskId = `${username}-${Date.now()}`;
@@ -57,8 +56,8 @@ async function main() {
 
   server.listen(PORT, () => console.log(`alesa-agent listening on :${PORT}`));
 
-  process.once('SIGTERM', () => { sessions.persist(); server.close(); });
-  process.once('SIGINT',  () => { sessions.persist(); server.close(); });
+  process.once('SIGTERM', () => server.close());
+  process.once('SIGINT',  () => server.close());
 }
 
 function json(res, status, data) {

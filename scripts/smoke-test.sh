@@ -46,14 +46,14 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   "$AGENT_URL/run")
 [ "$STATUS" = "400" ] && ok "400 on missing fields" || fail "Expected 400, got $STATUS"
 
-# 6. /run with unknown user returns 404
-echo "[6] POST /run with unknown user returns 404"
+# 6. /run with valid fields returns 202 (fire-and-forget)
+echo "[6] POST /run with valid fields returns 202"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Authorization: Bearer $AGENT_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"userId":999,"username":"no_such_user","task":"hello"}' \
+  -d '{"userId":999,"username":"smoketest","task":"echo smoke"}' \
   "$AGENT_URL/run")
-[ "$STATUS" = "404" ] && ok "404 for unknown user" || fail "Expected 404, got $STATUS"
+[ "$STATUS" = "202" ] && ok "202 accepted" || fail "Expected 202, got $STATUS"
 
 echo ""
 echo "=== Result: $PASS passed, $FAIL failed ==="
