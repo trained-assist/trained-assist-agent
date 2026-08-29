@@ -19,6 +19,14 @@ function loadUserTokens(userId) {
     else if (label === 'figma') extra.FIGMA_TOKEN = val;
     else if (label === 'notion') extra.NOTION_TOKEN = val;
     else if (label === 'linear') extra.LINEAR_API_KEY = val;
+    else if (label === 'nalog') {
+      try {
+        const parsed = JSON.parse(val);
+        if (parsed.auth_token)    extra.NALOG_TOKEN         = parsed.auth_token;
+        if (parsed.refresh_token) extra.NALOG_REFRESH_TOKEN  = parsed.refresh_token;
+        if (parsed.expires)       extra.NALOG_TOKEN_EXPIRES  = parsed.expires;
+      } catch { extra.NALOG_TOKEN = val; }
+    }
     else extra[label.toUpperCase().replace(/[^A-Z0-9]/g, '_')] = val;
   }
   return extra;
