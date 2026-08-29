@@ -1,6 +1,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { writeMcpConfig } = require('./browser');
 
 const STREAM_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
@@ -32,7 +33,14 @@ async function runTask({ taskId, user, task, context, secrets }) {
   // Build the log viewer URL (TODO: expose via /logs/:taskId)
   // For now: stream output directly to Telegram
 
-  const proc = spawn('claude', ['--dangerously-skip-permissions', '--print', prompt], {
+  // Write per-user MCP config — gives Claude access only to this user's Chrome profile
+  const mcpConfig = writeMcpConfig(user.workDir);
+
+  const proc = spawn('claude', [
+    '--dangerously-skip-permissions',
+    '--mcp-config', mcpConfig,
+    '--print', prompt,
+  ], {
     cwd: user.workDir,
     env: { ...process.env, ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY },
   });

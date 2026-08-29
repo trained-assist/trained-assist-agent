@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@google-cloud/secret-manager": "^5.6.0",
-    "axios": "^1.7.0"
+    "@playwright/mcp": "^0.0.29",
+    "axios": "^1.7.0",
+    "playwright": "^1.50.0"
   }
 }
