@@ -1,0 +1,15 @@
+{
+  "name": "alesa-agent",
+  "version": "0.1.0",
+  "description": "Alesa Agent — Claude Code session runner on GCP VM",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js src/runner.js src/sessions.js src/user-registry.js src/profiles.js src/log-buffer.js src/secrets.js"
+  },
+  "dependencies": {
+    "@google-cloud/secret-manager": "^5.6.0",
+    "axios": "^1.7.0"
+  }
+}
