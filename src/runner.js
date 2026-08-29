@@ -46,14 +46,17 @@ async function runTask({ taskId, user, task, context, sessionId, secrets }) {
   let activeSessionId = sessionId;
   let sessionContext = context;
 
-  if (sessionId) {
-    // Build context from prior session history
+  if (sessionId && sessions.getSession(user.workDir, sessionId)) {
+    // Existing session — build context from prior history
     const fromSession = sessions.buildContext(user.workDir, sessionId);
     if (fromSession) {
       sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
+    // Add new user message to session
+    sessions.appendUserMessage(user.workDir, sessionId, task);
   } else {
-    activeSessionId = sessions.createSession(user.workDir, { task });
+    // New session — create with bot-provided id (or generate one)
+    activeSessionId = sessions.createSession(user.workDir, { task, id: sessionId || undefined });
   }
 
   // Send "thinking" message, get message_id for streaming edits

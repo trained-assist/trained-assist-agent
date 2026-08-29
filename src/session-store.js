@@ -26,8 +26,8 @@ function saveIndex(workDir, sessions) {
 }
 
 /** Create a new session record, return its id */
-function createSession(workDir, { task }) {
-  const id = `s-${Date.now()}`;
+function createSession(workDir, { task, id: providedId }) {
+  const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
 
@@ -48,6 +48,27 @@ function createSession(workDir, { task }) {
   fs.writeFileSync(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));
 
   return id;
+}
+
+/** Append user message to an existing session (before running Claude) */
+function appendUserMessage(workDir, id, content) {
+  try {
+    const fp = sessionFilePath(workDir, id);
+    if (!fs.existsSync(fp)) return;
+    const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    const now = Date.now();
+    full.messages.push({ role: 'user', content, at: now });
+    full.lastAt = now;
+    full.messageCount = full.messages.length;
+    fs.writeFileSync(fp, JSON.stringify(full, null, 2));
+
+    const sessions = loadIndex(workDir);
+    const idx = sessions.findIndex(s => s.id === id);
+    if (idx >= 0) { sessions[idx].lastAt = now; sessions[idx].messageCount = full.messageCount; }
+    saveIndex(workDir, sessions);
+  } catch (e) {
+    console.error('[session-store] appendUserMessage error:', e.message);
+  }
 }
 
 /** Append assistant reply to an existing session */
@@ -102,4 +123,4 @@ function buildContext(workDir, sessionId) {
   return lines.join('\n');
 }
 
-module.exports = { createSession, appendReply, listSessions, getSession, buildContext };
+module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext };
