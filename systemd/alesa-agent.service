@@ -1,15 +1,16 @@
 [Unit]
-Description=Alesa Agent — Claude Code session runner
+Description=Trained Assist Agent — Claude Code session runner
 After=network.target
 
 [Service]
 Type=simple
 User=vova
-WorkingDirectory=/home/vova/alesa-agent
+WorkingDirectory=/home/vova/trained-assist-agent
 ExecStart=/usr/bin/node src/server.js
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
+Environment=PORT=8080
 
 [Install]
 WantedBy=multi-user.target
