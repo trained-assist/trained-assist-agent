@@ -44,6 +44,7 @@ ${sessionDescriptions}
       max_tokens: 64,
       messages: [{ role: 'user', content: prompt }],
     }),
+    signal: AbortSignal.timeout(8000),
   });
 
   if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
@@ -106,6 +107,8 @@ async function main() {
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
       if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32)
         return json(res, 400, { error: 'invalid username' });
+      if (sessionId && !/^[a-zA-Z0-9_-]+$/.test(sessionId))
+        return json(res, 400, { error: 'invalid sessionId' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
