@@ -9,6 +9,7 @@ const COOKIE_DOMAINS = {
   notion:  { domain: '.notion.so',   cookies: ['token_v2', 'notion_user_id'] },
   linear:  { domain: '.linear.app',  cookies: [] }, // full dump
   slack:   { domain: '.slack.com',   cookies: ['b', 'd'] },
+  nalog:   { domain: '.nalog.ru',    cookies: [] }, // full dump — nalog.ru uses many session cookies
 };
 
 function parseCookieString(str) {
