@@ -1,10 +1,28 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { writeMcpConfig } = require('./browser');
+const sessions = require('./session-store');
 
 const STREAM_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
+
+function loadUserTokens(userId) {
+  const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
+  const extra = {};
+  if (!fs.existsSync(tokensDir)) return extra;
+  for (const file of fs.readdirSync(tokensDir)) {
+    const val = fs.readFileSync(path.join(tokensDir, file), 'utf8').trim();
+    const label = file.toLowerCase();
+    if (label === 'github') { extra.GH_TOKEN = val; extra.GITHUB_TOKEN = val; }
+    else if (label === 'figma') extra.FIGMA_TOKEN = val;
+    else if (label === 'notion') extra.NOTION_TOKEN = val;
+    else if (label === 'linear') extra.LINEAR_API_KEY = val;
+    else extra[label.toUpperCase().replace(/[^A-Z0-9]/g, '_')] = val;
+  }
+  return extra;
+}
 
 /**
  * Runs `claude --dangerously-skip-permissions` for a task,
@@ -15,19 +33,34 @@ const MAX_MSG_LEN = 3500;
  * @param {object} opts.user   - { id, name, username, workDir }
  * @param {string} opts.task
  * @param {string|null} opts.context
+ * @param {string|null} opts.sessionId  - existing session to append to
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
-async function runTask({ taskId, user, task, context, secrets }) {
+async function runTask({ taskId, user, task, context, sessionId, secrets }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
   fs.mkdirSync(user.workDir, { recursive: true });
 
+  // Resolve session: attach to existing or create new
+  let activeSessionId = sessionId;
+  let sessionContext = context;
+
+  if (sessionId) {
+    // Build context from prior session history
+    const fromSession = sessions.buildContext(user.workDir, sessionId);
+    if (fromSession) {
+      sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
+    }
+  } else {
+    activeSessionId = sessions.createSession(user.workDir, { task });
+  }
+
   // Send "thinking" message, get message_id for streaming edits
   const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
   const msgId = thinkMsg?.result?.message_id;
 
-  const prompt = context ? `${context}\n\n${task}` : task;
+  const prompt = sessionContext ? `${sessionContext}\n\n${task}` : task;
   const fullOutput = { text: '' };
 
   // Build the log viewer URL (TODO: expose via /logs/:taskId)
@@ -36,13 +69,19 @@ async function runTask({ taskId, user, task, context, secrets }) {
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
   const mcpConfig = writeMcpConfig(user.workDir, user.id);
 
+  const userTokens = loadUserTokens(user.id);
+
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',
     '--mcp-config', mcpConfig,
     '--print', prompt,
   ], {
     cwd: user.workDir,
-    env: { ...process.env, ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY },
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY,
+      ...userTokens,
+    },
   });
 
   let streamTimer = null;
@@ -81,6 +120,11 @@ async function runTask({ taskId, user, task, context, secrets }) {
     );
   } else {
     await tgSend(BOT_TOKEN, chatId, `✅ ${final}`);
+  }
+
+  // Append assistant reply to session history
+  if (activeSessionId) {
+    sessions.appendReply(user.workDir, activeSessionId, result);
   }
 
   return result;

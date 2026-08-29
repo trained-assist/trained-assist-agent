@@ -5,6 +5,7 @@ const { execSync } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
+const { listSessions, getSession: getSessionData } = require('./session-store');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -53,7 +54,7 @@ async function main() {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context } = payload;
+      const { userId, username, task, context, sessionId } = payload;
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
       if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32)
         return json(res, 400, { error: 'invalid username' });
@@ -67,7 +68,7 @@ async function main() {
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task, context, secrets }).catch(err =>
+      runTask({ taskId, user, task, context, sessionId: sessionId || null, secrets }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
@@ -90,8 +91,28 @@ async function main() {
       return json(res, 200, { ok: true });
     }
 
-    // TODO: GET /logs/:taskId — stream live logs for log viewer
-    // TODO: POST /auth/verify — verify username/password (called by alesa-bot for /login)
+    // GET /sessions?username=xxx[&limit=N] — list sessions for a user
+    if (req.method === 'GET' && url.pathname === '/sessions') {
+      const username = url.searchParams.get('username');
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '10', 10), 50);
+      const workDir = path.join(BASE_USERS_DIR, username);
+      return json(res, 200, { sessions: listSessions(workDir, limit) });
+    }
+
+    // GET /sessions/:id?username=xxx — get full session with messages
+    const sessionMatch = url.pathname.match(/^\/sessions\/([a-zA-Z0-9_-]+)$/);
+    if (req.method === 'GET' && sessionMatch) {
+      const id = sessionMatch[1];
+      const username = url.searchParams.get('username');
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+      const workDir = path.join(BASE_USERS_DIR, username);
+      const session = getSessionData(workDir, id);
+      if (!session) return json(res, 404, { error: 'not found' });
+      return json(res, 200, session);
+    }
 
     json(res, 404, { error: 'not found' });
   });
