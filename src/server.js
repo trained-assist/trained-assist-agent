@@ -103,7 +103,7 @@ async function main() {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession } = payload;
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
       if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32)
         return json(res, 400, { error: 'invalid username' });
@@ -119,7 +119,7 @@ async function main() {
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task, context, sessionId: sessionId || null, secrets }).catch(err =>
+      runTask({ taskId, user, task, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, secrets }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;

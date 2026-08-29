@@ -36,7 +36,7 @@ function loadUserTokens(userId) {
  * @param {string|null} opts.sessionId  - existing session to append to
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
-async function runTask({ taskId, user, task, context, sessionId, secrets }) {
+async function runTask({ taskId, user, task, context, sessionId, contextFromSession, secrets }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
@@ -52,10 +52,15 @@ async function runTask({ taskId, user, task, context, sessionId, secrets }) {
     if (fromSession) {
       sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
-    // Add new user message to session
     sessions.appendUserMessage(user.workDir, sessionId, task);
   } else {
-    // New session — create with bot-provided id (or generate one)
+    // New session — optionally preload context from another session
+    if (contextFromSession) {
+      const sourceCtx = sessions.buildContext(user.workDir, contextFromSession);
+      if (sourceCtx) {
+        sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
+      }
+    }
     activeSessionId = sessions.createSession(user.workDir, { task, id: sessionId || undefined });
   }
 
