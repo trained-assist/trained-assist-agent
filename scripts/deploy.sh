@@ -1,12 +1,14 @@
 #!/bin/bash
 set -e
 
-REPO_DIR="/home/vova/trained-assist-agent"
 SERVICE="trained-assist-agent"
 
+# CI already cd-s into the repo dir before calling this script.
+# Use REPO_DIR as override if set, otherwise use CWD.
+REPO_DIR="${REPO_DIR:-$(pwd)}"
+
 echo "==> Pulling latest code..."
-cd "$REPO_DIR"
-git pull origin main
+git -C "$REPO_DIR" pull origin main
 
 echo "==> Installing dependencies..."
 npm ci --omit=dev
