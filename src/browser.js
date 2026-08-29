@@ -52,29 +52,40 @@ function buildStorageState(tokensDir) {
  * If the user has captured service cookies (via Chrome extension), injects them via --storage-state.
  */
 function writeMcpConfig(workDir, userId) {
-  const chromeDir = path.join(workDir, 'chrome');
-  fs.mkdirSync(chromeDir, { recursive: true });
+  // Note: --user-data-dir creates a persistent context, which is incompatible
+  // with --storage-state (Playwright limitation). We rely on --storage-state
+  // for both cookie injection and session persistence. Per-user isolation is
+  // maintained via separate state files in each user's workDir.
+
+  const stateFile = path.join(workDir, 'playwright-storage-state.json');
+
+  // Merge captured extension cookies into existing storage state
+  const existing = fs.existsSync(stateFile)
+    ? JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+    : { cookies: [], origins: [] };
+
+  if (userId) {
+    const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
+    if (fs.existsSync(tokensDir)) {
+      const fresh = buildStorageState(tokensDir);
+      if (fresh.cookies.length > 0) {
+        // Merge: fresh cookies override matching existing ones by name+domain
+        const existingMap = new Map(existing.cookies.map(c => [`${c.name}@@${c.domain}`, c]));
+        for (const c of fresh.cookies) existingMap.set(`${c.name}@@${c.domain}`, c);
+        existing.cookies = Array.from(existingMap.values());
+        console.log(`[browser] injected ${fresh.cookies.length} cookies for userId=${userId}`);
+      }
+    }
+  }
+
+  fs.writeFileSync(stateFile, JSON.stringify(existing, null, 2));
 
   const args = [
     '@playwright/mcp',
     '--headless',
     '--no-sandbox',
-    '--user-data-dir', chromeDir,
+    '--storage-state', stateFile,
   ];
-
-  // Inject captured cookies as Playwright storage state
-  if (userId) {
-    const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
-    if (fs.existsSync(tokensDir)) {
-      const state = buildStorageState(tokensDir);
-      if (state.cookies.length > 0) {
-        const stateFile = path.join(workDir, 'playwright-storage-state.json');
-        fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
-        args.push('--storage-state', stateFile);
-        console.log(`[browser] injected ${state.cookies.length} cookies for userId=${userId}`);
-      }
-    }
-  }
 
   const config = {
     mcpServers: {
