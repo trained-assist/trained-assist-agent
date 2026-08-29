@@ -73,6 +73,23 @@ async function main() {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/tokens') {
+      const body = await readBody(req);
+      let payload;
+      try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
+
+      const { userId, label, value } = payload;
+      if (!userId || !label || !value) return json(res, 400, { error: 'missing fields' });
+      if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
+        return json(res, 400, { error: 'invalid label' });
+
+      const tokensDir = path.join(process.env.HOME || '/home/vova', 'agent-tokens', String(userId));
+      fs.mkdirSync(tokensDir, { recursive: true });
+      fs.writeFileSync(path.join(tokensDir, label), String(value), { mode: 0o600 });
+      console.log(`[tokens] saved label="${label}" for userId=${userId}`);
+      return json(res, 200, { ok: true });
+    }
+
     // TODO: GET /logs/:taskId — stream live logs for log viewer
     // TODO: POST /auth/verify — verify username/password (called by alesa-bot for /login)
 
