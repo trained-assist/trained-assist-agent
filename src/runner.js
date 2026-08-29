@@ -34,7 +34,7 @@ async function runTask({ taskId, user, task, context, secrets }) {
   // For now: stream output directly to Telegram
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
-  const mcpConfig = writeMcpConfig(user.workDir);
+  const mcpConfig = writeMcpConfig(user.workDir, user.id);
 
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',
