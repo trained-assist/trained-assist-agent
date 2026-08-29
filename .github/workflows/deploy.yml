@@ -16,4 +16,5 @@ jobs:
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
             cd /home/vova/trained-assist-agent
+            git pull origin main
             bash scripts/deploy.sh
