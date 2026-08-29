@@ -31,7 +31,7 @@ function createSession(workDir, { task, id: providedId }) {
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
 
-  const meta = { id, topic, createdAt: now, lastAt: now, messageCount: 1 };
+  const meta = { id, topic, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic };
 
   const sessions = loadIndex(workDir);
   sessions.unshift(meta);
@@ -64,7 +64,11 @@ function appendUserMessage(workDir, id, content) {
 
     const sessions = loadIndex(workDir);
     const idx = sessions.findIndex(s => s.id === id);
-    if (idx >= 0) { sessions[idx].lastAt = now; sessions[idx].messageCount = full.messageCount; }
+    if (idx >= 0) {
+      sessions[idx].lastAt = now;
+      sessions[idx].messageCount = full.messageCount;
+      sessions[idx].lastUserMessage = content.slice(0, 120);
+    }
     saveIndex(workDir, sessions);
   } catch (e) {
     console.error('[session-store] appendUserMessage error:', e.message);

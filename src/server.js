@@ -11,6 +11,54 @@ const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
   path.join(process.env.HOME || '/home/vova', 'users');
 
+async function classifyMessage(message, sessions, apiKey) {
+  // Build a compact description of each session
+  const sessionDescriptions = sessions.map((s, i) => {
+    const lastMsg = s.lastUserMessage ? `\n   Последнее: "${s.lastUserMessage.slice(0, 100)}"` : '';
+    return `${i + 1}. ID: ${s.id}\n   Тема: "${s.topic}"${lastMsg}`;
+  }).join('\n\n');
+
+  const prompt = `Пользователь написал новое сообщение. Определи, к какому из существующих диалогов оно относится.
+
+СУЩЕСТВУЮЩИЕ ДИАЛОГИ:
+${sessionDescriptions}
+
+НОВОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:
+"${message}"
+
+Ответь ТОЛЬКО одной строкой — ID диалога если уверен, или слово "ambiguous" если непонятно.
+Правила:
+- Если сообщение явно продолжает один из диалогов — напиши его ID
+- Если сообщение может относиться к нескольким диалогам или ни к одному — напиши "ambiguous"
+- Не пиши ничего лишнего, только ID или "ambiguous"`;
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 64,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
+  const data = await res.json();
+  const answer = data.content?.[0]?.text?.trim() || 'ambiguous';
+
+  if (answer === 'ambiguous') return { sessionId: null, confidence: 'low' };
+
+  // Check that the returned ID actually exists in the provided list
+  const match = sessions.find(s => s.id === answer);
+  if (!match) return { sessionId: null, confidence: 'low' };
+
+  return { sessionId: match.id, confidence: 'high' };
+}
+
 async function main() {
   const secrets = await loadSecrets();
 
@@ -112,6 +160,25 @@ async function main() {
       const session = getSessionData(workDir, id);
       if (!session) return json(res, 404, { error: 'not found' });
       return json(res, 200, session);
+    }
+
+    // POST /classify — decide which session a message belongs to
+    if (req.method === 'POST' && url.pathname === '/classify') {
+      const body = await readBody(req);
+      let payload;
+      try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
+
+      const { message, sessions: sessionList } = payload;
+      if (!message || !Array.isArray(sessionList) || sessionList.length === 0)
+        return json(res, 400, { error: 'missing fields' });
+
+      try {
+        const result = await classifyMessage(message, sessionList, secrets.ANTHROPIC_API_KEY);
+        return json(res, 200, result);
+      } catch (e) {
+        console.error('[classify] error:', e.message);
+        return json(res, 200, { sessionId: null, confidence: 'low' }); // fallback: show picker
+      }
     }
 
     json(res, 404, { error: 'not found' });
