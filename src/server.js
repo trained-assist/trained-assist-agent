@@ -1,5 +1,7 @@
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
+const { execSync } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
@@ -23,6 +25,27 @@ async function main() {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, { status: 'alive', uptime: process.uptime() });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/stats') {
+      const totalMem = os.totalmem();
+      const freeMem = os.freemem();
+      const usedMem = totalMem - freeMem;
+      const cpus = os.cpus();
+      const load = os.loadavg();
+      let disk = null;
+      try {
+        const df = execSync('df -BM / --output=size,used,avail', { encoding: 'utf8' });
+        const [, line] = df.trim().split('\n');
+        const [size, used, avail] = line.trim().split(/\s+/).map(s => parseInt(s));
+        disk = { totalMb: size, usedMb: used, availMb: avail };
+      } catch { /* ignore */ }
+      return json(res, 200, {
+        cpu: { cores: cpus.length, load1m: load[0], load5m: load[1] },
+        memory: { totalMb: Math.round(totalMem / 1048576), usedMb: Math.round(usedMem / 1048576), freeMb: Math.round(freeMem / 1048576) },
+        disk,
+        uptime: process.uptime(),
+      });
     }
 
     if (req.method === 'POST' && url.pathname === '/run') {
