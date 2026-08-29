@@ -184,6 +184,72 @@ async function main() {
       }
     }
 
+    // GET /files?username=xxx&path=relative — list directory contents
+    if (req.method === 'GET' && url.pathname === '/files') {
+      const username = url.searchParams.get('username');
+      const relPath  = url.searchParams.get('path') || '';
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+
+      const workDir = path.join(BASE_USERS_DIR, username);
+      const target  = path.resolve(path.join(workDir, relPath));
+      if (!target.startsWith(workDir))
+        return json(res, 400, { error: 'path traversal' });
+
+      try {
+        const entries = fs.readdirSync(target, { withFileTypes: true })
+          .filter(e => !e.name.startsWith('.')) // hide dotfiles
+          .map(e => {
+            if (e.isDirectory()) {
+              let count = 0;
+              try { count = fs.readdirSync(path.join(target, e.name)).filter(n => !n.startsWith('.')).length; } catch {}
+              return { name: e.name, type: 'dir', count };
+            }
+            let size = 0;
+            try { size = fs.statSync(path.join(target, e.name)).size; } catch {}
+            return { name: e.name, type: 'file', size };
+          })
+          .sort((a, b) => {
+            if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
+        return json(res, 200, { path: relPath, entries });
+      } catch (e) {
+        return json(res, 404, { error: 'not found' });
+      }
+    }
+
+    // GET /files/read?username=xxx&path=relative — read a file
+    if (req.method === 'GET' && url.pathname === '/files/read') {
+      const username = url.searchParams.get('username');
+      const relPath  = url.searchParams.get('path') || '';
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+
+      const workDir = path.join(BASE_USERS_DIR, username);
+      const target  = path.resolve(path.join(workDir, relPath));
+      if (!target.startsWith(workDir))
+        return json(res, 400, { error: 'path traversal' });
+
+      const ext = path.extname(target).toLowerCase();
+      const READABLE = ['.md', '.json', '.txt', '.log', '.js', '.ts', '.yaml', '.yml', '.toml', '.env'];
+      if (!READABLE.includes(ext))
+        return json(res, 400, { error: 'not a readable file type' });
+
+      try {
+        const raw = fs.readFileSync(target, 'utf8');
+        const MAX = 3500;
+        return json(res, 200, {
+          path: relPath,
+          content: raw.length > MAX ? raw.slice(0, MAX) : raw,
+          truncated: raw.length > MAX,
+          size: raw.length,
+        });
+      } catch (e) {
+        return json(res, 404, { error: 'not found' });
+      }
+    }
+
     json(res, 404, { error: 'not found' });
   });
 
