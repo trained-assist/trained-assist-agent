@@ -55,6 +55,8 @@ async function main() {
 
       const { userId, username, task, context } = payload;
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
+      if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32)
+        return json(res, 400, { error: 'invalid username' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
