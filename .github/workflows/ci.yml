@@ -48,7 +48,7 @@ jobs:
         with:
           host: ${{ secrets.VM_RU_HOST }}
           username: ${{ secrets.VM_RU_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
+          password: ${{ secrets.VM_RU_PASSWORD }}
           script: |
             cd /home/vova/trained-assist-agent
             git fetch origin main
