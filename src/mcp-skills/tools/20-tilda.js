@@ -109,6 +109,21 @@ async function getProjectData(projectId, cookieHeader) {
   }
 }
 
+// ── HTTP: projects list without known project_id ───────────────────────────────
+
+async function listAllProjects(cookieHeader) {
+  // Tilda returns project list when projectid is omitted
+  const res = await tildaPost('/projects/get/getprojects/', { comm: 'getprojectslist' }, cookieHeader);
+  if (res.status >= 400 || /login|not authorized|sign in/i.test(res.text)) {
+    throw new Error(`Auth failed: ${res.text.slice(0, 200)}`);
+  }
+  try {
+    return JSON.parse(res.text);
+  } catch {
+    throw new Error(`getprojects did not return JSON: ${res.text.slice(0, 200)}`);
+  }
+}
+
 // ── Context helper ────────────────────────────────────────────────────────────
 
 const REAUTH_INSTRUCTIONS = 'Открой tilda.ru в браузере (ты уже залогинен — переходить никуда не нужно), нажми кнопку Tilda в расширении Cloud Auth Bridge. Когда сессия передана — скажи "готово".';
@@ -148,23 +163,54 @@ async function withAuth(userId, fn) {
 module.exports = {
   tools: {
 
+    tilda_list_all_projects: {
+      description: 'List all Tilda projects for the current user. Use this during onboarding to let the user pick a project by name instead of guessing the project ID.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const cookieHeader = readSessionCookies(USER_ID);
+        if (!cookieHeader || !cookieStringHasAuth(cookieHeader)) {
+          return {
+            error: 'session_expired',
+            requires_reauth: true,
+            instructions: REAUTH_INSTRUCTIONS,
+          };
+        }
+        try {
+          const data = await listAllProjects(cookieHeader);
+          const projects = (data.projects || data.pages || []).map(p => ({
+            id: p.id,
+            title: p.title || p.name,
+            pages_count: p.pagescount || p.pages_count,
+            domain: p.domain,
+          }));
+          return { projects_count: projects.length, projects };
+        } catch (e) {
+          if (e.message.includes('Auth failed')) {
+            return { error: 'session_expired', requires_reauth: true, instructions: REAUTH_INSTRUCTIONS };
+          }
+          return { error: e.message };
+        }
+      },
+    },
+
     tilda_set_config: {
-      description: 'Save Tilda project config: storage state file path, project ID, test/production page IDs and URLs. Call once per project to configure the skill.',
+      description: 'Save Tilda project config: project ID, test/production page IDs and URLs. Call after tilda_list_all_projects to configure which project and pages to use.',
       inputSchema: {
         type: 'object',
         properties: {
-          storage_state: { type: 'string', description: 'Path to Playwright storage state JSON (e.g. ~/Library/Application Support/tilda-site-ops/efi/storage-state.json)' },
-          project_id:    { type: 'string', description: 'Tilda project ID (number)' },
+          project_id:    { type: 'string', description: 'Tilda project ID (from tilda_list_all_projects)' },
           test_page_id:  { type: 'string', description: 'Test/staging page ID — changes go here first' },
           prod_page_id:  { type: 'string', description: 'Production page ID — changes go here after approval' },
           test_url:      { type: 'string', description: 'Public URL of the test page (for QA verification)' },
           prod_url:      { type: 'string', description: 'Public URL of the production page (for QA verification)' },
+          storage_state: { type: 'string', description: 'Optional: path to Playwright storage state JSON (fallback auth if extension session expires)' },
         },
-        required: ['storage_state', 'project_id'],
+        required: ['project_id'],
       },
-      handler: async ({ storage_state, project_id, test_page_id, prod_page_id, test_url, prod_url }) => {
+      handler: async ({ project_id, test_page_id, prod_page_id, test_url, prod_url, storage_state }) => {
         const config = readConfig(USER_ID) || {};
-        const updated = { ...config, storage_state, project_id };
+        const updated = { ...config, project_id };
+        if (storage_state !== undefined) updated.storage_state = storage_state;
         if (test_page_id !== undefined) updated.test_page_id = test_page_id;
         if (prod_page_id !== undefined) updated.prod_page_id = prod_page_id;
         if (test_url !== undefined) updated.test_url = test_url;

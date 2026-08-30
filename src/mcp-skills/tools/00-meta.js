@@ -15,7 +15,7 @@ const SKILLS = [
     id: 'tilda-site-ops',
     name: 'Tilda Site Ops',
     description: 'Работа с Tilda: страницы, блоки, публикация. Test-first: сначала тест, потом прод.',
-    tools: ['tilda_set_config', 'tilda_status', 'tilda_list_pages', 'tilda_get_page', 'tilda_backup_page', 'tilda_create_staging', 'tilda_publish_page', 'tilda_get_blocks', 'tilda_save_block'],
+    tools: ['tilda_list_all_projects', 'tilda_set_config', 'tilda_status', 'tilda_list_pages', 'tilda_get_page', 'tilda_backup_page', 'tilda_create_staging', 'tilda_publish_page', 'tilda_get_blocks', 'tilda_save_block'],
     requires: 'tilda-capture-storage-state.js (локальный браузер) → путь к storage-state.json → tilda_set_config',
   },
 ];
