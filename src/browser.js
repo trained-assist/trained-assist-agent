@@ -116,7 +116,7 @@ function writeMcpConfig(workDir, userId) {
 
   fs.writeFileSync(stateFile, JSON.stringify(existing, null, 2));
 
-  const args = [
+  const playwrightArgs = [
     '@playwright/mcp',
     '--headless',
     '--no-sandbox',
@@ -125,7 +125,17 @@ function writeMcpConfig(workDir, userId) {
 
   const config = {
     mcpServers: {
-      playwright: { command: 'npx', args },
+      playwright: { command: 'npx', args: playwrightArgs },
+      'trained-skills': {
+        command: 'node',
+        args: [path.join(__dirname, 'mcp-skills', 'index.js')],
+        env: {
+          USER_ID: String(userId || ''),
+          WORK_DIR: workDir,
+          HOME: os.homedir(),
+          PATH: process.env.PATH || '',
+        },
+      },
     },
   };
 

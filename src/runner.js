@@ -79,43 +79,9 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
 
   const userTokens = loadUserTokens(user.id);
 
-  const nalogCtx = userTokens.NALOG_TOKEN ? `\n[SYSTEM CONTEXT — nalog.ru НПД API]
-NALOG_TOKEN env var = JWT for lknpd.nalog.ru. Header: Authorization: Bearer $NALOG_TOKEN
-Base URL: https://lknpd.nalog.ru/api/v1
-
-Endpoints (confirmed working):
-  GET  /user — profile: {inn, displayName, phone}
-  GET  /incomes?from=<ISO>&to=<ISO>&limit=10&offset=0 — income list (use +03:00 offset)
-  POST /income — create receipt (НПД чек), returns {approvedReceiptUuid}
-  GET  /receipt/{inn}/{approvedReceiptUuid}/print — PUBLIC receipt URL, no auth, send to client
-
-POST /income body example:
-{
-  "paymentType": "CASH",        // or "WIRE" for bank transfer
-  "ignoreMaxTotalIncomeRestriction": false,
-  "client": {
-    "contactPhone": null,
-    "displayName": "Client Name",
-    "incomeType": "FROM_INDIVIDUAL",  // or "FROM_LEGAL" for ЮЛ/ИП
-    "inn": null                        // set INN if legal entity
-  },
-  "requestTime": "2026-08-30T12:00:00+03:00",
-  "operationTime": "2026-08-30T12:00:00+03:00",
-  "services": [{"name": "Service description", "amount": 5000, "quantity": 1}],
-  "totalAmount": 5000,
-  "ndsType": "NONE"
-}
-After creating receipt, always provide the print URL to user:
-  https://lknpd.nalog.ru/api/v1/receipt/{inn}/{approvedReceiptUuid}/print
-
-Token refresh (if you get 401):
-  POST /api/v1/auth/token
-  Body: {"refreshToken": "$NALOG_REFRESH_TOKEN", "deviceInfo": {"sourceType":"WEB","sourceDeviceId":"$NALOG_DEVICE_ID","appVersion":"1.0.0","metaDetails":{}}}
-  On success: save new token → write to ~/agent-tokens/<userId>/nalog as JSON with auth_token/refresh_token/expires/device_id fields
-  NALOG_DEVICE_ID env var = the original deviceId bound to this refreshToken (must not change)
-[END SYSTEM CONTEXT]\n` : '';
-
-  const prompt = sessionContext ? `${nalogCtx}${sessionContext}\n\n${task}` : `${nalogCtx}${task}`;
+  // Skills are now available via trained-skills MCP (tools/list → list_skills).
+  // No prompt injection needed — Claude discovers and calls tools directly.
+  const prompt = sessionContext ? `${sessionContext}\n\n${task}` : task;
   const fullOutput = { text: '' };
 
   // Build the log viewer URL (TODO: expose via /logs/:taskId)
