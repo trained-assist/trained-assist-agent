@@ -25,6 +25,7 @@ function loadUserTokens(userId) {
         if (parsed.auth_token)    extra.NALOG_TOKEN         = parsed.auth_token;
         if (parsed.refresh_token) extra.NALOG_REFRESH_TOKEN  = parsed.refresh_token;
         if (parsed.expires)       extra.NALOG_TOKEN_EXPIRES  = parsed.expires;
+        if (parsed.device_id)     extra.NALOG_DEVICE_ID      = parsed.device_id;
       } catch { extra.NALOG_TOKEN = val; }
     }
     else extra[label.toUpperCase().replace(/[^A-Z0-9]/g, '_')] = val;
@@ -106,6 +107,12 @@ POST /income body example:
 }
 After creating receipt, always provide the print URL to user:
   https://lknpd.nalog.ru/api/v1/receipt/{inn}/{approvedReceiptUuid}/print
+
+Token refresh (if you get 401):
+  POST /api/v1/auth/token
+  Body: {"refreshToken": "$NALOG_REFRESH_TOKEN", "deviceInfo": {"sourceType":"WEB","sourceDeviceId":"$NALOG_DEVICE_ID","appVersion":"1.0.0","metaDetails":{}}}
+  On success: save new token → write to ~/agent-tokens/<userId>/nalog as JSON with auth_token/refresh_token/expires/device_id fields
+  NALOG_DEVICE_ID env var = the original deviceId bound to this refreshToken (must not change)
 [END SYSTEM CONTEXT]\n` : '';
 
   const prompt = sessionContext ? `${nalogCtx}${sessionContext}\n\n${task}` : `${nalogCtx}${task}`;
