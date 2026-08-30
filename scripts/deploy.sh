@@ -17,7 +17,16 @@ if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; t
 fi
 
 echo "==> Installing systemd unit file..."
-UNIT_SRC="$REPO_DIR/systemd/${SERVICE}.service"
+# Use the RU-specific unit file on non-GCP VMs (Hostland has no GCP metadata)
+if curl -sf -m 2 http://metadata.google.internal/computeMetadata/v1/instance/id \
+     -H "Metadata-Flavor: Google" >/dev/null 2>&1; then
+  UNIT_VARIANT=""
+  echo "  Detected: GCP VM"
+else
+  UNIT_VARIANT="-ru"
+  echo "  Detected: non-GCP VM (using assist-agent-ru.service)"
+fi
+UNIT_SRC="$REPO_DIR/systemd/${SERVICE}${UNIT_VARIANT}.service"
 UNIT_DST="/etc/systemd/system/${SERVICE}.service"
 if [ -f "$UNIT_SRC" ]; then
   if ! diff -q "$UNIT_SRC" "$UNIT_DST" >/dev/null 2>&1; then
