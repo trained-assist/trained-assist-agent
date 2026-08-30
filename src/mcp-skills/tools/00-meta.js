@@ -39,6 +39,13 @@ const SKILLS = [
     tools: ['company_find_by_name', 'company_get_by_inn', 'company_find_by_email', 'company_set_dadata_token'],
     requires: 'Ничего — бесплатный режим работает сразу. Опционально: DaData token для ускорения.',
   },
+  {
+    id: 'google-drive',
+    name: 'Google Drive',
+    description: 'Читать, создавать и редактировать файлы в Google Drive через персональный Service Account. Настройка за одну команду — gdrive_setup автоматически создаёт SA.',
+    tools: ['gdrive_setup', 'gdrive_status', 'gdrive_list_files', 'gdrive_read_file', 'gdrive_search', 'gdrive_create_file', 'gdrive_update_file', 'gdrive_delete_file'],
+    requires: 'Вызови gdrive_setup → получишь email → расшарь папки Drive с этим email.',
+  },
 ];
 
 module.exports = {

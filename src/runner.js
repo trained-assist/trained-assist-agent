@@ -21,6 +21,7 @@ function loadUserTokens(userId) {
     else if (label === 'linear') extra.LINEAR_API_KEY = val;
     else if (label === 'weeek') extra.WEEEK_API_TOKEN = val;
     else if (label === 'dadata') extra.DADATA_API_TOKEN = val;
+    else if (label === 'gdrive') extra.GDRIVE_SA_JSON = val;
     else if (label === 'nalog') {
       try {
         const parsed = JSON.parse(val);
@@ -105,6 +106,7 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
     env: {
       ...cleanEnv,
       ...userTokens,
+      AGENT_USER_ID: String(user.id),
     },
   });
 

@@ -77,6 +77,13 @@ async function main() {
       return json(res, 200, { status: 'alive', uptime: process.uptime() });
     }
 
+    // GET /skills — list all available MCP skills (for bot /skills command)
+    if (req.method === 'GET' && url.pathname === '/skills') {
+      const { tools: metaTools } = require('./mcp-skills/tools/00-meta.js');
+      const { skills } = await metaTools.list_skills.handler();
+      return json(res, 200, { skills });
+    }
+
     // GET /health-full — runs actual claude call, verifies OAuth end-to-end
     if (req.method === 'GET' && url.pathname === '/health-full') {
       const start = Date.now();
