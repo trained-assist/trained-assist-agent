@@ -1,11 +1,11 @@
 #!/bin/bash
 # Setup script for RU VM (Hostland or any non-GCP Linux)
-# Run as root. Sets up alesa-agent with Playwright browsers.
+# Run as root. Sets up assist-agent with Playwright browsers.
 set -e
 
 REPO_URL="https://github.com/trained-assist/trained-assist-agent.git"
-REPO_DIR="/home/vova/alesa-agent"
-SERVICE="alesa-agent"
+REPO_DIR="/home/vova/trained-assist-agent"
+SERVICE="assist-agent"
 USER="vova"
 
 echo "==> Creating user if needed..."
@@ -51,7 +51,7 @@ sudo -u "$USER" mkdir -p "/home/$USER/users"
 
 echo "==> Installing systemd service..."
 # Copy template and let operator fill in secrets
-cp "$REPO_DIR/systemd/alesa-agent-ru.service" "/etc/systemd/system/$SERVICE.service"
+cp "$REPO_DIR/systemd/assist-agent-ru.service" "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
 systemctl enable "$SERVICE"
 

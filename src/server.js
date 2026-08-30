@@ -253,7 +253,7 @@ async function main() {
     json(res, 404, { error: 'not found' });
   });
 
-  server.listen(PORT, () => console.log(`alesa-agent listening on :${PORT}`));
+  server.listen(PORT, () => console.log(`assist-agent listening on :${PORT}`));
 
   process.once('SIGTERM', () => server.close());
   process.once('SIGINT',  () => server.close());

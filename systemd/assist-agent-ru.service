@@ -1,11 +1,11 @@
 [Unit]
-Description=Alesa Agent — RU IP instance
+Description=Trained Assist Agent — RU IP instance
 After=network.target
 
 [Service]
 Type=simple
 User=vova
-WorkingDirectory=/home/vova/alesa-agent
+WorkingDirectory=/home/vova/trained-assist-agent
 ExecStart=/usr/bin/node src/server.js
 Restart=always
 RestartSec=5

@@ -1,7 +1,7 @@
 {
-  "name": "alesa-agent",
+  "name": "trained-assist-agent",
   "version": "0.1.0",
-  "description": "Alesa Agent — Claude Code session runner on GCP VM",
+  "description": "Trained Assist Agent — Claude Code session runner",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
