@@ -6,7 +6,7 @@ After=xvfb-browser.service chrome-browser.service
 Type=simple
 User=vova
 ExecStartPre=/bin/sleep 3
-ExecStart=/usr/bin/x11vnc -display :99 -nopw -forever -quiet -rfbport 5900 -shared
+ExecStart=/usr/bin/x11vnc -display :99 -nopw -forever -quiet -rfbport 5900 -shared -xfixes
 Restart=always
 RestartSec=5
 
