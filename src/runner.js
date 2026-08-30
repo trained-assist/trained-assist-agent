@@ -8,6 +8,7 @@ const sessions = require('./session-store');
 const { recordUsage, getUsageTotals } = require('./usage-store');
 
 const STREAM_INTERVAL_MS = 3000;
+const HEARTBEAT_INTERVAL_MS = 12000;
 const MAX_MSG_LEN = 3500;
 
 const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
@@ -383,6 +384,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // Send "thinking" message, get message_id for streaming edits
   const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
   const msgId = thinkMsg?.result?.message_id;
+  const thinkingStart = Date.now();
 
   const userTokens = loadUserTokens(user.id);
 
@@ -390,9 +392,6 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // No prompt injection needed — Claude discovers and calls tools directly.
   const prompt = sessionContext ? `${sessionContext}\n\n${task}` : task;
   const fullOutput = { text: '' };
-
-  // Build the log viewer URL (TODO: expose via /logs/:taskId)
-  // For now: stream output directly to Telegram
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
   const mcpConfig = writeMcpConfig(user.workDir, user.id);
@@ -419,13 +418,26 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   });
 
   let streamTimer = null;
+  let heartbeatTimer = null;
+  let outputStarted = false;
   let lastSent = '';
   let lineBuffer = '';
   let claudeResult = null;  // text from result event
   let claudeUsage = null;   // usage from result event
 
+  // Heartbeat: show elapsed seconds while Claude hasn't produced output yet
+  if (msgId) {
+    heartbeatTimer = setInterval(async () => {
+      if (outputStarted) return;
+      const secs = Math.round((Date.now() - thinkingStart) / 1000);
+      await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ Думаю… (${secs}с)`).catch(() => {});
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
   function scheduleStream() {
     if (streamTimer) return;
+    outputStarted = true;
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     streamTimer = setInterval(async () => {
       const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
       if (snippet === lastSent || !snippet) return;
@@ -473,6 +485,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   });
 
   clearInterval(streamTimer);
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
 
   // Prefer the clean result string from the result event; fall back to accumulated stream text
   const result = (claudeResult ?? fullOutput.text).trim() || '(нет вывода)';
