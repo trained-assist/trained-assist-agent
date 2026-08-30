@@ -1,29 +1,30 @@
-# alesa-agent
+# trained-assist-agent
 
-HTTP API server running on GCP VM — receives tasks from alesa-bot and runs Claude Code.
+HTTP API server running on GCP VM — receives tasks from the Telegram bot and runs Claude Code.
 
 ## Architecture
 
 ```
-alesa-bot (CF Worker) → POST /run → alesa-agent (GCP VM)
+tg-bot (CF Worker) → POST /run → trained-assist-agent (GCP VM)
                                           ↓
                                    claude --dangerously-skip-permissions
                                           ↓
                               streams output → Telegram API directly
 ```
 
-**alesa-agent** is the VM-side of the Alesa system. It manages:
-- Per-user working directories (`~/alesa-data/sessions/<username>/`)
+**trained-assist-agent** is the VM-side of the system. It manages:
+- Per-user working directories (`~/agent-data/sessions/<username>/`)
 - Session state (in-memory + disk persistence)
 - User registry with scrypt-hashed passwords
 - Claude Code process lifecycle
+- MCP skills server (`trained-skills`) per session
 
 ## Repos
 
 | Repo | Description |
 |------|-------------|
-| [alesa-bot](https://github.com/trained-assist/alesa-bot) | Cloudflare Worker — Telegram webhook |
-| [alesa-agent](https://github.com/trained-assist/alesa-agent) | This repo — GCP VM agent |
+| [trained-assist-tg-bot](https://github.com/trained-assist/trained-assist-tg-bot) | Cloudflare Worker — Telegram webhook |
+| [trained-assist-agent](https://github.com/trained-assist/trained-assist-agent) | This repo — GCP VM agent |
 
 ## API
 
@@ -54,18 +55,18 @@ Returns `202 { "taskId": "alice-1234567890" }` immediately. Output streamed to T
 ### 1. Initial VM setup
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/trained-assist/alesa-agent/main/scripts/setup.sh | bash
+curl -sSL https://raw.githubusercontent.com/trained-assist/trained-assist-agent/main/scripts/setup.sh | bash
 ```
 
 ### 2. GCP Secret Manager
 
-Required secrets (project `alesa-personal-assistent`):
+Required secrets (project `alesa-personal-assistent` — GCP project name, not renamed):
 
 | Secret | Description |
 |--------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
-| `AGENT_SECRET` | Shared secret with alesa-bot (generate random string) |
+| `AGENT_SECRET` | Shared secret with tg-bot (generate random string) |
 | `DEEPGRAM_API_KEY` | Optional: voice transcription |
 | `BOT_SECRET` | Optional: Chrome extension |
 
@@ -96,19 +97,22 @@ npm run check  # syntax check all src files
 | Var | Default | Description |
 |-----|---------|-------------|
 | `PORT` | `3000` | HTTP listen port |
-| `ALESA_DATA_DIR` | `~/alesa-data` | Data directory for sessions + user registry |
+| `AGENT_DATA_DIR` | `~/agent-data` | Data directory for sessions + user registry |
 | `NODE_ENV` | — | Set to `production` in systemd |
+
+Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_DATA_DIR=/home/vova/alesa-data` explicitly.
 
 ## Claude Code Instructions
 
 ### Architecture rules
-- All state on disk in `ALESA_DATA_DIR` — persists across process restarts
+- All state on disk in `AGENT_DATA_DIR` — persists across process restarts
 - User registry: `users.json` — scrypt-hashed passwords
 - Sessions: `sessions.json` — in-memory + disk
 - Per-user workDir: `sessions/<username>/` — files for Claude Code
 - HTTP server: no framework, built-in `http` module only
 - Claude: spawned as child process via `spawn('claude', ['--dangerously-skip-permissions', '--print', prompt])`
 - Auth: all endpoints gated by `AGENT_SECRET` Bearer token
+- MCP skills: `src/mcp-skills/` — stdio JSON-RPC 2.0 server, auto-discovers tools from `tools/*.js`
 
 ### Adding a new endpoint
 Add route handling in `src/server.js` in the request handler chain (method + pathname check pattern).

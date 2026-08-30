@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const DATA_DIR = process.env.ALESA_DATA_DIR || path.join(process.env.HOME || '/home/vova', 'alesa-data');
+// AGENT_DATA_DIR preferred; ALESA_DATA_DIR kept for backward compat (existing data on VM)
+const DATA_DIR = process.env.AGENT_DATA_DIR || process.env.ALESA_DATA_DIR || path.join(process.env.HOME || '/home/vova', 'agent-data');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 
 // TODO: mirror full session logic from trained-assist-tg-bot/session-manager/sessions.js

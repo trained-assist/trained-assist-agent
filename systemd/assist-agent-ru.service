@@ -12,6 +12,7 @@ RestartSec=5
 
 Environment=NODE_ENV=production
 Environment=PORT=8080
+Environment=AGENT_DATA_DIR=/home/vova/alesa-data
 
 # Non-GCP: load secrets from env vars instead of GCP Secret Manager
 Environment=SECRETS_SOURCE=env

@@ -2,7 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DATA_DIR = process.env.ALESA_DATA_DIR || path.join(process.env.HOME || '/home/vova', 'alesa-data');
+// AGENT_DATA_DIR preferred; ALESA_DATA_DIR kept for backward compat (existing data on VM)
+const DATA_DIR = process.env.AGENT_DATA_DIR || process.env.ALESA_DATA_DIR || path.join(process.env.HOME || '/home/vova', 'agent-data');
 const REGISTRY_FILE = path.join(DATA_DIR, 'users.json');
 
 class UserRegistry {
@@ -30,7 +31,7 @@ class UserRegistry {
     return Object.entries(this._data).map(([username, u]) => ({ username, ...u }));
   }
 
-  // Called by /auth/verify endpoint (from alesa-bot /login flow)
+  // Called by /auth/verify endpoint (from bot /login flow)
   verify(username, password) {
     const u = this._data[username];
     if (!u) return null;
