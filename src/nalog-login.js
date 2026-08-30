@@ -75,63 +75,54 @@ async function startNalogLogin(userId, login, password) {
     const onEsia = () => /gosuslugi\.ru|esia\./.test(page.url());
 
     if (!onEsia()) {
-      // Try to find the "Войти через Госуслуги" button
-      const btnSelectors = [
-        'a[href*="gosuslugi"]',
-        'a[href*="esia"]',
-        'button:has-text("Госуслуги")',
-        'a:has-text("Госуслуги")',
-        '[class*="gosuslugi"]',
-      ];
-      let clicked = false;
-      for (const sel of btnSelectors) {
-        try {
-          const el = page.locator(sel).first();
-          if (await el.isVisible({ timeout: 2000 })) {
-            // Use mouse.click on real coordinates to produce trusted events
-            const box = await el.boundingBox();
-            if (box) {
-              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-              await page.waitForTimeout(150);
-              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-            } else {
-              await el.click();
-            }
-            clicked = true;
-            break;
-          }
-        } catch { /* selector not found */ }
-      }
-
-      if (!clicked) {
-        // Try the explicit auth URL
+      // Ensure we're on the login page
+      if (!/auth\/login/.test(page.url())) {
         await page.goto('https://lknpd.nalog.ru/auth/login', { waitUntil: 'networkidle', timeout: 15000 });
-        for (const sel of btnSelectors) {
-          try {
-            const el = page.locator(sel).first();
-            if (await el.isVisible({ timeout: 2000 })) {
-              const box = await el.boundingBox();
-              if (box) {
-                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-                await page.waitForTimeout(150);
-                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-              } else {
-                await el.click();
-              }
-              clicked = true;
-              break;
-            }
-          } catch { /* ignore */ }
-        }
       }
 
-      if (clicked) {
-        try {
-          await page.waitForURL(/gosuslugi\.ru|esia\./, { timeout: 20000 });
-        } catch {
-          await browser.close();
-          return { error: 'Не перешло на Госуслуги после клика — возможно, сайт заблокировал автоматизацию' };
+      // nalog.ru has 3 login tabs: "ИНН и пароль" | "Номер телефона" | "Госуслуги"
+      // Step 1: click the Госуслуги tab to switch to ESIA mode
+      const tabEl = page.locator('button, [role="tab"]', { hasText: 'Госуслуги' }).first();
+      try {
+        await tabEl.waitFor({ state: 'visible', timeout: 8000 });
+        const box = await tabEl.boundingBox();
+        if (box) {
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.waitForTimeout(200);
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        } else {
+          await tabEl.click();
         }
+        console.log('[nalog-login] clicked Госуслуги tab');
+        await page.waitForTimeout(600);
+      } catch {
+        await browser.close();
+        return { error: 'Не нашли вкладку "Госуслуги" на странице входа' };
+      }
+
+      // Step 2: click "ВОЙТИ" to start the ESIA OAuth redirect
+      const submitBtn = page.locator('button', { hasText: /войти/i }).first();
+      try {
+        await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
+        const box = await submitBtn.boundingBox();
+        if (box) {
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.waitForTimeout(200);
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        } else {
+          await submitBtn.click();
+        }
+        console.log('[nalog-login] clicked ВОЙТИ, awaiting ESIA redirect');
+      } catch {
+        await browser.close();
+        return { error: 'Не нашли кнопку "ВОЙТИ" после выбора вкладки Госуслуги' };
+      }
+
+      try {
+        await page.waitForURL(/gosuslugi\.ru|esia\./, { timeout: 20000 });
+      } catch {
+        await browser.close();
+        return { error: 'Не перешло на Госуслуги — сайт заблокировал переход или изменил структуру страницы' };
       }
     }
 
