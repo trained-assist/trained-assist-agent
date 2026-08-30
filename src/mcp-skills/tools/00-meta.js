@@ -68,6 +68,18 @@ const SKILLS = [
     tools: ['gdrive_setup', 'gdrive_status', 'gdrive_list_files', 'gdrive_read_file', 'gdrive_search', 'gdrive_create_file', 'gdrive_update_file', 'gdrive_delete_file'],
     requires: 'Вызови gdrive_setup → получишь email → расшарь папки Drive с этим email.',
   },
+  {
+    id: 'getcourse',
+    name: 'GetCourse',
+    description: 'Двухуровневая интеграция с GetCourse. L1 (API key): управление учениками, группами, заказами. L2 (сессия браузера): создание курсов, разделов, уроков, видео- и текстовых блоков.',
+    tools: [
+      'gc_status', 'gc_connect',
+      'gc_user_add', 'gc_user_find', 'gc_group_list', 'gc_order_list',
+      'gc_course_create', 'gc_section_create', 'gc_lesson_create',
+      'gc_lesson_add_video', 'gc_lesson_add_text', 'gc_lesson_sort',
+    ],
+    requires: 'Вызови gc_connect — получишь ссылку. Введи домен + API ключ (L1) и/или логин+пароль (L2).',
+  },
 ];
 
 module.exports = {
