@@ -46,14 +46,12 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   "$AGENT_URL/run")
 [ "$STATUS" = "400" ] && ok "400 on missing fields" || fail "Expected 400, got $STATUS"
 
-# 6. /run with valid fields returns 202 (fire-and-forget) — uses sandbox user zemtest
-# TODO: replace ZEMTEST_TG_USER_ID with zemtest's real Telegram userId once they connect via bot
-ZEMTEST_TG_USER_ID="${ZEMTEST_TG_USER_ID:-0}"
+# 6. /run with valid fields returns 202 (fire-and-forget) — sandbox group "тестовая группа" (zemtest)
 echo "[6] POST /run with valid fields returns 202"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Authorization: Bearer $AGENT_SECRET" \
   -H "Content-Type: application/json" \
-  -d "{\"userId\":$ZEMTEST_TG_USER_ID,\"username\":\"zemtest\",\"task\":\"echo smoke\"}" \
+  -d '{"userId":5367135237,"username":"zemtest","task":"echo smoke"}' \
   "$AGENT_URL/run")
 [ "$STATUS" = "202" ] && ok "202 accepted" || fail "Expected 202, got $STATUS"
 
