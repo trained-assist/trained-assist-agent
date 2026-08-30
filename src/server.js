@@ -180,9 +180,14 @@ async function main() {
 
       const { userId, username, task, context, sessionId, contextFromSession } = payload;
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
-      if (!/^\d{5,15}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
-      if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32)
+      if (!/^\d{1,20}$/.test(String(userId))) {
+        console.log('[/run] 400 invalid userId:', userId);
+        return json(res, 400, { error: 'invalid userId' });
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32) {
+        console.log('[/run] 400 invalid username:', username);
         return json(res, 400, { error: 'invalid username' });
+      }
       if (sessionId && !/^[a-zA-Z0-9_-]+$/.test(sessionId))
         return json(res, 400, { error: 'invalid sessionId' });
       if (contextFromSession && !/^[a-zA-Z0-9_-]+$/.test(contextFromSession))
@@ -210,7 +215,7 @@ async function main() {
 
       const { userId, label, value } = payload;
       if (!userId || !label || !value) return json(res, 400, { error: 'missing fields' });
-      if (!/^\d{5,15}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
+      if (!/^\d{1,20}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 

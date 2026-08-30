@@ -51,7 +51,7 @@ echo "[6] POST /run with valid fields returns 202"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Authorization: Bearer $AGENT_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"userId":999,"username":"smoketest","task":"echo smoke"}' \
+  -d '{"userId":123456789,"username":"smoketest","task":"echo smoke"}' \
   "$AGENT_URL/run")
 [ "$STATUS" = "202" ] && ok "202 accepted" || fail "Expected 202, got $STATUS"
 
