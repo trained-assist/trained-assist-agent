@@ -173,6 +173,11 @@ const QUICK_SETUPS = [
     service: 'nalog',
     hint: 'Войдёшь через Госуслуги — страница защищена, данные не проходят через чат.',
   },
+  {
+    match: /getcourse|геткурс|get.?course/i,
+    service: 'getcourse',
+    hint: 'Введи домен + API ключ (L1: ученики/заказы) и/или логин+пароль (L2: курсы/уроки).',
+  },
 ];
 
 function getQuickAnswer(task, userId) {
