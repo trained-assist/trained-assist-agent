@@ -163,12 +163,15 @@ async function startNalogLogin(userId, login, password) {
     }));
     console.log('[nalog-login] ESIA buttons: %s', pageState.buttons);
 
-    await loginInput.fill(login);
-    await page.waitForTimeout(300);
+    // ESIA is a Vue SPA — locator.fill() sets the DOM value but Vue doesn't see it.
+    // Use click+pressSequentially to simulate real keystrokes that Vue's event handlers pick up.
+    await loginInput.click();
+    await page.keyboard.press('Control+a');
+    await page.keyboard.type(login, { delay: 30 });
+    await page.waitForTimeout(400);
 
     if (!pwAlreadyVisible) {
       // Two-step form: click next to reveal password field.
-      // Use page.evaluate to bypass Playwright actionability and skip the lang-switcher button.
       const clicked = await page.evaluate(() => {
         const btns = Array.from(document.querySelectorAll('button'));
         const btn = btns.find(b =>
@@ -188,8 +191,10 @@ async function startNalogLogin(userId, login, password) {
       }
     }
 
-    await pwInput.fill(password);
-    await page.waitForTimeout(300);
+    await pwInput.click();
+    await page.keyboard.press('Control+a');
+    await page.keyboard.type(password, { delay: 30 });
+    await page.waitForTimeout(400);
 
     // Click the final "Войти" button via evaluate to avoid selector issues
     await page.evaluate(() => {
