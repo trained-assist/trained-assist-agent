@@ -1,23 +1,34 @@
 'use strict';
 
 // GitHub skill — uses GH_TOKEN (Personal Access Token) from agent-tokens/{userId}/github
-// runner.js already maps label 'github' → GH_TOKEN env var
+// runner.js maps label 'github' → GH_TOKEN env var for Claude process.
+// MCP process reads from disk directly (env vars are not forwarded to MCP).
 //
 // Token setup: github.com/settings/tokens → classic → repo + read:org scopes
 // Send via: /settoken github ghp_xxxxx
 
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
 const GH_API = 'https://api.github.com';
+const USER_ID = process.env.USER_ID || '';
 
 function getToken() {
   const tok = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-  if (!tok) throw new Error(
+  if (tok) return tok;
+  if (USER_ID) {
+    try {
+      const p = path.join(os.homedir(), 'agent-tokens', USER_ID, 'github');
+      if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+    } catch {}
+  }
+  throw new Error(
     'GitHub токен не задан.\n\n' +
-    'Как настроить:\n' +
     '1. github.com/settings/tokens → Generate new token (classic)\n' +
-    '2. Выбери scopes: repo, read:org\n' +
+    '2. Scopes: repo, read:org\n' +
     '3. /settoken github ghp_xxxxxxxxxxxxx'
   );
-  return tok;
 }
 
 async function ghFetch(path, opts = {}) {

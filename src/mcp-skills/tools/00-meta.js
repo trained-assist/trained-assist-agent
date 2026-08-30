@@ -9,7 +9,7 @@ const SKILLS = [
     name: 'Самозанятый НПД (nalog.ru)',
     description: 'Доходы, чеки НПД через API lknpd.nalog.ru. Токен нужен с Chrome extension.',
     tools: ['nalog_get_profile', 'nalog_get_incomes', 'nalog_create_receipt', 'nalog_refresh_token'],
-    requires: 'Chrome extension → отправить токен nalog.ru',
+    requires: 'Открой lknpd.nalog.ru в Chrome → нажми иконку расширения cloud-auth-bridge → "Send token". Токен живёт ~1 час.',
   },
   {
     id: 'tilda-site-ops',
@@ -30,7 +30,7 @@ const SKILLS = [
     name: 'Weeek CRM',
     description: 'Управление сделками, контактами и воронками в Weeek.net через REST API. Токен не протухает.',
     tools: ['weeek_status', 'weeek_set_token', 'weeek_list_funnels', 'weeek_list_statuses', 'weeek_list_deals', 'weeek_get_deal', 'weeek_create_deal', 'weeek_update_deal', 'weeek_delete_deal', 'weeek_list_contacts', 'weeek_get_contact', 'weeek_create_contact', 'weeek_update_contact'],
-    requires: 'Weeek API token: Settings → Integrations → API → Generate token → weeek_set_token',
+    requires: '/settoken weeek <token> — токен: Weeek → Settings → Integrations → API → Generate',
   },
   {
     id: 'company-enrichment',
