@@ -69,7 +69,7 @@ http.createServer((req, res) => {
 
           fs.mkdirSync(outDir, { recursive: true });
           try {
-            execSync(`node "${CAPTURE_SCRIPT}" ${domain} "${outPath}"`, { timeout: 10000, encoding: 'utf8' });
+            execSync(`node "${CAPTURE_SCRIPT}" ${domain} "${outPath}"`, { timeout: 25000, encoding: 'utf8' });
             data.cookies_captured = true;
             data.saved_to = outPath;
           } catch (e) {
