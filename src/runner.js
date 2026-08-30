@@ -97,9 +97,12 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
   const { ANTHROPIC_API_KEY: _stripped, ...cleanEnv } = process.env;
 
+  const systemPromptFile = path.join(__dirname, 'agent-system-prompt.txt');
+
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',
     '--mcp-config', mcpConfig,
+    ...(fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
     '--print', prompt,
   ], {
     cwd: user.workDir,
