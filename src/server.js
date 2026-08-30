@@ -1,7 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, execFile } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
@@ -75,6 +75,27 @@ async function main() {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, { status: 'alive', uptime: process.uptime() });
+    }
+
+    // GET /health-full — runs actual claude call, verifies OAuth end-to-end
+    if (req.method === 'GET' && url.pathname === '/health-full') {
+      const start = Date.now();
+      const { ANTHROPIC_API_KEY: _stripped, ...cleanEnv } = process.env;
+      try {
+        const output = await new Promise((resolve, reject) => {
+          execFile('claude', ['--dangerously-skip-permissions', '--print', 'say: pipeline-ok'], {
+            env: cleanEnv,
+            timeout: 45000,
+          }, (err, stdout, stderr) => {
+            if (err) return reject(new Error((stdout || stderr || err.message).trim().slice(0, 300)));
+            resolve(stdout.trim());
+          });
+        });
+        const ok = output.toLowerCase().includes('pipeline-ok');
+        return json(res, ok ? 200 : 500, { ok, output: output.slice(0, 200), auth: 'oauth', latencyMs: Date.now() - start });
+      } catch (err) {
+        return json(res, 500, { ok: false, error: err.message, latencyMs: Date.now() - start });
+      }
     }
 
     if (req.method === 'GET' && url.pathname === '/stats') {
