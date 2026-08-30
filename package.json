@@ -6,7 +6,11 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "node --check src/server.js src/runner.js src/sessions.js src/user-registry.js src/profiles.js src/log-buffer.js src/secrets.js"
+    "check": "node --check src/server.js src/runner.js src/session-store.js src/secrets.js src/browser.js",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
   },
   "dependencies": {
     "@google-cloud/secret-manager": "^5.6.0",

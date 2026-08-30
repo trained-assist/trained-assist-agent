@@ -1,17 +1,54 @@
-name: CI
+name: CI + Deploy
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
 jobs:
-  check:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+          cache: 'npm'
       - run: npm ci
       - name: Syntax check
         run: npm run check
+      - name: Unit tests
+        run: npm test
+
+  deploy-gcp:
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Deploy to GCP VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd /home/vova/trained-assist-agent
+            git pull origin main
+            bash scripts/deploy.sh
+
+  deploy-ru:
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Deploy to Hostland RU VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_RU_HOST }}
+          username: ${{ secrets.VM_RU_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd /home/vova/trained-assist-agent
+            git pull origin main
+            AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh

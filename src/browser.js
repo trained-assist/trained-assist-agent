@@ -134,4 +134,4 @@ function writeMcpConfig(workDir, userId) {
   return configPath;
 }
 
-module.exports = { writeMcpConfig };
+module.exports = { writeMcpConfig, buildNalogOrigins };
