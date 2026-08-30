@@ -76,7 +76,19 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
   const msgId = thinkMsg?.result?.message_id;
 
-  const prompt = sessionContext ? `${sessionContext}\n\n${task}` : task;
+  const nalogCtx = userTokens.NALOG_TOKEN ? `\n[SYSTEM CONTEXT — nalog.ru API]
+NALOG_TOKEN env var contains a valid JWT for lknpd.nalog.ru. Use it like:
+  Authorization: Bearer $NALOG_TOKEN
+Base URL: https://lknpd.nalog.ru/api/v1
+Key endpoints:
+  GET /user — profile info (ИНН, name)
+  GET /incomes?from=<ISO8601+03:00>&to=<ISO8601+03:00>&limit=10&offset=0 — income list
+  GET /incomes/{uuid} — single income receipt
+  POST /income — register new income (НПД check-in)
+Dates must be ISO8601 with Moscow timezone offset (+03:00), e.g. 2026-06-01T00:00:00+03:00
+[END SYSTEM CONTEXT]\n` : '';
+
+  const prompt = sessionContext ? `${nalogCtx}${sessionContext}\n\n${task}` : `${nalogCtx}${task}`;
   const fullOutput = { text: '' };
 
   // Build the log viewer URL (TODO: expose via /logs/:taskId)
