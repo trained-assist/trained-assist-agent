@@ -1,4 +1,5 @@
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -7,6 +8,32 @@ const sessions = require('./session-store');
 
 const STREAM_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
+
+const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
+const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
+
+function generateConnectLink(userId, service) {
+  const token = crypto.randomBytes(16).toString('hex');
+  fs.mkdirSync(CONNECT_PENDING_DIR, { recursive: true });
+  fs.writeFileSync(
+    path.join(CONNECT_PENDING_DIR, `${token}.json`),
+    JSON.stringify({ uid: String(userId), service, expires: Date.now() + 30 * 60 * 1000 })
+  );
+  // Clean up expired tokens
+  try {
+    const now = Date.now();
+    for (const f of fs.readdirSync(CONNECT_PENDING_DIR)) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const d = JSON.parse(fs.readFileSync(path.join(CONNECT_PENDING_DIR, f), 'utf8'));
+        if (d.expires < now) fs.unlinkSync(path.join(CONNECT_PENDING_DIR, f));
+      } catch {}
+    }
+  } catch {}
+  return `${AGENT_PUBLIC_URL}/connect/${service}?t=${token}`;
+}
+
+module.exports.CONNECT_PENDING_DIR = CONNECT_PENDING_DIR;
 
 function loadUserTokens(userId) {
   const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
@@ -41,33 +68,45 @@ function loadUserTokens(userId) {
 
 const SETUP_INTENT = /подключ|connect|настро|интегр|привяз|как.*добав|токен.*отправ|отправ.*токен|могу.*отправ|зайт|авториз|setup|подрубить/i;
 
+// service: label used in /connect/:service route and agent-tokens file name
+// hint: shown below the form link, or as fallback answer when no userId
 const QUICK_SETUPS = [
   {
     match: /github|гитхаб/i,
-    answer: 'Да — введи прямо в чат:\n`/settoken github ghp_xxxxx`\nТокен сохранится в систему, не в переписку.\n\nСоздать токен: github.com/settings/tokens → Generate new token (classic) → scopes: repo, read:org',
+    service: 'github',
+    hint: 'Создать токен: github.com/settings/tokens → Generate new token (classic) → scopes: repo, read:org',
   },
   {
     match: /weeek|вик(?!тор)/i,
-    answer: 'Введи:\n`/settoken weeek <token>`\nТокен: Weeek → Settings → Integrations → API → Generate token',
+    service: 'weeek',
+    hint: 'Токен: Weeek → Settings → Integrations → API → Generate token',
   },
   {
     match: /google.?drive|гугл.?диск|gdrive/i,
-    answer: 'Скажи мне "настрой google drive" — вызову gdrive_setup, он автоматически создаст сервис-аккаунт. Потом расшаришь папку с SA email.',
+    service: null, // no simple token — needs gdrive_setup flow
+    hint: 'Скажи мне "настрой Google Drive" — вызову gdrive_setup, автоматически создаст сервис-аккаунт.',
   },
   {
     match: /tilda|тильда/i,
-    answer: 'Нужно залогиниться через удалённый браузер. Скажи мне — пришлю ссылку, откроешь, войдёшь в Tilda, сессия захватится автоматически.',
+    service: null, // no simple token — needs browser session flow
+    hint: 'Нужен удалённый браузер — скажи мне "подключи Tilda".',
   },
   {
     match: /nalog|налог|нпд|самозан/i,
-    answer: 'Открой lknpd.nalog.ru в Chrome → нажми иконку расширения cloud-auth-bridge → Send token. Токен живёт ~1 час.',
+    service: null, // token from Chrome extension, not pasted
+    hint: 'Открой lknpd.nalog.ru → cloud-auth-bridge → Send token. Токен живёт ~1 час.',
   },
 ];
 
-function getQuickAnswer(task) {
+function getQuickAnswer(task, userId) {
   if (!SETUP_INTENT.test(task)) return null;
-  for (const { match, answer } of QUICK_SETUPS) {
-    if (match.test(task)) return answer;
+  for (const { match, service, hint } of QUICK_SETUPS) {
+    if (!match.test(task)) continue;
+    if (service && userId) {
+      const link = generateConnectLink(userId, service);
+      return `Вставь токен по ссылке — не попадёт в чат:\n${link}\n\n${hint}`;
+    }
+    return hint;
   }
   return null;
 }
@@ -113,7 +152,7 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   }
 
   // Quick answer — skip Claude entirely for known setup/connect patterns
-  const quickReply = getQuickAnswer(task);
+  const quickReply = getQuickAnswer(task, user.id);
   if (quickReply) {
     await tgSend(BOT_TOKEN, chatId, quickReply);
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, quickReply);

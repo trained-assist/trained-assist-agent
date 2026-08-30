@@ -66,6 +66,51 @@ async function main() {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
+    // ── /connect/:service — token collection form (no AGENT_SECRET needed) ──
+    const connectMatch = url.pathname.match(/^\/connect\/([a-z0-9_-]+)$/);
+    if (connectMatch) {
+      const service = connectMatch[1];
+      const { CONNECT_PENDING_DIR } = require('./runner');
+
+      const SERVICE_META = {
+        github: { name: 'GitHub', placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', hint: 'github.com/settings/tokens → Generate new token (classic) → scopes: <b>repo</b>, <b>read:org</b>' },
+        weeek:  { name: 'Weeek CRM', placeholder: 'Вставьте API токен', hint: 'Weeek → Settings → Integrations → API → Generate token' },
+      };
+      const meta = SERVICE_META[service];
+      if (!meta) { res.writeHead(404).end('Unknown service'); return; }
+
+      if (req.method === 'GET') {
+        const t = url.searchParams.get('t') || '';
+        const html = connectFormHtml(service, meta, t);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        let payload;
+        try { payload = JSON.parse(body); } catch { res.writeHead(400).end('bad json'); return; }
+        const { t, value } = payload;
+        if (!t || !value) { res.writeHead(400).end(JSON.stringify({ error: 'missing t or value' })); return; }
+
+        const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+        let pending;
+        try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
+        if (pending.expires < Date.now()) { fs.unlinkSync(pendingFile); res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+        if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
+
+        const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
+        fs.mkdirSync(tokensDir, { recursive: true });
+        fs.writeFileSync(path.join(tokensDir, service), String(value).trim(), { mode: 0o600 });
+        fs.unlinkSync(pendingFile); // one-time use
+        console.log(`[connect] saved ${service} token for uid=${pending.uid}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      res.writeHead(405).end(); return;
+    }
+
     // Auth: all endpoints require Bearer token
     const auth = req.headers['authorization'] || '';
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
@@ -303,6 +348,80 @@ async function main() {
 
   process.once('SIGTERM', () => server.close());
   process.once('SIGINT',  () => server.close());
+}
+
+function connectFormHtml(service, meta, token) {
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Подключить ${meta.name}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+  .card{background:#fff;border-radius:16px;padding:32px;max-width:480px;width:100%;box-shadow:0 2px 20px rgba(0,0,0,.08)}
+  h1{font-size:20px;font-weight:600;margin-bottom:8px}
+  .sub{color:#666;font-size:14px;margin-bottom:24px;line-height:1.5}
+  .sub a{color:#007aff;text-decoration:none}
+  label{display:block;font-size:13px;font-weight:500;color:#333;margin-bottom:6px}
+  input{width:100%;border:1.5px solid #e0e0e0;border-radius:10px;padding:12px 14px;font-size:15px;font-family:monospace;outline:none;transition:border .15s}
+  input:focus{border-color:#007aff}
+  button{margin-top:16px;width:100%;background:#007aff;color:#fff;border:none;border-radius:10px;padding:13px;font-size:16px;font-weight:600;cursor:pointer;transition:opacity .15s}
+  button:hover{opacity:.88}
+  button:disabled{opacity:.5;cursor:default}
+  .msg{margin-top:16px;padding:12px 14px;border-radius:10px;font-size:14px;display:none}
+  .msg.ok{background:#e8f5e9;color:#2e7d32}
+  .msg.err{background:#fdecea;color:#c62828}
+  .lock{font-size:13px;color:#999;margin-top:20px;text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Подключить ${meta.name}</h1>
+  <p class="sub">Токен не попадёт в переписку с ботом — форма отправляет его напрямую в защищённое хранилище.<br><br>${meta.hint}</p>
+  <label for="tok">Токен</label>
+  <input id="tok" type="password" placeholder="${meta.placeholder}" autocomplete="off" spellcheck="false">
+  <button id="btn" onclick="submit()">Подключить</button>
+  <div id="msg" class="msg"></div>
+  <p class="lock">🔒 Соединение защищено · Ссылка одноразовая</p>
+</div>
+<script>
+const T = '${token.replace(/'/g, "\\'")}';
+const SERVICE = '${service}';
+async function submit() {
+  const v = document.getElementById('tok').value.trim();
+  if (!v) { show('err', 'Вставьте токен'); return; }
+  const btn = document.getElementById('btn');
+  btn.disabled = true; btn.textContent = 'Подключаю…';
+  try {
+    const r = await fetch('/connect/' + SERVICE, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({t: T, value: v})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      show('ok', '✅ Готово! Можете закрыть страницу и вернуться в бот.');
+      btn.style.display = 'none';
+      document.getElementById('tok').disabled = true;
+    } else {
+      show('err', d.error || 'Ошибка');
+      btn.disabled = false; btn.textContent = 'Подключить';
+    }
+  } catch(e) {
+    show('err', 'Сетевая ошибка: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Подключить';
+  }
+}
+function show(cls, text) {
+  const el = document.getElementById('msg');
+  el.className = 'msg ' + cls; el.textContent = text; el.style.display = 'block';
+}
+document.getElementById('tok').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+</script>
+</body>
+</html>`;
 }
 
 function json(res, status, data) {
