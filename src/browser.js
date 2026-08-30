@@ -134,6 +134,11 @@ function writeMcpConfig(workDir, userId) {
           WORK_DIR: workDir,
           HOME: os.homedir(),
           PATH: process.env.PATH || '',
+          // INN enrichment credentials — pass-through from process env (loaded via secrets.env)
+          ...(process.env.INN_DADATA_TOKEN  ? { INN_DADATA_TOKEN:       process.env.INN_DADATA_TOKEN }  : {}),
+          ...(process.env.INN_DADATA_SECRET ? { INN_DADATA_SECRET:      process.env.INN_DADATA_SECRET } : {}),
+          ...(process.env.INN_CHECKO_KEY    ? { INN_CHECKO_KEY:         process.env.INN_CHECKO_KEY }    : {}),
+          ...(process.env.INN_RUSPROFILE_COOKIE ? { INN_RUSPROFILE_COOKIE: process.env.INN_RUSPROFILE_COOKIE } : {}),
         },
       },
     },
