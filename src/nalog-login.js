@@ -50,14 +50,21 @@ async function startNalogLogin(userId, login, password) {
 
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       locale: 'ru-RU',
+      extraHTTPHeaders: { 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8' },
+    });
+    // Hide automation signals
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+      window.chrome = { runtime: {} };
     });
     const page = await context.newPage();
 
     // Navigate; nalog.ru redirects to ESIA automatically
     console.log('[nalog-login] navigating to lknpd.nalog.ru');
-    await page.goto('https://lknpd.nalog.ru/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto('https://lknpd.nalog.ru/', { waitUntil: 'networkidle', timeout: 30000 });
 
     const onEsia = () => /gosuslugi\.ru|esia\./.test(page.url());
 
