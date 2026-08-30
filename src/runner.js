@@ -146,8 +146,10 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   return result;
 }
 
+const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+
 async function tgSend(token, chatId, text) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const res = await fetch(`${TG_API}/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text }),
@@ -156,7 +158,7 @@ async function tgSend(token, chatId, text) {
 }
 
 async function tgEdit(token, chatId, messageId, text) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+  const res = await fetch(`${TG_API}/bot${token}/editMessageText`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
