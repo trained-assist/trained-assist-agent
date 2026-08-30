@@ -193,7 +193,7 @@ async function main() {
 
       const workDir = path.join(BASE_USERS_DIR, username);
       const target  = path.resolve(path.join(workDir, relPath));
-      if (!target.startsWith(workDir))
+      if (target !== workDir && !target.startsWith(workDir + path.sep))
         return json(res, 400, { error: 'path traversal' });
 
       try {
@@ -228,7 +228,7 @@ async function main() {
 
       const workDir = path.join(BASE_USERS_DIR, username);
       const target  = path.resolve(path.join(workDir, relPath));
-      if (!target.startsWith(workDir))
+      if (target !== workDir && !target.startsWith(workDir + path.sep))
         return json(res, 400, { error: 'path traversal' });
 
       const ext = path.extname(target).toLowerCase();
