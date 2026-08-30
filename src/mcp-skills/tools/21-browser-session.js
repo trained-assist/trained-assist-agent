@@ -144,6 +144,44 @@ const tools = [
   },
 
   {
+    name: 'browser_session_login',
+    description: 'Fill and submit a login form in the remote browser (already open at the login page). Use when the user provides their credentials. Returns whether login succeeded, or whether CAPTCHA/2FA appeared and the user needs to handle it via VNC.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        email:    { type: 'string', description: 'Email or username' },
+        password: { type: 'string', description: 'Password' },
+      },
+      required: ['email', 'password'],
+    },
+    handler: async ({ email, password }) => {
+      if (!isChromeRunning()) return { error: 'browser_not_running' };
+      const scriptPath = path.join(os.homedir(), 'browser-session', 'login.js');
+      if (!fs.existsSync(scriptPath)) return { error: 'login.js not found on VM' };
+      try {
+        const result = execSync(`node "${scriptPath}"`, {
+          timeout: 20000,
+          encoding: 'utf8',
+          env: { ...process.env, LOGIN_EMAIL: email, LOGIN_PASSWORD: password },
+        });
+        const data = JSON.parse(result.trim());
+        if (data.captcha) {
+          data.message = `Появилась CAPTCHA — открой браузер и пройди её вручную: ${BROWSER_SESSION_URL}`;
+        } else if (data.two_factor) {
+          data.message = `Нужен код 2FA — введи его в браузере: ${BROWSER_SESSION_URL}`;
+        } else if (data.error_on_page) {
+          data.message = 'Неверный логин или пароль — проверь данные.';
+        } else if (data.navigated) {
+          data.message = 'Успешно залогинился. Теперь вызови browser_session_capture_cookies.';
+        }
+        return data;
+      } catch (e) {
+        return { error: 'login_failed', message: e.message };
+      }
+    },
+  },
+
+  {
     name: 'browser_session_navigate',
     description: 'Navigate the remote browser to a URL (via CDP). Useful to open the right login page before asking user to interact.',
     inputSchema: {
