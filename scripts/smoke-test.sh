@@ -55,6 +55,15 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   "$AGENT_URL/run")
 [ "$STATUS" = "202" ] && ok "202 accepted" || fail "Expected 202, got $STATUS"
 
+# 7. /run with negative userId (Telegram group/channel) returns 202
+echo "[7] POST /run with negative userId returns 202"
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  -H "Authorization: Bearer $AGENT_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"userId":-5259894154,"username":"smoketest","task":"echo smoke"}' \
+  "$AGENT_URL/run")
+[ "$STATUS" = "202" ] && ok "202 accepted for negative userId" || fail "Expected 202, got $STATUS"
+
 echo ""
 echo "=== Result: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] && echo "✅ All tests passed" && exit 0 || echo "❌ Tests failed — check logs" && exit 1

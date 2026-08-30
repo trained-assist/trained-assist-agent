@@ -100,7 +100,7 @@ async function main() {
         if (pending.expires < Date.now()) { fs.unlinkSync(pendingFile); res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
         if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
 
-        if (!/^\d{5,15}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
+        if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
         const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
         fs.mkdirSync(tokensDir, { recursive: true });
         fs.writeFileSync(path.join(tokensDir, service), String(value).trim(), { mode: 0o600 });
@@ -180,7 +180,7 @@ async function main() {
 
       const { userId, username, task, context, sessionId, contextFromSession } = payload;
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
-      if (!/^\d{1,20}$/.test(String(userId))) {
+      if (!/^-?\d{1,20}$/.test(String(userId))) {
         console.log('[/run] 400 invalid userId:', userId);
         return json(res, 400, { error: 'invalid userId' });
       }
@@ -215,7 +215,7 @@ async function main() {
 
       const { userId, label, value } = payload;
       if (!userId || !label || !value) return json(res, 400, { error: 'missing fields' });
-      if (!/^\d{1,20}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
+      if (!/^-?\d{1,20}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 
