@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
+const { recordUsage } = require('./usage-store');
 
 const STREAM_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
@@ -193,6 +194,7 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
 
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',
+    '--output-format', 'stream-json',
     '--mcp-config', mcpConfig,
     ...(fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
     '--print', prompt,
@@ -207,6 +209,9 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
 
   let streamTimer = null;
   let lastSent = '';
+  let lineBuffer = '';
+  let claudeResult = null;  // text from result event
+  let claudeUsage = null;   // usage from result event
 
   function scheduleStream() {
     if (streamTimer) return;
@@ -219,8 +224,34 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   }
 
   proc.stdout.on('data', chunk => {
-    fullOutput.text += chunk.toString();
-    scheduleStream();
+    lineBuffer += chunk.toString();
+    const lines = lineBuffer.split('\n');
+    lineBuffer = lines.pop(); // keep trailing incomplete line
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'result') {
+          claudeResult = typeof event.result === 'string' ? event.result : null;
+          claudeUsage = event.usage || null;
+          if (claudeUsage) {
+            console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
+          }
+        } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+          for (const block of event.message.content) {
+            if (block.type === 'text') {
+              fullOutput.text += block.text;
+            }
+          }
+          scheduleStream();
+        }
+      } catch {
+        // Non-JSON line (e.g. startup messages) — treat as plain text
+        fullOutput.text += line + '\n';
+        scheduleStream();
+      }
+    }
   });
 
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
@@ -232,7 +263,20 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
 
   clearInterval(streamTimer);
 
-  const result = fullOutput.text.trim() || '(нет вывода)';
+  // Prefer the clean result string from the result event; fall back to accumulated stream text
+  const result = (claudeResult ?? fullOutput.text).trim() || '(нет вывода)';
+
+  // Record token usage for billing
+  if (claudeUsage) {
+    recordUsage(user.workDir, {
+      taskId,
+      sessionId: activeSessionId,
+      input_tokens: claudeUsage.input_tokens || 0,
+      output_tokens: claudeUsage.output_tokens || 0,
+      cache_read_input_tokens: claudeUsage.cache_read_input_tokens || 0,
+      cache_creation_input_tokens: claudeUsage.cache_creation_input_tokens || 0,
+    });
+  }
   const final = result.slice(-MAX_MSG_LEN);
 
   if (msgId) {
