@@ -52,13 +52,19 @@ async function startNalogLogin(userId, login, password) {
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       locale: 'ru-RU',
-      extraHTTPHeaders: { 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8' },
+      extraHTTPHeaders: {
+        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+        // Override Client Hints to hide "HeadlessChrome"
+        'Sec-CH-UA': '"Google Chrome";v="131", "Chromium";v="131", "Not-A.Brand";v="99"',
+        'Sec-CH-UA-Mobile': '?0',
+        'Sec-CH-UA-Platform': '"Linux"',
+      },
     });
     // Hide automation signals
     await context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-      window.chrome = { runtime: {} };
+      window.chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
     });
     const page = await context.newPage();
 
@@ -82,7 +88,15 @@ async function startNalogLogin(userId, login, password) {
         try {
           const el = page.locator(sel).first();
           if (await el.isVisible({ timeout: 2000 })) {
-            await el.click();
+            // Use mouse.click on real coordinates to produce trusted events
+            const box = await el.boundingBox();
+            if (box) {
+              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+              await page.waitForTimeout(150);
+              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            } else {
+              await el.click();
+            }
             clicked = true;
             break;
           }
@@ -91,12 +105,19 @@ async function startNalogLogin(userId, login, password) {
 
       if (!clicked) {
         // Try the explicit auth URL
-        await page.goto('https://lknpd.nalog.ru/auth/login', { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.goto('https://lknpd.nalog.ru/auth/login', { waitUntil: 'networkidle', timeout: 15000 });
         for (const sel of btnSelectors) {
           try {
             const el = page.locator(sel).first();
             if (await el.isVisible({ timeout: 2000 })) {
-              await el.click();
+              const box = await el.boundingBox();
+              if (box) {
+                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+                await page.waitForTimeout(150);
+                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+              } else {
+                await el.click();
+              }
               clicked = true;
               break;
             }
