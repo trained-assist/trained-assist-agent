@@ -247,9 +247,14 @@ function getQuickAnswer(task, userId) {
   return null;
 }
 
+// Per-user serial task queue: Map<userId, Promise>
+// Prevents concurrent Claude processes for the same user (OOM risk on small VMs).
+const userQueues = new Map();
+
 /**
  * Runs `claude --dangerously-skip-permissions` for a task,
  * streams output to Telegram by editing a "thinking" message.
+ * Tasks for the same user are serialised — each waits for the previous to finish.
  *
  * @param {object} opts
  * @param {string} opts.taskId
@@ -259,7 +264,21 @@ function getQuickAnswer(task, userId) {
  * @param {string|null} opts.sessionId  - existing session to append to
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
-async function runTask({ taskId, user, task, context, sessionId, contextFromSession, secrets }) {
+function runTask(opts) {
+  const userId = String(opts.user.id);
+  const prev = userQueues.get(userId) ?? Promise.resolve();
+  const current = prev.then(() => _runTask(opts)).catch(err => {
+    console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
+  });
+  userQueues.set(userId, current);
+  current.finally(() => {
+    // Only clear if no newer task was enqueued after us
+    if (userQueues.get(userId) === current) userQueues.delete(userId);
+  });
+  return current;
+}
+
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, secrets }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 

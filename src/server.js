@@ -494,8 +494,15 @@ async function main() {
 
   server.listen(PORT, () => console.log(`assist-agent listening on :${PORT}`));
 
-  process.once('SIGTERM', () => server.close());
-  process.once('SIGINT',  () => server.close());
+  const shutdown = () => {
+    server.close(() => process.exit(0));
+    // Close any open Playwright browsers so Node exits cleanly
+    try { require('./nalog-login').closeAll(); } catch {}
+    // Force-exit after 10s if something still hangs
+    setTimeout(() => process.exit(0), 10_000).unref();
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT',  shutdown);
 }
 
 function tgNotifyNalog(botToken, chatId, expires) {
