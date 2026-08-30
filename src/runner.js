@@ -33,7 +33,6 @@ function generateConnectLink(userId, service) {
   return `${AGENT_PUBLIC_URL}/connect/${service}?t=${token}`;
 }
 
-module.exports.CONNECT_PENDING_DIR = CONNECT_PENDING_DIR;
 
 function loadUserTokens(userId) {
   const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
@@ -103,8 +102,13 @@ function getQuickAnswer(task, userId) {
   for (const { match, service, hint } of QUICK_SETUPS) {
     if (!match.test(task)) continue;
     if (service && userId) {
-      const link = generateConnectLink(userId, service);
-      return `Вставь токен по ссылке — не попадёт в чат:\n${link}\n\n${hint}`;
+      try {
+        const link = generateConnectLink(userId, service);
+        return `Вставь токен по ссылке — не попадёт в чат:\n${link}\n\n${hint}`;
+      } catch (e) {
+        console.error('[quick-answer] generateConnectLink failed:', e.message);
+        return hint;
+      }
     }
     return hint;
   }

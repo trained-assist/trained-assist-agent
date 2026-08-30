@@ -70,7 +70,7 @@ async function main() {
     const connectMatch = url.pathname.match(/^\/connect\/([a-z0-9_-]+)$/);
     if (connectMatch) {
       const service = connectMatch[1];
-      const { CONNECT_PENDING_DIR } = require('./runner');
+      const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
 
       const SERVICE_META = {
         github: { name: 'GitHub', placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', hint: 'github.com/settings/tokens → Generate new token (classic) → scopes: <b>repo</b>, <b>read:org</b>' },
