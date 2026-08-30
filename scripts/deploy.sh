@@ -7,6 +7,7 @@ REPO_DIR="${REPO_DIR:-$(pwd)}"
 
 echo "==> Installing dependencies..."
 cd "$REPO_DIR"
+rm -rf node_modules
 npm ci --omit=dev
 
 # Install Playwright Chromium if not already present (idempotent)
