@@ -19,6 +19,7 @@ ExecStart=/usr/bin/google-chrome \
   --window-size=1280,900 \
   --no-first-run \
   --no-default-browser-check \
+  --disable-extensions \
   about:blank
 Restart=on-failure
 RestartSec=5
