@@ -133,9 +133,23 @@ async function startNalogLogin(userId, login, password) {
 
     console.log('[nalog-login] on ESIA, filling credentials, url=%s', page.url());
 
+    // Wait for any input to appear (ESIA SPA takes time to render)
+    await page.waitForSelector('input', { state: 'visible', timeout: 25000 }).catch(() => {});
+    // Log full page state for debugging
+    const esiaState = await page.evaluate(() => ({
+      url: location.href,
+      inputs: Array.from(document.querySelectorAll('input')).map(el => `${el.type}#${el.id}[${el.name}]ac=${el.autocomplete}`).join(' | '),
+      buttons: Array.from(document.querySelectorAll('button')).map(b => `${b.type}:"${b.textContent.trim().slice(0, 20)}"[${b.className.slice(0, 40)}]`).join(' | '),
+      bodyText: document.body?.innerText?.slice(0, 200) || '',
+    }));
+    console.log('[nalog-login] ESIA state: url=%s inputs=%s buttons=%s text=%s',
+      esiaState.url, esiaState.inputs, esiaState.buttons, esiaState.bodyText.replace(/\n/g, ' '));
+    // Save screenshot for debugging
+    await page.screenshot({ path: `/tmp/esia-${Date.now()}.png`, fullPage: true }).catch(() => {});
+
     // Wait for the form to fully render before touching anything
     const loginInput = page.locator('#login, input[name="login"], input[autocomplete="username"]').first();
-    await loginInput.waitFor({ state: 'visible', timeout: 25000 });
+    await loginInput.waitFor({ state: 'visible', timeout: 15000 });
 
     const pwInput = page.locator('#password, input[name="password"], input[type="password"]').first();
     // Check if password field is also visible right now (single-step form)

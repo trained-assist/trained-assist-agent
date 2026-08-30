@@ -21,8 +21,6 @@ Nalog / НПД → "Открой lknpd.nalog.ru в Chrome, нажми иконк
 
 Company search / DaData → "Работает без настройки. Скажи что искать — найду по rusprofile.ru."
 
-GetCourse → "Вызову gc_connect — получишь ссылку для подключения. Введи домен (например school.getcourse.ru) и, опционально, API ключ (L1: ученики/заказы) и/или логин+пароль (L2: курсы/уроки)."
-
 INN enrichment (массовый сбор реквизитов компаний) → вызови inn_status чтобы проверить статус, затем inn_enrich_batch(file="...") чтобы обогатить список. DaData и Checko уже настроены платформой.
 
 ## Formatting
