@@ -11,6 +11,7 @@ ExecStartPre=/bin/sh -c 'fuser -k 8080/tcp 2>/dev/null; true'
 ExecStart=/usr/bin/node src/server.js
 Restart=always
 RestartSec=5
+EnvironmentFile=-/home/vova/secrets.env
 Environment=NODE_ENV=production
 Environment=PORT=8080
 Environment=AGENT_DATA_DIR=/home/vova/alesa-data
