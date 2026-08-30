@@ -133,40 +133,60 @@ async function startNalogLogin(userId, login, password) {
 
     console.log('[nalog-login] on ESIA, filling credentials, url=%s', page.url());
 
-    // Wait for ESIA SPA loading screen to clear, then fill credentials
+    // Wait for the form to fully render before touching anything
     const loginInput = page.locator('#login, input[name="login"], input[autocomplete="username"]').first();
     await loginInput.waitFor({ state: 'visible', timeout: 25000 });
-    await loginInput.fill(login);
 
-    // On esia.gosuslugi.ru login+password are on the same page.
-    // The first button[type="submit"] in DOM is the language switcher ("Русский") —
-    // must use text match to find actual "Войти" button.
     const pwInput = page.locator('#password, input[name="password"], input[type="password"]').first();
-    const pwVisible = await pwInput.isVisible({ timeout: 1000 }).catch(() => false);
+    // Check if password field is also visible right now (single-step form)
+    const pwAlreadyVisible = await pwInput.isVisible({ timeout: 3000 }).catch(() => false);
 
-    if (!pwVisible) {
-      // Two-step form: submit login first to reveal password field
-      const nextBtn = page.locator('button[type="submit"]', { hasText: /войти|далее|продолжить/i }).first();
-      await nextBtn.waitFor({ state: 'visible', timeout: 5000 });
-      await nextBtn.click();
-      await page.waitForTimeout(800);
+    // Log what's on the page for debugging
+    const pageState = await page.evaluate(() => ({
+      buttons: Array.from(document.querySelectorAll('button'))
+        .map(b => `${b.type}:"${b.textContent.trim().slice(0, 25)}"[${b.className.slice(0, 40)}]`)
+        .join(' | '),
+    }));
+    console.log('[nalog-login] ESIA buttons: %s', pageState.buttons);
+
+    await loginInput.fill(login);
+    await page.waitForTimeout(300);
+
+    if (!pwAlreadyVisible) {
+      // Two-step form: click next to reveal password field.
+      // Use page.evaluate to bypass Playwright actionability and skip the lang-switcher button.
+      const clicked = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const btn = btns.find(b =>
+          b.offsetParent !== null &&
+          !b.classList.contains('header__lang-button') &&
+          (/войти|далее|продолжить/i.test(b.textContent) || b.type === 'submit')
+        );
+        if (btn) { btn.click(); return btn.textContent.trim().slice(0, 30); }
+        return null;
+      });
+      console.log('[nalog-login] ESIA two-step next clicked: %s', clicked);
+      try {
+        await pwInput.waitFor({ state: 'visible', timeout: 15000 });
+      } catch {
+        await browser.close();
+        return { error: 'Не нашли поле для пароля — Госуслуги заблокировали вход или изменили форму' };
+      }
     }
 
-    try {
-      await pwInput.waitFor({ state: 'visible', timeout: 10000 });
-      await pwInput.fill(password);
-    } catch {
-      await browser.close();
-      return { error: 'Не нашли поле для пароля — форма Госуслуг изменилась' };
-    }
+    await pwInput.fill(password);
+    await page.waitForTimeout(300);
 
-    const loginBtn = page.locator('button[type="submit"]', { hasText: /войти/i }).first();
-    try {
-      await loginBtn.waitFor({ state: 'visible', timeout: 5000 });
-      await loginBtn.click();
-    } catch {
-      await page.locator('button[type="submit"]:visible').last().click();
-    }
+    // Click the final "Войти" button via evaluate to avoid selector issues
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button'));
+      const btn = btns.find(b =>
+        b.offsetParent !== null &&
+        !b.classList.contains('header__lang-button') &&
+        (/войти/i.test(b.textContent) || b.type === 'submit')
+      );
+      if (btn) btn.click();
+    });
 
     console.log('[nalog-login] credentials submitted, waiting for outcome');
 
