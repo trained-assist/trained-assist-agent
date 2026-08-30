@@ -7,22 +7,44 @@ const { enrich } = require('../../inn-pipeline/index');
 
 const USER_ID = process.env.USER_ID || '';
 
-function configDir(userId) {
-  return path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'inn');
+const CREDENTIAL_KEYS = ['dadataToken', 'dadataSecret', 'checkoKey', 'rusprofileCookie'];
+
+function userConfigPath(userId) {
+  return path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'inn', 'config.json');
 }
 
-function readConfig(userId) {
-  const dir = configDir(userId);
-  const file = path.join(dir, 'config.json');
+function readRawConfig(userId) {
+  const file = userConfigPath(userId);
   if (!fs.existsSync(file)) return {};
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
 }
 
+// Platform credentials from env vars (set via secrets.env / GCP Secret Manager)
+function platformConfig() {
+  return {
+    dadataToken:      process.env.INN_DADATA_TOKEN       || null,
+    dadataSecret:     process.env.INN_DADATA_SECRET      || null,
+    checkoKey:        process.env.INN_CHECKO_KEY         || null,
+    rusprofileCookie: process.env.INN_RUSPROFILE_COOKIE  || null,
+  };
+}
+
+// Merge: user overrides platform. Track source per key.
+function readConfig(userId) {
+  const platform = platformConfig();
+  const user = readRawConfig(userId);
+  const _sources = {};
+  for (const k of CREDENTIAL_KEYS) {
+    if (user[k])          _sources[k] = 'user';
+    else if (platform[k]) _sources[k] = 'platform';
+  }
+  return { ...platform, ...user, _sources };
+}
+
 function writeConfig(userId, patch) {
-  const dir = configDir(userId);
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, 'config.json');
-  const current = readConfig(userId);
+  const file = userConfigPath(userId);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const current = readRawConfig(userId);
   fs.writeFileSync(file, JSON.stringify({ ...current, ...patch }, null, 2), 'utf8');
 }
 
@@ -34,13 +56,18 @@ module.exports = {
       inputSchema: { type: 'object', properties: {} },
       handler: async (_, ctx) => {
         const cfg = readConfig(ctx?.userId);
+        const src = cfg._sources || {};
+        function credStatus(key, freeDefault) {
+          if (cfg[key]) return { status: 'configured', origin: src[key] || 'user' };
+          return { status: freeDefault ? 'ready' : 'not_configured' };
+        }
         return {
           sources: {
-            bfo_nalog:  { status: 'ready',      note: 'Free, no auth. Main source.' },
-            egrul:      { status: 'ready',      note: 'Free, no auth. Director lookup.' },
-            dadata:     { status: cfg.dadataToken ? 'configured' : 'not_configured', note: 'Paid. Faster fallback.' },
-            checko:     { status: cfg.checkoKey  ? 'configured' : 'not_configured', note: 'Paid. Financial data.' },
-            rusprofile:   { status: cfg.rusprofileCookie ? 'configured' : 'ready', note: 'Free scraping. Set cookie if blocked.' },
+            bfo_nalog:  { status: 'ready', note: 'Free, no auth. Main source.' },
+            egrul:      { status: 'ready', note: 'Free, no auth. Director lookup.' },
+            dadata:     { ...credStatus('dadataToken'),        note: 'Paid. Faster fallback.' },
+            checko:     { ...credStatus('checkoKey'),          note: 'Paid. Financial data.' },
+            rusprofile: { ...credStatus('rusprofileCookie', true), note: 'Free scraping. Set cookie if blocked.' },
           },
           cache_dir: path.join(process.cwd(), '.inn-cache'),
         };
