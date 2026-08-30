@@ -90,12 +90,9 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
   const mcpConfig = writeMcpConfig(user.workDir, user.id);
 
-  // Use OAuth credentials from ~/.claude/.credentials.json (pushed by auth-sync).
-  // Only fall back to ANTHROPIC_API_KEY if explicitly set — avoids "credit balance" errors
-  // when the API key account runs out of funds.
-  const apiKeyEnv = secrets.ANTHROPIC_API_KEY
-    ? { ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY }
-    : {};
+  // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
+  // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
+  const { ANTHROPIC_API_KEY: _stripped, ...cleanEnv } = process.env;
 
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',
@@ -104,8 +101,7 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   ], {
     cwd: user.workDir,
     env: {
-      ...process.env,
-      ...apiKeyEnv,
+      ...cleanEnv,
       ...userTokens,
     },
   });
