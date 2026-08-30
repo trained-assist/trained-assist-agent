@@ -13,7 +13,7 @@ async function main() {
     process.exit(1);
   }
 
-  const browser = await PLAYWRIGHT.chromium.connectOverCDP('http://127.0.0.1:9222');
+  const browser = await PLAYWRIGHT.chromium.connectOverCDP('http://127.0.0.1:9224');
   try {
     const context = browser.contexts()[0];
     if (!context) throw new Error('No browser context — Chrome not ready');

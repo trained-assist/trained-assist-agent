@@ -1,6 +1,6 @@
 [Unit]
-Description=Chrome browser for remote sessions (CDP :9222)
-After=xvfb-browser.service
+Description=Chrome browser for remote sessions (CDP :9224)
+After=xvfb-browser.service wm-browser.service
 Requires=xvfb-browser.service
 
 [Service]
@@ -8,13 +8,19 @@ Type=simple
 User=vova
 Environment=DISPLAY=:99
 Environment=HOME=/home/vova
-ExecStartPre=/bin/sleep 2
+ExecStartPre=/bin/sh -c "\
+  rm -f \"/home/vova/chrome-profiles/browser-session/Default/Current Session\" \
+         \"/home/vova/chrome-profiles/browser-session/Default/Last Session\" \
+         \"/home/vova/chrome-profiles/browser-session/Default/Current Tabs\" \
+         \"/home/vova/chrome-profiles/browser-session/Default/Last Tabs\"; \
+  rm -rf \"/home/vova/chrome-profiles/browser-session/Default/Sessions\"; \
+  sleep 2"
 ExecStart=/usr/bin/google-chrome \
   --no-sandbox \
   --disable-dev-shm-usage \
   --disable-gpu \
   --user-data-dir=/home/vova/chrome-profiles/browser-session \
-  --remote-debugging-port=9222 \
+  --remote-debugging-port=9224 \
   --remote-debugging-address=127.0.0.1 \
   --window-size=1280,900 \
   --no-first-run \

@@ -1,0 +1,16 @@
+[Unit]
+Description=Openbox window manager for browser VNC session
+After=xvfb-browser.service
+Requires=xvfb-browser.service
+
+[Service]
+Type=simple
+User=vova
+Environment=DISPLAY=:99
+Environment=HOME=/home/vova
+ExecStart=/usr/bin/openbox --sm-disable
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

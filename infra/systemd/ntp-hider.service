@@ -1,0 +1,14 @@
+[Unit]
+Description=Hide Chrome New Tab windows so Tilda stays visible
+After=wm-browser.service chrome-browser.service
+Requires=xvfb-browser.service
+
+[Service]
+Type=simple
+User=vova
+ExecStart=/home/vova/browser-session/hide-ntp.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
