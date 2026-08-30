@@ -5,7 +5,7 @@
 // Lets the user log into any site manually (handles CAPTCHAs, IP-binding, etc.)
 // then captures cookies via CDP for use by other skills (Tilda, etc.)
 //
-// Architecture: Xvfb :99 → Chrome (CDP :9222) → x11vnc :5900 → websockify :6080 → nginx /browser/
+// Architecture: Xvfb :99 → Chrome (CDP :9224) → x11vnc :5900 → websockify :6080 → nginx /browser/
 // All processes run as persistent systemd services on the VM.
 
 const fs = require('fs');
@@ -20,7 +20,7 @@ const BROWSER_SESSION_URL = process.env.BROWSER_SESSION_URL
   || 'https://136-65-7-197.sslip.io/browser/';
 
 // CDP endpoint for the persistent Chrome
-const CDP_PORT = 9222;
+const CDP_PORT = 9224;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ const tools = [
         running,
         url: BROWSER_SESSION_URL,
         instructions: running
-          ? `Браузер запущен. Открой: ${BROWSER_SESSION_URL}\nЗалогинься в нужном сервисе, потом вызови browser_session_capture_cookies.`
+          ? `Браузер запущен. Открой: ${BROWSER_SESSION_URL}\n\n⏳ После открытия подожди 10–15 секунд — страница входа загружается автоматически.\n\nЗалогинься, потом вызови browser_session_capture_cookies.`
           : 'Браузер не запущен. Запусти сервисы: sudo systemctl start xvfb-browser chrome-browser vnc-browser novnc-browser',
       };
     },
@@ -85,7 +85,7 @@ const tools = [
       }
       return {
         url: BROWSER_SESSION_URL,
-        message: `Открой в браузере: ${BROWSER_SESSION_URL}\n\nЗалогинься в нужном сервисе. Когда готово — скажи "готово" и я захвачу сессию.`,
+        message: `Открой в браузере: ${BROWSER_SESSION_URL}\n\n⏳ После открытия подожди 10–15 секунд — страница входа загружается автоматически.\n\nЗалогинься. Когда готово — скажи "готово" и я захвачу сессию.`,
       };
     },
   },
