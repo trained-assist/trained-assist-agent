@@ -53,8 +53,9 @@ http.createServer((req, res) => {
         });
         const data = JSON.parse(out.trim());
 
-        // Auto-capture cookies on clean success
-        if (data.navigated && !data.captcha && !data.two_factor && !data.error_on_page) {
+        // Auto-capture cookies on clean success (navigated or already logged in)
+        const shouldCapture = (data.navigated || data.already_logged_in) && !data.captcha && !data.two_factor && !data.error_on_page;
+        if (shouldCapture) {
           const domain = pending?.domain || 'tilda.ru';
           const label  = domain.replace(/\./g, '-') + '-session';
 

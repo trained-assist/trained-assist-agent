@@ -22,6 +22,14 @@ if (!email || !password) {
 
     const urlBefore = page.url();
 
+    // If already logged in (not on login page), skip form filling
+    const isLoginPage = /login|signin|sign-in/i.test(urlBefore);
+    if (!isLoginPage) {
+      console.log(JSON.stringify({ ok: true, url_before: urlBefore, url_after: urlBefore, navigated: false, already_logged_in: true, captcha: false, two_factor: false, error_on_page: false }));
+      try { browser._connection.close(); } catch {}
+      process.exit(0);
+    }
+
     // Fill email / username field
     const emailSel = 'input[type="email"], input[name="email"], input[name="login"], input[name="username"]';
     await page.fill(emailSel, email, { timeout: 8000 });
