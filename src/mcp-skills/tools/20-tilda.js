@@ -34,6 +34,24 @@ function writeConfig(userId, data) {
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
+// tilda-session file: raw cookie string saved by Chrome extension from tilda.ru
+// Format: "userid=12345; hash=abcdef; ..."
+function sessionPath(userId) {
+  return path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'tilda-session');
+}
+
+function readSessionCookies(userId) {
+  const file = sessionPath(userId);
+  if (!fs.existsSync(file)) return null;
+  const val = fs.readFileSync(file, 'utf8').trim();
+  return val || null;
+}
+
+function cookieStringHasAuth(cookieStr) {
+  return cookieStr && cookieStr.includes('userid=') && cookieStr.includes('hash=');
+}
+
+// Fallback: Playwright storage-state JSON (local dev / manual capture)
 function loadStorageState(stateFile) {
   if (!stateFile) return null;
   const expanded = stateFile.startsWith('~/')
@@ -43,14 +61,14 @@ function loadStorageState(stateFile) {
   try { return JSON.parse(fs.readFileSync(expanded, 'utf8')); } catch { return null; }
 }
 
-function extractCookieHeader(storageState) {
+function extractCookieHeaderFromState(storageState) {
   const cookies = (storageState?.cookies || []).filter(c =>
     c.domain && c.domain.includes('tilda')
   );
   return cookies.map(c => `${c.name}=${c.value}`).join('; ');
 }
 
-function hasAuthCookies(storageState) {
+function storageStateHasAuth(storageState) {
   const cookies = (storageState?.cookies || []);
   const names = new Set(cookies.filter(c => c.domain?.includes('tilda')).map(c => c.name));
   return names.has('userid') && names.has('hash');
@@ -93,17 +111,35 @@ async function getProjectData(projectId, cookieHeader) {
 
 // ── Context helper ────────────────────────────────────────────────────────────
 
+const REAUTH_INSTRUCTIONS = 'Открой tilda.ru в браузере (ты уже залогинен — переходить никуда не нужно), нажми кнопку Tilda в расширении Cloud Auth Bridge. Когда сессия передана — скажи "готово".';
+
 async function withAuth(userId, fn) {
   const config = readConfig(userId);
   if (!config) return { error: 'No Tilda config. Run tilda_set_config first.' };
-  if (!config.storage_state) return { error: 'No storage_state in config. Run tilda_set_config.' };
   if (!config.project_id) return { error: 'No project_id in config. Run tilda_set_config.' };
 
-  const state = loadStorageState(config.storage_state);
-  if (!state) return { error: `Storage state file not found: ${config.storage_state}. Capture login with tilda-capture-storage-state.js first.` };
-  if (!hasAuthCookies(state)) return { error: 'Storage state has no Tilda auth cookies (userid + hash). Session expired — run tilda-capture-storage-state.js again.' };
+  // Priority 1: tilda-session file from Chrome extension (userid; hash cookie string)
+  let cookieHeader = readSessionCookies(userId);
+  if (cookieHeader && !cookieStringHasAuth(cookieHeader)) {
+    cookieHeader = null; // stale/empty file
+  }
 
-  const cookieHeader = extractCookieHeader(state);
+  // Priority 2: Playwright storage-state file (local dev / manual capture)
+  if (!cookieHeader && config.storage_state) {
+    const state = loadStorageState(config.storage_state);
+    if (state && storageStateHasAuth(state)) {
+      cookieHeader = extractCookieHeaderFromState(state);
+    }
+  }
+
+  if (!cookieHeader) {
+    return {
+      error: 'session_expired',
+      requires_reauth: true,
+      instructions: REAUTH_INSTRUCTIONS,
+    };
+  }
+
   return fn(config, cookieHeader);
 }
 
@@ -143,27 +179,52 @@ module.exports = {
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
         const config = readConfig(USER_ID);
-        if (!config) return { error: 'No config. Run tilda_set_config first.' };
+        if (!config) return {
+          ok: false,
+          reason: 'not_configured',
+          instructions: 'Run tilda_set_config with storage_state path and project_id.',
+        };
 
-        const state = loadStorageState(config.storage_state);
-        if (!state) return { ok: false, reason: 'storage_state file not found', config };
-        if (!hasAuthCookies(state)) return { ok: false, reason: 'No auth cookies in storage state — session expired', config };
+        // Check which session source is available
+        const sessionCookies = readSessionCookies(USER_ID);
+        const hasSession = sessionCookies && cookieStringHasAuth(sessionCookies);
+        const hasStorageState = config.storage_state && (() => {
+          const s = loadStorageState(config.storage_state);
+          return s && storageStateHasAuth(s);
+        })();
 
-        const cookieHeader = extractCookieHeader(state);
+        if (!hasSession && !hasStorageState) {
+          return {
+            ok: false,
+            reason: 'session_expired',
+            requires_reauth: true,
+            instructions: REAUTH_INSTRUCTIONS,
+          };
+        }
+
+        const cookieHeader = hasSession
+          ? sessionCookies
+          : extractCookieHeaderFromState(loadStorageState(config.storage_state));
+
         try {
           const project = await getProjectData(config.project_id, cookieHeader);
           return {
             ok: true,
+            session_source: hasSession ? 'chrome_extension' : 'storage_state_file',
             project_id: config.project_id,
             test_page_id: config.test_page_id || '(not set)',
             prod_page_id: config.prod_page_id || '(not set)',
             test_url: config.test_url || '(not set)',
             prod_url: config.prod_url || '(not set)',
-            csrf_present: !!project.csrf,
             pages_count: Array.isArray(project.pages) ? project.pages.length : '?',
           };
         } catch (e) {
-          return { ok: false, reason: e.message, config };
+          return {
+            ok: false,
+            reason: e.message,
+            requires_reauth: e.message.includes('Auth failed'),
+            instructions: e.message.includes('Auth failed') ? REAUTH_INSTRUCTIONS : undefined,
+          };
         }
       },
     },
