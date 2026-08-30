@@ -1,7 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
-const { execSync, execFile } = require('child_process');
+const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
@@ -269,6 +269,24 @@ async function main() {
       } catch (e) {
         return json(res, 404, { error: 'not found' });
       }
+    }
+
+    // POST /webhooks/weeek-session — triggered by CF Worker when WEEEK_APP_COOKIE expires (401)
+    // Auth: Bearer AGENT_SECRET (same as other endpoints)
+    if (req.method === 'POST' && url.pathname === '/webhooks/weeek-session') {
+      json(res, 202, { ok: true, message: 'Refresh started' });
+      // Run refresh in background, send Telegram alert with result
+      const refreshScript = path.join(__dirname, '..', 'scripts', 'refresh-weeek-session.js');
+      const env = {
+        ...process.env,
+        TELEGRAM_BOT_TOKEN: secrets.BOT_TOKEN,
+        CF_API_TOKEN: secrets.CF_API_TOKEN || '',
+        OPERATOR_CHAT_ID: secrets.OPERATOR_CHAT_ID || '1714048',
+      };
+      const child = spawn('node', [refreshScript], { env, detached: true, stdio: 'inherit' });
+      child.unref();
+      console.log('[weeek-session] Refresh script started, pid:', child.pid);
+      return;
     }
 
     json(res, 404, { error: 'not found' });

@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Weeek session cookie every 6 hours
+
+[Timer]
+# Run 2 minutes after boot (give Chrome time to start), then every 6 hours
+OnBootSec=2min
+OnUnitActiveSec=6h
+# If a run was missed (machine was off), catch up within 10 minutes
+Persistent=true
+
+[Install]
+WantedBy=timers.target

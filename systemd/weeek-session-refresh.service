@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Weeek session cookie in Cloudflare Worker
+After=network.target chrome-browser.service
+
+[Service]
+Type=oneshot
+User=vova
+WorkingDirectory=/home/vova/trained-assist-agent
+ExecStart=/usr/bin/node scripts/refresh-weeek-session.js
+StandardOutput=journal
+StandardError=journal
+# Secrets injected via environment — loaded by the script from GCP at runtime
+# CF_API_TOKEN must be in GCP secrets (see README for setup)
