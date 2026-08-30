@@ -5,7 +5,7 @@ const path = require('path');
 const os = require('os');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
-const { recordUsage } = require('./usage-store');
+const { recordUsage, getUsageTotals } = require('./usage-store');
 
 const STREAM_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
@@ -138,12 +138,16 @@ function getSecretsLog(userId) {
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
 
-const SETUP_INTENT = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
+const SETUP_INTENT          = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
 const INN_CAPABILITY_INTENT = /(?:скил|skill|умееш|можешь|есть.{0,30}возможн|есть.{0,30}функц|есть.{0,30}инструм|что.{0,20}умееш).{0,80}(?:инн|огрн|компани|директор|выручк|реквизит|участник|выставк)/i;
-const SECRETS_LIST_INTENT = /^\/secrets_list$|список.{0,15}доступ|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
-const SECRETS_LOG_INTENT  = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
-const REVOKE_INTENT       = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
-const REVOKE_SERVICE_RE   = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
+const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}доступ|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
+const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
+const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
+const REVOKE_SERVICE_RE     = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
+const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
+const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
+const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
+const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
 
 const TRUST_FOOTER = '\n\n🔒 Данные для входа не видны в переписке с ботом — они поступают прямо на сервер и хранятся в изолированном хранилище, отдельно от ИИ. Все обращения фиксируются в /secrets_log. Отзыв доступов: /secrets_list';
 
@@ -181,7 +185,57 @@ const QUICK_SETUPS = [
   },
 ];
 
-function getQuickAnswer(task, userId) {
+function getQuickAnswer(task, userId, workDir) {
+  // /ping — liveness check
+  if (PING_INTENT.test(task)) return '🟢 Онлайн. Готов к работе.';
+
+  // /help — capability overview (static, no Claude needed)
+  if (HELP_INTENT.test(task)) {
+    return [
+      '🤖 Что я умею:',
+      '',
+      '📁 Работа с файлами, кодом, данными',
+      '🔗 Интеграции: GitHub, Weeek, Налог.ру, Tilda, GetCourse, Google Drive',
+      '🏢 INN Enrichment — поиск ИНН/ОГРН/директоров/выручки по списку компаний',
+      '🌐 Браузер — вхожу на сайты и выполняю действия',
+      '',
+      'Команды:',
+      '/secrets_list — подключённые сервисы',
+      '/secrets_log — история обращений к данным',
+      '/sessions — мои диалоги',
+      '/usage — расход токенов',
+      '',
+      'Чтобы подключить сервис: «подключи GitHub», «подключи Налог.ру» и т. д.',
+    ].join('\n');
+  }
+
+  // /sessions — list recent sessions
+  if (SESSIONS_INTENT.test(task)) {
+    if (!workDir) return 'Не удалось определить рабочую директорию.';
+    const list = sessions.listSessions(workDir, 10);
+    if (!list || list.length === 0) return 'Нет активных диалогов.';
+    const lines = list.map((s, i) => {
+      const d = new Date(s.lastAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+      return `${i + 1}. ${s.topic.slice(0, 60)} (${d}, ${s.messageCount} сообщ.)`;
+    });
+    return '💬 Последние диалоги:\n' + lines.join('\n');
+  }
+
+  // /usage — token usage stats
+  if (USAGE_INTENT.test(task)) {
+    if (!workDir) return 'Не удалось определить рабочую директорию.';
+    const t = getUsageTotals(workDir);
+    if (!t || t.tasks === 0) return 'Данных об использовании пока нет.';
+    const lines = [
+      `📊 Использование токенов (всего ${t.tasks} задач):`,
+      `• Входящих: ${t.input_tokens.toLocaleString('ru-RU')}`,
+      `• Исходящих: ${t.output_tokens.toLocaleString('ru-RU')}`,
+    ];
+    if (t.cache_read > 0) lines.push(`• Из кэша: ${t.cache_read.toLocaleString('ru-RU')}`);
+    if (t.cache_write > 0) lines.push(`• В кэш записано: ${t.cache_write.toLocaleString('ru-RU')}`);
+    return lines.join('\n');
+  }
+
   // /secrets_list — show connected services
   if (SECRETS_LIST_INTENT.test(task)) {
     const services = userId ? listConnectedServices(userId) : null;
@@ -274,7 +328,7 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   // Quick answer — check before session creation so system commands
   // (/secrets_list, /secrets_log, connect links, revoke) don't pollute
   // session history with ephemeral utility responses.
-  const quickReply = getQuickAnswer(task, user.id);
+  const quickReply = getQuickAnswer(task, user.id, user.workDir);
   if (quickReply) {
     await tgSend(BOT_TOKEN, chatId, quickReply);
     // If continuing an existing session, still log the exchange there
