@@ -34,13 +34,19 @@ function generateConnectLink(userId, service) {
 }
 
 
+// Files in agent-tokens dir that are not service credentials
+const LOG_FILES = new Set(['.secrets_log']);
+
 function loadUserTokens(userId) {
   const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
   const extra = {};
   if (!fs.existsSync(tokensDir)) return extra;
+  const accessed = [];
   for (const file of fs.readdirSync(tokensDir)) {
+    if (LOG_FILES.has(file)) continue;
     const val = fs.readFileSync(path.join(tokensDir, file), 'utf8').trim();
     const label = file.toLowerCase();
+    accessed.push(label);
     if (label === 'github') { extra.GH_TOKEN = val; extra.GITHUB_TOKEN = val; }
     else if (label === 'figma') extra.FIGMA_TOKEN = val;
     else if (label === 'notion') extra.NOTION_TOKEN = val;
@@ -59,56 +65,170 @@ function loadUserTokens(userId) {
     }
     else extra[label.toUpperCase().replace(/[^A-Z0-9]/g, '_')] = val;
   }
+  if (accessed.length > 0) appendSecretsLog(userId, accessed);
   return extra;
 }
 
-// ── Quick answers — bypass Claude for known setup patterns ───────────────────
+// Append one line to .secrets_log: ISO timestamp + TAB + services
+function appendSecretsLog(userId, services) {
+  try {
+    const logPath = path.join(os.homedir(), 'agent-tokens', String(userId), '.secrets_log');
+    const line = `${new Date().toISOString()}\t${services.join(',')}\n`;
+    fs.appendFileSync(logPath, line, { mode: 0o600 });
+  } catch { /* non-critical */ }
+}
+
+// ── Service metadata for secrets_list / revoke ─────────────────────────────
+const SERVICE_DISPLAY = {
+  github:         'GitHub',
+  weeek:          'Weeek CRM',
+  nalog:          'Налог.ру (НПД)',
+  figma:          'Figma',
+  notion:         'Notion',
+  linear:         'Linear',
+  tilda:          'Tilda',
+  'tilda-session': 'Tilda (сессия)',
+  dadata:         'DaData',
+  gdrive:         'Google Drive',
+};
+
+function listConnectedServices(userId) {
+  const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
+  if (!fs.existsSync(tokensDir)) return null;
+  const files = fs.readdirSync(tokensDir).filter(f => !LOG_FILES.has(f));
+  if (files.length === 0) return null;
+  return files.map(f => {
+    const name = SERVICE_DISPLAY[f.toLowerCase()] || f;
+    const mtime = fs.statSync(path.join(tokensDir, f)).mtime;
+    return { file: f, name, mtime };
+  });
+}
+
+function revokeService(userId, serviceName) {
+  const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
+  const ALIASES = {
+    github: 'github', гитхаб: 'github',
+    weeek: 'weeek', вик: 'weeek',
+    nalog: 'nalog', налог: 'nalog', нпд: 'nalog', самозан: 'nalog',
+    figma: 'figma', фигма: 'figma',
+    notion: 'notion',
+    linear: 'linear',
+    tilda: 'tilda', тильда: 'tilda',
+    gdrive: 'gdrive', гугл: 'gdrive', google: 'gdrive',
+    dadata: 'dadata',
+  };
+  const key = ALIASES[serviceName.toLowerCase().replace(/[^a-zа-яё]/gi, '')];
+  if (!key) return null; // unknown service
+
+  const filePath = path.join(tokensDir, key);
+  if (!fs.existsSync(filePath)) return 'not_found';
+  fs.unlinkSync(filePath);
+  appendSecretsLog(userId, [`revoke:${key}`]);
+  return key;
+}
+
+function getSecretsLog(userId) {
+  const logPath = path.join(os.homedir(), 'agent-tokens', String(userId), '.secrets_log');
+  if (!fs.existsSync(logPath)) return null;
+  const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+  return lines.slice(-20).reverse(); // last 20, newest first
+}
+
+// ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
 
-const SETUP_INTENT = /подключ|connect|настро|интегр|привяз|как.*добав|токен.*отправ|отправ.*токен|могу.*отправ|зайт|авториз|setup|подрубить/i;
+const SETUP_INTENT = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
+const SECRETS_LIST_INTENT = /^\/secrets_list$|список.{0,15}доступ|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
+const SECRETS_LOG_INTENT  = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
+const REVOKE_INTENT       = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
+const REVOKE_SERVICE_RE   = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
 
-// service: label used in /connect/:service route and agent-tokens file name
-// hint: shown below the form link, or as fallback answer when no userId
+const TRUST_FOOTER = '\n\n🔒 Данные для входа не видны в переписке с ботом — они поступают прямо на сервер и хранятся в изолированном хранилище, отдельно от ИИ. Все обращения фиксируются в /secrets_log. Отзыв доступов: /secrets_list';
+
+// service: label in /connect/:service route and agent-tokens filename
 const QUICK_SETUPS = [
   {
     match: /github|гитхаб/i,
     service: 'github',
-    hint: 'Создать токен: github.com/settings/tokens → Generate new token (classic) → scopes: repo, read:org',
+    hint: 'Где взять: github.com/settings/tokens → Generate new token (classic) → scopes: repo, read:org',
   },
   {
     match: /weeek|вик(?!тор)/i,
     service: 'weeek',
-    hint: 'Токен: Weeek → Settings → Integrations → API → Generate token',
+    hint: 'Где взять: Weeek → Settings → Integrations → API → Generate token',
   },
   {
     match: /google.?drive|гугл.?диск|gdrive/i,
-    service: null, // no simple token — needs gdrive_setup flow
-    hint: 'Скажи мне "настрой Google Drive" — вызову gdrive_setup, автоматически создаст сервис-аккаунт.',
+    service: null,
+    hint: 'Скажи мне "настрой Google Drive" — вызову gdrive_setup, он создаст сервис-аккаунт автоматически.',
   },
   {
     match: /tilda|тильда/i,
-    service: null, // no simple token — needs browser session flow
+    service: null,
     hint: 'Нужен удалённый браузер — скажи мне "подключи Tilda".',
   },
   {
     match: /nalog|налог|нпд|самозан/i,
     service: 'nalog',
-    hint: 'Войди через Госуслуги по ссылке — данные не попадают в чат, форма безопасна.',
+    hint: 'Войдёшь через Госуслуги — страница защищена, данные не проходят через чат.',
   },
 ];
 
 function getQuickAnswer(task, userId) {
+  // /secrets_list — show connected services
+  if (SECRETS_LIST_INTENT.test(task)) {
+    const services = userId ? listConnectedServices(userId) : null;
+    if (!services || services.length === 0) {
+      return 'Нет подключённых сервисов.\n\nЧтобы подключить: «подключи GitHub», «подключи Налог.ру» и т. д.';
+    }
+    const lines = services.map(s => {
+      const d = s.mtime.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+      return `• ${s.name} — обновлён ${d}`;
+    });
+    return [
+      '🔑 Подключённые сервисы:',
+      ...lines,
+      '',
+      'Отозвать: «отзови доступ к [сервис]»',
+      'История обращений: /secrets_log',
+    ].join('\n');
+  }
+
+  // /secrets_log — show access log
+  if (SECRETS_LOG_INTENT.test(task)) {
+    const log = userId ? getSecretsLog(userId) : null;
+    if (!log || log.length === 0) return 'История обращений пуста.';
+    const lines = log.map(l => {
+      const [ts, svcs] = l.split('\t');
+      const time = new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+      return `${time} — ${svcs}`;
+    });
+    return '📋 Последние обращения к вашим данным:\n' + lines.join('\n');
+  }
+
+  // Revoke — delete a service token
+  if (REVOKE_INTENT.test(task)) {
+    const svcMatch = task.match(REVOKE_SERVICE_RE);
+    if (!svcMatch) return 'Укажи сервис для отзыва, например: «отзови доступ к GitHub»';
+    if (!userId) return 'Не удалось определить пользователя.';
+    const result = revokeService(userId, svcMatch[1]);
+    if (result === null) return `Не распознал сервис «${svcMatch[1]}». Доступные: GitHub, Weeek, Налог.ру, Figma, Tilda, Google Drive.`;
+    if (result === 'not_found') return `Сервис «${svcMatch[1]}» не был подключён.`;
+    return `✅ Доступ к ${SERVICE_DISPLAY[result] || result} отозван. Данные удалены с сервера.`;
+  }
+
   if (!SETUP_INTENT.test(task)) {
     console.log('[quick-answer] no setup intent, task=%j', task.slice(0, 120));
     return null;
   }
+
   for (const { match, service, hint } of QUICK_SETUPS) {
     if (!match.test(task)) continue;
     console.log('[quick-answer] matched service=%s uid=%s', service || 'null', userId);
     if (service && userId) {
       try {
         const link = generateConnectLink(userId, service);
-        return `Вставь токен по ссылке — не попадёт в чат:\n${link}\n\n${hint}`;
+        return `Данные для входа — по ссылке:\n${link}\n\n${hint}${TRUST_FOOTER}`;
       } catch (e) {
         console.error('[quick-answer] generateConnectLink failed:', e.message);
         return hint;
@@ -116,6 +236,7 @@ function getQuickAnswer(task, userId) {
     }
     return hint;
   }
+
   console.log('[quick-answer] setup intent matched but no service pattern, task=%j', task.slice(0, 120));
   return null;
 }
