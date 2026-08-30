@@ -16,10 +16,32 @@ if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; t
   npx playwright install chromium --with-deps 2>&1 | tail -5 || true
 fi
 
+echo "==> Installing systemd unit file..."
+UNIT_SRC="$REPO_DIR/systemd/${SERVICE}.service"
+UNIT_DST="/etc/systemd/system/${SERVICE}.service"
+if [ -f "$UNIT_SRC" ]; then
+  if ! diff -q "$UNIT_SRC" "$UNIT_DST" >/dev/null 2>&1; then
+    sudo cp "$UNIT_SRC" "$UNIT_DST"
+    sudo systemctl daemon-reload
+    echo "  Unit file updated and daemon reloaded"
+  else
+    echo "  Unit file unchanged"
+  fi
+fi
+
+echo "==> Killing any orphan node processes on port 8080..."
+# systemctl restart only kills the tracked PID; orphan processes (started outside systemd)
+# stay alive on port 8080 and serve stale code — kill them before the restart.
+sudo fuser -k 8080/tcp 2>/dev/null || true
+sleep 1
+
 echo "==> Restarting service..."
 sudo systemctl restart "$SERVICE"
-sleep 3
-sudo systemctl status "$SERVICE" --no-pager --lines=5 || true
+# RestartSec=5 in unit file — wait long enough for a crash-then-restart cycle to complete
+sleep 8
+sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
+echo "==> Service journal (last 20 lines)..."
+sudo journalctl -u "$SERVICE" --no-pager -n 20 || true
 
 echo "==> Running smoke tests..."
 AGENT_SECRET=$(gcloud secrets versions access latest --secret=AGENT_SECRET --project=alesa-personal-assistent 2>/dev/null || echo "$AGENT_SECRET")
