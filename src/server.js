@@ -8,6 +8,8 @@ const { runTask } = require('./runner');
 const { listSessions, getSession: getSessionData } = require('./session-store');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
+const { nalogFormHtml } = require('./connect-forms/nalog');
+const { getcourseFormHtml } = require('./connect-forms/getcourse');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
