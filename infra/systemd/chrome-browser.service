@@ -27,6 +27,7 @@ ExecStart=/usr/bin/google-chrome \
   --no-default-browser-check \
   --disable-extensions \
   --app=https://tilda.ru/login/
+ExecStartPost=/bin/sh -c "/home/vova/browser-session/close-ntp-once.sh &"
 Restart=on-failure
 RestartSec=5
 
