@@ -36,6 +36,42 @@ function loadUserTokens(userId) {
   return extra;
 }
 
+// ── Quick answers — bypass Claude for known setup patterns ───────────────────
+// Returns a string if the task matches, null otherwise.
+
+const SETUP_INTENT = /подключ|connect|настро|интегр|привяз|как.*добав|токен.*отправ|отправ.*токен|могу.*отправ|зайт|авториз|setup|подрубить/i;
+
+const QUICK_SETUPS = [
+  {
+    match: /github|гитхаб/i,
+    answer: 'Да — введи прямо в чат:\n`/settoken github ghp_xxxxx`\nТокен сохранится в систему, не в переписку.\n\nСоздать токен: github.com/settings/tokens → Generate new token (classic) → scopes: repo, read:org',
+  },
+  {
+    match: /weeek|вик(?!тор)/i,
+    answer: 'Введи:\n`/settoken weeek <token>`\nТокен: Weeek → Settings → Integrations → API → Generate token',
+  },
+  {
+    match: /google.?drive|гугл.?диск|gdrive/i,
+    answer: 'Скажи мне "настрой google drive" — вызову gdrive_setup, он автоматически создаст сервис-аккаунт. Потом расшаришь папку с SA email.',
+  },
+  {
+    match: /tilda|тильда/i,
+    answer: 'Нужно залогиниться через удалённый браузер. Скажи мне — пришлю ссылку, откроешь, войдёшь в Tilda, сессия захватится автоматически.',
+  },
+  {
+    match: /nalog|налог|нпд|самозан/i,
+    answer: 'Открой lknpd.nalog.ru в Chrome → нажми иконку расширения cloud-auth-bridge → Send token. Токен живёт ~1 час.',
+  },
+];
+
+function getQuickAnswer(task) {
+  if (!SETUP_INTENT.test(task)) return null;
+  for (const { match, answer } of QUICK_SETUPS) {
+    if (match.test(task)) return answer;
+  }
+  return null;
+}
+
 /**
  * Runs `claude --dangerously-skip-permissions` for a task,
  * streams output to Telegram by editing a "thinking" message.
@@ -74,6 +110,14 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
       }
     }
     activeSessionId = sessions.createSession(user.workDir, { task, id: sessionId || undefined });
+  }
+
+  // Quick answer — skip Claude entirely for known setup/connect patterns
+  const quickReply = getQuickAnswer(task);
+  if (quickReply) {
+    await tgSend(BOT_TOKEN, chatId, quickReply);
+    if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, quickReply);
+    return quickReply;
   }
 
   // Send "thinking" message, get message_id for streaming edits
