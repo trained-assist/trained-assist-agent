@@ -9,8 +9,30 @@ const COOKIE_DOMAINS = {
   notion:  { domain: '.notion.so',   cookies: ['token_v2', 'notion_user_id'] },
   linear:  { domain: '.linear.app',  cookies: [] }, // full dump
   slack:   { domain: '.slack.com',   cookies: ['b', 'd'] },
-  nalog:   { domain: '.nalog.ru',    cookies: [] }, // full dump — nalog.ru uses many session cookies
+  // nalog uses sessionStorage, not cookies — handled separately in buildNalogOrigins()
 };
+
+// nalog.ru stores auth in sessionStorage, not cookies.
+// Playwright storageState supports sessionStorage via origins[].sessionStorage.
+function buildNalogOrigins(tokenFile) {
+  try {
+    const raw = fs.readFileSync(tokenFile, 'utf8').trim();
+    const parsed = JSON.parse(raw);
+    if (!parsed.auth_token) return [];
+    const items = [
+      { name: 'auth.token',         value: parsed.auth_token },
+      { name: 'refresh.token',      value: parsed.refresh_token || '' },
+      { name: 'auth.token.expires', value: parsed.expires || '' },
+    ].filter(i => i.value);
+    return [{
+      origin: 'https://lknpd.nalog.ru',
+      localStorage: [],
+      sessionStorage: items,
+    }];
+  } catch {
+    return [];
+  }
+}
 
 function parseCookieString(str) {
   return str.split(';').map(s => s.trim()).filter(Boolean).map(pair => {
@@ -75,6 +97,19 @@ function writeMcpConfig(workDir, userId) {
         for (const c of fresh.cookies) existingMap.set(`${c.name}@@${c.domain}`, c);
         existing.cookies = Array.from(existingMap.values());
         console.log(`[browser] injected ${fresh.cookies.length} cookies for userId=${userId}`);
+      }
+
+      // Inject nalog.ru sessionStorage (auth token stored there, not in cookies)
+      const nalogFile = path.join(tokensDir, 'nalog');
+      if (fs.existsSync(nalogFile)) {
+        const nalogOrigins = buildNalogOrigins(nalogFile);
+        if (nalogOrigins.length > 0) {
+          // Merge with existing origins by origin URL
+          const originMap = new Map((existing.origins || []).map(o => [o.origin, o]));
+          for (const o of nalogOrigins) originMap.set(o.origin, o);
+          existing.origins = Array.from(originMap.values());
+          console.log(`[browser] injected nalog sessionStorage for userId=${userId}`);
+        }
       }
     }
   }

@@ -76,16 +76,35 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
   const msgId = thinkMsg?.result?.message_id;
 
-  const nalogCtx = userTokens.NALOG_TOKEN ? `\n[SYSTEM CONTEXT — nalog.ru API]
-NALOG_TOKEN env var contains a valid JWT for lknpd.nalog.ru. Use it like:
-  Authorization: Bearer $NALOG_TOKEN
+  const nalogCtx = userTokens.NALOG_TOKEN ? `\n[SYSTEM CONTEXT — nalog.ru НПД API]
+NALOG_TOKEN env var = JWT for lknpd.nalog.ru. Header: Authorization: Bearer $NALOG_TOKEN
+NALOG_INN env var = user's INN (if set).
 Base URL: https://lknpd.nalog.ru/api/v1
-Key endpoints:
-  GET /user — profile info (ИНН, name)
-  GET /incomes?from=<ISO8601+03:00>&to=<ISO8601+03:00>&limit=10&offset=0 — income list
-  GET /incomes/{uuid} — single income receipt
-  POST /income — register new income (НПД check-in)
-Dates must be ISO8601 with Moscow timezone offset (+03:00), e.g. 2026-06-01T00:00:00+03:00
+
+Endpoints (confirmed working):
+  GET  /user — profile: {inn, displayName, phone}
+  GET  /incomes?from=<ISO>&to=<ISO>&limit=10&offset=0 — income list (use +03:00 offset)
+  POST /income — create receipt (НПД чек), returns {approvedReceiptUuid}
+  GET  /receipt/{inn}/{approvedReceiptUuid}/print — PUBLIC receipt URL, no auth, send to client
+
+POST /income body example:
+{
+  "paymentType": "CASH",        // or "WIRE" for bank transfer
+  "ignoreMaxTotalIncomeRestriction": false,
+  "client": {
+    "contactPhone": null,
+    "displayName": "Client Name",
+    "incomeType": "FROM_INDIVIDUAL",  // or "FROM_LEGAL" for ЮЛ/ИП
+    "inn": null                        // set INN if legal entity
+  },
+  "requestTime": "2026-08-30T12:00:00+03:00",
+  "operationTime": "2026-08-30T12:00:00+03:00",
+  "services": [{"name": "Service description", "amount": 5000, "quantity": 1}],
+  "totalAmount": 5000,
+  "ndsType": "NONE"
+}
+After creating receipt, always provide the print URL to user:
+  https://lknpd.nalog.ru/api/v1/receipt/{inn}/{approvedReceiptUuid}/print
 [END SYSTEM CONTEXT]\n` : '';
 
   const prompt = sessionContext ? `${nalogCtx}${sessionContext}\n\n${task}` : `${nalogCtx}${task}`;
