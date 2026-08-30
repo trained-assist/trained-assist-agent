@@ -236,10 +236,9 @@ const tools = [
         if (!page) return { error: 'no_page_target' };
 
         // Navigate via CDP activate + navigate endpoint (simple HTTP approach)
-        execSync(
-          `curl -sf "http://127.0.0.1:${CDP_PORT}/json/activate/${page.id}"`,
-          { timeout: 3000 }
-        );
+        // Use execFileSync to avoid shell injection via page.id from CDP response
+        execFileSync('curl', ['-sf', `http://127.0.0.1:${CDP_PORT}/json/activate/${page.id}`],
+          { timeout: 3000 });
         // Use node to send CDP command (no ws module needed — use native approach)
         const navScript = path.join(os.homedir(), 'browser-session', 'navigate.js');
         if (fs.existsSync(navScript)) {
