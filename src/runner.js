@@ -19,6 +19,8 @@ function loadUserTokens(userId) {
     else if (label === 'figma') extra.FIGMA_TOKEN = val;
     else if (label === 'notion') extra.NOTION_TOKEN = val;
     else if (label === 'linear') extra.LINEAR_API_KEY = val;
+    else if (label === 'weeek') extra.WEEEK_API_TOKEN = val;
+    else if (label === 'dadata') extra.DADATA_API_TOKEN = val;
     else if (label === 'nalog') {
       try {
         const parsed = JSON.parse(val);

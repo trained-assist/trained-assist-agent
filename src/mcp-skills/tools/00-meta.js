@@ -25,6 +25,20 @@ const SKILLS = [
     tools: ['browser_session_status', 'browser_session_url', 'browser_session_capture_cookies', 'browser_session_navigate'],
     requires: 'ничего — браузер всегда запущен',
   },
+  {
+    id: 'weeek-crm',
+    name: 'Weeek CRM',
+    description: 'Управление сделками, контактами и воронками в Weeek.net через REST API. Токен не протухает.',
+    tools: ['weeek_status', 'weeek_set_token', 'weeek_list_funnels', 'weeek_list_statuses', 'weeek_list_deals', 'weeek_get_deal', 'weeek_create_deal', 'weeek_update_deal', 'weeek_delete_deal', 'weeek_list_contacts', 'weeek_get_contact', 'weeek_create_contact', 'weeek_update_contact'],
+    requires: 'Weeek API token: Settings → Integrations → API → Generate token → weeek_set_token',
+  },
+  {
+    id: 'company-enrichment',
+    name: 'Обогащение компаний (rusprofile)',
+    description: 'Найти компанию по названию → ИНН → полные данные (CEO, контакты, выручка, адрес). Бесплатно через rusprofile.ru, или быстрее с DaData API.',
+    tools: ['company_find_by_name', 'company_get_by_inn', 'company_find_by_email', 'company_set_dadata_token'],
+    requires: 'Ничего — бесплатный режим работает сразу. Опционально: DaData token для ускорения.',
+  },
 ];
 
 module.exports = {
