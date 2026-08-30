@@ -19,6 +19,20 @@ const USER_ID = process.env.USER_ID || '';
 const BROWSER_SESSION_URL = process.env.BROWSER_SESSION_URL
   || 'https://136-65-7-197.sslip.io/browser/';
 
+// Pending login tokens dir — login-server reads these to validate uid+token pairs
+const PENDING_DIR = path.join(os.homedir(), 'browser-session', 'pending');
+
+function generateLoginLink(userId, domain) {
+  const token = require('crypto').randomBytes(12).toString('hex');
+  fs.mkdirSync(PENDING_DIR, { recursive: true });
+  const expires = Date.now() + 30 * 60 * 1000; // 30 min
+  fs.writeFileSync(
+    path.join(PENDING_DIR, `${token}.json`),
+    JSON.stringify({ uid: String(userId), domain, expires })
+  );
+  return `${BROWSER_SESSION_URL}?uid=${encodeURIComponent(userId)}&token=${token}`;
+}
+
 // CDP endpoint for the persistent Chrome
 const CDP_PORT = 9224;
 
@@ -73,19 +87,24 @@ const tools = [
 
   {
     name: 'browser_session_url',
-    description: 'Get the noVNC URL to share with the user so they can interact with the remote browser.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-    handler: async () => {
+    description: 'Generate a personalized login URL for a specific user. The URL contains uid+token so cookies are saved to the right user after login.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        user_id: { type: 'string', description: 'Telegram user ID' },
+        domain:  { type: 'string', description: 'Domain to capture after login, e.g. "tilda.ru"', default: 'tilda.ru' },
+      },
+      required: ['user_id'],
+    },
+    handler: async ({ user_id, domain = 'tilda.ru' }) => {
       const running = isChromeRunning();
       if (!running) {
-        return {
-          error: 'browser_not_running',
-          message: 'Remote browser is not running. Contact admin to start browser-session services.',
-        };
+        return { error: 'browser_not_running', message: 'Remote browser is not running.' };
       }
+      const url = generateLoginLink(user_id, domain);
       return {
-        url: BROWSER_SESSION_URL,
-        message: `Открой в браузере: ${BROWSER_SESSION_URL}\n\n⏳ После открытия подожди 10–15 секунд — страница входа загружается автоматически.\n\nЗалогинься. Когда готово — скажи "готово" и я захвачу сессию.`,
+        url,
+        message: `Открой ссылку для входа в ${domain}:\n${url}\n\nПосле ввода логина и пароля страница сама всё сохранит и скажет "Готово".`,
       };
     },
   },

