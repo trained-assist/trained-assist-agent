@@ -1,140 +1,21 @@
 const { spawn } = require('child_process');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
 const { recordUsage, getUsageTotals } = require('./usage-store');
+const {
+  loadUserTokens,
+  listConnectedServices,
+  revokeService,
+  getSecretsLog,
+  generateConnectLink,
+  SERVICE_DISPLAY,
+} = require('./user-tokens');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 12000;
 const MAX_MSG_LEN = 3500;
-
-const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
-const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
-
-function generateConnectLink(userId, service) {
-  const token = crypto.randomBytes(16).toString('hex');
-  fs.mkdirSync(CONNECT_PENDING_DIR, { recursive: true });
-  fs.writeFileSync(
-    path.join(CONNECT_PENDING_DIR, `${token}.json`),
-    JSON.stringify({ uid: String(userId), service, expires: Date.now() + 30 * 60 * 1000 })
-  );
-  // Clean up expired tokens
-  try {
-    const now = Date.now();
-    for (const f of fs.readdirSync(CONNECT_PENDING_DIR)) {
-      if (!f.endsWith('.json')) continue;
-      try {
-        const d = JSON.parse(fs.readFileSync(path.join(CONNECT_PENDING_DIR, f), 'utf8'));
-        if (d.expires < now) fs.unlinkSync(path.join(CONNECT_PENDING_DIR, f));
-      } catch {}
-    }
-  } catch {}
-  return `${AGENT_PUBLIC_URL}/connect/${service}?t=${token}`;
-}
-
-
-// Files in agent-tokens dir that are not service credentials
-const LOG_FILES = new Set(['.secrets_log']);
-
-function loadUserTokens(userId) {
-  const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
-  const extra = {};
-  if (!fs.existsSync(tokensDir)) return extra;
-  const accessed = [];
-  for (const file of fs.readdirSync(tokensDir)) {
-    if (LOG_FILES.has(file)) continue;
-    const val = fs.readFileSync(path.join(tokensDir, file), 'utf8').trim();
-    const label = file.toLowerCase();
-    accessed.push(label);
-    if (label === 'github') { extra.GH_TOKEN = val; extra.GITHUB_TOKEN = val; }
-    else if (label === 'figma') extra.FIGMA_TOKEN = val;
-    else if (label === 'notion') extra.NOTION_TOKEN = val;
-    else if (label === 'linear') extra.LINEAR_API_KEY = val;
-    else if (label === 'weeek') extra.WEEEK_API_TOKEN = val;
-    else if (label === 'dadata') extra.DADATA_API_TOKEN = val;
-    else if (label === 'gdrive') extra.GDRIVE_SA_JSON = val;
-    else if (label === 'nalog') {
-      try {
-        const parsed = JSON.parse(val);
-        if (parsed.auth_token)    extra.NALOG_TOKEN         = parsed.auth_token;
-        if (parsed.refresh_token) extra.NALOG_REFRESH_TOKEN  = parsed.refresh_token;
-        if (parsed.expires)       extra.NALOG_TOKEN_EXPIRES  = parsed.expires;
-        if (parsed.device_id)     extra.NALOG_DEVICE_ID      = parsed.device_id;
-      } catch { extra.NALOG_TOKEN = val; }
-    }
-    else extra[label.toUpperCase().replace(/[^A-Z0-9]/g, '_')] = val;
-  }
-  if (accessed.length > 0) appendSecretsLog(userId, accessed);
-  return extra;
-}
-
-// Append one line to .secrets_log: ISO timestamp + TAB + services
-function appendSecretsLog(userId, services) {
-  try {
-    const logPath = path.join(os.homedir(), 'agent-tokens', String(userId), '.secrets_log');
-    const line = `${new Date().toISOString()}\t${services.join(',')}\n`;
-    fs.appendFileSync(logPath, line, { mode: 0o600 });
-  } catch { /* non-critical */ }
-}
-
-// ── Service metadata for secrets_list / revoke ─────────────────────────────
-const SERVICE_DISPLAY = {
-  github:         'GitHub',
-  weeek:          'Weeek CRM',
-  nalog:          'Налог.ру (НПД)',
-  figma:          'Figma',
-  notion:         'Notion',
-  linear:         'Linear',
-  tilda:          'Tilda',
-  'tilda-session': 'Tilda (сессия)',
-  dadata:         'DaData',
-  gdrive:         'Google Drive',
-};
-
-function listConnectedServices(userId) {
-  const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
-  if (!fs.existsSync(tokensDir)) return null;
-  const files = fs.readdirSync(tokensDir).filter(f => !LOG_FILES.has(f));
-  if (files.length === 0) return null;
-  return files.map(f => {
-    const name = SERVICE_DISPLAY[f.toLowerCase()] || f;
-    const mtime = fs.statSync(path.join(tokensDir, f)).mtime;
-    return { file: f, name, mtime };
-  });
-}
-
-function revokeService(userId, serviceName) {
-  const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
-  const ALIASES = {
-    github: 'github', гитхаб: 'github',
-    weeek: 'weeek', вик: 'weeek',
-    nalog: 'nalog', налог: 'nalog', нпд: 'nalog', самозан: 'nalog',
-    figma: 'figma', фигма: 'figma',
-    notion: 'notion',
-    linear: 'linear',
-    tilda: 'tilda', тильда: 'tilda',
-    gdrive: 'gdrive', гугл: 'gdrive', google: 'gdrive',
-    dadata: 'dadata',
-  };
-  const key = ALIASES[serviceName.toLowerCase().replace(/[^a-zа-яё]/gi, '')];
-  if (!key) return null; // unknown service
-
-  const filePath = path.join(tokensDir, key);
-  if (!fs.existsSync(filePath)) return 'not_found';
-  fs.unlinkSync(filePath);
-  appendSecretsLog(userId, [`revoke:${key}`]);
-  return key;
-}
-
-function getSecretsLog(userId) {
-  const logPath = path.join(os.homedir(), 'agent-tokens', String(userId), '.secrets_log');
-  if (!fs.existsSync(logPath)) return null;
-  const lines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
-  return lines.slice(-20).reverse(); // last 20, newest first
-}
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
