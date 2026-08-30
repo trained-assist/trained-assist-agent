@@ -12,8 +12,14 @@ async function main() {
   try {
     const context = browser.contexts()[0];
     const pages = context.pages();
-    const page = pages[0] || await context.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    let page;
+    if (pages.length === 0 || pages[0].url().startsWith('chrome://')) {
+      page = await context.newPage();
+      if (pages[0]) await pages[0].close();
+    } else {
+      page = pages[0];
+    }
+    await page.goto(url, { waitUntil: 'commit', timeout: 15000 });
     console.log(`Navigated: ${url}`);
   } finally {
     try { browser._connection.close(); } catch {}
