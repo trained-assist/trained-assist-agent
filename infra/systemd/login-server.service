@@ -1,0 +1,14 @@
+[Unit]
+Description=Browser login helper server (CDP form filler on :9090)
+After=chrome-browser.service
+
+[Service]
+Type=simple
+User=vova
+WorkingDirectory=/home/vova/browser-session
+ExecStart=/usr/bin/node /home/vova/browser-session/login-server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
