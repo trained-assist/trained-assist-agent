@@ -76,6 +76,8 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
   const msgId = thinkMsg?.result?.message_id;
 
+  const userTokens = loadUserTokens(user.id);
+
   const nalogCtx = userTokens.NALOG_TOKEN ? `\n[SYSTEM CONTEXT — nalog.ru НПД API]
 NALOG_TOKEN env var = JWT for lknpd.nalog.ru. Header: Authorization: Bearer $NALOG_TOKEN
 Base URL: https://lknpd.nalog.ru/api/v1
@@ -114,8 +116,6 @@ After creating receipt, always provide the print URL to user:
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
   const mcpConfig = writeMcpConfig(user.workDir, user.id);
-
-  const userTokens = loadUserTokens(user.id);
 
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',

@@ -9,6 +9,12 @@ echo "==> Installing dependencies..."
 cd "$REPO_DIR"
 npm ci --omit=dev
 
+# Install Playwright Chromium if not already present (idempotent)
+if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; then
+  echo "==> Installing Playwright Chromium..."
+  npx playwright install chromium --with-deps 2>&1 | tail -5 || true
+fi
+
 echo "==> Restarting service..."
 sudo systemctl restart "$SERVICE"
 sleep 3
