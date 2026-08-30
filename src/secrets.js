@@ -1,25 +1,50 @@
-const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
-
-const client = new SecretManagerServiceClient();
-const PROJECT = 'alesa-personal-assistent';
-
-async function getSecret(name) {
-  const [version] = await client.accessSecretVersion({
-    name: `projects/${PROJECT}/secrets/${name}/versions/latest`,
-  });
-  return version.payload.data.toString('utf8').trim();
-}
-
 const REQUIRED = ['TELEGRAM_BOT_TOKEN', 'ANTHROPIC_API_KEY', 'AGENT_SECRET'];
 const OPTIONAL = ['DEEPGRAM_API_KEY', 'BOT_SECRET'];
 
-async function loadSecrets() {
+// GCP Secret Manager — used when running on GCP with ADC available
+async function loadFromGcp() {
+  const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+  const client = new SecretManagerServiceClient();
+  const PROJECT = 'alesa-personal-assistent';
+
+  async function getSecret(name) {
+    const [version] = await client.accessSecretVersion({
+      name: `projects/${PROJECT}/secrets/${name}/versions/latest`,
+    });
+    return version.payload.data.toString('utf8').trim();
+  }
+
   const names = [...REQUIRED, ...OPTIONAL];
   const results = await Promise.allSettled(names.map(n => getSecret(n)));
-  const values = Object.fromEntries(names.map((n, i) => [
+  return Object.fromEntries(names.map((n, i) => [
     n,
     results[i].status === 'fulfilled' ? results[i].value : null,
   ]));
+}
+
+// Env-var fallback — used on non-GCP VMs (e.g. Hostland RU VM)
+function loadFromEnv() {
+  const names = [...REQUIRED, ...OPTIONAL];
+  return Object.fromEntries(names.map(n => [n, process.env[n] || null]));
+}
+
+async function loadSecrets() {
+  let values;
+
+  if (process.env.SECRETS_SOURCE === 'env') {
+    values = loadFromEnv();
+  } else {
+    // Try GCP first, fall back to env vars
+    try {
+      values = await loadFromGcp();
+      // Fill missing with env vars
+      for (const n of [...REQUIRED, ...OPTIONAL]) {
+        if (!values[n] && process.env[n]) values[n] = process.env[n];
+      }
+    } catch {
+      values = loadFromEnv();
+    }
+  }
 
   for (const name of REQUIRED) {
     if (!values[name]) throw new Error(`Required secret missing: ${name}`);
