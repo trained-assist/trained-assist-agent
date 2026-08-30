@@ -48,7 +48,9 @@ function readSessionCookies(userId) {
 }
 
 function cookieStringHasAuth(cookieStr) {
-  return cookieStr && cookieStr.includes('userid=') && cookieStr.includes('hash=');
+  // Tilda cookie names vary — just check the string is non-trivially populated.
+  // Real auth validation happens via API call (getprojects returns login page on failure).
+  return cookieStr && cookieStr.length > 20;
 }
 
 // Fallback: Playwright storage-state JSON (local dev / manual capture)
