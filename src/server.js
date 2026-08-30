@@ -107,6 +107,18 @@ async function main() {
         fs.unlinkSync(pendingFile); // one-time use
         console.log(`[connect] saved ${service} token for uid=${pending.uid}`);
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
+
+        // Notify user in Telegram (fire-and-forget)
+        const SERVICE_NAMES = { github: 'GitHub', weeek: 'Weeek CRM' };
+        const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+        fetch(`${tgBase}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: pending.uid,
+            text: `✅ ${SERVICE_NAMES[service] || service} подключён! Токен сохранён — можете пользоваться.`,
+          }),
+        }).catch(e => console.error('[connect] tg notify failed:', e.message));
         return;
       }
 
