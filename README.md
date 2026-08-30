@@ -84,6 +84,67 @@ Set in repo Settings → Secrets:
 | `VM_USER` | SSH user (`vova`) |
 | `VM_SSH_KEY` | Private SSH key for deployment |
 
+## RU VM — nalog login setup
+
+`POST /connect/nalog` runs headless Playwright for 30–60 s. nginx must not cut the connection before it completes.
+
+### 1. Playwright Chromium
+
+```bash
+# On the RU VM, as root after npm ci:
+sudo -u vova npx playwright install chromium
+sudo -u vova npx playwright install-deps chromium
+```
+
+`scripts/setup-ru-vm.sh` already does this — only needed when adding the VM manually.
+
+### 2. AGENT_PUBLIC_URL
+
+Add to `/home/vova/secrets.env` on the RU VM:
+
+```
+AGENT_PUBLIC_URL=https://178-212-14-192.sslip.io
+```
+
+This is what goes into the connect-link sent to users via Telegram.
+
+### 3. nginx proxy_read_timeout
+
+`POST /connect/nalog` blocks for up to 60 s while the browser logs in.
+Default nginx `proxy_read_timeout` is 60 s — too tight. Add to the nginx server block:
+
+```nginx
+# /etc/nginx/sites-available/assist-agent  (or the relevant include)
+location /connect/nalog {
+    proxy_pass         http://127.0.0.1:8080;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+}
+location /connect/nalog/code {
+    proxy_pass         http://127.0.0.1:8080;
+    proxy_read_timeout 60s;
+}
+```
+
+Reload: `nginx -t && systemctl reload nginx`
+
+### Smoke-test the nalog routes
+
+```bash
+BASE=https://178-212-14-192.sslip.io
+# Form renders (no auth needed)
+curl -s -o /dev/null -w "%{http_code}" "$BASE/connect/nalog?t=abc"  # → 200
+# Missing fields
+curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/connect/nalog" \
+  -H 'Content-Type: application/json' -d '{"t":"aabbccddeeff00112233445566778899"}' # → 400
+# Bad pending token
+curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/connect/nalog" \
+  -H 'Content-Type: application/json' \
+  -d '{"t":"aabbccddeeff00112233445566778899","login":"a","password":"b"}' # → 403
+```
+
+---
+
 ## Development
 
 ```bash
@@ -99,6 +160,7 @@ npm run check  # syntax check all src files
 | `PORT` | `3000` | HTTP listen port |
 | `AGENT_DATA_DIR` | `~/agent-data` | Data directory for sessions + user registry |
 | `NODE_ENV` | — | Set to `production` in systemd |
+| `AGENT_PUBLIC_URL` | `https://136-65-7-197.sslip.io` | Public base URL for connect-links (set to RU VM URL on RU VM) |
 
 Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_DATA_DIR=/home/vova/alesa-data` explicitly.
 
