@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход в Tilda</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  min-height: 100dvh;
+  background: #0f1420;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: system-ui, -apple-system, sans-serif;
+  padding: 24px;
+  color: #fff;
+}
+.card {
+  width: 100%;
+  max-width: 400px;
+  background: #1a2035;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 16px;
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.logo {
+  text-align: center;
+  font-size: 15px;
+  color: #94a3b8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.logo .site { font-family: monospace; font-size: 13px; background: rgba(255,255,255,.08); padding: 4px 12px; border-radius: 6px; color: #7dd3fc; }
+h1 { font-size: 22px; font-weight: 700; text-align: center; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+label { font-size: 13px; color: #94a3b8; }
+input {
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 10px;
+  color: #fff;
+  font-size: 16px;
+  padding: 13px 16px;
+  outline: none;
+  transition: border-color .15s;
+  width: 100%;
+}
+input:focus { border-color: #3b82f6; background: rgba(59,130,246,.08); }
+button {
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 14px;
+  cursor: pointer;
+  transition: background .15s, transform .1s;
+  margin-top: 4px;
+}
+button:active { transform: scale(.98); }
+button:disabled { background: #1e3a6e; cursor: default; }
+.status {
+  font-size: 14px;
+  text-align: center;
+  min-height: 20px;
+  color: #94a3b8;
+}
+.status.err { color: #f87171; }
+.status.ok { color: #4ade80; }
+.hint { font-size: 12px; color: #475569; text-align: center; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <span>🔐 Защищённый вход</span>
+    <span class="site">tilda.ru/login/</span>
+  </div>
+  <h1>Войти в Tilda</h1>
+  <div class="field">
+    <label>Email</label>
+    <input type="email" id="em" placeholder="you@example.com" autocomplete="email" inputmode="email">
+  </div>
+  <div class="field">
+    <label>Пароль</label>
+    <input type="password" id="pw" placeholder="••••••••" autocomplete="current-password">
+  </div>
+  <button id="btn" onclick="doLogin()">Войти →</button>
+  <div class="status" id="st"></div>
+  <div class="hint">Данные вводятся напрямую в браузер на сервере</div>
+</div>
+<script>
+async function doLogin() {
+  const btn = document.getElementById('btn');
+  const st  = document.getElementById('st');
+  const em  = document.getElementById('em').value.trim();
+  const pw  = document.getElementById('pw').value;
+  if (!em || !pw) { st.className='status err'; st.textContent='Введи email и пароль'; return; }
+  btn.disabled = true; btn.textContent = '⏳ Входим…'; st.className='status'; st.textContent='';
+  try {
+    const r = await fetch('/browser-login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email:em, password:pw})
+    });
+    const d = await r.json();
+    if (d.navigated && !d.error_on_page) {
+      st.className='status ok'; st.textContent='✓ Успешно! Открываем браузер…';
+      setTimeout(() => location.href='/browser/vnc.html', 1200);
+    } else if (d.captcha) {
+      st.className='status err'; st.textContent='⚠️ CAPTCHA — пройди в браузере';
+      setTimeout(() => location.href='/browser/vnc.html', 1500);
+    } else if (d.two_factor) {
+      st.className='status err'; st.textContent='📱 Нужен код 2FA';
+      setTimeout(() => location.href='/browser/vnc.html', 1500);
+    } else if (d.error_on_page) {
+      btn.disabled=false; btn.textContent='Войти →';
+      st.className='status err'; st.textContent='❌ Неверный логин или пароль';
+    } else {
+      st.className='status'; st.textContent='Проверяй браузер…';
+      setTimeout(() => location.href='/browser/vnc.html', 1500);
+    }
+  } catch(e) {
+    btn.disabled=false; btn.textContent='Войти →';
+    st.className='status err'; st.textContent='❌ '+e.message;
+  }
+}
+document.addEventListener('keydown', e => { if (e.key==='Enter') doLogin(); });
+document.getElementById('em').focus();
+</script>
+</body>
+</html>
