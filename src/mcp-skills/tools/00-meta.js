@@ -47,6 +47,21 @@ const SKILLS = [
     requires: '/settoken github ghp_xxxxx — классический PAT с scope: repo, read:org',
   },
   {
+    id: 'inn-enrichment',
+    name: 'INN Enrichment — обогащение компаний',
+    description: 'Для списка компаний (300–1000) находит ИНН, ОГРН, директора, выручку, прибыль. ' +
+      'Источники: BFO ФНС (бесплатно), ЕГРЮЛ (бесплатно), сайты компаний, DaData, Checko. ' +
+      'Параллельно, 300 компаний за 10–15 мин. Hit rate 60–85%.',
+    tools: ['inn_status', 'inn_set_dadata_token', 'inn_set_checko_key', 'inn_set_rusprofile_cookie', 'inn_enrich_batch'],
+    requires: [
+      'BFO ФНС — бесплатно, без настройки',
+      'ЕГРЮЛ — бесплатно, без настройки',
+      'DaData — inn_set_dadata_token(token, secret)  → ускоряет fallback',
+      'Checko — inn_set_checko_key(key)  → финансы для компаний не найденных в BFO',
+      'Rusprofile — бесплатно; при блокировке → inn_set_rusprofile_cookie(cookie)',
+    ].join('\n'),
+  },
+  {
     id: 'google-drive',
     name: 'Google Drive',
     description: 'Читать, создавать и редактировать файлы в Google Drive через персональный Service Account. Настройка за одну команду — gdrive_setup автоматически создаёт SA.',
