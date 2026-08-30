@@ -117,5 +117,17 @@ Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_D
 ### Adding a new endpoint
 Add route handling in `src/server.js` in the request handler chain (method + pathname check pattern).
 
-### Deployment
-`git push origin main` → GitHub Actions SSHes to VM → `scripts/deploy.sh` runs.
+### Git workflow — PR-first
+**Never push directly to `main`.** All changes go through a feature branch + PR:
+
+```bash
+git checkout -b feature/my-change
+# make changes, commit
+git push -u origin feature/my-change
+gh pr create --fill          # opens PR, triggers CI
+gh pr merge --squash --delete-branch  # after CI is green
+```
+
+CI runs on every PR (`npm ci` → syntax check → unit tests). Deploy to GCP + RU VMs only fires on merge to `main`.
+
+GitHub branch protection is not available on this private repo (free plan) — enforce this rule manually.
