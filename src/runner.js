@@ -92,8 +92,8 @@ const QUICK_SETUPS = [
   },
   {
     match: /nalog|налог|нпд|самозан/i,
-    service: null, // token from Chrome extension, not pasted
-    hint: 'Открой lknpd.nalog.ru → cloud-auth-bridge → Send token. Токен живёт ~1 час.',
+    service: 'nalog',
+    hint: 'Войди через Госуслуги по ссылке — данные не попадают в чат, форма безопасна.',
   },
 ];
 
