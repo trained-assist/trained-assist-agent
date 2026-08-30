@@ -50,6 +50,7 @@ jobs:
           username: ${{ secrets.VM_RU_USER }}
           password: ${{ secrets.VM_RU_PASSWORD }}
           script: |
+            git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
             git fetch origin main
             git reset --hard origin/main
