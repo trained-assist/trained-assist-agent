@@ -203,16 +203,29 @@ async function startNalogLogin(userId, login, password) {
     });
 
     console.log('[nalog-login] credentials submitted, waiting for outcome');
+    // Screenshot immediately after clicking Войти — shows what ESIA does next
+    await page.waitForTimeout(2000);
+    await page.screenshot({ path: `/tmp/esia-after-${Date.now()}.png`, fullPage: true }).catch(() => {});
+    const afterState = await page.evaluate(() => ({
+      url: location.href,
+      bodyText: document.body?.innerText?.slice(0, 300).replace(/\n/g, ' ') || '',
+      inputs: Array.from(document.querySelectorAll('input')).map(el => `${el.type}#${el.id}`).join(' | '),
+    }));
+    console.log('[nalog-login] after-submit state: url=%s inputs=%s text=%s',
+      afterState.url, afterState.inputs, afterState.bodyText);
 
     const outcome = await Promise.race([
       // Success: back on nalog.ru (not on /auth/ sub-path)
       page.waitForURL(u => /lknpd\.nalog\.ru/.test(u) && !/\/auth\//.test(u), { timeout: 30000 })
         .then(() => 'success'),
-      // 2FA code input
+      // 2FA or SMS confirmation — broaden selectors to catch ESIA's actual OTP screen
       page.waitForSelector(
-        '#otp, input[name="otp"], input[placeholder*="код"], input[placeholder*="sms"], input[maxlength="6"], .form-otp input',
+        '#otp, input[name="otp"], input[placeholder*="код"], input[placeholder*="sms"], input[maxlength="6"], .form-otp input, input[type="tel"], .totp input',
         { timeout: 30000 },
       ).then(() => 'need_code'),
+      // ESIA may redirect to a consent/confirm screen on esia.gosuslugi.ru
+      page.waitForURL(u => /esia.*confirm|esia.*consent|esia.*approve/.test(u), { timeout: 30000 })
+        .then(() => 'success'),
     ]).catch(() => 'timeout');
 
     if (outcome === 'success') {
@@ -226,8 +239,14 @@ async function startNalogLogin(userId, login, password) {
       return { status: 'need_code', sessionId };
     }
 
-    // Timeout — try to read an error message from the page
-    const errEl = await page.$('.form__error, .error-text, [class*="error"]');
+    // Timeout — snapshot what the page looks like and any error text
+    const timeoutSnap = await page.evaluate(() => ({
+      url: location.href,
+      text: document.body?.innerText?.slice(0, 400).replace(/\n/g, ' ') || '',
+    })).catch(() => ({ url: '?', text: '' }));
+    await page.screenshot({ path: `/tmp/esia-timeout-${Date.now()}.png`, fullPage: true }).catch(() => {});
+    console.log('[nalog-login] timeout: url=%s text=%s', timeoutSnap.url, timeoutSnap.text);
+    const errEl = await page.$('.form__error, .error-text, [class*="error"], .esia-input__error-text');
     const errText = errEl ? (await errEl.textContent() || '').trim().slice(0, 200) : '';
     await browser.close();
     return { error: errText || 'Тайм-аут при ожидании ответа Госуслуг — проверьте логин и пароль' };
