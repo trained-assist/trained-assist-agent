@@ -1,0 +1,27 @@
+[Unit]
+Description=Chrome browser for remote sessions (CDP :9222)
+After=xvfb-browser.service
+Requires=xvfb-browser.service
+
+[Service]
+Type=simple
+User=vova
+Environment=DISPLAY=:99
+Environment=HOME=/home/vova
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/google-chrome \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --user-data-dir=/home/vova/chrome-profiles/browser-session \
+  --remote-debugging-port=9222 \
+  --remote-debugging-address=127.0.0.1 \
+  --window-size=1280,900 \
+  --no-first-run \
+  --no-default-browser-check \
+  about:blank
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

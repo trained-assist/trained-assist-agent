@@ -1,0 +1,14 @@
+[Unit]
+Description=noVNC WebSocket proxy
+After=vnc-browser.service
+
+[Service]
+Type=simple
+User=vova
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/websockify --web /usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

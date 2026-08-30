@@ -1,0 +1,14 @@
+[Unit]
+Description=VNC server for browser session (display :99)
+After=xvfb-browser.service chrome-browser.service
+
+[Service]
+Type=simple
+User=vova
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/bin/x11vnc -display :99 -nopw -forever -quiet -rfbport 5900 -shared
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
