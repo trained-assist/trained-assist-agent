@@ -98,9 +98,13 @@ const QUICK_SETUPS = [
 ];
 
 function getQuickAnswer(task, userId) {
-  if (!SETUP_INTENT.test(task)) return null;
+  if (!SETUP_INTENT.test(task)) {
+    console.log('[quick-answer] no setup intent, task=%j', task.slice(0, 120));
+    return null;
+  }
   for (const { match, service, hint } of QUICK_SETUPS) {
     if (!match.test(task)) continue;
+    console.log('[quick-answer] matched service=%s uid=%s', service || 'null', userId);
     if (service && userId) {
       try {
         const link = generateConnectLink(userId, service);
@@ -112,6 +116,7 @@ function getQuickAnswer(task, userId) {
     }
     return hint;
   }
+  console.log('[quick-answer] setup intent matched but no service pattern, task=%j', task.slice(0, 120));
   return null;
 }
 
