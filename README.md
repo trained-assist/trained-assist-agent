@@ -179,6 +179,24 @@ Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_D
 ### Adding a new endpoint
 Add route handling in `src/server.js` in the request handler chain (method + pathname check pattern).
 
+### Quick answers — prefer instant replies over calling Claude
+
+**Rule: if a response can be determined without calling Claude, make it a quick answer.**
+
+Quick answers in `src/runner.js → getQuickAnswer()` bypass Claude entirely — zero latency, zero tokens, predictable output.
+
+When to add a quick answer:
+- User asks about a known capability: "есть ли скил X", "умеешь ли ты Y"
+- User asks for a known setup flow: "подключи GitHub", "как добавить Weeek"
+- User requests structured data that the server already has: `/secrets_list`, secrets log, revoke
+
+How to add:
+1. Add a regex constant near the other `*_INTENT` constants at the top of the function block
+2. Add an `if (MY_INTENT.test(task)) return '...';` check inside `getQuickAnswer()` — before the `SETUP_INTENT` gate for non-setup patterns
+3. For setup flows that generate a connect link, add an entry to `QUICK_SETUPS` array
+
+**Do NOT route through Claude** for: yes/no capability questions, pre-scripted setup instructions, or anything where the server can produce the exact right answer deterministically.
+
 ### Git workflow — PR-first
 **Never push directly to `main`.** All changes go through a feature branch + PR:
 
