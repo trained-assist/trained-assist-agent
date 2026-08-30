@@ -46,53 +46,64 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   "$AGENT_URL/run")
 [ "$STATUS" = "400" ] && ok "400 on missing fields" || fail "Expected 400, got $STATUS"
 
-# 6. GET /connect/nalog — form renders (no auth needed)
-echo "[6] GET /connect/nalog returns 200 (form)"
+# 6. /run with valid fields returns 202 (fire-and-forget) — uses sandbox user zemtest
+# TODO: replace ZEMTEST_TG_USER_ID with zemtest's real Telegram userId once they connect via bot
+ZEMTEST_TG_USER_ID="${ZEMTEST_TG_USER_ID:-0}"
+echo "[6] POST /run with valid fields returns 202"
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  -H "Authorization: Bearer $AGENT_SECRET" \
+  -H "Content-Type: application/json" \
+  -d "{\"userId\":$ZEMTEST_TG_USER_ID,\"username\":\"zemtest\",\"task\":\"echo smoke\"}" \
+  "$AGENT_URL/run")
+[ "$STATUS" = "202" ] && ok "202 accepted" || fail "Expected 202, got $STATUS"
+
+# 7. GET /connect/nalog — form renders (no auth needed)
+echo "[7] GET /connect/nalog returns 200 (form)"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$AGENT_URL/connect/nalog?t=abc")
 [ "$STATUS" = "200" ] && ok "200 form rendered" || fail "Expected 200, got $STATUS"
 
-# 7. POST /connect/nalog — missing fields → 400
-echo "[7] POST /connect/nalog missing fields returns 400"
+# 8. POST /connect/nalog — missing fields → 400
+echo "[8] POST /connect/nalog missing fields returns 400"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{"t":"aabbccddeeff00112233445566778899"}' \
   "$AGENT_URL/connect/nalog")
 [ "$STATUS" = "400" ] && ok "400 on missing fields" || fail "Expected 400, got $STATUS"
 
-# 8. POST /connect/nalog — invalid token format → 400
-echo "[8] POST /connect/nalog invalid token format returns 400"
+# 9. POST /connect/nalog — invalid token format → 400
+echo "[9] POST /connect/nalog invalid token format returns 400"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{"t":"INVALID","login":"a","password":"b"}' \
   "$AGENT_URL/connect/nalog")
 [ "$STATUS" = "400" ] && ok "400 on invalid token" || fail "Expected 400, got $STATUS"
 
-# 9. POST /connect/nalog — nonexistent pending token → 403
-echo "[9] POST /connect/nalog nonexistent token returns 403"
+# 10. POST /connect/nalog — nonexistent pending token → 403
+echo "[10] POST /connect/nalog nonexistent token returns 403"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{"t":"aabbccddeeff00112233445566778899","login":"a","password":"b"}' \
   "$AGENT_URL/connect/nalog")
 [ "$STATUS" = "403" ] && ok "403 on unknown token" || fail "Expected 403, got $STATUS"
 
-# 10. POST /connect/nalog/code — missing fields → 400
-echo "[10] POST /connect/nalog/code missing fields returns 400"
+# 11. POST /connect/nalog/code — missing fields → 400
+echo "[11] POST /connect/nalog/code missing fields returns 400"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{}' \
   "$AGENT_URL/connect/nalog/code")
 [ "$STATUS" = "400" ] && ok "400 on missing session/code" || fail "Expected 400, got $STATUS"
 
-# 11. POST /connect/nalog/code — invalid code format → 400
-echo "[11] POST /connect/nalog/code invalid code format returns 400"
+# 12. POST /connect/nalog/code — invalid code format → 400
+echo "[12] POST /connect/nalog/code invalid code format returns 400"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{"session":"aabbccddeeff00112233445566778899","code":"abc"}' \
   "$AGENT_URL/connect/nalog/code")
 [ "$STATUS" = "400" ] && ok "400 on non-numeric code" || fail "Expected 400, got $STATUS"
 
-# 12. POST /connect/nalog/code — valid format but unknown session → 400
-echo "[12] POST /connect/nalog/code unknown session returns 400"
+# 13. POST /connect/nalog/code — valid format but unknown session → 400
+echo "[13] POST /connect/nalog/code unknown session returns 400"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d '{"session":"aabbccddeeff00112233445566778899","code":"123456"}' \
