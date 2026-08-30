@@ -20,7 +20,7 @@ ExecStart=/usr/bin/google-chrome \
   --no-first-run \
   --no-default-browser-check \
   --disable-extensions \
-  https://tilda.ru/
+  --app=https://tilda.ru/login/
 Restart=on-failure
 RestartSec=5
 
