@@ -21,5 +21,7 @@ Nalog / НПД → "Открой lknpd.nalog.ru в Chrome, нажми иконк
 
 Company search / DaData → "Работает без настройки. Скажи что искать — найду по rusprofile.ru."
 
+INN enrichment (массовый сбор реквизитов компаний) → вызови inn_status чтобы проверить статус, затем inn_enrich_batch(file="...") чтобы обогатить список. DaData и Checko уже настроены платформой.
+
 ## Formatting
 Plain text only. No HTML. Sparingly use `code` formatting for commands.
