@@ -7,6 +7,7 @@ const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
 const { listSessions, getSession: getSessionData } = require('./session-store');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
+const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -136,6 +137,60 @@ async function main() {
           }
 
           res.writeHead(500).end(JSON.stringify({ error: 'unexpected result' }));
+          return;
+        }
+
+        res.writeHead(405).end(); return;
+      }
+
+      // ── getcourse — two-level connect form (domain + apiKey + login/password) ──
+      if (service === 'getcourse') {
+        if (req.method === 'GET') {
+          const t = url.searchParams.get('t') || '';
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(getcourseFormHtml(t));
+          return;
+        }
+
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          let payload;
+          try { payload = JSON.parse(body); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
+          const { t, domain, apiKey, login, password } = payload;
+          if (!t || !domain) { res.writeHead(400).end(JSON.stringify({ error: 'missing t or domain' })); return; }
+          if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
+
+          const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+          let pending;
+          try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
+          if (pending.expires < Date.now()) { fs.unlinkSync(pendingFile); res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          if (pending.service !== 'getcourse') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
+          if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
+
+          fs.unlinkSync(pendingFile); // one-time use
+
+          const cleanDomain = domain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+          const patch = { accountDomain: cleanDomain };
+          if (apiKey) patch.apiKey = apiKey.trim();
+          mergeGetcourseConfig(pending.uid, patch);
+
+          let cookiesCount = 0;
+          let level = [];
+          if (apiKey) level.push('L1');
+
+          if (login && password) {
+            const result = await startGetcourseLogin(pending.uid, cleanDomain, login.trim(), password);
+            if (result.error) {
+              res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: result.error }));
+              return;
+            }
+            cookiesCount = result.cookiesCount || 0;
+            level.push('L2');
+          }
+
+          if (!level.length) level.push('domain-only');
+
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, level }));
+          tgNotifyGetcourse(secrets.TELEGRAM_BOT_TOKEN, pending.uid, cleanDomain, level, cookiesCount);
           return;
         }
 
