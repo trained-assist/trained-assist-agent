@@ -19,6 +19,9 @@ Environment=SECRETS_SOURCE=env
 # Route Telegram API through GCP proxy (Hostland blocks 149.154.x.x)
 Environment=TELEGRAM_API_URL=https://136-65-7-197.sslip.io/tg-proxy
 
+# Route Anthropic API through GCP proxy (Anthropic blocks Russian IPs)
+Environment=ANTHROPIC_BASE_URL=https://136-65-7-197.sslip.io/anthropic-proxy
+
 # === FILL IN THESE SECRETS ===
 # Environment=TELEGRAM_BOT_TOKEN=...
 # Environment=ANTHROPIC_API_KEY=...
