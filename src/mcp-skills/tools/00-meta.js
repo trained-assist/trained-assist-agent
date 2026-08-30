@@ -40,6 +40,13 @@ const SKILLS = [
     requires: 'Ничего — бесплатный режим работает сразу. Опционально: DaData token для ускорения.',
   },
   {
+    id: 'github',
+    name: 'GitHub',
+    description: 'Работа с GitHub: репозитории, issues, pull requests, файлы. Читать/создавать задачи, PR, комментарии, файлы.',
+    tools: ['github_status', 'github_list_repos', 'github_get_file', 'github_list_issues', 'github_create_issue', 'github_update_issue', 'github_add_comment', 'github_list_prs', 'github_create_pr', 'github_search', 'github_create_or_update_file'],
+    requires: '/settoken github ghp_xxxxx — классический PAT с scope: repo, read:org',
+  },
+  {
     id: 'google-drive',
     name: 'Google Drive',
     description: 'Читать, создавать и редактировать файлы в Google Drive через персональный Service Account. Настройка за одну команду — gdrive_setup автоматически создаёт SA.',
