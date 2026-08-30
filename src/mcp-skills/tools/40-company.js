@@ -190,9 +190,23 @@ async function rusprofileFetch(urlPath, accept = 'text/html') {
   _lastReq = Date.now();
 
   const res = await fetch(url, {
-    headers: { accept, 'user-agent': UA },
+    headers: {
+      accept,
+      'user-agent': UA,
+      'accept-language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+      'referer': 'https://www.rusprofile.ru/',
+      'sec-fetch-site': 'same-origin',
+      'sec-fetch-mode': 'navigate',
+    },
     signal: AbortSignal.timeout(15000),
   });
+  if (res.status === 403) {
+    throw new Error(
+      'Rusprofile вернул 403 — сервер заблокировал запрос с этого IP (облачные серверы часто блокируются). ' +
+      'Решения: 1) Добавить DaData токен (company_set_dadata_token) — работает с любого IP. ' +
+      '2) Запустить с домашнего/офисного IP.'
+    );
+  }
   if (!res.ok) throw new Error(`Rusprofile ${res.status}: ${url}`);
   const body = await res.text();
   const payload = { body, status: res.status };
