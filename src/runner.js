@@ -405,6 +405,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',
     '--output-format', 'stream-json',
+    '--verbose',
     '--mcp-config', mcpConfig,
     ...(fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
     '--print', prompt,
