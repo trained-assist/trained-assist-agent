@@ -11,7 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 const USER_ID = process.env.USER_ID || '';
 
@@ -30,6 +30,17 @@ function generateLoginLink(userId, domain) {
     path.join(PENDING_DIR, `${token}.json`),
     JSON.stringify({ uid: String(userId), domain, expires })
   );
+  // Cleanup expired tokens while we're here
+  try {
+    const now = Date.now();
+    for (const f of fs.readdirSync(PENDING_DIR)) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const d = JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8'));
+        if (d.expires < now) fs.unlinkSync(path.join(PENDING_DIR, f));
+      } catch {}
+    }
+  } catch {}
   return `${BROWSER_SESSION_URL}?uid=${encodeURIComponent(userId)}&token=${token}`;
 }
 
@@ -59,9 +70,9 @@ async function captureCookiesViaScript(domain, outputPath) {
   if (!fs.existsSync(scriptPath)) {
     throw new Error(`capture-cookies.js not found at ${scriptPath}`);
   }
-  const result = execSync(
-    `node "${scriptPath}" "${domain}" "${outputPath}"`,
-    { timeout: 15000, encoding: 'utf8' }
+  const result = execFileSync(
+    process.execPath, [scriptPath, domain, outputPath],
+    { timeout: 25000, encoding: 'utf8' }
   );
   return result.trim();
 }
@@ -232,7 +243,7 @@ const tools = [
         // Use node to send CDP command (no ws module needed — use native approach)
         const navScript = path.join(os.homedir(), 'browser-session', 'navigate.js');
         if (fs.existsSync(navScript)) {
-          execSync(`node "${navScript}" "${url}"`, { timeout: 10000 });
+          execFileSync(process.execPath, [navScript, url], { timeout: 10000 });
         }
         return { ok: true, navigated_to: url };
       } catch (e) {

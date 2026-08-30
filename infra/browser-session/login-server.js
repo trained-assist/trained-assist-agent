@@ -6,14 +6,21 @@ const http    = require('http');
 const fs      = require('fs');
 const path    = require('path');
 const os      = require('os');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const LOGIN_SCRIPT   = path.join(os.homedir(), 'browser-session', 'login.js');
 const CAPTURE_SCRIPT = path.join(os.homedir(), 'browser-session', 'capture-cookies.js');
 const PENDING_DIR    = path.join(os.homedir(), 'browser-session', 'pending');
+const ORIGIN         = 'https://136-65-7-197.sslip.io';
 const PORT = 9090;
+const BODY_LIMIT = 65536; // 64 KB
+
+const TOKEN_RE  = /^[0-9a-f]{24}$/;
+const UID_RE    = /^\d{1,20}$/;
+const DOMAIN_RE = /^[a-zA-Z0-9.-]{1,253}$/;
 
 function loadPending(token) {
+  if (!TOKEN_RE.test(token)) return null;
   try {
     const file = path.join(PENDING_DIR, `${token}.json`);
     const d = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -23,31 +30,39 @@ function loadPending(token) {
 }
 
 http.createServer((req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Origin', ORIGIN);
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   if (req.method === 'POST' && req.url === '/login') {
     let body = '';
-    req.on('data', d => body += d);
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > BODY_LIMIT) { req.destroy(); }
+    });
     req.on('end', () => {
       let email, password, uid, token;
       try { ({ email, password, uid, token } = JSON.parse(body)); } catch {
         res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'bad json' })); return;
       }
 
-      // Validate pending token if provided
+      // Validate and resolve uid+token
       let pending = null;
       if (token) {
-        pending = loadPending(token);
+        pending = loadPending(token); // TOKEN_RE validated inside
         if (!pending) {
           res.writeHead(403); res.end(JSON.stringify({ ok: false, error: 'invalid or expired token' })); return;
         }
-        uid = pending.uid;
+        uid = pending.uid; // always from trusted pending file, not request body
+      }
+
+      // Validate uid if still coming from request body (no-token fallback path)
+      if (uid && !UID_RE.test(String(uid))) {
+        res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'invalid uid' })); return;
       }
 
       try {
-        const out = execSync(`node "${LOGIN_SCRIPT}"`, {
+        const out = execFileSync(process.execPath, [LOGIN_SCRIPT], {
           timeout: 20000, encoding: 'utf8',
           env: { ...process.env, LOGIN_EMAIL: email, LOGIN_PASSWORD: password },
         });
@@ -57,24 +72,27 @@ http.createServer((req, res) => {
         const shouldCapture = (data.navigated || data.already_logged_in) && !data.captcha && !data.two_factor && !data.error_on_page;
         if (shouldCapture) {
           const domain = pending?.domain || 'tilda.ru';
-          const label  = domain.replace(/\./g, '-') + '-session';
-
-          // Save to user-specific dir if uid known, else temp fallback
-          const outDir  = uid
-            ? path.join(os.homedir(), 'agent-tokens', String(uid))
-            : path.join(os.homedir(), 'browser-session');
-          const outPath = uid
-            ? path.join(outDir, label)
-            : path.join(outDir, 'tilda-latest-cookies.txt');
-
-          fs.mkdirSync(outDir, { recursive: true });
-          try {
-            execSync(`node "${CAPTURE_SCRIPT}" ${domain} "${outPath}"`, { timeout: 25000, encoding: 'utf8' });
-            data.cookies_captured = true;
-            data.saved_to = outPath;
-          } catch (e) {
+          if (!DOMAIN_RE.test(domain)) {
             data.cookies_captured = false;
-            data.cookies_error = e.message;
+            data.cookies_error = 'invalid domain in pending token';
+          } else {
+            const label  = domain.replace(/\./g, '-') + '-session';
+            const outDir  = uid
+              ? path.join(os.homedir(), 'agent-tokens', String(uid))
+              : path.join(os.homedir(), 'browser-session');
+            const outPath = uid
+              ? path.join(outDir, label)
+              : path.join(outDir, 'tilda-latest-cookies.txt');
+
+            fs.mkdirSync(outDir, { recursive: true });
+            try {
+              execFileSync(process.execPath, [CAPTURE_SCRIPT, domain, outPath], { timeout: 25000, encoding: 'utf8' });
+              data.cookies_captured = true;
+              data.saved_to = outPath;
+            } catch (e) {
+              data.cookies_captured = false;
+              data.cookies_error = e.message;
+            }
           }
 
           // Consume pending token
