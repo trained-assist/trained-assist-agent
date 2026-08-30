@@ -1,5 +1,5 @@
-const REQUIRED = ['TELEGRAM_BOT_TOKEN', 'ANTHROPIC_API_KEY', 'AGENT_SECRET'];
-const OPTIONAL = ['DEEPGRAM_API_KEY', 'BOT_SECRET'];
+const REQUIRED = ['TELEGRAM_BOT_TOKEN', 'AGENT_SECRET'];
+const OPTIONAL = ['ANTHROPIC_API_KEY', 'DEEPGRAM_API_KEY', 'BOT_SECRET'];
 
 // GCP Secret Manager — used when running on GCP with ADC available
 async function loadFromGcp() {
