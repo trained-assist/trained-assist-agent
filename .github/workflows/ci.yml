@@ -34,7 +34,8 @@ jobs:
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
             cd /home/vova/trained-assist-agent
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             bash scripts/deploy.sh
 
   deploy-ru:
@@ -50,5 +51,6 @@ jobs:
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
             cd /home/vova/trained-assist-agent
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
