@@ -92,6 +92,7 @@ async function main() {
         try { payload = JSON.parse(body); } catch { res.writeHead(400).end('bad json'); return; }
         const { t, value } = payload;
         if (!t || !value) { res.writeHead(400).end(JSON.stringify({ error: 'missing t or value' })); return; }
+        if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
 
         const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
         let pending;
@@ -99,6 +100,7 @@ async function main() {
         if (pending.expires < Date.now()) { fs.unlinkSync(pendingFile); res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
         if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
 
+        if (!/^\d{5,15}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
         const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
         fs.mkdirSync(tokensDir, { recursive: true });
         fs.writeFileSync(path.join(tokensDir, service), String(value).trim(), { mode: 0o600 });
@@ -178,10 +180,13 @@ async function main() {
 
       const { userId, username, task, context, sessionId, contextFromSession } = payload;
       if (!userId || !username || !task) return json(res, 400, { error: 'missing fields' });
+      if (!/^\d{5,15}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32)
         return json(res, 400, { error: 'invalid username' });
       if (sessionId && !/^[a-zA-Z0-9_-]+$/.test(sessionId))
         return json(res, 400, { error: 'invalid sessionId' });
+      if (contextFromSession && !/^[a-zA-Z0-9_-]+$/.test(contextFromSession))
+        return json(res, 400, { error: 'invalid contextFromSession' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
@@ -205,6 +210,7 @@ async function main() {
 
       const { userId, label, value } = payload;
       if (!userId || !label || !value) return json(res, 400, { error: 'missing fields' });
+      if (!/^\d{5,15}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 
@@ -429,10 +435,15 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-function readBody(req) {
+function readBody(req, maxBytes = 1_048_576) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', c => chunks.push(c));
+    let total = 0;
+    req.on('data', c => {
+      total += c.length;
+      if (total > maxBytes) { req.destroy(); return reject(new Error('body too large')); }
+      chunks.push(c);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });
