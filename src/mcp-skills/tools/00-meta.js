@@ -16,7 +16,14 @@ const SKILLS = [
     name: 'Tilda Site Ops',
     description: 'Работа с Tilda: страницы, блоки, публикация. Test-first: сначала тест, потом прод.',
     tools: ['tilda_list_all_projects', 'tilda_set_config', 'tilda_status', 'tilda_list_pages', 'tilda_get_page', 'tilda_backup_page', 'tilda_create_staging', 'tilda_publish_page', 'tilda_get_blocks', 'tilda_save_block'],
-    requires: 'tilda-capture-storage-state.js (локальный браузер) → путь к storage-state.json → tilda_set_config',
+    requires: 'browser_session_url → пользователь логинится в удалённый браузер → browser_session_capture_cookies("tilda.ru", "tilda-session")',
+  },
+  {
+    id: 'browser-session',
+    name: 'Remote Browser Session',
+    description: 'Удалённый Chrome на VM (noVNC). Позволяет залогиниться в любой сервис с IP виртуалки и захватить сессию. Решает IP-binding и CAPTCHA.',
+    tools: ['browser_session_status', 'browser_session_url', 'browser_session_capture_cookies', 'browser_session_navigate'],
+    requires: 'ничего — браузер всегда запущен',
   },
 ];
 

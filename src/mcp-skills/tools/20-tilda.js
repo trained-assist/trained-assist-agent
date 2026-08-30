@@ -128,7 +128,13 @@ async function listAllProjects(cookieHeader) {
 
 // ── Context helper ────────────────────────────────────────────────────────────
 
-const REAUTH_INSTRUCTIONS = 'Открой tilda.ru в браузере (ты уже залогинен — переходить никуда не нужно), нажми кнопку Tilda в расширении Cloud Auth Bridge. Когда сессия передана — скажи "готово".';
+// When session expires, guide user through remote browser login flow
+const REAUTH_INSTRUCTIONS = [
+  'Сессия Tilda истекла. Нужно залогиниться через удалённый браузер:',
+  '1. Вызови browser_session_url — получишь ссылку на браузер',
+  '2. Открой ссылку, залогинься на tilda.ru',
+  '3. Скажи "готово" — я захвачу сессию через browser_session_capture_cookies',
+].join('\n');
 
 async function withAuth(userId, fn) {
   const config = readConfig(userId);
