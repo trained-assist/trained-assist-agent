@@ -139,6 +139,7 @@ function getSecretsLog(userId) {
 // Returns a string if the task matches, null otherwise.
 
 const SETUP_INTENT = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
+const INN_CAPABILITY_INTENT = /(?:скил|skill|умееш|можешь|есть.{0,30}возможн|есть.{0,30}функц|есть.{0,30}инструм|что.{0,20}умееш).{0,80}(?:инн|огрн|компани|директор|выручк|реквизит|участник|выставк)/i;
 const SECRETS_LIST_INTENT = /^\/secrets_list$|список.{0,15}доступ|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
 const SECRETS_LOG_INTENT  = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT       = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
@@ -223,6 +224,11 @@ function getQuickAnswer(task, userId) {
     return `✅ Доступ к ${SERVICE_DISPLAY[result] || result} отозван. Данные удалены с сервера.`;
   }
 
+  // Capability question about INN enrichment — answer immediately without calling Claude
+  if (INN_CAPABILITY_INTENT.test(task)) {
+    return 'Да, есть скил INN Enrichment.\n\nНаходит для списка компаний (300–1000 шт): ИНН, ОГРН, директора, выручку и прибыль.\n\nИсточники: БФО ФНС (бесплатно), ЕГРЮЛ, DaData, Checko — всё уже настроено, ключи у платформы.\n\nПришли JSON-файл со списком компаний — и запущу.';
+  }
+
   if (!SETUP_INTENT.test(task)) {
     console.log('[quick-answer] no setup intent, task=%j', task.slice(0, 120));
     return null;
@@ -265,6 +271,20 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
 
   fs.mkdirSync(user.workDir, { recursive: true });
 
+  // Quick answer — check before session creation so system commands
+  // (/secrets_list, /secrets_log, connect links, revoke) don't pollute
+  // session history with ephemeral utility responses.
+  const quickReply = getQuickAnswer(task, user.id);
+  if (quickReply) {
+    await tgSend(BOT_TOKEN, chatId, quickReply);
+    // If continuing an existing session, still log the exchange there
+    if (sessionId && sessions.getSession(user.workDir, sessionId)) {
+      sessions.appendUserMessage(user.workDir, sessionId, task);
+      sessions.appendReply(user.workDir, sessionId, quickReply);
+    }
+    return quickReply;
+  }
+
   // Resolve session: attach to existing or create new
   let activeSessionId = sessionId;
   let sessionContext = context;
@@ -285,14 +305,6 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
       }
     }
     activeSessionId = sessions.createSession(user.workDir, { task, id: sessionId || undefined });
-  }
-
-  // Quick answer — skip Claude entirely for known setup/connect patterns
-  const quickReply = getQuickAnswer(task, user.id);
-  if (quickReply) {
-    await tgSend(BOT_TOKEN, chatId, quickReply);
-    if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, quickReply);
-    return quickReply;
   }
 
   // Send "thinking" message, get message_id for streaming edits
