@@ -17,6 +17,8 @@ const fs = require('fs');
 const path = require('path');
 
 const GCP_PROJECT = 'alesa-personal-assistent';
+// MCP process receives USER_ID; Claude process receives AGENT_USER_ID — support both.
+const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
 
 // ── Access token cache (per SA email, 55-min TTL) ─────────────────────────
 
@@ -38,9 +40,17 @@ async function getAdcToken(scope = 'https://www.googleapis.com/auth/iam') {
 // ── Service Account JWT auth (for per-user SA) ────────────────────────────
 
 function parseSaJson() {
+  // Env var (Claude process path)
   const raw = process.env.GDRIVE_SA_JSON;
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
+  if (raw) { try { return JSON.parse(raw); } catch {} }
+  // Disk (MCP process path — env vars not forwarded from runner.js)
+  if (USER_ID) {
+    try {
+      const p = path.join(os.homedir(), 'agent-tokens', USER_ID, 'gdrive');
+      if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8').trim());
+    } catch {}
+  }
+  return null;
 }
 
 function makeJwt(sa, scope = 'https://www.googleapis.com/auth/drive') {
@@ -172,8 +182,8 @@ module.exports = {
         },
       },
       handler: async ({ display_name } = {}) => {
-        const userId = process.env.AGENT_USER_ID;
-        if (!userId) throw new Error('AGENT_USER_ID не задан — обновление runner.js нужно');
+        const userId = USER_ID;
+        if (!userId) throw new Error('USER_ID не задан в среде MCP-процесса');
 
         // Check if already set up
         const existing = parseSaJson();

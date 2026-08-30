@@ -253,4 +253,4 @@ const tools = [
   },
 ];
 
-module.exports = tools;
+module.exports = { tools: Object.fromEntries(tools.map(t => [t.name, t])) };
