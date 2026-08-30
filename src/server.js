@@ -186,7 +186,7 @@ async function main() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             chat_id: pending.uid,
-            text: `✅ ${SERVICE_NAMES[service] || service} подключён! Токен сохранён — можете пользоваться.`,
+            text: `✅ ${SERVICE_NAMES[service] || service} подключён! Данные для входа сохранены в изолированном хранилище — в чат не попадают.\n\nУправление доступами: /secrets_list`,
           }),
         }).catch(e => console.error('[connect] tg notify failed:', e.message));
         return;
@@ -451,7 +451,7 @@ function tgNotifyNalog(botToken, chatId, expires) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
-      text: `✅ Налог.ру подключён! Токен действует до ${expiresStr} (МСК). Теперь можно работать с чеками НПД.`,
+      text: `✅ Налог.ру подключён! Данные авторизации сохранены — действуют до ${expiresStr} (МСК).\n\nТеперь можно работать с чеками НПД. Управление доступами: /secrets_list`,
     }),
   }).catch(e => console.error('[nalog] tg notify failed:', e.message));
 }
@@ -491,7 +491,7 @@ function nalogFormHtml(token) {
 
   <div id="step1">
     <h1>Подключить Налог.ру</h1>
-    <p class="sub">Войдите через Госуслуги — данные не попадают в чат с ботом, форма отправляет их напрямую в браузер на сервере.</p>
+    <p class="sub">Введите данные для входа в Госуслуги. Они поступают напрямую на сервер — в чат с ботом <b>не попадают</b>.</p>
     <label for="login">Логин Госуслуг (телефон, email или СНИЛС)</label>
     <input id="login" type="text" autocomplete="username" inputmode="email" placeholder="+7 999 123-45-67">
     <label for="password">Пароль Госуслуг</label>
@@ -512,10 +512,10 @@ function nalogFormHtml(token) {
   <div id="step3">
     <div class="icon">✅</div>
     <h1>Налог.ру подключён!</h1>
-    <p class="sub" id="expiresText">Токен сохранён. Можете закрыть эту страницу и вернуться в бот.</p>
+    <p class="sub" id="expiresText">Данные авторизации сохранены. Можете закрыть эту страницу и вернуться в бот.</p>
   </div>
 
-  <p class="lock">🔒 Соединение защищено · Ссылка одноразовая</p>
+  <p class="lock">🔒 Данные авторизации изолированы от ИИ · Каждое обращение фиксируется · Отзыв: /secrets_list</p>
 </div>
 <script>
 const T = '${token.replace(/'/g, "\\'")}';
@@ -629,19 +629,19 @@ function connectFormHtml(service, meta, token) {
 <body>
 <div class="card">
   <h1>Подключить ${meta.name}</h1>
-  <p class="sub">Токен не попадёт в переписку с ботом — форма отправляет его напрямую в защищённое хранилище.<br><br>${meta.hint}</p>
-  <label for="tok">Токен</label>
+  <p class="sub">Данные для входа поступают напрямую на сервер — в чат с ботом <b>не попадают</b>. Каждое обращение фиксируется, доступ можно отозвать через /secrets_list.<br><br>${meta.hint}</p>
+  <label for="tok">Данные для авторизации</label>
   <input id="tok" type="password" placeholder="${meta.placeholder}" autocomplete="off" spellcheck="false">
   <button id="btn" onclick="submit()">Подключить</button>
   <div id="msg" class="msg"></div>
-  <p class="lock">🔒 Соединение защищено · Ссылка одноразовая</p>
+  <p class="lock">🔒 Данные авторизации изолированы от ИИ · Каждое обращение фиксируется · Отзыв: /secrets_list</p>
 </div>
 <script>
 const T = '${token.replace(/'/g, "\\'")}';
 const SERVICE = '${service}';
 async function submit() {
   const v = document.getElementById('tok').value.trim();
-  if (!v) { show('err', 'Вставьте токен'); return; }
+  if (!v) { show('err', 'Введите данные для входа'); return; }
   const btn = document.getElementById('btn');
   btn.disabled = true; btn.textContent = 'Подключаю…';
   try {
