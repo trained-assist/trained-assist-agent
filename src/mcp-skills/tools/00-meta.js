@@ -11,8 +11,13 @@ const SKILLS = [
     tools: ['nalog_get_profile', 'nalog_get_incomes', 'nalog_create_receipt', 'nalog_refresh_token'],
     requires: 'Chrome extension → отправить токен nalog.ru',
   },
-  // New skills registered here by their tool files automatically —
-  // update this list when adding a skill module.
+  {
+    id: 'tilda-site-ops',
+    name: 'Tilda Site Ops',
+    description: 'Работа с Tilda: страницы, блоки, публикация. Test-first: сначала тест, потом прод.',
+    tools: ['tilda_set_config', 'tilda_status', 'tilda_list_pages', 'tilda_get_page', 'tilda_backup_page', 'tilda_create_staging', 'tilda_publish_page', 'tilda_get_blocks', 'tilda_save_block'],
+    requires: 'tilda-capture-storage-state.js (локальный браузер) → путь к storage-state.json → tilda_set_config',
+  },
 ];
 
 module.exports = {
