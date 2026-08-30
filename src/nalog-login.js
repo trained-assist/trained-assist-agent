@@ -133,22 +133,39 @@ async function startNalogLogin(userId, login, password) {
 
     console.log('[nalog-login] on ESIA, filling credentials, url=%s', page.url());
 
-    // ESIA login is 2-step: first enter login, then password on next screen
+    // Wait for ESIA SPA loading screen to clear, then fill credentials
     const loginInput = page.locator('#login, input[name="login"], input[autocomplete="username"]').first();
-    await loginInput.waitFor({ state: 'visible', timeout: 15000 });
+    await loginInput.waitFor({ state: 'visible', timeout: 25000 });
     await loginInput.fill(login);
-    await page.locator('button[type="submit"]').first().click();
-    await page.waitForTimeout(800);
 
-    // Password (appears on same page or next page)
+    // On esia.gosuslugi.ru login+password are on the same page.
+    // The first button[type="submit"] in DOM is the language switcher ("Русский") —
+    // must use text match to find actual "Войти" button.
     const pwInput = page.locator('#password, input[name="password"], input[type="password"]').first();
+    const pwVisible = await pwInput.isVisible({ timeout: 1000 }).catch(() => false);
+
+    if (!pwVisible) {
+      // Two-step form: submit login first to reveal password field
+      const nextBtn = page.locator('button[type="submit"]', { hasText: /войти|далее|продолжить/i }).first();
+      await nextBtn.waitFor({ state: 'visible', timeout: 5000 });
+      await nextBtn.click();
+      await page.waitForTimeout(800);
+    }
+
     try {
       await pwInput.waitFor({ state: 'visible', timeout: 10000 });
       await pwInput.fill(password);
-      await page.locator('button[type="submit"]').first().click();
     } catch {
       await browser.close();
-      return { error: 'Не нашли поле для пароля — форма Госуслуг изменилась или запрос заблокирован' };
+      return { error: 'Не нашли поле для пароля — форма Госуслуг изменилась' };
+    }
+
+    const loginBtn = page.locator('button[type="submit"]', { hasText: /войти/i }).first();
+    try {
+      await loginBtn.waitFor({ state: 'visible', timeout: 5000 });
+      await loginBtn.click();
+    } catch {
+      await page.locator('button[type="submit"]:visible').last().click();
     }
 
     console.log('[nalog-login] credentials submitted, waiting for outcome');
