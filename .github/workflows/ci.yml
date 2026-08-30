@@ -38,6 +38,22 @@ jobs:
             git reset --hard origin/main
             bash scripts/deploy.sh
 
+  smoke-gcp:
+    runs-on: ubuntu-latest
+    needs: deploy-gcp
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post-deploy smoke test (GCP)
+        env:
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+        run: |
+          echo "Waiting 15s for service to settle..."
+          sleep 15
+          AGENT_URL="https://136-65-7-197.sslip.io/agent" \
+          AGENT_SECRET="$AGENT_SECRET" \
+          bash scripts/smoke-test.sh
+
   deploy-ru:
     runs-on: ubuntu-latest
     needs: ci
