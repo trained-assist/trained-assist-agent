@@ -263,6 +263,19 @@ async function main() {
       return json(res, 200, { status: 'alive', uptime: process.uptime() });
     }
 
+    // GET /capabilities?userId=XXX — list services with tokens on this machine
+    if (req.method === 'GET' && url.pathname === '/capabilities') {
+      const userId = url.searchParams.get('userId') || '';
+      if (!userId || !/^-?\d{1,20}$/.test(userId)) return json(res, 400, { error: 'invalid userId' });
+      const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
+      const SKIP = new Set(['.secrets_log']);
+      let capabilities = [];
+      if (fs.existsSync(tokensDir)) {
+        capabilities = fs.readdirSync(tokensDir).filter(f => !SKIP.has(f) && !f.startsWith('.'));
+      }
+      return json(res, 200, { capabilities });
+    }
+
     // GET /skills — list all available MCP skills (for bot /skills command)
     if (req.method === 'GET' && url.pathname === '/skills') {
       const { tools: metaTools } = require('./mcp-skills/tools/00-meta.js');
