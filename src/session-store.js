@@ -21,8 +21,14 @@ function loadIndex(workDir) {
   } catch { return []; }
 }
 
+function atomicWrite(fp, data) {
+  const tmp = `${fp}.tmp`;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, fp);
+}
+
 function saveIndex(workDir, sessions) {
-  fs.writeFileSync(sessionsPath(workDir), JSON.stringify(sessions, null, 2));
+  atomicWrite(sessionsPath(workDir), JSON.stringify(sessions, null, 2));
 }
 
 /** Create a new session record, return its id */
@@ -43,9 +49,9 @@ function createSession(workDir, { task, id: providedId }) {
   fs.mkdirSync(dir, { recursive: true });
   const full = {
     ...meta,
-    messages: [{ role: 'user', content: task, at: now }],
+    messages: [{ role: 'user', content: task.slice(0, 2000), at: now }],
   };
-  fs.writeFileSync(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));
+  atomicWrite(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));
 
   return id;
 }
@@ -57,10 +63,10 @@ function appendUserMessage(workDir, id, content) {
     if (!fs.existsSync(fp)) return;
     const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
     const now = Date.now();
-    full.messages.push({ role: 'user', content, at: now });
+    full.messages.push({ role: 'user', content: content.slice(0, 2000), at: now });
     full.lastAt = now;
     full.messageCount = full.messages.length;
-    fs.writeFileSync(fp, JSON.stringify(full, null, 2));
+    atomicWrite(fp, JSON.stringify(full, null, 2));
 
     const sessions = loadIndex(workDir);
     const idx = sessions.findIndex(s => s.id === id);
@@ -82,10 +88,10 @@ function appendReply(workDir, id, reply) {
     if (!fs.existsSync(fp)) return;
     const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
     const now = Date.now();
-    full.messages.push({ role: 'assistant', content: reply, at: now });
+    full.messages.push({ role: 'assistant', content: reply.slice(0, 2000), at: now });
     full.lastAt = now;
     full.messageCount = full.messages.length;
-    fs.writeFileSync(fp, JSON.stringify(full, null, 2));
+    atomicWrite(fp, JSON.stringify(full, null, 2));
 
     // Update index
     const sessions = loadIndex(workDir);
