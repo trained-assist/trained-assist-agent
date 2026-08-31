@@ -163,15 +163,19 @@ async function startNalogLogin(userId, login, password) {
     }));
     console.log('[nalog-login] ESIA buttons: %s', pageState.buttons);
 
-    // ESIA is a Vue SPA — locator.fill() sets the DOM value but Vue doesn't see it.
-    // Use click+pressSequentially to simulate real keystrokes that Vue's event handlers pick up.
+    // ESIA is a Vue SPA. The password field is in the DOM but only "activates" after
+    // ESIA async-validates the login (checks the phone is registered).
+    // Simulate human typing: type login → Tab (triggers onBlur/validation) → wait → type password.
     await loginInput.click();
     await page.keyboard.press('Control+a');
-    await page.keyboard.type(login, { delay: 30 });
-    await page.waitForTimeout(400);
+    await page.keyboard.type(login, { delay: 80 });
+    // Tab out of login field — triggers ESIA's async login validation
+    await page.keyboard.press('Tab');
+    console.log('[nalog-login] tabbed out of login, waiting for ESIA async validation');
+    await page.waitForTimeout(2000);
 
     if (!pwAlreadyVisible) {
-      // Two-step form: click next to reveal password field.
+      // Two-step form: login validation didn't auto-show password — click next
       const clicked = await page.evaluate(() => {
         const btns = Array.from(document.querySelectorAll('button'));
         const btn = btns.find(b =>
@@ -193,8 +197,8 @@ async function startNalogLogin(userId, login, password) {
 
     await pwInput.click();
     await page.keyboard.press('Control+a');
-    await page.keyboard.type(password, { delay: 30 });
-    await page.waitForTimeout(400);
+    await page.keyboard.type(password, { delay: 80 });
+    await page.waitForTimeout(600);
 
     // Click the final "Войти" button via evaluate to avoid selector issues
     await page.evaluate(() => {
