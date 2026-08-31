@@ -12,8 +12,8 @@
 // no org policies blocking key creation, unlike the main project (alesa-personal-assistent).
 
 const crypto = require('crypto');
-const os     = require('fs') && require('os');
 const fs     = require('fs');
+const os     = require('os');
 const path   = require('path');
 
 const GCP_PROJECT = 'trained-assist-gdrive-sa';
@@ -196,15 +196,17 @@ module.exports = {
           }
         );
 
+        let saData = null;
         if (!createRes.ok) {
           const err = await createRes.json().catch(() => ({}));
           const msg = err.error?.message || createRes.statusText;
           if (createRes.status !== 409) {
             throw new Error(`Не удалось создать SA (${createRes.status}): ${msg}`);
           }
+          // 409 = SA already exists — continue with derived email
+        } else {
+          saData = await createRes.json().catch(() => null);
         }
-
-        const saData  = await createRes.json().catch(() => null);
         const saEmail = saData?.email || `${accountId}@${GCP_PROJECT}.iam.gserviceaccount.com`;
 
         // Create key for the SA
@@ -277,7 +279,7 @@ module.exports = {
         const sa    = requireSa();
         const limit = Math.min(page_size || 30, 100);
         let q       = 'trashed=false';
-        if (folder_id) q += ` and '${folder_id}' in parents`;
+        if (folder_id) q += ` and '${folder_id.replace(/'/g, '')}' in parents`;
         const fields  = 'nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink)';
         let apiPath   = `/drive/v3/files?pageSize=${limit}&orderBy=modifiedTime desc&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}`;
         if (page_token) apiPath += `&pageToken=${encodeURIComponent(page_token)}`;
@@ -332,7 +334,7 @@ module.exports = {
         const n       = Math.min(limit || 20, 50);
         const escaped = query.replace(/'/g, "\\'");
         let q         = `(name contains '${escaped}' or fullText contains '${escaped}') and trashed=false`;
-        if (folder_id) q += ` and '${folder_id}' in parents`;
+        if (folder_id) q += ` and '${folder_id.replace(/'/g, '')}' in parents`;
         const fields  = 'files(id,name,mimeType,size,modifiedTime,webViewLink)';
         const data    = await driveApi('GET', `/drive/v3/files?pageSize=${n}&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}`, null, sa);
         return {

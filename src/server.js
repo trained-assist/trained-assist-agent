@@ -13,6 +13,7 @@ const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./ge
 const { nalogFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
+const { connectFormHtml } = require('./connect-forms/generic');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -106,7 +107,7 @@ async function main() {
       if (result.error) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: result.error })); return; }
 
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, expires: result.expires }));
-      if (result.userId) tgNotifyNalog(secrets.TELEGRAM_BOT_TOKEN, result.userId, result.expires);
+      if (result.userId) tgNotifyNalog(secrets.BOT_TOKEN, result.userId, result.expires);
       return;
     }
 
@@ -289,7 +290,7 @@ async function main() {
 
           if (result.status === 'ok') {
             res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ status: 'ok', expires: result.expires }));
-            tgNotifyNalog(secrets.TELEGRAM_BOT_TOKEN, pending.uid, result.expires);
+            tgNotifyNalog(secrets.BOT_TOKEN, pending.uid, result.expires);
             return;
           }
 
@@ -362,7 +363,7 @@ async function main() {
           if (!level.length) level.push('domain-only');
 
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, level }));
-          tgNotifyGetcourse(secrets.TELEGRAM_BOT_TOKEN, pending.uid, cleanDomain, level, cookiesCount);
+          tgNotifyGetcourse(secrets.BOT_TOKEN, pending.uid, cleanDomain, level, cookiesCount);
           return;
         }
 
@@ -408,7 +409,7 @@ async function main() {
         // Notify user in Telegram (fire-and-forget)
         const SERVICE_NAMES = { github: 'GitHub', weeek: 'Weeek CRM' };
         const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-        fetch(`${tgBase}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

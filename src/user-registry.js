@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { initLog } = require('./requirements-log');
 
 // AGENT_DATA_DIR preferred; ALESA_DATA_DIR kept for backward compat (existing data on VM)
 const DATA_DIR = process.env.AGENT_DATA_DIR || process.env.ALESA_DATA_DIR || path.join(process.env.HOME || '/home/vova', 'agent-data');
@@ -46,6 +47,7 @@ class UserRegistry {
     const { hash, salt } = this._hash(password);
     const workDir = path.join(DATA_DIR, 'sessions', username);
     fs.mkdirSync(workDir, { recursive: true });
+    initLog(workDir);
     this._data[username] = { name: displayName || username, passwordHash: hash, salt, workDir, createdAt: new Date().toISOString() };
     this._save();
     return { username, password };

@@ -14,6 +14,7 @@ const {
   generateConnectLink,
   SERVICE_DISPLAY,
 } = require('./user-tokens');
+const { initLog, readLog } = require('./requirements-log');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 12000;
@@ -29,7 +30,7 @@ const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}доступ|
 const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
 const REVOKE_SERVICE_RE     = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
-const GDRIVE_SA_EMAIL_INTENT = /(?:почт|email|e-mail|адрес).{0,40}(?:сервис|service|sa\b)|(?:сервис|service|sa\b).{0,40}(?:почт|email|e-mail|аккаун)|дай.{0,30}(?:почт|email|адрес).{0,30}(?:гугл|google|drive|аккаун)/i;
+const GDRIVE_SA_EMAIL_INTENT  = /(?:почт|email|e-mail|адрес).{0,40}(?:сервис|service|sa\b)|(?:сервис|service|sa\b).{0,40}(?:почт|email|e-mail|аккаун)|дай.{0,30}(?:почт|email|адрес).{0,30}(?:гугл|google|drive|аккаун)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
@@ -261,6 +262,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const chatId = user.id;
 
   fs.mkdirSync(user.workDir, { recursive: true });
+  initLog(user.workDir);
 
   // Quick answer — check before session creation so system commands
   // (/secrets_list, /secrets_log, connect links, revoke) don't pollute
@@ -322,9 +324,17 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     return expiredMsg;
   }
 
+  // Inject requirements log so Claude can track and update user requirements
+  const reqLog = readLog(user.workDir);
+  const reqLogSection = reqLog
+    ? `[REQUIREMENTS LOG — обновляй в конце каждой задачи]\n${reqLog}`
+    : '';
+
   // Skills are now available via trained-skills MCP (tools/list → list_skills).
   // No prompt injection needed — Claude discovers and calls tools directly.
-  const prompt = sessionContext ? `${sessionContext}\n\n${task}` : task;
+  let baseContext = sessionContext || '';
+  if (reqLogSection) baseContext = baseContext ? `${baseContext}\n\n${reqLogSection}` : reqLogSection;
+  const prompt = baseContext ? `${baseContext}\n\n${task}` : task;
   const fullOutput = { text: '' };
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
@@ -552,4 +562,4 @@ async function tgEdit(token, chatId, messageId, text) {
   return res.json();
 }
 
-module.exports = { runTask };
+module.exports = { runTask, getQuickAnswer };
