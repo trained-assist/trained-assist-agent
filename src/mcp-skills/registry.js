@@ -29,6 +29,7 @@ module.exports = {
   callTool: (name, args) => {
     const fn = handlers[name];
     if (!fn) throw new Error(`Unknown tool: ${name}`);
-    return fn(args);
+    const ctx = { userId: process.env.USER_ID };
+    return fn(args, ctx);
   },
 };

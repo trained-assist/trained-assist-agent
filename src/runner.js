@@ -16,6 +16,7 @@ const {
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 12000;
 const MAX_MSG_LEN = 3500;
+const CLAUDE_TIMEOUT_MS = 5 * 60 * 1000; // 5 min hard limit — kills Claude if hung
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
@@ -30,6 +31,9 @@ const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
+// Checks whether a service is connected ("github подключен?", "статус nalog") — NOT imperative "подключи"
+const SERVICE_STATUS_INTENT = /(?:подключён|подключен|connected|активен|добавлен|работает|есть ли|подключён ли).{0,30}(?:github|weeek|вик|nalog|налог|нпд|figma|фигма|tilda|тильда|gdrive|getcourse|геткурс)|(?:github|weeek|вик|nalog|налог|нпд|figma|фигма|tilda|тильда|gdrive|getcourse|геткурс).{0,20}(?:подключён|подключен|connected|активен|добавлен|работает|статус|status)/i;
+const SERVICE_STATUS_RE     = /(github|weeek|вик|nalog|налог|нпд|figma|фигма|tilda|тильда|gdrive|getcourse|геткурс)/i;
 
 const TRUST_FOOTER = '\n\n🔒 Данные для входа не видны в переписке с ботом — они поступают прямо на сервер и хранятся в изолированном хранилище, отдельно от ИИ. Все обращения фиксируются в /secrets_log. Отзыв доступов: /secrets_list';
 
@@ -147,6 +151,23 @@ function getQuickAnswer(task, userId, workDir) {
       return `${time} — ${svcs}`;
     });
     return '📋 Последние обращения к вашим данным:\n' + lines.join('\n');
+  }
+
+  // Service status check — "github подключен?", "статус nalog"
+  if (SERVICE_STATUS_INTENT.test(task) && userId) {
+    const svcMatch = task.match(SERVICE_STATUS_RE);
+    if (svcMatch) {
+      const ALIASES = { вик: 'weeek', налог: 'nalog', нпд: 'nalog', фигма: 'figma', тильда: 'tilda', геткурс: 'getcourse', гугл: 'gdrive' };
+      const key = ALIASES[svcMatch[1].toLowerCase()] || svcMatch[1].toLowerCase();
+      const display = SERVICE_DISPLAY[key] || key;
+      const services = listConnectedServices(userId);
+      const found = services?.find(s => s.file === key);
+      if (found) {
+        const d = found.mtime.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+        return `✅ ${display} подключён (обновлён ${d}).`;
+      }
+      return `❌ ${display} не подключён. Напиши «подключи ${display}» чтобы добавить.`;
+    }
   }
 
   // Revoke — delete a service token
@@ -361,13 +382,33 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
-  await new Promise((resolve, reject) => {
-    proc.on('close', resolve);
-    proc.on('error', reject);
-  });
+  let timedOut = false;
+  try {
+    await new Promise((resolve, reject) => {
+      const killTimer = setTimeout(() => {
+        timedOut = true;
+        proc.kill('SIGTERM');
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
+        reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
+      }, CLAUDE_TIMEOUT_MS);
 
-  clearInterval(streamTimer);
-  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      proc.on('close', (code) => {
+        clearTimeout(killTimer);
+        if (code !== 0) console.error(`[${taskId}] claude exited with code ${code}`);
+        resolve(code);
+      });
+      proc.on('error', (err) => {
+        clearTimeout(killTimer);
+        reject(err);
+      });
+    });
+  } catch (err) {
+    console.error(`[${taskId}] claude process error:`, err.message);
+    if (timedOut) fullOutput.text += '\n\n⏱ Задача прервана по таймауту (5 мин).';
+  } finally {
+    clearInterval(streamTimer);
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  }
 
   // Prefer the clean result string from the result event; fall back to accumulated stream text
   const result = (claudeResult ?? fullOutput.text).trim() || '(нет вывода)';
