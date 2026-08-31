@@ -83,9 +83,11 @@ function writeMcpConfig(workDir, userId) {
   const stateFile = path.join(workDir, 'playwright-storage-state.json');
 
   // Merge captured extension cookies into existing storage state
-  const existing = fs.existsSync(stateFile)
-    ? JSON.parse(fs.readFileSync(stateFile, 'utf8'))
-    : { cookies: [], origins: [] };
+  let existing = { cookies: [], origins: [] };
+  if (fs.existsSync(stateFile)) {
+    try { existing = JSON.parse(fs.readFileSync(stateFile, 'utf8')); }
+    catch { /* corrupt state file — start fresh */ }
+  }
 
   if (userId) {
     const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
