@@ -91,6 +91,7 @@ async function main() {
   const GDRIVE_REDIRECT_URI  = `${(process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '')}/connect/gdrive/callback`;
 
   const server = http.createServer(async (req, res) => {
+    try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
     // ── POST /connect/nalog/code — confirm 2FA code (no AGENT_SECRET needed) ──
@@ -692,6 +693,10 @@ async function main() {
     }
 
     json(res, 404, { error: 'not found' });
+    } catch (err) {
+      console.error('[request-handler] unhandled error:', err);
+      if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: 'internal server error' }));
+    }
   });
 
   server.listen(PORT, () => console.log(`assist-agent listening on :${PORT}`));
@@ -743,6 +748,16 @@ function readBody(req, maxBytes = 1_048_576) {
     req.on('error', reject);
   });
 }
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[unhandledRejection] at:', promise, 'reason:', reason);
+  // Log but do NOT crash — a single bad request should not kill the server.
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  // Same: log and keep running unless it's a startup error.
+});
 
 main().catch(err => { console.error('Fatal:', err); process.exit(1); });
 
