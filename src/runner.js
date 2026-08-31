@@ -291,6 +291,23 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   const userTokens = loadUserTokens(user.id);
 
+  // Expired nalog token — tell user immediately, don't waste Claude on it
+  const needsNalog = /nalog|налог|нпд|lknpd|самозан|чек|фнс/i.test(task);
+  if (needsNalog && userTokens.NALOG_TOKEN_EXPIRES && new Date(userTokens.NALOG_TOKEN_EXPIRES) < new Date()) {
+    const expiredMsg = [
+      '🔒 Токен Налог.ру истёк.',
+      '',
+      'Чтобы обновить:',
+      '1. Открой lknpd.nalog.ru в Chrome',
+      '2. Нажми иконку cloud-auth-bridge → «Send token»',
+      '',
+      'После этого повтори запрос.',
+    ].join('\n');
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, expiredMsg).catch(() => tgSend(BOT_TOKEN, chatId, expiredMsg));
+    else await tgSend(BOT_TOKEN, chatId, expiredMsg);
+    return expiredMsg;
+  }
+
   // Skills are now available via trained-skills MCP (tools/list → list_skills).
   // No prompt injection needed — Claude discovers and calls tools directly.
   const prompt = sessionContext ? `${sessionContext}\n\n${task}` : task;
