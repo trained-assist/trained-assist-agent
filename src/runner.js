@@ -30,7 +30,15 @@ const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}доступ|
 const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
 const REVOKE_SERVICE_RE     = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
-const GDRIVE_SA_EMAIL_INTENT  = /(?:почт|email|e-mail|адрес).{0,40}(?:сервис|service|sa\b)|(?:сервис|service|sa\b).{0,40}(?:почт|email|e-mail|аккаун)|дай.{0,30}(?:почт|email|адрес).{0,30}(?:гугл|google|drive|аккаун)/i;
+// "на какой email шарить", "почта SA", "дай адрес google" — always read from disk, never hallucinate
+const GDRIVE_SA_EMAIL_INTENT  = /(?:почт|email|e-mail|адрес).{0,40}(?:сервис|service|sa\b)|(?:сервис|service|sa\b).{0,40}(?:почт|email|e-mail|аккаун)|дай.{0,30}(?:почт|email|адрес).{0,30}(?:гугл|google|drive|аккаун)|на\s+(?:какой|что|какую).{0,30}(?:шар|поделить|пошар)|куда.{0,20}(?:шар|поделить|пошар)/i;
+// "пошарить таблицу тебе", "поделиться файлом", "как дать доступ к гугл" — needs SA email answer
+// verb forms only (пошари/пошарить/шари), not past/adj (пошаренные/пошарено — those go to LIST)
+const GDRIVE_SHARE_INTENT     = /(?:пошар[иьюшт]|поделить|шар[иьюшт]|дать?\s+доступ).{0,50}(?:гугл|google|таблиц|докс|docs|sheets|файл|документ)|(?:гугл|google|таблиц|докс|docs|sheets|файл|документ).{0,50}(?:пошар[иьюшт]|поделить|шар[иьюшт]|дать?\s+доступ)/i;
+// "мои файлы гугл", "что мне пошарено", "список документов"
+const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие).{0,20}(?:файл|документ|гугл|google|пошарен)|(?:что|какие).{0,30}(?:пошарено|пошарил|открыл)|gdrive.{0,20}(?:файл|документ|список)/i;
+// "можешь читать гугл шит", "умеешь работать с гугл таблицами"
+const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
@@ -185,16 +193,76 @@ function getQuickAnswer(task, userId, workDir) {
     return `✅ Доступ к ${SERVICE_DISPLAY[result] || result} отозван. Данные удалены с сервера.`;
   }
 
-  // Google Drive SA email — read token file directly, no Claude needed
-  if (GDRIVE_SA_EMAIL_INTENT.test(task) && userId) {
-    const gdriveFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+  // "мои файлы гугл", "что мне пошарено", "список документов" — LIST before SHARE (пошаренные matches both)
+  if (GDRIVE_LIST_INTENT.test(task) && userId) {
+    const catalogPath2 = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-catalog.json');
     try {
-      const sa = JSON.parse(fs.readFileSync(gdriveFile, 'utf8'));
-      if (sa.client_email) {
-        return `📧 Email сервис-аккаунта Google Drive:\n\`${sa.client_email}\`\n\nПоделись этим адресом с нужными папками/файлами в Google Drive.`;
+      const catalog2 = JSON.parse(fs.readFileSync(catalogPath2, 'utf8'));
+      if (!catalog2.length) return '📂 Пока нет пошаренных файлов. Поделись файлом — пришлю уведомление и запишу в список.';
+      const MIME_ICON2 = {
+        'application/vnd.google-apps.spreadsheet':  '📊',
+        'application/vnd.google-apps.document':     '📄',
+        'application/vnd.google-apps.presentation': '📊',
+        'application/vnd.google-apps.folder':       '📁',
+      };
+      const lines2 = catalog2.slice(-20).reverse().map(f => {
+        const icon = MIME_ICON2[f.mimeType] || '📎';
+        const date = f.sharedAt ? new Date(f.sharedAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) : '';
+        const link = f.webViewLink ? `[${f.name}](${f.webViewLink})` : f.name;
+        return `${icon} ${link}${date ? ' — ' + date : ''}`;
+      });
+      return ['📂 Пошаренные файлы:', '', ...lines2].join('\n');
+    } catch {}
+    return '📂 Пока нет пошаренных файлов. Поделись файлом через Google Drive — пришлю уведомление.';
+  }
+
+  // "можешь читать гугл шит", "умеешь работать с csv/таблицами"
+  if (GDRIVE_CAPABILITY_INTENT.test(task)) {
+    if (!userId) return null;
+    const gdriveFile3 = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+    const connected = fs.existsSync(gdriveFile3);
+    return connected
+      ? [
+          'Да, умею работать с Google Drive:',
+          '',
+          '📊 Читать Google Sheets — анализ, формулы, выборки',
+          '📄 Читать Google Docs — конспект, резюме, поиск по тексту',
+          '📤 Загружать CSV/данные в Google Sheets (создавать новые листы)',
+          '📂 Следить за папкой — уведомление когда добавляют новый файл',
+          '',
+          'Google Drive уже подключён. Пошари файл — и пришли мне ссылку или скажи «прочитай [название]».',
+        ].join('\n')
+      : [
+          'Да, умею работать с Google Drive:',
+          '',
+          '📊 Читать Google Sheets — анализ, формулы, выборки',
+          '📄 Читать Google Docs — конспект, резюме, поиск по тексту',
+          '📤 Загружать CSV/данные в Google Sheets',
+          '📂 Следить за папкой — уведомление когда добавляют новый файл',
+          '',
+          'Для начала: напиши «настрой Google Drive» — создам сервис-аккаунт за 30 секунд.',
+        ].join('\n');
+  }
+
+  // "пошарить таблицу тебе", "как поделиться файлом", "email SA" — always read from disk, never hallucinate
+  if ((GDRIVE_SHARE_INTENT.test(task) || GDRIVE_SA_EMAIL_INTENT.test(task)) && userId) {
+    const gdriveFile2 = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+    try {
+      const sa2 = JSON.parse(fs.readFileSync(gdriveFile2, 'utf8'));
+      if (sa2.client_email) {
+        return [
+          '📂 Чтобы дать мне доступ к файлу или папке в Google Drive:',
+          '',
+          '1. Открой файл/папку → кнопка «Поделиться» (Share)',
+          `2. Добавь этот email с ролью «Читатель» (или «Редактор» если нужно):`,
+          `\`${sa2.client_email}\``,
+          '3. Нажми «Отправить»',
+          '',
+          'Как только пошаришь — пришлю уведомление и смогу читать файл.',
+        ].join('\n');
       }
     } catch {}
-    return '❌ Google Drive не настроен. Напиши «настрой Google Drive» — создам сервис-аккаунт автоматически.';
+    return '❌ Google Drive ещё не настроен. Напиши «настрой Google Drive» — автоматически создам сервис-аккаунт и дам email для шаринга.';
   }
 
   // Capability question about INN enrichment — answer immediately without calling Claude

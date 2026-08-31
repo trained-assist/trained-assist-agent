@@ -182,7 +182,16 @@ module.exports = {
           );
         }
 
-        const accountId = `agent-user-${userId}`.slice(0, 30);
+        const _slug = (display_name || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')   // non-ascii (Cyrillic etc.) and spaces → -
+          .replace(/^-+|-+$/g, '')        // trim leading/trailing -
+          .slice(0, 20)                   // leave room for suffix
+          || 'user';
+        const _suffix = Math.random().toString(36).slice(2, 6); // 4 random alphanumeric chars
+        // GCP SA accountId: 6-30 chars, must start with lowercase letter
+        const _raw = `${_slug}-${_suffix}`;
+        const accountId = /^[a-z]/.test(_raw) ? _raw : `u-${_raw}`.slice(0, 30);
         const saName    = display_name || `Agent User ${userId}`;
 
         // Create Service Account in the dedicated project (no org policies)
