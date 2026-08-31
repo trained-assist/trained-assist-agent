@@ -45,6 +45,7 @@ function nalogFormHtml(token) {
   <div id="step2">
     <h1>Код подтверждения</h1>
     <p class="sub">На ваш телефон или в приложение Госуслуги отправлен код. Введите его ниже.</p>
+    <p class="sub" style="margin-top:8px;color:#e65100">⏱ Сессия действует <b id="countdown">25:00</b> — не закрывайте страницу</p>
     <label for="code">Код из SMS / приложения</label>
     <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" maxlength="8">
     <button id="btn2" onclick="submitCode()">Подтвердить</button>
@@ -98,6 +99,7 @@ async function submitCreds() {
       sessionId = d.sessionId;
       show('step2');
       document.getElementById('code').focus();
+      startCountdown(25 * 60);
       return;
     }
     showMsg(1, 'err', 'Неожиданный ответ сервера'); btn.disabled = false; btn.textContent = 'Войти через Госуслуги';
@@ -137,6 +139,25 @@ async function submitCode() {
 
 document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') submitCreds(); });
 document.getElementById('code').addEventListener('keydown', e => { if (e.key === 'Enter') submitCode(); });
+
+let countdownTimer;
+function startCountdown(seconds) {
+  clearInterval(countdownTimer);
+  const el = document.getElementById('countdown');
+  if (!el) return;
+  const end = Date.now() + seconds * 1000;
+  countdownTimer = setInterval(() => {
+    const left = Math.max(0, Math.round((end - Date.now()) / 1000));
+    const m = String(Math.floor(left / 60)).padStart(2, '0');
+    const s = String(left % 60).padStart(2, '0');
+    el.textContent = m + ':' + s;
+    if (left === 0) {
+      clearInterval(countdownTimer);
+      showMsg(2, 'err', 'Сессия истекла — начните заново');
+      document.getElementById('btn2').disabled = true;
+    }
+  }, 1000);
+}
 </script>
 </body>
 </html>`;
