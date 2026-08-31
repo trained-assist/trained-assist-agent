@@ -1,124 +1,165 @@
+'use strict';
+
+// Drive watcher — polls Google Drive API for each user's SA.
+//
+// For every userId that has ~/agent-tokens/{userId}/gdrive (a service-account JSON key),
+// polls Drive API every 2 min for newly shared files and sends a Telegram message.
+//
+// First run per userId: marks all existing shared files as "seen" (no notification).
+// Subsequent runs: notifies on new shares only.
+
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const DATA_DIR = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'alesa-data');
-const TOKEN_FILE = path.join(DATA_DIR, 'drive-watch-token.json');
-const CHATS_FILE = path.join(DATA_DIR, 'drive-watch-chats.json');
+const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
-// Call this on every /run request to keep the chatId list up to date
-function trackChat(userId) {
-  const id = String(userId);
-  const chats = _readChats();
-  if (!chats.includes(id)) {
-    chats.push(id);
-    _writeChats(chats);
-    console.log('[drive-watcher] tracking new chatId:', id);
-  }
+// ── SA JWT auth (mirrors 50-gdrive.js — duplicated to avoid cross-module coupling) ──
+
+const _tokenCache = new Map();
+
+function _makeJwt(sa) {
+  const now = Math.floor(Date.now() / 1000);
+  const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    iss: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/drive.readonly',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  })).toString('base64url');
+  const data = `${header}.${payload}`;
+  const sign = crypto.createSign('RSA-SHA256');
+  sign.update(data);
+  return `${data}.${sign.sign(sa.private_key, 'base64url')}`;
 }
 
-function _readChats() {
-  try { return JSON.parse(fs.readFileSync(CHATS_FILE, 'utf8')); }
-  catch { return []; }
+async function _getSaToken(sa) {
+  const key = sa.client_email;
+  const cached = _tokenCache.get(key);
+  if (cached && Date.now() < cached.expiresAt - 60_000) return cached.token;
+  const jwt = _makeJwt(sa);
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+    signal: AbortSignal.timeout(10000),
+  });
+  const data = await res.json();
+  if (!data.access_token) throw new Error(`SA auth failed: ${JSON.stringify(data)}`);
+  _tokenCache.set(key, { token: data.access_token, expiresAt: Date.now() + 3600_000 });
+  return data.access_token;
 }
 
-function _writeChats(chats) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CHATS_FILE, JSON.stringify(chats));
-}
+// ── Per-user check ────────────────────────────────────────────────────────────
 
-function _readToken() {
-  try { return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')); }
-  catch { return {}; }
-}
-
-function _writeToken(data) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify(data));
-}
-
-function _mimeLabel(mimeType) {
-  if (!mimeType) return 'файл';
+function _mimeLabel(mimeType = '') {
   if (mimeType.includes('spreadsheet')) return 'таблицу';
-  if (mimeType.includes('document')) return 'документ';
+  if (mimeType.includes('document'))    return 'документ';
   if (mimeType.includes('presentation')) return 'презентацию';
-  if (mimeType.includes('folder')) return 'папку';
-  if (mimeType.includes('video')) return 'видео';
+  if (mimeType.includes('folder'))      return 'папку';
+  if (mimeType.includes('video'))       return 'видео';
   return 'файл';
 }
 
-async function pollDriveChanges({ botToken, tgBase }) {
-  // Skip on non-GCP VMs (no ADC available)
-  if (process.env.SECRETS_SOURCE === 'env') return;
+async function _checkUser(userId, botToken) {
+  const saFile  = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+  const seenFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-seen');
+  if (!fs.existsSync(saFile)) return;
 
-  let google;
-  try {
-    ({ google } = require('googleapis'));
-  } catch {
-    return; // package not installed
+  let sa;
+  try { sa = JSON.parse(fs.readFileSync(saFile, 'utf8')); }
+  catch { return; }
+  if (!sa?.client_email || !sa?.private_key) return;
+
+  let token;
+  try { token = await _getSaToken(sa); }
+  catch (e) {
+    console.error(`[drive-watcher] SA auth error userId=${userId}:`, e.message);
+    return;
   }
 
+  // List most-recent 20 files shared with this SA
+  let files;
   try {
-    const auth = new google.auth.GoogleAuth({
-      scopes: ['https://www.googleapis.com/auth/drive.readonly'],
-    });
-    const drive = google.drive({ version: 'v3', auth });
-
-    const tokenData = _readToken();
-
-    // First run: just store the starting page token, nothing to report yet
-    if (!tokenData.startPageToken) {
-      const r = await drive.changes.getStartPageToken();
-      _writeToken({ startPageToken: r.data.startPageToken });
-      console.log('[drive-watcher] initialized, startPageToken saved');
+    const res = await fetch(
+      'https://www.googleapis.com/drive/v3/files' +
+      '?q=sharedWithMe%3Dtrue&orderBy=sharedWithMeTime%20desc&pageSize=20' +
+      '&fields=files(id,name,webViewLink,mimeType,owners)',
+      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) {
+      console.error(`[drive-watcher] Drive API ${res.status} for userId=${userId}`);
       return;
     }
-
-    const r = await drive.changes.list({
-      pageToken: tokenData.startPageToken,
-      fields: 'nextPageToken,newStartPageToken,changes(fileId,removed,file(name,webViewLink,mimeType,sharingUser))',
-      includeRemoved: false,
-      spaces: 'drive',
-    });
-
-    const nextToken = r.data.newStartPageToken || r.data.nextPageToken;
-    if (nextToken) _writeToken({ startPageToken: nextToken });
-
-    const newFiles = (r.data.changes || []).filter(c => !c.removed && c.file?.webViewLink);
-    if (!newFiles.length) return;
-
-    const chatIds = _readChats();
-    if (!chatIds.length) {
-      console.log('[drive-watcher] new files found but no chatIds tracked yet');
-      return;
-    }
-
-    const tgUrl = (tgBase || 'https://api.telegram.org').replace(/\/$/, '');
-
-    for (const change of newFiles) {
-      const { name, webViewLink, mimeType, sharingUser } = change.file;
-      const sharer = sharingUser?.emailAddress || sharingUser?.displayName || '?';
-      const label = _mimeLabel(mimeType);
-      const text = `📂 Ассистенту открыли доступ к ${label} [${name}](${webViewLink})\nОт: ${sharer}`;
-
-      console.log(`[drive-watcher] new file: "${name}" from ${sharer}`);
-
-      for (const chatId of chatIds) {
-        await fetch(`${tgUrl}/bot${botToken}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text,
-            parse_mode: 'Markdown',
-            disable_web_page_preview: false,
-          }),
-        }).catch(e => console.error('[drive-watcher] tg send failed:', e.message));
-      }
-    }
+    files = (await res.json()).files || [];
   } catch (e) {
-    console.error('[drive-watcher] poll error:', e.message);
+    console.error(`[drive-watcher] fetch error userId=${userId}:`, e.message);
+    return;
+  }
+
+  // First run: initialize seen list silently — don't spam about pre-existing files
+  if (!fs.existsSync(seenFile)) {
+    fs.writeFileSync(seenFile, JSON.stringify(files.map(f => f.id)));
+    console.log(`[drive-watcher] userId=${userId} initialized, ${files.length} pre-existing files marked seen`);
+    return;
+  }
+
+  let seen;
+  try { seen = new Set(JSON.parse(fs.readFileSync(seenFile, 'utf8'))); }
+  catch { seen = new Set(); }
+
+  const newFiles = files.filter(f => !seen.has(f.id));
+  if (!newFiles.length) return;
+
+  console.log(`[drive-watcher] userId=${userId}: ${newFiles.length} new shared file(s)`);
+
+  for (const file of newFiles) {
+    const label = _mimeLabel(file.mimeType);
+    const owner = file.owners?.[0]?.emailAddress || file.owners?.[0]?.displayName || '?';
+    const name  = file.name || 'документ';
+    const link  = file.webViewLink;
+    const text  = link
+      ? `📂 Мне открыли доступ к ${label} [${name}](${link})\nОт: ${owner}\n\nПришли ссылку — прочитаю.`
+      : `📂 Мне открыли доступ к ${label} «${name}»\nОт: ${owner}\n\nПришли ссылку — прочитаю.`;
+
+    await fetch(`${TG_BASE}/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: userId,
+        text,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: false,
+      }),
+    }).catch(e => console.error('[drive-watcher] TG send failed:', e.message));
+
+    seen.add(file.id);
+  }
+
+  fs.writeFileSync(seenFile, JSON.stringify([...seen]));
+}
+
+// ── Scan all users ────────────────────────────────────────────────────────────
+
+async function pollDriveChanges({ botToken }) {
+  const tokensBase = path.join(os.homedir(), 'agent-tokens');
+  if (!fs.existsSync(tokensBase)) return;
+
+  let entries;
+  try { entries = fs.readdirSync(tokensBase); }
+  catch { return; }
+
+  for (const userId of entries) {
+    if (!/^\d+$/.test(userId)) continue; // only numeric Telegram user IDs
+    await _checkUser(userId, botToken).catch(e =>
+      console.error(`[drive-watcher] uncaught error userId=${userId}:`, e.message)
+    );
   }
 }
+
+// trackChat — kept for API compatibility with server.js (no longer needed)
+function trackChat() {}
 
 module.exports = { trackChat, pollDriveChanges };
