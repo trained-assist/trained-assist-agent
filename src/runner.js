@@ -321,57 +321,64 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   fs.mkdirSync(user.workDir, { recursive: true });
   initLog(user.workDir);
 
-  // Resolve session: attach to existing, continue current, or create new.
-  // Done before quick-answer check so every exchange (quick or not) is logged.
-  let activeSessionId = sessionId;
+  // Resolve session context without writing to disk yet.
+  // Session creation / message appending is deferred until we know this is not a utility command.
+  let activeSessionId = null;
   let sessionContext = context;
-  let sessionAlreadyHasMessages = false;
+  let sessionExists = false; // true when continuing an existing session (not creating)
 
-  if (sessionId && sessions.getSession(user.workDir, sessionId)) {
-    // Explicit session passed by bot — continue it
-    const fromSession = sessions.buildContext(user.workDir, sessionId);
-    if (fromSession) {
-      sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
+  if (sessionId) {
+    // Explicit session ID from bot — always honor it, create if needed
+    activeSessionId = sessionId;
+    const existing = sessions.getSession(user.workDir, sessionId);
+    if (existing) {
+      sessionExists = true;
+      const fromSession = sessions.buildContext(user.workDir, sessionId);
+      if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
-    sessionAlreadyHasMessages = true;
-    sessions.appendUserMessage(user.workDir, sessionId, task);
   } else {
     // No explicit session — try to continue the most recent one (within 4h)
     const currentId = getCurrentSessionId(user.workDir);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
+      sessionExists = true;
       const fromSession = sessions.buildContext(user.workDir, currentId);
-      if (fromSession) {
-        sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
-      }
-      sessionAlreadyHasMessages = true;
-      sessions.appendUserMessage(user.workDir, currentId, task);
-    } else {
-      // New session
-      if (contextFromSession) {
-        const sourceCtx = sessions.buildContext(user.workDir, contextFromSession);
-        if (sourceCtx) {
-          sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
-        }
-      }
-      activeSessionId = sessions.createSession(user.workDir, { task, id: sessionId || undefined });
+      if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
   }
 
-  // Quick answer — bypass Claude but still log the exchange so history is intact
+  if (contextFromSession && !sessionExists) {
+    const sourceCtx = sessions.buildContext(user.workDir, contextFromSession);
+    if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
+  }
+
+  // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   const quickReply = getQuickAnswer(task, user.id, user.workDir);
   if (quickReply) {
-    // For system utility commands (/secrets_list, /ping, etc.) skip logging to keep history clean
-    const isUtility = /^\/|^ты живой|^ты онлайн|^ты работаешь|^ping$/i.test(task.trim()) ||
-      PING_INTENT.test(task) || SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
+    const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
+      SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task);
 
     if (!isUtility) {
-      sessions.appendReply(user.workDir, activeSessionId, quickReply);
+      if (sessionExists) {
+        sessions.appendUserMessage(user.workDir, activeSessionId, task);
+        sessions.appendReply(user.workDir, activeSessionId, quickReply);
+      } else {
+        // New conversation — create session with first exchange
+        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
+        sessions.appendReply(user.workDir, activeSessionId, quickReply);
+      }
       setCurrentSessionId(user.workDir, activeSessionId);
     }
     await tgSend(BOT_TOKEN, chatId, quickReply);
     return quickReply;
+  }
+
+  // Claude path — finalize session (create or append user message)
+  if (sessionExists) {
+    sessions.appendUserMessage(user.workDir, activeSessionId, task);
+  } else {
+    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
   }
 
   // Send "thinking" message, get message_id for streaming edits
