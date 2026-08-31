@@ -378,7 +378,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       setCurrentSessionId(user.workDir, activeSessionId);
     }
     const expandMarkup = activeSessionId && !isUtility
-      ? { inline_keyboard: [[{ text: '↗️ Спросить Клода подробнее', callback_data: `ask_claude|${activeSessionId}` }]] }
+      ? { inline_keyboard: [[{ text: '↗️ вдумчивее плиз', callback_data: `ask_claude|${activeSessionId}` }]] }
       : null;
     await tgSend(BOT_TOKEN, chatId, quickReply, expandMarkup ? { reply_markup: expandMarkup } : {});
     return quickReply;
