@@ -314,7 +314,7 @@ function runTask(opts) {
   return current;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, secrets }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, secrets }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
@@ -352,8 +352,15 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
+  // When forceClaude=true (user tapped the expand button), recover task from session if not provided
+  if (forceClaude && !task && activeSessionId && sessionExists) {
+    const sess = sessions.getSession(user.workDir, activeSessionId);
+    task = sess?.lastUserMessage || task;
+  }
+
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
-  const quickReply = getQuickAnswer(task, user.id, user.workDir);
+  // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
+  const quickReply = forceClaude ? null : getQuickAnswer(task, user.id, user.workDir);
   if (quickReply) {
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
       SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
@@ -370,7 +377,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       }
       setCurrentSessionId(user.workDir, activeSessionId);
     }
-    await tgSend(BOT_TOKEN, chatId, quickReply);
+    const expandMarkup = activeSessionId && !isUtility
+      ? { inline_keyboard: [[{ text: '↗️ Спросить Клода подробнее', callback_data: `ask_claude|${activeSessionId}` }]] }
+      : null;
+    await tgSend(BOT_TOKEN, chatId, quickReply, expandMarkup ? { reply_markup: expandMarkup } : {});
     return quickReply;
   }
 
@@ -638,11 +648,11 @@ function formatToolActivity(name, input = {}) {
 
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
-async function tgSend(token, chatId, text) {
+async function tgSend(token, chatId, text, extra = {}) {
   const res = await fetch(`${TG_API}/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify({ chat_id: chatId, text, ...extra }),
   });
   return res.json();
 }
