@@ -442,6 +442,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       ...cleanEnv,
       ...userTokens,
       AGENT_USER_ID: String(user.id),
+      ...(user.name     ? { AGENT_USER_NAME: user.name }         : {}),
+      ...(user.username ? { AGENT_USER_HANDLE: user.username }   : {}),
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
     },
   });
