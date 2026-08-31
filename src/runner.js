@@ -339,7 +339,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let baseContext = reqLogSection || '';
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
-  const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : task;
+  const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
   const fullOutput = { text: '' };
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
