@@ -55,8 +55,15 @@ jobs:
         env:
           AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
         run: |
-          echo "Waiting 15s for service to settle..."
-          sleep 15
+          echo "Waiting for service to be healthy (up to 60s)..."
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $AGENT_SECRET" \
+              "https://136-65-7-197.sslip.io/agent/health" 2>/dev/null || echo 000)
+            echo "  attempt $i: HTTP $STATUS"
+            [ "$STATUS" = "200" ] && break
+            sleep 5
+          done
           AGENT_URL="https://136-65-7-197.sslip.io/agent" \
           AGENT_SECRET="$AGENT_SECRET" \
           bash scripts/smoke-test.sh
