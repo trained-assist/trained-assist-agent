@@ -3,8 +3,18 @@ const OPTIONAL = ['ANTHROPIC_API_KEY', 'DEEPGRAM_API_KEY', 'BOT_SECRET', 'CF_API
 
 // GCP Secret Manager — used when running on GCP with ADC available
 async function loadFromGcp() {
-  const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
-  const client = new SecretManagerServiceClient();
+  // GOOGLE_APPLICATION_CREDENTIALS may point to a Drive-only SA key (no Secret Manager access).
+  // Temporarily unset it so the SDK falls back to the Compute Engine metadata server,
+  // which has Secret Manager access. The Drive SA is only for Drive API calls.
+  const savedCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  let client;
+  try {
+    const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+    client = new SecretManagerServiceClient();
+  } finally {
+    if (savedCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = savedCreds;
+  }
   const PROJECT = 'alesa-personal-assistent'; // GCP project name — cannot be renamed
 
   async function getSecret(name) {
