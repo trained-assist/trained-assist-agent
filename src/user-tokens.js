@@ -7,7 +7,7 @@ const TOKENS_ROOT = path.join(os.homedir(), 'agent-tokens');
 const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
 const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
 
-const LOG_FILES = new Set(['.secrets_log']);
+const LOG_FILES = new Set(['.secrets_log', 'gdrive-seen']); // internal state files, not credentials
 
 const SERVICE_DISPLAY = {
   github:          'GitHub',
