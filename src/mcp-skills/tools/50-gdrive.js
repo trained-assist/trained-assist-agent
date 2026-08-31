@@ -50,7 +50,7 @@ function makeJwt(sa) {
   const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(JSON.stringify({
     iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive',
+    scope: 'https://www.googleapis.com/auth/drive', // full scope required — drive.readonly misses externally-shared files
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,

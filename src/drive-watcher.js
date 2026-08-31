@@ -1,12 +1,15 @@
 'use strict';
 
-// Drive watcher — polls Google Drive API for each user's SA.
+// Drive watcher — polls Google Drive Changes API for each user's SA.
 //
-// For every userId that has ~/agent-tokens/{userId}/gdrive (a service-account JSON key),
-// polls Drive API every 2 min for newly shared files and sends a Telegram message.
+// Uses Changes API (not sharedWithMe=true) — sharedWithMe doesn't work for SAs
+// when shared from personal Gmail accounts. Changes API correctly tracks all
+// files that become accessible to the SA.
 //
-// First run per userId: marks all existing shared files as "seen" (no notification).
-// Subsequent runs: notifies on new shares only.
+// Scope: drive (full) required — drive.readonly misses externally-shared files.
+//
+// State stored in ~/agent-tokens/{userId}/gdrive-seen as JSON:
+//   { type: 'changes', pageToken: '...' }
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -15,7 +18,7 @@ const os = require('os');
 
 const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
-// ── SA JWT auth (mirrors 50-gdrive.js — duplicated to avoid cross-module coupling) ──
+// ── SA JWT auth ───────────────────────────────────────────────────────────────
 
 const _tokenCache = new Map();
 
@@ -24,7 +27,7 @@ function _makeJwt(sa) {
   const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(JSON.stringify({
     iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive.readonly',
+    scope: 'https://www.googleapis.com/auth/drive', // full scope required for SA file access
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -52,7 +55,7 @@ async function _getSaToken(sa) {
   return data.access_token;
 }
 
-// ── File catalog ─────────────────────────────────────────────────────────────
+// ── File catalog ──────────────────────────────────────────────────────────────
 
 const EXPORT_MIME = {
   'application/vnd.google-apps.document':     'text/plain',
@@ -69,21 +72,19 @@ async function _readSnippet(fileId, mimeType, token) {
     } else if (mimeType && (mimeType.startsWith('text/') || mimeType === 'application/json')) {
       url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
     } else {
-      return null; // binary or folder — skip content
+      return null;
     }
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) });
     if (!res.ok) return null;
-    const text = await res.text();
-    return text.slice(0, 600).trim() || null;
+    return (await res.text()).slice(0, 600).trim() || null;
   } catch { return null; }
 }
 
-// Non-blocking — called with .catch(() => {}) so it never delays notifications
 async function _catalogFile(userId, file, token) {
   const catalogPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-catalog.json');
   let catalog = [];
   try { catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8')); } catch {}
-  if (catalog.find(e => e.id === file.id)) return; // already cataloged
+  if (catalog.find(e => e.id === file.id)) return;
 
   const isFolder = file.mimeType === 'application/vnd.google-apps.folder';
   const snippet  = isFolder ? null : await _readSnippet(file.id, file.mimeType, token);
@@ -105,31 +106,42 @@ async function _catalogFile(userId, file, token) {
   console.log(`[drive-watcher] cataloged userId=${userId} fileId=${file.id} name="${file.name}"`);
 }
 
-// ── Per-user check ────────────────────────────────────────────────────────────
+// ── State helpers ─────────────────────────────────────────────────────────────
 
-function _mimeLabel(mimeType = '') {
-  if (mimeType.includes('spreadsheet')) return 'таблицу';
-  if (mimeType.includes('document'))    return 'документ';
-  if (mimeType.includes('presentation')) return 'презентацию';
-  if (mimeType.includes('folder'))      return 'папку';
-  if (mimeType.includes('video'))       return 'видео';
-  return 'файл';
+function _readState(stateFile) {
+  try {
+    const raw = fs.readFileSync(stateFile, 'utf8').trim();
+    const parsed = JSON.parse(raw);
+    // Old format was an array of file IDs — treat as needs-reinit
+    if (Array.isArray(parsed)) return null;
+    return parsed;
+  } catch { return null; }
 }
 
-// Atomic write for seenFile — prevents corrupt state on crash/OOM mid-write
-function _writeSeen(seenFile, seen) {
-  const tmp = `${seenFile}.tmp`;
+function _writeState(stateFile, state) {
+  const tmp = `${stateFile}.tmp`;
   try {
-    fs.writeFileSync(tmp, JSON.stringify([...seen]));
-    fs.renameSync(tmp, seenFile);
+    fs.writeFileSync(tmp, JSON.stringify(state));
+    fs.renameSync(tmp, stateFile);
   } catch (e) {
-    console.error('[drive-watcher] seenFile write failed:', e.message);
+    console.error('[drive-watcher] state write failed:', e.message);
   }
 }
 
+// ── Per-user check ────────────────────────────────────────────────────────────
+
+function _mimeLabel(mimeType = '') {
+  if (mimeType.includes('spreadsheet'))  return 'таблицу';
+  if (mimeType.includes('document'))     return 'документ';
+  if (mimeType.includes('presentation')) return 'презентацию';
+  if (mimeType.includes('folder'))       return 'папку';
+  if (mimeType.includes('video'))        return 'видео';
+  return 'файл';
+}
+
 async function _checkUser(userId, botToken) {
-  const saFile  = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
-  const seenFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-seen');
+  const saFile    = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+  const stateFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-seen');
   if (!fs.existsSync(saFile)) return;
 
   let sa;
@@ -144,54 +156,68 @@ async function _checkUser(userId, botToken) {
     return;
   }
 
-  // Fetch ALL sharedWithMe files, following pagination (max 5 pages × 100 = 500 files).
-  // The old pageSize=20 with no loop permanently missed files at positions 21+.
-  let files = [];
-  let pageToken;
-  let pages = 0;
-  try {
-    do {
-      const qs = `q=sharedWithMe%3Dtrue&orderBy=sharedWithMeTime%20desc&pageSize=100` +
-        `&fields=nextPageToken%2Cfiles(id%2Cname%2CwebViewLink%2CmimeType%2Cowners)` +
-        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+  const state = _readState(stateFile);
+
+  // First run (or stale old format): get startPageToken and return — no notification
+  if (!state?.pageToken) {
+    try {
       const res = await fetch(
-        `https://www.googleapis.com/drive/v3/files?${qs}`,
+        'https://www.googleapis.com/drive/v3/changes/startPageToken',
+        { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) }
+      );
+      if (!res.ok) { console.error(`[drive-watcher] startPageToken ${res.status} userId=${userId}`); return; }
+      const data = await res.json();
+      _writeState(stateFile, { type: 'changes', pageToken: data.startPageToken });
+      console.log(`[drive-watcher] userId=${userId} initialized Changes API pageToken=${data.startPageToken}`);
+    } catch (e) {
+      console.error(`[drive-watcher] init error userId=${userId}:`, e.message);
+    }
+    return;
+  }
+
+  // Poll changes since last token
+  const newFiles = [];
+  let currentToken = state.pageToken;
+  let newPageToken = currentToken;
+
+  try {
+    for (;;) {
+      const fields = 'nextPageToken,newStartPageToken,changes(changeType,removed,file(id,name,mimeType,webViewLink,owners))';
+      const res = await fetch(
+        `https://www.googleapis.com/drive/v3/changes?pageToken=${encodeURIComponent(currentToken)}&fields=${encodeURIComponent(fields)}&pageSize=100`,
         { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) }
       );
       if (!res.ok) {
-        console.error(`[drive-watcher] Drive API ${res.status} for userId=${userId}`);
+        const err = await res.json().catch(() => ({}));
+        console.error(`[drive-watcher] Changes API ${res.status} userId=${userId}:`, err.error?.message || '');
         return;
       }
       const data = await res.json();
-      files = files.concat(data.files || []);
-      pageToken = data.nextPageToken;
-    } while (pageToken && ++pages < 5);
+      for (const change of (data.changes || [])) {
+        if (change.changeType === 'file' && !change.removed && change.file?.id) {
+          newFiles.push(change.file);
+        }
+      }
+      if (data.nextPageToken) {
+        currentToken = data.nextPageToken;
+      } else {
+        newPageToken = data.newStartPageToken || currentToken;
+        break;
+      }
+    }
   } catch (e) {
-    console.error(`[drive-watcher] fetch error userId=${userId}:`, e.message);
+    console.error(`[drive-watcher] changes fetch error userId=${userId}:`, e.message);
     return;
   }
 
-  // First run: mark everything as seen silently — don't notify about pre-existing files
-  if (!fs.existsSync(seenFile)) {
-    _writeSeen(seenFile, new Set(files.map(f => f.id)));
-    console.log(`[drive-watcher] userId=${userId} initialized, ${files.length} pre-existing files marked seen`);
-    return;
+  // Always advance the cursor even if no new files
+  if (newPageToken !== state.pageToken) {
+    _writeState(stateFile, { type: 'changes', pageToken: newPageToken });
   }
 
-  let seen;
-  try { seen = new Set(JSON.parse(fs.readFileSync(seenFile, 'utf8'))); }
-  catch (e) {
-    // Corrupt seenFile — reinitialize with current files to avoid duplicate notifications.
-    // Files shared between last good write and now will be missed on this poll only.
-    console.error(`[drive-watcher] corrupt seenFile userId=${userId}, reinitializing:`, e.message);
-    _writeSeen(seenFile, new Set(files.map(f => f.id)));
-    return;
-  }
-
-  const newFiles = files.filter(f => !seen.has(f.id));
   if (!newFiles.length) return;
 
-  console.log(`[drive-watcher] userId=${userId}: ${newFiles.length} new shared file(s)`);
+  console.log(`[drive-watcher] userId=${userId}: ${newFiles.length} new file(s) via Changes API`);
 
   for (const file of newFiles) {
     const label = _mimeLabel(file.mimeType);
@@ -205,22 +231,12 @@ async function _checkUser(userId, botToken) {
     await fetch(`${TG_BASE}/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: userId,
-        text,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: false,
-      }),
+      body: JSON.stringify({ chat_id: userId, text, parse_mode: 'Markdown', disable_web_page_preview: false }),
     }).catch(e => console.error('[drive-watcher] TG send failed:', e.message));
 
-    // Catalog in background — non-blocking, never delays next notification
     _catalogFile(userId, file, token).catch(e =>
       console.error(`[drive-watcher] catalog failed fileId=${file.id}:`, e.message)
     );
-
-    // Persist seen state after every send — crash-safe; no duplicates on restart
-    seen.add(file.id);
-    _writeSeen(seenFile, seen);
   }
 }
 
@@ -242,7 +258,7 @@ async function pollDriveChanges({ botToken }) {
   }
 }
 
-// trackChat — kept for API compatibility with server.js (no longer needed)
+// trackChat — kept for API compatibility with server.js
 function trackChat() {}
 
 module.exports = { trackChat, pollDriveChanges };
