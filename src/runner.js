@@ -552,4 +552,4 @@ async function tgEdit(token, chatId, messageId, text) {
   return res.json();
 }
 
-module.exports = { runTask };
+module.exports = { runTask, getQuickAnswer };
