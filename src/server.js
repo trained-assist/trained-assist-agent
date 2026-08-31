@@ -444,7 +444,7 @@ async function main() {
       const userId = url.searchParams.get('userId') || '';
       if (!userId || !/^-?\d{1,20}$/.test(userId)) return json(res, 400, { error: 'invalid userId' });
       const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
-      const SKIP = new Set(['.secrets_log']);
+      const SKIP = new Set(['.secrets_log', 'gdrive-seen', 'gdrive-catalog', 'gdrive-catalog.json']);
       let capabilities = [];
       if (fs.existsSync(tokensDir)) {
         capabilities = fs.readdirSync(tokensDir).filter(f => !SKIP.has(f) && !f.startsWith('.'));
