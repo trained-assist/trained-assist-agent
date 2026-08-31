@@ -332,9 +332,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Skills are now available via trained-skills MCP (tools/list → list_skills).
   // No prompt injection needed — Claude discovers and calls tools directly.
-  let baseContext = sessionContext || '';
-  if (reqLogSection) baseContext = baseContext ? `${baseContext}\n\n${reqLogSection}` : reqLogSection;
-  const prompt = baseContext ? `${baseContext}\n\n${task}` : task;
+  //
+  // Context ordering: requirements log → session history → current user message.
+  // "Пользователь:" prefix on the current task is critical when session context is
+  // present — without it Claude reads the last session message as the current request.
+  let baseContext = reqLogSection || '';
+  if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
+  const currentTask = sessionContext ? `Пользователь: ${task}` : task;
+  const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : task;
   const fullOutput = { text: '' };
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
