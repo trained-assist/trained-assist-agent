@@ -43,5 +43,29 @@ When the user asks to read / open / list any Google Drive file or folder:
 - If the user asks about their Google Drive SA email: call gdrive_status — it returns the sa_email.
 - If asked "что подключено" — use gdrive_status / /secrets_list, not Claude account context.
 
+## Requirements Log — ведение лога требований
+
+В рабочей директории пользователя есть файл `requirements-log.md`. Это живой трекер: что пользователь хочет от ассистента, как часто упоминает, насколько эмоционально.
+
+**Когда обновлять:** если в задаче пользователь упоминает фичу, пожелание, или улучшение ассистента — обнови лог в конце задачи (последним действием перед ответом). Не трогай лог для рутинных задач (прочитай файл, напиши письмо и т. д.) — только для стратегических требований.
+
+**Правила:**
+1. Новое требование → добавь запись с Count: 1, датой First и Last = сегодня
+2. Уже есть в логе → увеличь Count на 1, обнови Last; если стало важнее — увеличь Intensity
+3. Реализовал → обнови Status на `implemented`
+4. Отказ → `rejected: [причина]`
+
+**Intensity (0–3):**
+- 0 — вскользь упомянул ("было бы неплохо")
+- 1 — чёткая просьба ("нужно", "сделай", "добавь")
+- 2 — акцентировал ("очень важно!", восклицательные знаки, повторил в том же сообщении)
+- 3 — `[voice-message]` с эмоциями, или требование повторено несколько раз подряд с нарастанием
+
+**Нумерация:** продолжай с последнего номера в файле. Формат записи:
+```
+**[NNN]** Описание требования
+Status: planned | Count: N | Intensity: N | First: YYYY-MM-DD | Last: YYYY-MM-DD
+```
+
 ## Formatting
 Plain text only. No HTML. Sparingly use `code` formatting for commands.

@@ -14,6 +14,7 @@ const {
   generateConnectLink,
   SERVICE_DISPLAY,
 } = require('./user-tokens');
+const { initLog, readLog } = require('./requirements-log');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 12000;
@@ -261,6 +262,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const chatId = user.id;
 
   fs.mkdirSync(user.workDir, { recursive: true });
+  initLog(user.workDir);
 
   // Quick answer — check before session creation so system commands
   // (/secrets_list, /secrets_log, connect links, revoke) don't pollute
@@ -322,9 +324,17 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     return expiredMsg;
   }
 
+  // Inject requirements log so Claude can track and update user requirements
+  const reqLog = readLog(user.workDir);
+  const reqLogSection = reqLog
+    ? `[REQUIREMENTS LOG — обновляй в конце каждой задачи]\n${reqLog}`
+    : '';
+
   // Skills are now available via trained-skills MCP (tools/list → list_skills).
   // No prompt injection needed — Claude discovers and calls tools directly.
-  const prompt = sessionContext ? `${sessionContext}\n\n${task}` : task;
+  let baseContext = sessionContext || '';
+  if (reqLogSection) baseContext = baseContext ? `${baseContext}\n\n${reqLogSection}` : reqLogSection;
+  const prompt = baseContext ? `${baseContext}\n\n${task}` : task;
   const fullOutput = { text: '' };
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
