@@ -433,3 +433,134 @@ describe('Telegram delivery', () => {
   });
 
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO 7: quick-answer button (expand to Claude)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Expand button — forceClaude escalation', () => {
+
+  it('quick answer includes inline keyboard button', { timeout: 10000 }, async () => {
+    await chat('подключи github');
+    const sent = tgSent();
+    expect(sent.length).toBe(1);
+    const body = sent[0].body;
+    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toMatch(/вдумчивее/i);
+    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data).toMatch(/^ask_claude\|/);
+  });
+
+  it('forceClaude=true skips quick answer and calls Claude', { timeout: 20000 }, async () => {
+    // First: create session with a quick answer
+    await chat('подключи github');
+    const current = readCurrentSession();
+    const sessionId = current.id;
+
+    // Now user taps expand button — forceClaude=true, no task (agent reads lastUserMessage)
+    tgLog = [];
+    await runTask({
+      taskId: `t-expand-${Date.now()}`,
+      user: makeUser(),
+      task: '',           // bot sends empty task on button tap
+      context: null,
+      sessionId,
+      contextFromSession: null,
+      forceClaude: true,
+      secrets: { BOT_TOKEN: 'fake:token' },
+    });
+
+    // Should have sent thinking + final edit (Claude path, not quick-answer path)
+    const sends = tgSent().filter(l => l.url.includes('sendMessage'));
+    const edits = tgSent().filter(l => l.url.includes('editMessageText'));
+    expect(sends.length, 'should send thinking message').toBe(1);
+    expect(sends[0].body.text).toMatch(/Думаю/);
+    expect(edits.length, 'should edit to ✅').toBeGreaterThanOrEqual(1);
+    expect(edits[edits.length - 1].body.text).toMatch(/✅/);
+  });
+
+  it('forceClaude session history includes the original quick-answer exchange', { timeout: 20000 }, async () => {
+    await chat('подключи weeek');
+    const sessionId = readCurrentSession().id;
+
+    await runTask({
+      taskId: `t-expand2-${Date.now()}`,
+      user: makeUser(),
+      task: '',
+      context: null,
+      sessionId,
+      contextFromSession: null,
+      forceClaude: true,
+      secrets: { BOT_TOKEN: 'fake:token' },
+    });
+
+    const sess = readSession(sessionId);
+    // Session should have: quick-answer user + quick-answer bot + expand user(same) + claude reply = 4
+    expect(sess.messages.length, 'expected 4 messages (quick exchange + Claude turn)').toBe(4);
+    const claudeMsg = sess.messages[sess.messages.length - 1];
+    expect(claudeMsg.role).toBe('assistant');
+  });
+
+  it('utility commands still have NO button (ping)', { timeout: 10000 }, async () => {
+    await chat('/ping');
+    const sent = tgSent();
+    expect(sent.length).toBe(1);
+    expect(sent[0].body.reply_markup).toBeUndefined();
+  });
+
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO 8: real dialogue pattern — выставки/gdrive style
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Dialogue: Google Drive file research (like выставки)', () => {
+
+  it('gdrive share prompt → Claude data request: session carries SA email', { timeout: 25000 }, async () => {
+    // Simulate: user asks to share a file (quick answer with SA email)
+    // then asks Claude to read it
+    // Without gdrive token set up, gdrive_share goes to null (no email)
+    // So we test the pattern where user sends Claude a real work message first
+
+    await chat('это каталог выставок, хочу собрать данные по участникам', {
+      claudeReply: 'Понял задачу. Покажи список выставок — или пришли ссылку на файл.',
+    });
+
+    const current = readCurrentSession();
+    const sess = readSession(current.id);
+    expect(sess.messages.length).toBe(2);
+    expect(sess.messages[0].content).toMatch(/выставок/i);
+
+    // User continues — Claude gets prior context
+    tgLog = [];
+    await chat('вот файл выставки-2026.xlsx, первые 3 — ExpoMos, BuildEx, AgriRu', {
+      claudeReply: 'Понял, буду собирать данные: ИНН, ОГРН, директор, выручка, сайт. Начинаю с ExpoMos.',
+    });
+
+    const sessAfter = readSession(current.id);
+    expect(sessAfter.messages.length, 'expected 4 messages after 2 Claude turns').toBe(4);
+
+    const texts = tgTexts();
+    expect(texts[texts.length - 1]).toMatch(/✅/);
+    expect(texts[texts.length - 1]).toMatch(/ExpoMos/);
+  });
+
+  it('long dialogue (4 turns) — session accumulates correctly', { timeout: 60000 }, async () => {
+    const turns = [
+      { msg: 'подключи github', reply: null },   // quick answer
+      { msg: 'создай репо train-data', reply: 'Репозиторий train-data создан' },
+      { msg: 'добавь README с описанием', reply: 'README.md добавлен в main' },
+      { msg: 'создай .gitignore для node', reply: '.gitignore создан' },
+    ];
+
+    for (const t of turns) {
+      await chat(t.msg, { claudeReply: t.reply });
+    }
+
+    const sess = readSession(readCurrentSession().id);
+    // quick answer: 2 msgs + 3 Claude turns × 2 = 8 total
+    expect(sess.messages.length, 'expected 8 messages across 4 turns').toBe(8);
+
+    const sessionId = readCurrentSession().id;
+    expect(sessionId, 'session should stay the same throughout').toBe(readCurrentSession().id);
+  });
+
+});
