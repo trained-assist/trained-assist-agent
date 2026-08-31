@@ -101,10 +101,10 @@ async function submit() {
   showMsg('info', login ? '⏳ Открываю браузер и вхожу в аккаунт…' : '⏳ Сохраняю настройки…');
 
   try {
-    const r = await fetch('/connect/getcourse', {
+    const r = await fetch(location.pathname, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ t: T, accountDomain: domain, apiKey: apiKey || undefined, login: login || undefined, password: password || undefined }),
+      body: JSON.stringify({ t: T, domain: domain, apiKey: apiKey || undefined, login: login || undefined, password: password || undefined }),
       signal: AbortSignal.timeout(95000),
     });
     const d = await r.json();
