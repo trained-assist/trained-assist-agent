@@ -38,8 +38,8 @@ if [ -f "$UNIT_SRC" ]; then
   fi
 fi
 
-echo "==> Stopping legacy conflicting services (alesa-agent, trained-assist-agent)..."
-for OLD_SVC in alesa-agent trained-assist-agent; do
+echo "==> Stopping legacy conflicting services (alesa-agent)..."
+for OLD_SVC in alesa-agent; do
   if systemctl list-unit-files | grep -q "^${OLD_SVC}.service"; then
     sudo systemctl stop "$OLD_SVC" 2>/dev/null || true
     sudo systemctl disable "$OLD_SVC" 2>/dev/null || true
