@@ -61,11 +61,8 @@ const QUICK_SETUPS = [
     service: 'weeek',
     hint: 'Где взять: Weeek → Settings → Integrations → API → Generate token',
   },
-  {
-    match: /google.?drive|гугл.?диск|gdrive/i,
-    service: null,
-    hint: 'Скажи мне "настрой Google Drive" — вызову gdrive_setup, он создаст сервис-аккаунт автоматически.',
-  },
+  // Google Drive: pass to Claude so it calls gdrive_setup automatically — no manual step for user
+  // { match: /google.?drive|гугл.?диск|gdrive/i, service: null, hint: '...' },
   {
     match: /tilda|тильда/i,
     service: null,
@@ -232,16 +229,7 @@ function getQuickAnswer(task, userId, workDir) {
           '',
           'Google Drive уже подключён. Пошари файл — и пришли мне ссылку или скажи «прочитай [название]».',
         ].join('\n')
-      : [
-          'Да, умею работать с Google Drive:',
-          '',
-          '📊 Читать Google Sheets — анализ, формулы, выборки',
-          '📄 Читать Google Docs — конспект, резюме, поиск по тексту',
-          '📤 Загружать CSV/данные в Google Sheets',
-          '📂 Следить за папкой — уведомление когда добавляют новый файл',
-          '',
-          'Для начала: напиши «настрой Google Drive» — создам сервис-аккаунт за 30 секунд.',
-        ].join('\n');
+      : null; // not configured — let Claude call gdrive_setup automatically
   }
 
   // "пошарить таблицу тебе", "как поделиться файлом", "email SA" — always read from disk, never hallucinate
@@ -262,7 +250,7 @@ function getQuickAnswer(task, userId, workDir) {
         ].join('\n');
       }
     } catch {}
-    return '❌ Google Drive ещё не настроен. Напиши «настрой Google Drive» — автоматически создам сервис-аккаунт и дам email для шаринга.';
+    return null; // not configured — let Claude call gdrive_setup automatically
   }
 
   // Capability question about INN enrichment — answer immediately without calling Claude
