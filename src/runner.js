@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
+const { getCurrentSessionId, setCurrentSessionId } = require('./session-store');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
 const { recordUsage, getUsageTotals } = require('./usage-store');
 const {
@@ -320,40 +321,57 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   fs.mkdirSync(user.workDir, { recursive: true });
   initLog(user.workDir);
 
-  // Quick answer — check before session creation so system commands
-  // (/secrets_list, /secrets_log, connect links, revoke) don't pollute
-  // session history with ephemeral utility responses.
-  const quickReply = getQuickAnswer(task, user.id, user.workDir);
-  if (quickReply) {
-    await tgSend(BOT_TOKEN, chatId, quickReply);
-    // If continuing an existing session, still log the exchange there
-    if (sessionId && sessions.getSession(user.workDir, sessionId)) {
-      sessions.appendUserMessage(user.workDir, sessionId, task);
-      sessions.appendReply(user.workDir, sessionId, quickReply);
-    }
-    return quickReply;
-  }
-
-  // Resolve session: attach to existing or create new
+  // Resolve session: attach to existing, continue current, or create new.
+  // Done before quick-answer check so every exchange (quick or not) is logged.
   let activeSessionId = sessionId;
   let sessionContext = context;
+  let sessionAlreadyHasMessages = false;
 
   if (sessionId && sessions.getSession(user.workDir, sessionId)) {
-    // Existing session — build context from prior history
+    // Explicit session passed by bot — continue it
     const fromSession = sessions.buildContext(user.workDir, sessionId);
     if (fromSession) {
       sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
+    sessionAlreadyHasMessages = true;
     sessions.appendUserMessage(user.workDir, sessionId, task);
   } else {
-    // New session — optionally preload context from another session
-    if (contextFromSession) {
-      const sourceCtx = sessions.buildContext(user.workDir, contextFromSession);
-      if (sourceCtx) {
-        sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
+    // No explicit session — try to continue the most recent one (within 4h)
+    const currentId = getCurrentSessionId(user.workDir);
+    if (currentId && sessions.getSession(user.workDir, currentId)) {
+      activeSessionId = currentId;
+      const fromSession = sessions.buildContext(user.workDir, currentId);
+      if (fromSession) {
+        sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
       }
+      sessionAlreadyHasMessages = true;
+      sessions.appendUserMessage(user.workDir, currentId, task);
+    } else {
+      // New session
+      if (contextFromSession) {
+        const sourceCtx = sessions.buildContext(user.workDir, contextFromSession);
+        if (sourceCtx) {
+          sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
+        }
+      }
+      activeSessionId = sessions.createSession(user.workDir, { task, id: sessionId || undefined });
     }
-    activeSessionId = sessions.createSession(user.workDir, { task, id: sessionId || undefined });
+  }
+
+  // Quick answer — bypass Claude but still log the exchange so history is intact
+  const quickReply = getQuickAnswer(task, user.id, user.workDir);
+  if (quickReply) {
+    // For system utility commands (/secrets_list, /ping, etc.) skip logging to keep history clean
+    const isUtility = /^\/|^ты живой|^ты онлайн|^ты работаешь|^ping$/i.test(task.trim()) ||
+      PING_INTENT.test(task) || SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
+      SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task);
+
+    if (!isUtility) {
+      sessions.appendReply(user.workDir, activeSessionId, quickReply);
+      setCurrentSessionId(user.workDir, activeSessionId);
+    }
+    await tgSend(BOT_TOKEN, chatId, quickReply);
+    return quickReply;
   }
 
   // Send "thinking" message, get message_id for streaming edits
@@ -407,6 +425,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   const systemPromptFile = path.join(__dirname, 'agent-system-prompt.txt');
 
+  const sessionFilePath = activeSessionId
+    ? path.join(user.workDir, 'sessions', `${activeSessionId}.json`)
+    : '';
+
   const proc = spawn('claude', [
     '--dangerously-skip-permissions',
     '--output-format', 'stream-json',
@@ -420,6 +442,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       ...cleanEnv,
       ...userTokens,
       AGENT_USER_ID: String(user.id),
+      ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
     },
   });
 
@@ -574,6 +597,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // Append assistant reply to session history
   if (activeSessionId) {
     sessions.appendReply(user.workDir, activeSessionId, result);
+    setCurrentSessionId(user.workDir, activeSessionId);
   }
 
   return result;
