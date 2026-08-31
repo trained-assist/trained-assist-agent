@@ -44,10 +44,21 @@ echo "==> Killing any orphan node processes on port 8080..."
 sudo fuser -k 8080/tcp 2>/dev/null || true
 sleep 1
 
+echo "==> Ensuring data directories exist..."
+DATA_DIR="${AGENT_DATA_DIR:-/home/vova/alesa-data}"
+mkdir -p "$DATA_DIR/system-flags"
+chown -R vova:vova "$DATA_DIR" 2>/dev/null || true
+
 echo "==> Restarting service..."
 sudo systemctl restart "$SERVICE"
-# RestartSec=5 in unit file — wait long enough for a crash-then-restart cycle to complete
-sleep 8
+
+echo "==> Waiting for service to be healthy (up to 60s)..."
+for i in $(seq 1 12); do
+  STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:8080/health 2>/dev/null || echo 000)
+  echo "  attempt $i: HTTP $STATUS_CODE"
+  [ "$STATUS_CODE" = "401" ] && break
+  sleep 5
+done
 sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
 echo "==> Service journal (last 20 lines)..."
 sudo journalctl -u "$SERVICE" --no-pager -n 20 || true
