@@ -68,9 +68,9 @@ async function _readSnippet(fileId, mimeType, token) {
     let url;
     const exportMime = EXPORT_MIME[mimeType];
     if (exportMime) {
-      url = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`;
+      url = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}&supportsAllDrives=true`;
     } else if (mimeType && (mimeType.startsWith('text/') || mimeType === 'application/json')) {
-      url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+      url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
     } else {
       return null;
     }
@@ -162,7 +162,7 @@ async function _checkUser(userId, botToken) {
   if (!state?.pageToken) {
     try {
       const res = await fetch(
-        'https://www.googleapis.com/drive/v3/changes/startPageToken',
+        'https://www.googleapis.com/drive/v3/changes/startPageToken?supportsAllDrives=true&includeCorpusRemovals=true',
         { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) }
       );
       if (!res.ok) { console.error(`[drive-watcher] startPageToken ${res.status} userId=${userId}`); return; }
@@ -184,7 +184,7 @@ async function _checkUser(userId, botToken) {
     for (;;) {
       const fields = 'nextPageToken,newStartPageToken,changes(changeType,removed,file(id,name,mimeType,webViewLink,owners))';
       const res = await fetch(
-        `https://www.googleapis.com/drive/v3/changes?pageToken=${encodeURIComponent(currentToken)}&fields=${encodeURIComponent(fields)}&pageSize=100`,
+        `https://www.googleapis.com/drive/v3/changes?pageToken=${encodeURIComponent(currentToken)}&fields=${encodeURIComponent(fields)}&pageSize=100&supportsAllDrives=true&includeItemsFromAllDrives=true`,
         { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) }
       );
       if (!res.ok) {
