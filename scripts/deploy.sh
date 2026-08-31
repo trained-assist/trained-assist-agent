@@ -5,6 +5,9 @@ set -e
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 
+echo "==> Stopping service before dependency install..."
+sudo systemctl stop "$SERVICE" 2>/dev/null || true
+
 echo "==> Installing dependencies..."
 cd "$REPO_DIR"
 rm -rf node_modules
