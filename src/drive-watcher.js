@@ -131,12 +131,12 @@ function _writeState(stateFile, state) {
 // ── Per-user check ────────────────────────────────────────────────────────────
 
 function _mimeLabel(mimeType = '') {
-  if (mimeType.includes('spreadsheet'))  return 'таблицу';
-  if (mimeType.includes('document'))     return 'документ';
-  if (mimeType.includes('presentation')) return 'презентацию';
-  if (mimeType.includes('folder'))       return 'папку';
+  if (mimeType.includes('spreadsheet'))  return 'таблице';
+  if (mimeType.includes('document'))     return 'документу';
+  if (mimeType.includes('presentation')) return 'презентации';
+  if (mimeType.includes('folder'))       return 'папке';
   if (mimeType.includes('video'))        return 'видео';
-  return 'файл';
+  return 'файлу';
 }
 
 async function _checkUser(userId, botToken) {
@@ -225,8 +225,8 @@ async function _checkUser(userId, botToken) {
     const name  = file.name || 'документ';
     const link  = file.webViewLink;
     const text  = link
-      ? `📂 Мне открыли доступ к ${label} [${name}](${link})\nОт: ${owner}\n\nПришли ссылку — прочитаю.`
-      : `📂 Мне открыли доступ к ${label} «${name}»\nОт: ${owner}\n\nПришли ссылку — прочитаю.`;
+      ? `📂 Открыли доступ к ${label} [${name}](${link})\nОт: ${owner}\n\nСкажи что делать с файлом.`
+      : `📂 Открыли доступ к ${label} «${name}»\nОт: ${owner}\n\nСкажи что делать с файлом.`;
 
     await fetch(`${TG_BASE}/bot${botToken}/sendMessage`, {
       method: 'POST',
