@@ -91,6 +91,7 @@ async function main() {
   const GDRIVE_REDIRECT_URI  = `${(process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '')}/connect/gdrive/callback`;
 
   const server = http.createServer(async (req, res) => {
+    try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
     // ── POST /connect/nalog/code — confirm 2FA code (no AGENT_SECRET needed) ──
@@ -131,7 +132,7 @@ async function main() {
         return;
       }
       if (pending.expires < Date.now()) {
-        fs.unlinkSync(pendingFile);
+        try { fs.unlinkSync(pendingFile); } catch {}
         res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Ссылка устарела. Попроси новую через Telegram.'));
         return;
       }
@@ -145,7 +146,11 @@ async function main() {
       }
 
       // Consume pending token; generate OAuth state
-      fs.unlinkSync(pendingFile);
+      try { fs.unlinkSync(pendingFile); } catch {
+        // Already consumed by a concurrent request — return the same error as expired
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Ссылка уже использована.'));
+        return;
+      }
       const crypto = require('crypto');
       const stateToken = crypto.randomBytes(16).toString('hex');
       oauthStateStore.set(stateToken, { userId: pending.uid, expires: Date.now() + 15 * 60 * 1000 });
@@ -274,11 +279,11 @@ async function main() {
           const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
           let pending;
           try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-          if (pending.expires < Date.now()) { fs.unlinkSync(pendingFile); res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
           if (pending.service !== 'nalog') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
           if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
 
-          fs.unlinkSync(pendingFile); // one-time use
+          try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; } // one-time use
 
           // Browser login may take 30–60s; form sets fetch timeout to 90s
           const result = await startNalogLogin(pending.uid, login, password);
@@ -335,11 +340,11 @@ async function main() {
           const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
           let pending;
           try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-          if (pending.expires < Date.now()) { fs.unlinkSync(pendingFile); res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
           if (pending.service !== 'getcourse') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
           if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
 
-          fs.unlinkSync(pendingFile); // one-time use
+          try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; } // one-time use
 
           const cleanDomain = domain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
           const patch = { accountDomain: cleanDomain };
@@ -395,14 +400,14 @@ async function main() {
         const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
         let pending;
         try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-        if (pending.expires < Date.now()) { fs.unlinkSync(pendingFile); res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+        if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
         if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
 
         if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
         const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
         fs.mkdirSync(tokensDir, { recursive: true });
         fs.writeFileSync(path.join(tokensDir, service), String(value).trim(), { mode: 0o600 });
-        fs.unlinkSync(pendingFile); // one-time use
+        try { fs.unlinkSync(pendingFile); } catch {} // one-time use; ignore if already deleted
         console.log(`[connect] saved ${service} token for uid=${pending.uid}`);
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
 
@@ -692,6 +697,10 @@ async function main() {
     }
 
     json(res, 404, { error: 'not found' });
+    } catch (err) {
+      console.error('[request-handler] unhandled error:', err);
+      if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: 'internal server error' }));
+    }
   });
 
   server.listen(PORT, () => console.log(`assist-agent listening on :${PORT}`));
@@ -743,6 +752,16 @@ function readBody(req, maxBytes = 1_048_576) {
     req.on('error', reject);
   });
 }
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[unhandledRejection] at:', promise, 'reason:', reason);
+  // Log but do NOT crash — a single bad request should not kill the server.
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  // Same: log and keep running unless it's a startup error.
+});
 
 main().catch(err => { console.error('Fatal:', err); process.exit(1); });
 

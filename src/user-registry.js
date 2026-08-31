@@ -18,8 +18,12 @@ class UserRegistry {
   }
 
   _save() {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(this._data, null, 2));
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(REGISTRY_FILE, JSON.stringify(this._data, null, 2));
+    } catch (e) {
+      console.error('[user-registry] _save failed:', e.message);
+    }
   }
 
   get(username) {

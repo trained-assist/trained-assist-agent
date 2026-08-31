@@ -367,4 +367,11 @@ async function extractAndSave(page, browser, userId) {
   }
 }
 
-module.exports = { startNalogLogin, confirmNalogCode };
+function closeAll() {
+  for (const [id, sess] of pendingSessions) {
+    sess.browser.close().catch(() => {});
+    pendingSessions.delete(id);
+  }
+}
+
+module.exports = { startNalogLogin, confirmNalogCode, closeAll };

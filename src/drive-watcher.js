@@ -63,6 +63,17 @@ function _mimeLabel(mimeType = '') {
   return 'файл';
 }
 
+// Atomic write for seenFile — prevents corrupt state on crash/OOM mid-write
+function _writeSeen(seenFile, seen) {
+  const tmp = `${seenFile}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify([...seen]));
+    fs.renameSync(tmp, seenFile);
+  } catch (e) {
+    console.error('[drive-watcher] seenFile write failed:', e.message);
+  }
+}
+
 async function _checkUser(userId, botToken) {
   const saFile  = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
   const seenFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-seen');
@@ -80,35 +91,49 @@ async function _checkUser(userId, botToken) {
     return;
   }
 
-  // List most-recent 20 files shared with this SA
-  let files;
+  // Fetch ALL sharedWithMe files, following pagination (max 5 pages × 100 = 500 files).
+  // The old pageSize=20 with no loop permanently missed files at positions 21+.
+  let files = [];
+  let pageToken;
+  let pages = 0;
   try {
-    const res = await fetch(
-      'https://www.googleapis.com/drive/v3/files' +
-      '?q=sharedWithMe%3Dtrue&orderBy=sharedWithMeTime%20desc&pageSize=20' +
-      '&fields=files(id,name,webViewLink,mimeType,owners)',
-      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) }
-    );
-    if (!res.ok) {
-      console.error(`[drive-watcher] Drive API ${res.status} for userId=${userId}`);
-      return;
-    }
-    files = (await res.json()).files || [];
+    do {
+      const qs = `q=sharedWithMe%3Dtrue&orderBy=sharedWithMeTime%20desc&pageSize=100` +
+        `&fields=nextPageToken%2Cfiles(id%2Cname%2CwebViewLink%2CmimeType%2Cowners)` +
+        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+      const res = await fetch(
+        `https://www.googleapis.com/drive/v3/files?${qs}`,
+        { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) }
+      );
+      if (!res.ok) {
+        console.error(`[drive-watcher] Drive API ${res.status} for userId=${userId}`);
+        return;
+      }
+      const data = await res.json();
+      files = files.concat(data.files || []);
+      pageToken = data.nextPageToken;
+    } while (pageToken && ++pages < 5);
   } catch (e) {
     console.error(`[drive-watcher] fetch error userId=${userId}:`, e.message);
     return;
   }
 
-  // First run: initialize seen list silently — don't spam about pre-existing files
+  // First run: mark everything as seen silently — don't notify about pre-existing files
   if (!fs.existsSync(seenFile)) {
-    fs.writeFileSync(seenFile, JSON.stringify(files.map(f => f.id)));
+    _writeSeen(seenFile, new Set(files.map(f => f.id)));
     console.log(`[drive-watcher] userId=${userId} initialized, ${files.length} pre-existing files marked seen`);
     return;
   }
 
   let seen;
   try { seen = new Set(JSON.parse(fs.readFileSync(seenFile, 'utf8'))); }
-  catch { seen = new Set(); }
+  catch (e) {
+    // Corrupt seenFile — reinitialize with current files to avoid duplicate notifications.
+    // Files shared between last good write and now will be missed on this poll only.
+    console.error(`[drive-watcher] corrupt seenFile userId=${userId}, reinitializing:`, e.message);
+    _writeSeen(seenFile, new Set(files.map(f => f.id)));
+    return;
+  }
 
   const newFiles = files.filter(f => !seen.has(f.id));
   if (!newFiles.length) return;
@@ -135,10 +160,10 @@ async function _checkUser(userId, botToken) {
       }),
     }).catch(e => console.error('[drive-watcher] TG send failed:', e.message));
 
+    // Persist seen state after every send — crash-safe; no duplicates on restart
     seen.add(file.id);
+    _writeSeen(seenFile, seen);
   }
-
-  fs.writeFileSync(seenFile, JSON.stringify([...seen]));
 }
 
 // ── Scan all users ────────────────────────────────────────────────────────────

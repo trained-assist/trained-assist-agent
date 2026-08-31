@@ -40,7 +40,9 @@ function loadUserTokens(userId) {
   const accessed = [];
   for (const file of fs.readdirSync(dir)) {
     if (LOG_FILES.has(file)) continue;
-    const val = fs.readFileSync(path.join(dir, file), 'utf8').trim();
+    let val;
+    try { val = fs.readFileSync(path.join(dir, file), 'utf8').trim(); }
+    catch { continue; } // file deleted between readdirSync and readFileSync — skip
     const label = file.toLowerCase();
     accessed.push(label);
     if (label === 'github') { extra.GH_TOKEN = val; extra.GITHUB_TOKEN = val; }
@@ -72,7 +74,8 @@ function listConnectedServices(userId) {
   if (files.length === 0) return null;
   return files.map(f => {
     const name = SERVICE_DISPLAY[f.toLowerCase()] || f;
-    const mtime = fs.statSync(path.join(dir, f)).mtime;
+    let mtime = new Date(0);
+    try { mtime = fs.statSync(path.join(dir, f)).mtime; } catch {} // race: file deleted between readdirSync and statSync
     return { file: f, name, mtime };
   });
 }
@@ -95,7 +98,7 @@ function revokeService(userId, serviceName) {
 
   const filePath = path.join(dir, key);
   if (!fs.existsSync(filePath)) return 'not_found';
-  fs.unlinkSync(filePath);
+  try { fs.unlinkSync(filePath); } catch { return 'not_found'; } // TOCTOU: already deleted
   appendSecretsLog(userId, [`revoke:${key}`]);
   return key;
 }
