@@ -327,13 +327,16 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let lineBuffer = '';
   let claudeResult = null;  // text from result event
   let claudeUsage = null;   // usage from result event
+  let lastActivity = '';     // last tool name/cmd for heartbeat
+  let exitCode = 0;
 
   // Heartbeat: show elapsed seconds while Claude hasn't produced output yet
   if (msgId) {
     heartbeatTimer = setInterval(async () => {
       if (outputStarted) return;
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
-      await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ Думаю… (${secs}с)`).catch(() => {});
+      const label = lastActivity || 'Думаю…';
+      await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${label} (${secs}с)`).catch(() => {});
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -368,6 +371,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           for (const block of event.message.content) {
             if (block.type === 'text') {
               fullOutput.text += block.text;
+            } else if (block.type === 'tool_use') {
+              lastActivity = formatToolActivity(block.name, block.input);
+              if (!outputStarted && msgId) {
+                const secs = Math.round((Date.now() - thinkingStart) / 1000);
+                tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${lastActivity} (${secs}с)`).catch(() => {});
+              }
             }
           }
           scheduleStream();
@@ -394,7 +403,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
       proc.on('close', (code) => {
         clearTimeout(killTimer);
-        if (code !== 0) console.error(`[${taskId}] claude exited with code ${code}`);
+        if (code !== 0) {
+          console.error(`[${taskId}] claude exited with code ${code}`);
+          exitCode = code;
+        }
         resolve(code);
       });
       proc.on('error', (err) => {
@@ -408,6 +420,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   } finally {
     clearInterval(streamTimer);
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  }
+
+  // If claude crashed with non-zero exit and produced almost no output — show crash error
+  if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
+    const crashMsg = `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
+    else await tgSend(BOT_TOKEN, chatId, crashMsg);
+    return crashMsg;
   }
 
   // Prefer the clean result string from the result event; fall back to accumulated stream text
@@ -440,6 +460,30 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
 
   return result;
+}
+
+
+function formatToolActivity(name, input = {}) {
+  switch (name) {
+    case 'Bash': {
+      const cmd = (input.command || '').trim().replace(/\n/g, ' ').slice(0, 80);
+      return `💻 ${cmd}`;
+    }
+    case 'Read':
+      return `📖 Читаю ${(input.file_path || '').replace(/^.*\//, '').slice(0, 60)}`;
+    case 'Write':
+      return `✍️ Пишу ${(input.file_path || '').replace(/^.*\//, '').slice(0, 60)}`;
+    case 'Edit':
+      return `✏️ Редактирую ${(input.file_path || '').replace(/^.*\//, '').slice(0, 60)}`;
+    case 'WebFetch':
+      return `🌐 ${(input.url || '').slice(0, 60)}`;
+    case 'WebSearch':
+      return `🔍 ${(input.query || '').slice(0, 60)}`;
+    case 'Agent':
+      return `🤖 Запускаю агента…`;
+    default:
+      return `🔧 ${name}`;
+  }
 }
 
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
