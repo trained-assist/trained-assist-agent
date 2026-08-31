@@ -65,7 +65,7 @@ const T = '${token.replace(/'/g, "\\'")}';
 let sessionId = '';
 
 function show(stepId) {
-  ['step1','step2','step3'].forEach(id => document.getElementById(id).style.display = id === stepId ? '' : 'none');
+  ['step1','step2','step3'].forEach(id => document.getElementById(id).style.display = id === stepId ? 'block' : 'none');
 }
 
 function showMsg(n, cls, text) {
