@@ -6,6 +6,7 @@ const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
+const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData } = require('./session-store');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
@@ -532,6 +533,7 @@ async function main() {
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
       const user = { id: userId, name: username, username, workDir };
+      trackChat(userId);
 
       // Accept request immediately, run task in background
       const taskId = `${username}-${Date.now()}`;
@@ -692,6 +694,11 @@ async function main() {
   });
 
   server.listen(PORT, () => console.log(`assist-agent listening on :${PORT}`));
+
+  // Drive watcher: poll every 2 min for new files shared with the SA
+  const driveOpts = { botToken: secrets.BOT_TOKEN, tgBase: process.env.TELEGRAM_API_URL };
+  pollDriveChanges(driveOpts).catch(() => {});
+  setInterval(() => pollDriveChanges(driveOpts).catch(() => {}), 2 * 60 * 1000);
 
   const shutdown = () => {
     server.close(() => process.exit(0));
