@@ -177,7 +177,7 @@ async function pollDriveChanges({ botToken }) {
   catch { return; }
 
   for (const userId of entries) {
-    if (!/^\d+$/.test(userId)) continue; // only numeric Telegram user IDs
+    if (!/^-?\d+$/.test(userId)) continue; // numeric Telegram IDs (groups have negative IDs)
     await _checkUser(userId, botToken).catch(e =>
       console.error(`[drive-watcher] uncaught error userId=${userId}:`, e.message)
     );
