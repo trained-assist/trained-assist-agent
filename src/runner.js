@@ -337,16 +337,28 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   let heartbeatTimer = null;
   let outputStarted = false;
   let lastSent = '';
+  let lastToolCall = '';  // most recent tool call label shown to user
   let lineBuffer = '';
   let claudeResult = null;  // text from result event
   let claudeUsage = null;   // usage from result event
+
+  function buildStatusText() {
+    const secs = Math.round((Date.now() - thinkingStart) / 1000);
+    const tool = lastToolCall ? `\n\n⚙️ ${lastToolCall}` : '';
+    if (fullOutput.text) {
+      return `⏳ ${fullOutput.text.slice(-MAX_MSG_LEN)}${tool}`;
+    }
+    return `⏳ Думаю… (${secs}с)${tool}`;
+  }
 
   // Heartbeat: show elapsed seconds while Claude hasn't produced output yet
   if (msgId) {
     heartbeatTimer = setInterval(async () => {
       if (outputStarted) return;
-      const secs = Math.round((Date.now() - thinkingStart) / 1000);
-      await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ Думаю… (${secs}с)`).catch(() => {});
+      const text = buildStatusText();
+      if (text === lastSent) return;
+      lastSent = text;
+      await tgEdit(BOT_TOKEN, chatId, msgId, text).catch(() => {});
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -355,11 +367,20 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
     outputStarted = true;
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     streamTimer = setInterval(async () => {
-      const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
-      if (snippet === lastSent || !snippet) return;
-      lastSent = snippet;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${snippet}`).catch(() => {});
+      const text = buildStatusText();
+      if (text === lastSent) return;
+      lastSent = text;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, text).catch(() => {});
     }, STREAM_INTERVAL_MS);
+  }
+
+  function formatToolCall(name, input) {
+    if (name === 'Bash') return `$ ${(input?.command || '').replace(/\n/g, ' ').slice(0, 120)}`;
+    if (name === 'Read') return `📖 ${input?.file_path || ''}`;
+    if (name === 'Write' || name === 'Edit') return `✏️ ${input?.file_path || ''}`;
+    if (name === 'WebSearch') return `🔍 ${input?.query || ''}`;
+    if (name === 'WebFetch') return `🌐 ${(input?.url || '').slice(0, 80)}`;
+    return `🔧 ${name}`;
   }
 
   proc.stdout.on('data', chunk => {
@@ -381,9 +402,17 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
           for (const block of event.message.content) {
             if (block.type === 'text') {
               fullOutput.text += block.text;
+              scheduleStream();
+            } else if (block.type === 'tool_use') {
+              lastToolCall = formatToolCall(block.name, block.input);
+              // Immediately show tool call without waiting for next timer tick
+              const text = buildStatusText();
+              if (text !== lastSent && msgId) {
+                lastSent = text;
+                tgEdit(BOT_TOKEN, chatId, msgId, text).catch(() => {});
+              }
             }
           }
-          scheduleStream();
         }
       } catch {
         // Non-JSON line (e.g. startup messages) — treat as plain text
@@ -419,12 +448,17 @@ async function runTask({ taskId, user, task, context, sessionId, contextFromSess
   }
   const final = result.slice(-MAX_MSG_LEN);
 
+  const tokenLine = claudeUsage
+    ? `\n\n🔢 ${(claudeUsage.input_tokens + claudeUsage.output_tokens).toLocaleString('ru-RU')} токенов`
+    : '';
+  const finalText = `✅ ${final}${tokenLine}`;
+
   if (msgId) {
-    await tgEdit(BOT_TOKEN, chatId, msgId, `✅ ${final}`).catch(() =>
-      tgSend(BOT_TOKEN, chatId, `✅ ${final}`)
+    await tgEdit(BOT_TOKEN, chatId, msgId, finalText).catch(() =>
+      tgSend(BOT_TOKEN, chatId, finalText)
     );
   } else {
-    await tgSend(BOT_TOKEN, chatId, `✅ ${final}`);
+    await tgSend(BOT_TOKEN, chatId, finalText);
   }
 
   // Append assistant reply to session history
