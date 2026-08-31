@@ -147,6 +147,21 @@ curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/connect/nalog" \
 
 ## Development
 
+## Development workflow
+
+All changes go through PRs — no direct pushes to `main`.
+
+```bash
+git checkout -b fix/description   # or feat/description
+# make changes
+git add . && git commit -m "fix: description"
+git push origin fix/description
+gh pr create --fill                # opens PR; CI runs; auto-merges on green
+```
+
+Branch protection requires the `ci` job to pass. PRs auto-merge (squash) when CI is green — no manual approval needed.
+
+
 ```bash
 npm install
 npm run dev    # starts with --watch
