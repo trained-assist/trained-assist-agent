@@ -10,6 +10,7 @@ const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
 const { nalogFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
+const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -64,8 +65,27 @@ ${sessionDescriptions}
   return { sessionId: match.id, confidence: 'high' };
 }
 
+// OAuth2 state store: state_token → {userId, expires}
+const oauthStateStore = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of oauthStateStore) {
+    if (v.expires < now) oauthStateStore.delete(k);
+  }
+}, 60_000);
+
+const GDRIVE_SCOPES = [
+  'https://www.googleapis.com/auth/drive',
+  'openid',
+  'email',
+].join(' ');
+
 async function main() {
   const secrets = await loadSecrets();
+
+  const GDRIVE_CLIENT_ID     = secrets.GOOGLE_OAUTH_CLIENT_ID;
+  const GDRIVE_CLIENT_SECRET = secrets.GOOGLE_OAUTH_CLIENT_SECRET;
+  const GDRIVE_REDIRECT_URI  = `${(process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '')}/connect/gdrive/callback`;
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -85,6 +105,144 @@ async function main() {
 
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, expires: result.expires }));
       if (result.userId) tgNotifyNalog(secrets.TELEGRAM_BOT_TOKEN, result.userId, result.expires);
+      return;
+    }
+
+    // ── GET /connect/gdrive/start?t=TOKEN — redirect to Google OAuth2 ────────
+    if (req.method === 'GET' && url.pathname === '/connect/gdrive/start') {
+      const t = url.searchParams.get('t') || '';
+      if (!/^[a-f0-9]{32}$/.test(t)) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Неверный токен.'));
+        return;
+      }
+      if (!GDRIVE_CLIENT_ID) {
+        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Google OAuth не настроен на сервере.'));
+        return;
+      }
+
+      const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
+      const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+      let pending;
+      try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Ссылка недействительна или устарела.'));
+        return;
+      }
+      if (pending.expires < Date.now()) {
+        fs.unlinkSync(pendingFile);
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Ссылка устарела. Попроси новую через Telegram.'));
+        return;
+      }
+      if (pending.service !== 'gdrive') {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Неверный сервис.'));
+        return;
+      }
+      if (!/^-?\d{1,20}$/.test(pending.uid)) {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Неверный UID.'));
+        return;
+      }
+
+      // Consume pending token; generate OAuth state
+      fs.unlinkSync(pendingFile);
+      const crypto = require('crypto');
+      const stateToken = crypto.randomBytes(16).toString('hex');
+      oauthStateStore.set(stateToken, { userId: pending.uid, expires: Date.now() + 15 * 60 * 1000 });
+
+      const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+      authUrl.searchParams.set('client_id', GDRIVE_CLIENT_ID);
+      authUrl.searchParams.set('redirect_uri', GDRIVE_REDIRECT_URI);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('scope', GDRIVE_SCOPES);
+      authUrl.searchParams.set('access_type', 'offline');
+      authUrl.searchParams.set('prompt', 'consent');
+      authUrl.searchParams.set('state', stateToken);
+
+      res.writeHead(302, { 'Location': authUrl.toString() }).end();
+      return;
+    }
+
+    // ── GET /connect/gdrive/callback?code=...&state=... ──────────────────────
+    if (req.method === 'GET' && url.pathname === '/connect/gdrive/callback') {
+      const code  = url.searchParams.get('code')  || '';
+      const state = url.searchParams.get('state') || '';
+      const error = url.searchParams.get('error') || '';
+
+      if (error) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml(`Ошибка авторизации: ${error}`));
+        return;
+      }
+      if (!code || !state) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Неверный callback.'));
+        return;
+      }
+
+      const stateData = oauthStateStore.get(state);
+      if (!stateData || stateData.expires < Date.now()) {
+        oauthStateStore.delete(state);
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Сессия авторизации устарела. Начни заново через Telegram.'));
+        return;
+      }
+      oauthStateStore.delete(state);
+      const { userId } = stateData;
+
+      // Exchange code for tokens
+      let tokenData;
+      try {
+        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            code,
+            client_id: GDRIVE_CLIENT_ID,
+            client_secret: GDRIVE_CLIENT_SECRET,
+            redirect_uri: GDRIVE_REDIRECT_URI,
+            grant_type: 'authorization_code',
+          }).toString(),
+          signal: AbortSignal.timeout(10000),
+        });
+        tokenData = await tokenRes.json();
+        if (!tokenData.refresh_token) {
+          throw new Error(tokenData.error_description || tokenData.error || 'no refresh_token in response');
+        }
+      } catch (e) {
+        console.error('[gdrive/callback] token exchange failed:', e.message);
+        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml(`Ошибка получения токена: ${e.message}`));
+        return;
+      }
+
+      // Get user email via tokeninfo
+      let email = '';
+      try {
+        const infoRes = await fetch(`https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${tokenData.access_token}`, { signal: AbortSignal.timeout(5000) });
+        const info = await infoRes.json();
+        email = info.email || '';
+      } catch { /* non-critical */ }
+
+      // Save to user token file
+      const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
+      fs.mkdirSync(tokensDir, { recursive: true });
+      const credData = {
+        type: 'oauth2',
+        access_token:  tokenData.access_token,
+        refresh_token: tokenData.refresh_token,
+        expiry: new Date(Date.now() + (tokenData.expires_in || 3600) * 1000).toISOString(),
+        email,
+        scope: tokenData.scope || '',
+      };
+      fs.writeFileSync(path.join(tokensDir, 'gdrive'), JSON.stringify(credData), { mode: 0o600 });
+      console.log(`[gdrive/callback] saved tokens for userId=${userId} email=${email}`);
+
+      // Notify user in Telegram
+      const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+      fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: userId,
+          text: `✅ Google Drive подключён!${email ? ` (${email})` : ''}\n\nТеперь расшари нужные папки/файлы с ассистентом — он попросит тебя об этом когда нужно. Управление доступами: /secrets_list`,
+        }),
+      }).catch(e => console.error('[gdrive/callback] tg notify failed:', e.message));
+
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveSuccessHtml(email));
       return;
     }
 
@@ -142,6 +300,16 @@ async function main() {
           return;
         }
 
+        res.writeHead(405).end(); return;
+      }
+
+      // ── gdrive — OAuth2 authorization page ───────────────────────────────────
+      if (service === 'gdrive') {
+        if (req.method === 'GET') {
+          const t = url.searchParams.get('t') || '';
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveFormHtml(t));
+          return;
+        }
         res.writeHead(405).end(); return;
       }
 
@@ -261,6 +429,19 @@ async function main() {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, { status: 'alive', uptime: process.uptime() });
+    }
+
+    // GET /capabilities?userId=XXX — list services with tokens on this machine
+    if (req.method === 'GET' && url.pathname === '/capabilities') {
+      const userId = url.searchParams.get('userId') || '';
+      if (!userId || !/^-?\d{1,20}$/.test(userId)) return json(res, 400, { error: 'invalid userId' });
+      const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
+      const SKIP = new Set(['.secrets_log']);
+      let capabilities = [];
+      if (fs.existsSync(tokensDir)) {
+        capabilities = fs.readdirSync(tokensDir).filter(f => !SKIP.has(f) && !f.startsWith('.'));
+      }
+      return json(res, 200, { capabilities });
     }
 
     // GET /skills — list all available MCP skills (for bot /skills command)
