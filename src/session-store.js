@@ -133,4 +133,27 @@ function buildContext(workDir, sessionId) {
   return lines.join('\n');
 }
 
-module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext };
+const CURRENT_SESSION_FILE = 'current-session.json';
+const CURRENT_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+function getCurrentSessionId(workDir) {
+  try {
+    const fp = path.join(workDir, SESSIONS_DIR, CURRENT_SESSION_FILE);
+    if (!fs.existsSync(fp)) return null;
+    const { id, lastAt } = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    if (Date.now() - lastAt > CURRENT_SESSION_TTL_MS) return null;
+    return id;
+  } catch { return null; }
+}
+
+function setCurrentSessionId(workDir, id) {
+  try {
+    const dir = path.join(workDir, SESSIONS_DIR);
+    fs.mkdirSync(dir, { recursive: true });
+    atomicWrite(path.join(dir, CURRENT_SESSION_FILE), JSON.stringify({ id, lastAt: Date.now() }));
+  } catch (e) {
+    console.error('[session-store] setCurrentSessionId error:', e.message);
+  }
+}
+
+module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId };
