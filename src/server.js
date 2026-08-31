@@ -5,6 +5,7 @@ const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { runTask } = require('./runner');
+const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { listSessions, getSession: getSessionData } = require('./session-store');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
@@ -470,6 +471,21 @@ async function main() {
       } catch (err) {
         return json(res, 500, { ok: false, error: err.message, latencyMs: Date.now() - start });
       }
+    }
+
+    // GET /internal/auth-status — read/clear Claude Code auth flag (for repair system)
+    if (req.method === 'GET' && url.pathname === '/internal/auth-status') {
+      const flag = getAuthFlag();
+      return json(res, 200, {
+        claude_auth_ok: !flag.failed,
+        ...(flag.failed ? { reason: flag.reason, vm: flag.vm, failed_at: flag.failed_at, error_text: flag.error_text } : {}),
+      });
+    }
+
+    // POST /internal/auth-status/clear — mark repaired (called by repair system after fixing auth)
+    if (req.method === 'POST' && url.pathname === '/internal/auth-status/clear') {
+      clearAuthFailedFlag();
+      return json(res, 200, { ok: true });
     }
 
     if (req.method === 'GET' && url.pathname === '/stats') {

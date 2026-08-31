@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
+const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
 const { recordUsage, getUsageTotals } = require('./usage-store');
 const {
   loadUserTokens,
@@ -412,6 +413,20 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Prefer the clean result string from the result event; fall back to accumulated stream text
   const result = (claudeResult ?? fullOutput.text).trim() || '(нет вывода)';
+
+  // Detect Claude Code auth failure — set flag and send clear message instead of raw error
+  if (isAuthError(result)) {
+    const reason = detectReason(result);
+    setAuthFailedFlag({ reason, error_text: result });
+    const authMsg = '⚠️ Авторизация Claude Code истекла — оператор уже уведомлён, скоро починим.';
+    if (msgId) {
+      await tgEdit(BOT_TOKEN, chatId, msgId, authMsg).catch(() => tgSend(BOT_TOKEN, chatId, authMsg));
+    } else {
+      await tgSend(BOT_TOKEN, chatId, authMsg);
+    }
+    if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, authMsg);
+    return authMsg;
+  }
 
   // Record token usage for billing
   if (claudeUsage) {
