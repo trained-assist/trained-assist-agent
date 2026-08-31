@@ -41,7 +41,7 @@ function getcourseFormHtml(token) {
     <p class="sub">Данные не попадают в чат — форма отправляет их напрямую на сервер.</p>
 
     <label for="domain">Домен аккаунта</label>
-    <input id="domain" type="text" placeholder="myschool.getcourse.ru" autocomplete="off" spellcheck="false">
+    <input id="domain" type="text" placeholder="myschool.getcourse.ru или mycustomdomain.ru" autocomplete="off" spellcheck="false">
 
     <div class="divider">
       <div class="divider-line"></div>
@@ -104,7 +104,7 @@ async function submit() {
     const r = await fetch('/connect/getcourse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ t: T, accountDomain: domain, apiKey: apiKey || undefined, login: login || undefined, password: password || undefined }),
+      body: JSON.stringify({ t: T, domain, apiKey: apiKey || undefined, login: login || undefined, password: password || undefined }),
       signal: AbortSignal.timeout(95000),
     });
     const d = await r.json();
