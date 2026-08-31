@@ -3,33 +3,32 @@ const OPTIONAL = ['ANTHROPIC_API_KEY', 'DEEPGRAM_API_KEY', 'BOT_SECRET', 'CF_API
 
 // GCP Secret Manager — used when running on GCP with ADC available
 async function loadFromGcp() {
-  // GOOGLE_APPLICATION_CREDENTIALS may point to a Drive-only SA key (no Secret Manager access).
-  // Temporarily unset it so the SDK falls back to the Compute Engine metadata server,
-  // which has Secret Manager access. The Drive SA is only for Drive API calls.
+  // GOOGLE_APPLICATION_CREDENTIALS may point to a Drive-only SA (no Secret Manager access).
+  // Unset it for the entire duration so the SDK uses the Compute Engine metadata server
+  // (which has SM access). Restored in finally after all API calls complete.
   const savedCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  let client;
   try {
     const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
-    client = new SecretManagerServiceClient();
+    const client = new SecretManagerServiceClient();
+    const PROJECT = 'alesa-personal-assistent'; // GCP project name — cannot be renamed
+
+    async function getSecret(name) {
+      const [version] = await client.accessSecretVersion({
+        name: `projects/${PROJECT}/secrets/${name}/versions/latest`,
+      });
+      return version.payload.data.toString('utf8').trim();
+    }
+
+    const names = [...REQUIRED, ...OPTIONAL];
+    const results = await Promise.allSettled(names.map(n => getSecret(n)));
+    return Object.fromEntries(names.map((n, i) => [
+      n,
+      results[i].status === 'fulfilled' ? results[i].value : null,
+    ]));
   } finally {
     if (savedCreds !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = savedCreds;
   }
-  const PROJECT = 'alesa-personal-assistent'; // GCP project name — cannot be renamed
-
-  async function getSecret(name) {
-    const [version] = await client.accessSecretVersion({
-      name: `projects/${PROJECT}/secrets/${name}/versions/latest`,
-    });
-    return version.payload.data.toString('utf8').trim();
-  }
-
-  const names = [...REQUIRED, ...OPTIONAL];
-  const results = await Promise.allSettled(names.map(n => getSecret(n)));
-  return Object.fromEntries(names.map((n, i) => [
-    n,
-    results[i].status === 'fulfilled' ? results[i].value : null,
-  ]));
 }
 
 // Env-var fallback — used on non-GCP VMs (e.g. Hostland RU VM)
