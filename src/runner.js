@@ -1,6 +1,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
@@ -28,6 +29,7 @@ const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}доступ|
 const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
 const REVOKE_SERVICE_RE     = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
+const GDRIVE_SA_EMAIL_INTENT = /(?:почт|email|e-mail|адрес).{0,40}(?:сервис|service|sa\b)|(?:сервис|service|sa\b).{0,40}(?:почт|email|e-mail|аккаун)|дай.{0,30}(?:почт|email|адрес).{0,30}(?:гугл|google|drive|аккаун)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
@@ -180,6 +182,18 @@ function getQuickAnswer(task, userId, workDir) {
     if (result === null) return `Не распознал сервис «${svcMatch[1]}». Доступные: GitHub, Weeek, Налог.ру, Figma, Tilda, Google Drive.`;
     if (result === 'not_found') return `Сервис «${svcMatch[1]}» не был подключён.`;
     return `✅ Доступ к ${SERVICE_DISPLAY[result] || result} отозван. Данные удалены с сервера.`;
+  }
+
+  // Google Drive SA email — read token file directly, no Claude needed
+  if (GDRIVE_SA_EMAIL_INTENT.test(task) && userId) {
+    const gdriveFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+    try {
+      const sa = JSON.parse(fs.readFileSync(gdriveFile, 'utf8'));
+      if (sa.client_email) {
+        return `📧 Email сервис-аккаунта Google Drive:\n\`${sa.client_email}\`\n\nПоделись этим адресом с нужными папками/файлами в Google Drive.`;
+      }
+    } catch {}
+    return '❌ Google Drive не настроен. Напиши «настрой Google Drive» — создам сервис-аккаунт автоматически.';
   }
 
   // Capability question about INN enrichment — answer immediately without calling Claude
