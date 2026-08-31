@@ -304,9 +304,33 @@ async function confirmNalogCode(sessionId, code) {
   pendingSessions.delete(sessionId); // one-time
 
   try {
-    const codeInput = page.locator('#otp, input[name="otp"], input[placeholder*="код"], input[maxlength="6"], .form-otp input').first();
-    await codeInput.fill(code);
-    await page.locator('button[type="submit"]:visible').first().click();
+    // ESIA uses 6 separate tel inputs (one digit per cell)
+    const telInputs = page.locator('input[type="tel"]');
+    const telCount = await telInputs.count().catch(() => 0);
+    if (telCount >= code.length) {
+      // Fill each digit into its own cell; many OTP forms auto-advance
+      for (let i = 0; i < code.length; i++) {
+        await telInputs.nth(i).click();
+        await telInputs.nth(i).fill(code[i]);
+        await page.waitForTimeout(50);
+      }
+    } else {
+      // Fallback: single OTP input
+      const codeInput = page.locator('#otp, input[name="otp"], input[placeholder*="код"], input[maxlength="6"], .form-otp input').first();
+      await codeInput.fill(code);
+    }
+    // Many OTP forms auto-submit; wait briefly then click submit if still on same page
+    await page.waitForTimeout(1500);
+    const stillOnEsia = /esia|gosuslugi/.test(page.url());
+    if (stillOnEsia) {
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button')).find(b =>
+          b.offsetParent !== null && !b.classList.contains('header__lang-button') &&
+          (/подтвердить|войти|продолжить|далее/i.test(b.textContent) || b.type === 'submit')
+        );
+        if (btn) btn.click();
+      });
+    }
 
     await page.waitForURL(u => /lknpd\.nalog\.ru/.test(u) && !/\/auth\//.test(u), { timeout: 30000 });
     return extractAndSave(page, browser, userId);
