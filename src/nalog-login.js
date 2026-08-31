@@ -135,6 +135,20 @@ async function startNalogLogin(userId, login, password) {
 
     // Wait for any input to appear (ESIA SPA takes time to render)
     await page.waitForSelector('input', { state: 'visible', timeout: 25000 }).catch(() => {});
+
+    // ESIA sometimes opens on the QR-code tab — switch to login/password tab if needed
+    const loginInput = page.locator('#login, input[name="login"], input[autocomplete="username"]').first();
+    const loginVisible = await loginInput.isVisible({ timeout: 2000 }).catch(() => false);
+    if (!loginVisible) {
+      console.log('[nalog-login] QR tab detected, switching to Логин и пароль');
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const btn = btns.find(b => /логин.*пароль|пароль.*логин/i.test(b.textContent));
+        if (btn) btn.click();
+      });
+      await page.waitForTimeout(1500);
+    }
+
     // Log full page state for debugging
     const esiaState = await page.evaluate(() => ({
       url: location.href,
@@ -147,8 +161,7 @@ async function startNalogLogin(userId, login, password) {
     // Save screenshot for debugging
     await page.screenshot({ path: `/tmp/esia-${Date.now()}.png`, fullPage: true }).catch(() => {});
 
-    // Wait for the form to fully render before touching anything
-    const loginInput = page.locator('#login, input[name="login"], input[autocomplete="username"]').first();
+    // Wait for the login/password form to be ready
     await loginInput.waitFor({ state: 'visible', timeout: 15000 });
 
     const pwInput = page.locator('#password, input[name="password"], input[type="password"]').first();
@@ -163,13 +176,21 @@ async function startNalogLogin(userId, login, password) {
     }));
     console.log('[nalog-login] ESIA buttons: %s', pageState.buttons);
 
-    // ESIA is a Vue SPA. The password field is in the DOM but only "activates" after
-    // ESIA async-validates the login (checks the phone is registered).
-    // Simulate human typing: type login → Tab (triggers onBlur/validation) → wait → type password.
+    // ESIA is a Vue SPA — standard fill()/keyboard.type() don't update Vue's reactive state.
+    // Use nativeInputValueSetter + input/change events (standard trick for React/Vue controlled inputs).
+    const fillVueInput = (selector, value) => page.evaluate(([sel, val]) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }, [selector, value]);
+
+    // Focus + fill login, then Tab to trigger ESIA async validation
     await loginInput.click();
-    await page.keyboard.press('Control+a');
-    await page.keyboard.type(login, { delay: 80 });
-    // Tab out of login field — triggers ESIA's async login validation
+    await fillVueInput('#login, input[name="login"]', login);
     await page.keyboard.press('Tab');
     console.log('[nalog-login] tabbed out of login, waiting for ESIA async validation');
     await page.waitForTimeout(2000);
@@ -196,8 +217,7 @@ async function startNalogLogin(userId, login, password) {
     }
 
     await pwInput.click();
-    await page.keyboard.press('Control+a');
-    await page.keyboard.type(password, { delay: 80 });
+    await fillVueInput('#password, input[type="password"]', password);
     await page.waitForTimeout(600);
 
     // Click the final "Войти" button via evaluate to avoid selector issues
