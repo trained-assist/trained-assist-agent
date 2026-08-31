@@ -52,6 +52,59 @@ async function _getSaToken(sa) {
   return data.access_token;
 }
 
+// ── File catalog ─────────────────────────────────────────────────────────────
+
+const EXPORT_MIME = {
+  'application/vnd.google-apps.document':     'text/plain',
+  'application/vnd.google-apps.spreadsheet':  'text/csv',
+  'application/vnd.google-apps.presentation': 'text/plain',
+};
+
+async function _readSnippet(fileId, mimeType, token) {
+  try {
+    let url;
+    const exportMime = EXPORT_MIME[mimeType];
+    if (exportMime) {
+      url = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`;
+    } else if (mimeType && (mimeType.startsWith('text/') || mimeType === 'application/json')) {
+      url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+    } else {
+      return null; // binary or folder — skip content
+    }
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text.slice(0, 600).trim() || null;
+  } catch { return null; }
+}
+
+// Non-blocking — called with .catch(() => {}) so it never delays notifications
+async function _catalogFile(userId, file, token) {
+  const catalogPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-catalog.json');
+  let catalog = [];
+  try { catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8')); } catch {}
+  if (catalog.find(e => e.id === file.id)) return; // already cataloged
+
+  const isFolder = file.mimeType === 'application/vnd.google-apps.folder';
+  const snippet  = isFolder ? null : await _readSnippet(file.id, file.mimeType, token);
+
+  catalog.push({
+    id:          file.id,
+    name:        file.name,
+    mimeType:    file.mimeType,
+    webViewLink: file.webViewLink,
+    owner:       file.owners?.[0]?.emailAddress || file.owners?.[0]?.displayName || null,
+    sharedAt:    new Date().toISOString(),
+    snippet,
+    catalogedAt: new Date().toISOString(),
+  });
+
+  const tmp = `${catalogPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(catalog, null, 2));
+  fs.renameSync(tmp, catalogPath);
+  console.log(`[drive-watcher] cataloged userId=${userId} fileId=${file.id} name="${file.name}"`);
+}
+
 // ── Per-user check ────────────────────────────────────────────────────────────
 
 function _mimeLabel(mimeType = '') {
@@ -159,6 +212,11 @@ async function _checkUser(userId, botToken) {
         disable_web_page_preview: false,
       }),
     }).catch(e => console.error('[drive-watcher] TG send failed:', e.message));
+
+    // Catalog in background — non-blocking, never delays next notification
+    _catalogFile(userId, file, token).catch(e =>
+      console.error(`[drive-watcher] catalog failed fileId=${file.id}:`, e.message)
+    );
 
     // Persist seen state after every send — crash-safe; no duplicates on restart
     seen.add(file.id);
