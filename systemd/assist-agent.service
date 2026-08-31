@@ -17,7 +17,6 @@ Environment=PORT=8080
 Environment=AGENT_DATA_DIR=/home/vova/alesa-data
 Environment=AGENT_PUBLIC_URL=https://136-65-7-197.sslip.io/agent
 Environment=VM_NAME=gcp-main
-Environment=GOOGLE_APPLICATION_CREDENTIALS=/home/vova/gdrive-sa.json
 
 [Install]
 WantedBy=multi-user.target
