@@ -303,7 +303,29 @@ module.exports = {
       },
     },
 
-    // ── L2: Course creation ───────────────────────────────────────────────
+    // ── L2: Course listing & creation ────────────────────────────────────────
+
+    gc_course_list: {
+      description: 'List all courses (trainings) in the GetCourse account. Returns id, title, status, url for each course.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async (_, ctx) => {
+        const cfg = readConfig(ctx?.userId);
+        const err = requireL2(cfg);
+        if (err) return err;
+        const result = await gcSessionJson(cfg, '/pl/teach/gcapi/training/getTrainingStatuses', {});
+        if (result.error) return result;
+        const trainings = result.data?.trainings || [];
+        const courses = trainings
+          .filter(t => !t.parentId)
+          .map(t => ({
+            id: t.id,
+            title: t.title || t.name,
+            status: t.status,
+            url: `https://${cfg.accountDomain}/teach/control/stream/view?id=${t.id}`,
+          }));
+        return { count: courses.length, courses };
+      },
+    },
 
     gc_course_create: {
       description: 'Create a top-level training (course). Returns id and URL. Use the id in gc_section_create.',
