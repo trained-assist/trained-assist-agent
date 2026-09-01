@@ -335,6 +335,111 @@ module.exports = {
       },
     },
 
+    gc_group_courses: {
+      description: 'List courses (trainings/streams) available to a GetCourse group. Takes group_id (from gc_group_list) or group_name substring. Returns list of courses the group has access to. Takes ~20s.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          group_id:   { type: 'string', description: 'Group ID from gc_group_list' },
+          group_name: { type: 'string', description: 'Group name or substring — will find group_id automatically' },
+        },
+      },
+      handler: async ({ group_id, group_name }, ctx) => {
+        const cfg = readConfig(ctx?.userId);
+        const err = requireL2(cfg);
+        if (err) return err;
+        if (!group_id && !group_name) return { error: 'missing_param', message: 'Укажи group_id или group_name.' };
+
+        let gid = group_id;
+
+        // Resolve group_name → group_id via group list page
+        if (!gid && group_name) {
+          let browser2;
+          try {
+            const opened = await openBrowserPage(cfg);
+            browser2 = opened.browser;
+            const p2 = opened.page;
+            await p2.goto(`https://${cfg.accountDomain}/pl/user/group/index`, { waitUntil: 'networkidle', timeout: 30000 });
+            if (p2.url().includes('/login')) {
+              await browser2.close();
+              return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+            }
+            await p2.waitForTimeout(4000);
+            const found = await p2.evaluate((q) => {
+              for (const li of document.querySelectorAll('li[data-type="group"]')) {
+                const nameEl = li.querySelector('.rd-group-name');
+                const name = nameEl?.textContent?.trim().replace(/\s+/g, ' ') || '';
+                if (name.toLowerCase().includes(q.toLowerCase())) return { id: li.dataset.id, name };
+              }
+              return null;
+            }, group_name);
+            await browser2.close();
+            if (!found) return { found: false, message: `Группа "${group_name}" не найдена. Используй gc_group_list чтобы увидеть все группы.` };
+            gid = found.id;
+          } catch (e) {
+            await browser2?.close().catch(() => {});
+            return { error: 'playwright_error', message: e.message.slice(0, 200) };
+          }
+        }
+
+        let browser;
+        try {
+          const opened = await openBrowserPage(cfg);
+          browser = opened.browser;
+          const page = opened.page;
+
+          // Group edit page has a trainings/streams tab
+          await page.goto(`https://${cfg.accountDomain}/pl/user/group/update?id=${gid}`, { waitUntil: 'networkidle', timeout: 30000 });
+          if (page.url().includes('/login')) {
+            await browser.close();
+            return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+          }
+          await page.waitForTimeout(3000);
+
+          // Click "Тренинги" / "Потоки" / "Курсы" tab if present
+          const tabClicked = await page.evaluate(() => {
+            const all = Array.from(document.querySelectorAll('a, button, [role="tab"], li'));
+            const tab = all.find(el => /тренинг|поток|курс/i.test((el.textContent || '').trim().slice(0, 30)));
+            if (tab) { tab.click(); return true; }
+            return false;
+          });
+          if (tabClicked) await page.waitForTimeout(2000);
+
+          const courses = await page.evaluate(() => {
+            const results = [];
+            const seen = new Set();
+            // Stream links anywhere on the page
+            document.querySelectorAll('a[href*="/teach/control/stream/"]').forEach(a => {
+              const href = a.getAttribute('href') || '';
+              const m = href.match(/\/id\/(\d+)/);
+              if (!m) return;
+              const id = m[1];
+              if (seen.has(id)) return;
+              const text = (a.innerText || a.textContent || '').trim().replace(/\s+/g, ' ');
+              if (!text || text.length < 2) return;
+              seen.add(id);
+              results.push({ id, title: text.slice(0, 120) });
+            });
+            return results;
+          });
+
+          await browser.close();
+
+          if (!courses.length) {
+            return {
+              found: false,
+              group_id: gid,
+              message: 'Тренинги для этой группы не найдены на странице настроек. Возможно, связь задана через правила автоматизации — проверь /pl/user/autogroup/index.',
+            };
+          }
+          return { group_id: gid, count: courses.length, courses };
+        } catch (e) {
+          await browser?.close().catch(() => {});
+          return { error: 'playwright_error', message: e.message.slice(0, 200) };
+        }
+      },
+    },
+
     gc_group_list: {
       description: 'List groups (группы доступа) in GetCourse via Playwright. Requires L2 (session). Use to find correct group_name before gc_user_add. Takes ~15s. Returns has_more:true if the account has more groups than fit on the first page.',
       inputSchema: {
