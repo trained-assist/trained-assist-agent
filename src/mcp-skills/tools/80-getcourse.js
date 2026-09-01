@@ -45,13 +45,25 @@ function buildCookieHeader(cfg) {
   return (cfg.sessionCookies || []).map(c => `${c.name}=${c.value}`).join('; ');
 }
 
-// L1: GET export  (users, groups, orders)
+// L1: POST export  (users, groups, orders)
+// GetCourse requires POST with form-encoded body — GET with query params returns "Пустой параметр action"
 async function gcApiExport(cfg, endpoint, paramsObj) {
   const paramsB64 = Buffer.from(JSON.stringify(paramsObj)).toString('base64');
-  const url = `https://${cfg.accountDomain}${endpoint}?action=export&key=${encodeURIComponent(cfg.apiKey)}&params=${encodeURIComponent(paramsB64)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  const body = new URLSearchParams({ action: 'export', key: cfg.apiKey, params: paramsB64 });
+  const res = await fetch(`https://${cfg.accountDomain}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+    signal: AbortSignal.timeout(15000),
+  });
   const text = await res.text();
-  try { return JSON.parse(text); } catch { return { error: 'non-json response', preview: text.slice(0, 500) }; }
+  try {
+    const json = JSON.parse(text);
+    if (json.error === 'Действие запрещено') {
+      return { error: 'export_forbidden', message: 'API ключ не имеет прав на экспорт данных. В GetCourse: Настройки → API → включи "Экспорт пользователей" и "Экспорт заказов".' };
+    }
+    return json;
+  } catch { return { error: 'non-json response', preview: text.slice(0, 500) }; }
 }
 
 // L1: POST import (users)
@@ -299,7 +311,7 @@ module.exports = {
         if (email)     rules.push({ field: 'user_email', condition: 'equal',     value: email });
         if (date_from) rules.push({ field: 'created_at', condition: 'more_than', value: date_from });
         if (date_to)   rules.push({ field: 'created_at', condition: 'less_than', value: date_to });
-        return gcApiExport(cfg, '/pl/api/orders', { page: 1, count, ...(rules.length && { rules }) });
+        return gcApiExport(cfg, '/pl/api/deals', { page: 1, count, ...(rules.length && { rules }) });
       },
     },
 
