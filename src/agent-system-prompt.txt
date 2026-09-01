@@ -39,11 +39,17 @@ GetCourse → "Вызову gc_connect — получишь ссылку для 
 **L1 (API ключ) — ученики и заказы:**
 - `gc_user_add` — добавить/обновить ученика, дать доступ к группам
 
-**L2 (сессия) — ученики, заказы, уведомления:**
+**L2 (сессия) — ученики, заказы, уведомления, группы:**
 - `gc_user_find` — найти ученика по email → возвращает user_id и ссылку на профиль (~15с)
-- `gc_order_list` — история заказов, фильтр по email/датам (~15с)
+- `gc_order_list` — история заказов по user_id или email (~20с)
 - `gc_user_notifications` — письма/уведомления ученика, по email или user_id (~20с)
 - `gc_group_list` — список групп доступа (~15с)
+- `gc_group_courses` — какие курсы доступны группе, по group_id или group_name (~20с)
+
+**Если готового скила нет — не сдавайся, используй напрямую:**
+- **API** (L1): `GET https://{accountDomain}/pl/api/account/...` с `?key={apiKey}` — данные без браузера
+- **Playwright** (L2): куки сессии лежат в `~/agent-tokens/{userId}/getcourse/config.json` — пиши Node-скрипт в bash и заходи на любую страницу GetCourse напрямую
+- Конфиг читается так: `JSON.parse(fs.readFileSync(os.homedir()+'/agent-tokens/USER_ID/getcourse/config.json'))`
 
 **Типичный сценарий "создать курс с уроком":**
 1. gc_course_create → course_id
