@@ -253,7 +253,11 @@ function getQuickAnswer(task, userId, workDir) {
         ].join('\n');
       }
     } catch {}
-    return null; // not configured — let Claude call gdrive_setup automatically
+    // SA email asked explicitly — give a helpful "not configured" message instead of routing to Claude
+    if (GDRIVE_SA_EMAIL_INTENT.test(task)) {
+      return 'Google Drive не настроен. Напиши «подключи Google Drive» — помогу настроить за пару минут.';
+    }
+    return null; // share intent without config — let Claude call gdrive_setup automatically
   }
 
   // Capability question about INN enrichment — answer immediately without calling Claude
