@@ -167,18 +167,22 @@ Estimated time: 10–15 min for 300 companies.`,
 
         const log = [];
         const started = Date.now();
+        const enrichedPath = path.join(outDir, 'requisites_enrichment.json');
+        const reportPath   = path.join(outDir, 'requisites_report.json');
+        const partial = [];
 
         const { enriched, report } = await enrich(exhibitors, config, ({ done, total, company, result }) => {
+          partial.push(result ? { ...company, ...result } : company);
           if (result?.inn) {
             log.push(`✓ ${company.name} → ${result.inn} [${result.requisites_confidence}]`);
           } else if (done % 20 === 0) {
             log.push(`… ${done}/${total} done`);
+            // Save intermediate results every 20 companies so a timeout doesn't lose all work
+            try { fs.writeFileSync(enrichedPath, JSON.stringify(partial, null, 2), 'utf8'); } catch {}
           }
         });
 
-        // write outputs
-        const enrichedPath = path.join(outDir, 'requisites_enrichment.json');
-        const reportPath   = path.join(outDir, 'requisites_report.json');
+        // write final outputs
         fs.writeFileSync(enrichedPath, JSON.stringify(enriched, null, 2), 'utf8');
         fs.writeFileSync(reportPath,   JSON.stringify(report, null, 2), 'utf8');
 

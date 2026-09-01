@@ -20,7 +20,7 @@ const { initLog, readLog } = require('./requirements-log');
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 12000;
 const MAX_MSG_LEN = 3500;
-const CLAUDE_TIMEOUT_MS = 5 * 60 * 1000; // 5 min hard limit — kills Claude if hung
+const CLAUDE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min hard limit — batch INN enrichment takes 10-15 min for 300 companies
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
