@@ -17,8 +17,9 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
-// Playwright tests require a real Chromium binary — only available on Linux VMs (GCP + RU).
-const IS_LINUX = process.platform === 'linux';
+// Playwright tests require a real Chromium binary — skip in CI (no binary installed there)
+// and on macOS dev machines. Run locally on Linux VMs (GCP + RU) or when RUN_PW_TESTS=1.
+const IS_LINUX = process.platform === 'linux' && !process.env.CI;
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
