@@ -50,7 +50,7 @@ function makeJwt(sa) {
   const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(JSON.stringify({
     iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive', // full scope required — drive.readonly misses externally-shared files
+    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets',
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -92,6 +92,22 @@ function requireSa() {
     );
   }
   return sa;
+}
+
+// ── Sheets API helper ─────────────────────────────────────────────────────────
+
+async function sheetsApi(method, apiPath, body = null, sa = null) {
+  if (!sa) sa = requireSa();
+  const token = await getAccessToken(sa);
+  const res = await fetch(`https://sheets.googleapis.com/v4${apiPath}`, {
+    method,
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Sheets ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
+  return data;
 }
 
 // ── Drive API helper ──────────────────────────────────────────────────────────
@@ -434,6 +450,63 @@ module.exports = {
         if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(`Update ${res.status}: ${err.error?.message || res.statusText}`); }
         const file = await res.json();
         return { updated: true, file_id: file.id, name: file.name, modified: file.modifiedTime };
+      },
+    },
+
+    gdrive_write_sheet: {
+      description: 'Write rows to a specific tab (sheet) in a Google Spreadsheet. Creates the tab if it does not exist. ' +
+        'Use this to save structured data (participants, results, reports) directly into a Google Sheet. ' +
+        'rows is an array of arrays — first row should be the header.\n\n' +
+        'Example: gdrive_write_sheet({ spreadsheet_id: "1abc...", sheet_name: "Lingerie Show", rows: [["Компания","Сайт","Целевая"],["Рога и копыта","rogaikopyta.ru","Да"]] })',
+      inputSchema: {
+        type: 'object',
+        required: ['spreadsheet_id', 'sheet_name', 'rows'],
+        properties: {
+          spreadsheet_id: { type: 'string', description: 'Google Spreadsheet ID' },
+          sheet_name:     { type: 'string', description: 'Tab name to write to (created if missing)' },
+          rows:           { type: 'array',  description: 'Array of rows; each row is array of cell values. First row = header.' },
+          clear_first:    { type: 'boolean', description: 'Clear existing data in the tab before writing (default true)' },
+        },
+      },
+      handler: async ({ spreadsheet_id, sheet_name, rows, clear_first = true }) => {
+        if (!spreadsheet_id || !sheet_name || !Array.isArray(rows) || rows.length === 0) {
+          return { error: 'Нужны: spreadsheet_id, sheet_name, rows (непустой массив)' };
+        }
+        const sa = requireSa();
+
+        // 1. Get existing sheets to check if tab exists
+        const meta = await sheetsApi('GET', `/spreadsheets/${spreadsheet_id}?fields=sheets.properties`, null, sa);
+        const sheets = meta.sheets || [];
+        const existing = sheets.find(s => s.properties?.title === sheet_name);
+
+        let sheetId;
+        if (!existing) {
+          // 2. Create new tab
+          const resp = await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}:batchUpdate`, {
+            requests: [{ addSheet: { properties: { title: sheet_name } } }],
+          }, sa);
+          sheetId = resp.replies?.[0]?.addSheet?.properties?.sheetId;
+        } else {
+          sheetId = existing.properties.sheetId;
+          if (clear_first) {
+            await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(sheet_name)}:clear`, {}, sa);
+          }
+        }
+
+        // 3. Write data
+        const range = `${sheet_name}!A1`;
+        await sheetsApi('PUT', `/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
+          values: rows,
+        }, sa);
+
+        return {
+          written: true,
+          spreadsheet_id,
+          sheet_name,
+          rows_written: rows.length,
+          tab_created: !existing,
+          url: `https://docs.google.com/spreadsheets/d/${spreadsheet_id}`,
+        };
       },
     },
 
