@@ -90,92 +90,175 @@ function scoreLink(link, siteOrigin) {
 
 // ── HTML → company name list ──────────────────────────────────────────────────
 
+// Returns array of {name, website, category, booth}
 function parseParticipantsFromHtml(html, sourceUrl = '') {
-  // Remove scripts/styles
   const clean = html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<!--[\s\S]*?-->/g, '');
 
-  const companies = [];
+  const entries = [];
 
-  // Strategy 1: look for structured company cards (common exhibition CMS patterns)
-  // Patterns: <div class="*exhibitor*|*participant*|*company*|*member*">...NAME...</div>
-  const cardRe = /class="[^"]*(?:exhibitor|participant|company|member|экспонент|участник|booth|stand)[^"]*"[^>]*>([\s\S]{0,400}?)<\/(?:div|li|article|section)>/gi;
+  // Strategy 1: structured company cards
+  const cardRe = /class="[^"]*(?:exhibitor|participant|company|member|экспонент|участник|booth|stand)[^"]*"[^>]*>([\s\S]{0,600}?)<\/(?:div|li|article|section)>/gi;
   let cm;
   while ((cm = cardRe.exec(clean)) !== null) {
     const inner = cm[1];
-    // Prefer anchor text (company name link) over full card text (which may include booth info)
-    const anchorMatch = inner.match(/<a[^>]*>([\s\S]{0,120}?)<\/a>/i);
-    const text = anchorMatch
-      ? anchorMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
-      : inner.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    const name = extractCompanyName(text);
-    if (name) companies.push(name);
+    const entry = extractCardEntry(inner, sourceUrl);
+    if (entry) entries.push(entry);
   }
 
-  // Strategy 2: table rows — look for table with company-looking rows
-  if (companies.length < 5) {
+  // Strategy 2: table rows
+  if (entries.length < 5) {
     const tableRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
     let tm;
     while ((tm = tableRe.exec(clean)) !== null) {
-      const cells = tm[1].match(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi) || [];
+      const cells = (tm[1].match(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi) || []);
       if (cells.length < 1 || cells.length > 8) continue;
-      const firstCell = (cells[0] || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      const name = extractCompanyName(firstCell);
-      if (name && name.length > 3) companies.push(name);
+      const firstCell = cells[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const name = cleanName(firstCell);
+      if (name && name.length > 3) {
+        const site = extractSiteFromCell(cells[1] || '');
+        entries.push({ name, website: site, category: '', booth: '' });
+      }
     }
   }
 
-  // Strategy 3: list items — <li> in a container with participant-ish parent
-  if (companies.length < 5) {
-    const listRe = /<li[^>]*>([\s\S]{0,200}?)<\/li>/gi;
+  // Strategy 3: list items
+  if (entries.length < 5) {
+    const listRe = /<li[^>]*>([\s\S]{0,300}?)<\/li>/gi;
     let lm;
     while ((lm = listRe.exec(clean)) !== null) {
-      const text = lm[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      const name = extractCompanyName(text);
-      if (name && name.length > 3) companies.push(name);
+      const entry = extractCardEntry(lm[1], sourceUrl);
+      if (entry) entries.push(entry);
     }
   }
 
-  // Deduplicate and filter junk
+  // Deduplicate by name
   const seen = new Set();
   const result = [];
-  for (const c of companies) {
-    const key = c.toLowerCase();
+  for (const e of entries) {
+    const key = e.name.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    if (isJunk(c)) continue;
-    result.push(c);
+    if (isJunk(e.name)) continue;
+    result.push(e);
   }
   return result;
 }
 
-function extractCompanyName(raw) {
+function extractCardEntry(inner, sourceUrl) {
+  // Extract anchor: prefer link to company page
+  const anchorRe = /<a\s[^>]*href=["']([^"'#][^"']*)["'][^>]*>([\s\S]{0,150}?)<\/a>/i;
+  const anchorM = inner.match(anchorRe);
+
+  let rawName = anchorM
+    ? anchorM[2].replace(/<[^>]+>/g, ' ')
+    : inner.replace(/<[^>]+>/g, ' ');
+  rawName = rawName.replace(/\s+/g, ' ').trim();
+  const name = cleanName(rawName);
+  if (!name) return null;
+
+  // Company website: external href (not same-origin exhibition site)
+  let website = '';
+  if (anchorM) {
+    try {
+      const href = new URL(anchorM[1], sourceUrl);
+      const srcOrigin = sourceUrl ? new URL(sourceUrl).origin : '';
+      if (href.origin !== srcOrigin && /^https?:/.test(href.href)) website = href.href;
+    } catch {}
+  }
+  // Fallback: look for explicit site link in card
+  if (!website) {
+    const siteM = inner.match(/href=["'](https?:\/\/(?!.*(?:выставк|expo|exhib|fair))[^"']+)["']/i);
+    if (siteM) {
+      try {
+        const u = new URL(siteM[1]);
+        const srcOrigin = sourceUrl ? new URL(sourceUrl).origin : '';
+        if (u.origin !== srcOrigin) website = u.href;
+      } catch {}
+    }
+  }
+
+  // Category: look for class/data attr hints or text after comma/dash
+  const catM = inner.match(/(?:category|categor|категор|тип|type|отрасл|сфер)[^>]*>([^<]{2,60})</i)
+    || inner.match(/(?:class="[^"]*(?:cat|tag|type|badge)[^"]*"[^>]*>)([^<]{2,50})</i);
+  const category = catM ? catM[1].trim() : '';
+
+  // Booth: look for stand/booth number
+  const boothM = inner.match(/(?:стенд|booth|stand|hall|зал|павильон)\s*[:#]?\s*([A-ZА-Я]?\d{1,4}[A-ZА-Я]?(?:[-/]\d{1,4})?)/i)
+    || inner.match(/\b([A-ZА-Я]\d{2,4})\b/);
+  const booth = boothM ? boothM[1] : '';
+
+  return { name, website, category, booth };
+}
+
+function extractSiteFromCell(cellHtml) {
+  const m = cellHtml.match(/href=["'](https?:\/\/[^"']+)["']/i);
+  return m ? m[1] : '';
+}
+
+function cleanName(raw) {
   const text = raw
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 120);
-
-  // Remove booth numbers, stand IDs at start: "A12 ", "123 ", "Зал 1 "
+  // Strip leading booth ids: "A12 ", "123 ", "Зал 1 "
   const cleaned = text.replace(/^(?:[A-ZА-Я]?\d{1,4}[\s.\-]+|(?:зал|hall|stand|стенд|pavilion|павильон)\s+\S+\s+)/i, '').trim();
-
   if (!cleaned || cleaned.length < 3 || cleaned.length > 100) return null;
   return cleaned;
 }
 
 function isJunk(name) {
-  // Filter navigation items, headers, etc.
   if (/^(?:главная|home|контакты|contact|о нас|about|новости|news|программ|schedule|регистрац|register|войти|login|выставка|exposition|exhibition|форум|conference|семинар|\d+)$/i.test(name.trim())) return true;
-  if (name.split(' ').length > 10) return true; // too long to be a company name
+  if (name.split(' ').length > 10) return true;
   if (/^[A-ZА-ЯЁ\s,.-]+$/.test(name) && name.length < 3) return true;
   return false;
 }
 
-function toCSV(companies) {
-  const header = 'Название компании';
-  return [header, ...companies].join('\n');
+// Find the "next page" link in paginated catalogues
+function findNextPageUrl(html, currentUrl) {
+  const clean = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '');
+  const nextRe = /href=["']([^"']+)["'][^>]*>[\s\S]{0,30}?(?:следующ|next|›|»|вперёд|>)/gi;
+  let m;
+  while ((m = nextRe.exec(clean)) !== null) {
+    try {
+      const abs = new URL(m[1], currentUrl).toString();
+      if (abs !== currentUrl) return abs;
+    } catch {}
+  }
+  // rel="next"
+  const relM = clean.match(/rel=["']next["'][^>]*href=["']([^"']+)["']|href=["']([^"']+)["'][^>]*rel=["']next["']/i);
+  if (relM) {
+    try { return new URL(relM[1] || relM[2], currentUrl).toString(); } catch {}
+  }
+  return null;
+}
+
+function toCSV(entries) {
+  if (!entries.length) return 'Название компании';
+  // Detect if we have rich objects or bare strings (backwards compat)
+  if (typeof entries[0] === 'string') {
+    return ['Название компании', ...entries].join('\n');
+  }
+  const hasWebsite = entries.some(e => e.website);
+  const hasCategory = entries.some(e => e.category);
+  const hasBooth = entries.some(e => e.booth);
+  const cols = ['Название компании'];
+  if (hasCategory) cols.push('Категория');
+  if (hasBooth) cols.push('Стенд');
+  if (hasWebsite) cols.push('Сайт');
+  const rows = entries.map(e => {
+    const row = [e.name];
+    if (hasCategory) row.push(e.category || '');
+    if (hasBooth) row.push(e.booth || '');
+    if (hasWebsite) row.push(e.website || '');
+    return row.map(v => v.includes(',') ? `"${v}"` : v).join(',');
+  });
+  return [cols.join(','), ...rows].join('\n');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -184,14 +267,15 @@ module.exports = {
   tools: {
 
     expo_find_participants: {
-      description: 'Найти страницу участников/экспонентов выставки и вернуть список компаний. ' +
-        'Передай URL сайта выставки — скил сам найдёт страницу участников и вернёт CSV со списком.\n\n' +
-        'Если сайт рендерится через JS и список не парсится автоматически:\n' +
-        '1. Используй browser_session_navigate (скил Browser Session) чтобы открыть страницу участников\n' +
-        '   — или Playwright инструменты если подключены\n' +
-        '2. Либо WebFetch для получения HTML\n' +
-        '3. Затем вызови expo_parse_participants(html) с полученным HTML\n\n' +
-        'Результат (CSV) можно сразу передавать в inn_enrich_batch для обогащения.',
+      description: 'Найти страницу участников/экспонентов выставки и вернуть список компаний (CSV).\n\n' +
+        'ВАЖНО — алгоритм для Claude:\n' +
+        '1. Вызови expo_find_participants(site_url)\n' +
+        '2. Если result.warning (JS-сайт / 0 компаний) — НЕ СПРАШИВАЙ ПОЛЬЗОВАТЕЛЯ, сразу:\n' +
+        '   а) WebFetch страницы участников → expo_parse_participants(html)\n' +
+        '   б) Если WebFetch тоже пуст — browser_session_navigate на страницу участников,\n' +
+        '      прочитай DOM, передай HTML в expo_parse_participants\n' +
+        '3. CSV из result.csv готов для inn_enrich_batch\n\n' +
+        'Поля в CSV: Название компании, Категория (если есть), Стенд (если есть), Сайт (если есть).',
       inputSchema: {
         type: 'object',
         required: ['site_url'],
@@ -234,16 +318,38 @@ module.exports = {
 
         if (companies.length === 0) {
           return {
-            warning: 'Компании не найдены автоматически. Вероятно, сайт рендерится через JS.',
-            hint: 'Используй WebFetch чтобы получить HTML страницы участников, потом вызови expo_parse_participants(html).',
+            warning: 'Компании не найдены автоматически. Вероятно, сайт рендерится через JS или защищён.',
+            hint: 'Сразу попробуй WebFetch страницы участников → expo_parse_participants(html). Если пусто — browser_session_navigate.',
             site_url,
           };
+        }
+
+        // Step 4: follow pagination until max_companies reached or no next page
+        let currentHtml = main.html;
+        let currentUrl = main.url;
+        let pageCount = 1;
+        while (companies.length < max_companies && pageCount < 10) {
+          const nextUrl = findNextPageUrl(currentHtml, currentUrl);
+          if (!nextUrl || nextUrl === currentUrl) break;
+          const nextPage = await fetchHtml(nextUrl);
+          if (nextPage.error || !nextPage.html) break;
+          const more = parseParticipantsFromHtml(nextPage.html, nextUrl);
+          if (more.length === 0) break;
+          const beforeCount = companies.length;
+          const seen = new Set(companies.map(e => (e.name || e).toLowerCase()));
+          for (const e of more) {
+            if (!seen.has((e.name || e).toLowerCase())) companies.push(e);
+          }
+          if (companies.length === beforeCount) break; // no new entries
+          currentHtml = nextPage.html;
+          currentUrl = nextUrl;
+          pageCount++;
         }
 
         const limited = companies.slice(0, max_companies);
         return {
           found: limited.length,
-          total_on_page: companies.length,
+          pages_fetched: pageCount,
           csv: toCSV(limited),
           companies: limited,
         };
