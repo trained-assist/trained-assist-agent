@@ -1,4 +1,10 @@
-function getcourseFormHtml(token) {
+// saved: { domain, apiKey, login, password, hasSession } — all optional
+function getcourseFormHtml(token, saved) {
+  saved = saved || {};
+  const hasSaved = !!(saved.domain || saved.apiKey || saved.login);
+  function jsStr(v) { return v ? JSON.stringify(String(v)) : 'null'; }
+  const savedJs = `{domain:${jsStr(saved.domain)},apiKey:${jsStr(saved.apiKey)},login:${jsStr(saved.login)},password:${jsStr(saved.password)},hasSession:${!!saved.hasSession}}`;
+
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -11,16 +17,19 @@ function getcourseFormHtml(token) {
   .card{background:#fff;border-radius:16px;padding:32px;max-width:480px;width:100%;box-shadow:0 2px 20px rgba(0,0,0,.08)}
   h1{font-size:20px;font-weight:600;margin-bottom:8px}
   .sub{color:#666;font-size:14px;margin-bottom:24px;line-height:1.5}
+  .saved-banner{background:#e8f5e9;color:#2e7d32;border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px}
   label{display:block;font-size:13px;font-weight:500;color:#333;margin-bottom:6px;margin-top:16px}
   label:first-of-type{margin-top:0}
   input{width:100%;border:1.5px solid #e0e0e0;border-radius:10px;padding:12px 14px;font-size:15px;outline:none;transition:border .15s}
-  input:focus{border-color:#007aff}
+  input.prefilled{border-color:#34c759;background:#f0faf3}
+  input:focus{border-color:#007aff;background:#fff}
   .divider{display:flex;align-items:center;gap:10px;margin:20px 0 4px}
   .divider-line{flex:1;height:1px;background:#e0e0e0}
   .divider-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;padding:0 4px}
   .l1-label{color:#1db87a}
   .l2-label{color:#8b5cf6}
   .opt{font-size:11px;color:#999;font-weight:400;margin-left:4px}
+  .session-badge{display:inline-block;background:#e8f5e9;color:#2e7d32;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:600;margin-left:6px}
   button{margin-top:20px;width:100%;background:#007aff;color:#fff;border:none;border-radius:10px;padding:13px;font-size:16px;font-weight:600;cursor:pointer;transition:opacity .15s}
   button:hover{opacity:.88}
   button:disabled{opacity:.5;cursor:default}
@@ -40,6 +49,8 @@ function getcourseFormHtml(token) {
     <h1>Подключить GetCourse</h1>
     <p class="sub">Данные не попадают в чат — форма отправляет их напрямую на сервер.</p>
 
+    ${hasSaved ? '<div class="saved-banner">✅ Данные сохранены с прошлого раза — можно переподключить или изменить</div>' : ''}
+
     <label for="domain">Домен аккаунта</label>
     <input id="domain" type="text" placeholder="myschool.getcourse.ru" autocomplete="off" spellcheck="false">
 
@@ -55,7 +66,7 @@ function getcourseFormHtml(token) {
 
     <div class="divider">
       <div class="divider-line"></div>
-      <div class="divider-label l2-label">Уровень 2 — Сессия</div>
+      <div class="divider-label l2-label">Уровень 2 — Сессия${hasSaved && saved.hasSession ? '<span class="session-badge">активна</span>' : ''}</div>
       <div class="divider-line"></div>
     </div>
 
@@ -65,7 +76,7 @@ function getcourseFormHtml(token) {
     <input id="password" type="password" autocomplete="current-password" placeholder="Пароль от аккаунта">
     <div class="hint">Даёт доступ к созданию курсов, уроков, загрузке видео. Вход занимает 15–30 сек.</div>
 
-    <button id="btn" onclick="submit()">Подключить</button>
+    <button id="btn" onclick="submit()">${hasSaved ? 'Переподключить' : 'Подключить'}</button>
     <div id="msg" class="msg"></div>
   </div>
 
@@ -79,6 +90,24 @@ function getcourseFormHtml(token) {
 </div>
 <script>
 const T = '${token.replace(/'/g, "\\'")}';
+const SAVED = ${savedJs};
+
+window.addEventListener('DOMContentLoaded', () => {
+  if (!SAVED) return;
+  const fields = [
+    {id: 'domain',   key: 'domain'},
+    {id: 'apiKey',   key: 'apiKey'},
+    {id: 'login',    key: 'login'},
+    {id: 'password', key: 'password'},
+  ];
+  for (const {id, key} of fields) {
+    if (!SAVED[key]) continue;
+    const el = document.getElementById(id);
+    el.value = SAVED[key];
+    el.classList.add('prefilled');
+    el.addEventListener('input', () => el.classList.remove('prefilled'));
+  }
+});
 
 function showMsg(cls, text) {
   const el = document.getElementById('msg');
@@ -110,7 +139,7 @@ async function submit() {
     const d = await r.json();
     if (d.error) {
       showMsg('err', d.error);
-      btn.disabled = false; btn.textContent = 'Подключить';
+      btn.disabled = false; btn.textContent = 'Переподключить';
       return;
     }
     const levelText = { 'L1+L2': 'API + сессия (полный доступ)', 'L1': 'API (управление учениками)', 'L2': 'Сессия (создание курсов)' }[d.level] || d.level;
@@ -119,7 +148,7 @@ async function submit() {
     document.getElementById('done').style.display = 'block';
   } catch(e) {
     showMsg('err', e.name === 'TimeoutError' ? 'Превышено время ожидания — попробуйте ещё раз' : 'Ошибка: ' + e.message);
-    btn.disabled = false; btn.textContent = 'Подключить';
+    btn.disabled = false; btn.textContent = 'Переподключить';
   }
 }
 

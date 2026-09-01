@@ -14,6 +14,7 @@ const { nalogFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
 const { connectFormHtml } = require('./connect-forms/generic');
+const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -368,7 +369,28 @@ async function main() {
       if (service === 'getcourse') {
         if (req.method === 'GET') {
           const t = url.searchParams.get('t') || '';
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(getcourseFormHtml(t));
+          // Pre-fill from saved config if available
+          let gcSaved = null;
+          try {
+            if (/^[a-f0-9]{32}$/.test(t)) {
+              const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
+              const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
+              if (pending.uid && pending.expires > Date.now()) {
+                const cfgFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'getcourse', 'config.json');
+                if (fs.existsSync(cfgFile)) {
+                  const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+                  gcSaved = {
+                    domain: cfg.accountDomain || null,
+                    apiKey: cfg.apiKey || null,
+                    login: cfg.login || null,
+                    password: cfg.password || null,
+                    hasSession: !!(cfg.sessionCookies && cfg.sessionCookies.length > 0),
+                  };
+                }
+              }
+            }
+          } catch { /* non-critical: render form without pre-fill */ }
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(getcourseFormHtml(t, gcSaved));
           return;
         }
 
@@ -392,6 +414,8 @@ async function main() {
           const cleanDomain = domain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
           const patch = { accountDomain: cleanDomain };
           if (apiKey) patch.apiKey = apiKey.trim();
+          if (login) patch.login = login.trim();
+          if (password) patch.password = password; // stored for form pre-fill on next connect
           mergeGetcourseConfig(pending.uid, patch);
 
           let cookiesCount = 0;
@@ -418,6 +442,79 @@ async function main() {
         res.writeHead(405).end(); return;
       }
 
+      // login-creds services: two-field (email+password) forms
+      const LOGIN_CREDS_META = {
+        'tilda-creds': {
+          name: 'Tilda (логин)',
+          hint: 'Сохраните логин и пароль от tilda.ru — ассистент сможет входить автоматически, не видя данных в чате.',
+          emailLabel: 'Email от Tilda',
+          emailPlaceholder: 'you@example.com',
+        },
+      };
+      const loginCredsMeta = LOGIN_CREDS_META[service];
+      if (loginCredsMeta) {
+        if (req.method === 'GET') {
+          const t = url.searchParams.get('t') || '';
+          let lcSaved = null;
+          try {
+            if (/^[a-f0-9]{32}$/.test(t)) {
+              const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
+              const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
+              if (pending.uid && pending.expires > Date.now()) {
+                const credsFile = path.join(os.homedir(), 'agent-tokens', pending.uid, service);
+                if (fs.existsSync(credsFile)) {
+                  const stored = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+                  lcSaved = { email: stored.email || null, password: stored.password || null };
+                }
+              }
+            }
+          } catch { /* non-critical */ }
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+            .end(loginCredsFormHtml(service, loginCredsMeta, t, lcSaved));
+          return;
+        }
+
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          let payload;
+          try { payload = JSON.parse(body); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
+          const { t, email, password } = payload;
+          if (!t || !email || !password) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
+          if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
+
+          const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+          let pending;
+          try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
+          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
+          if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
+
+          const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
+          fs.mkdirSync(tokensDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(tokensDir, service),
+            JSON.stringify({ email: email.trim(), password }),
+            { mode: 0o600 }
+          );
+          try { fs.unlinkSync(pendingFile); } catch {}
+          console.log(`[connect] saved ${service} creds for uid=${pending.uid}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
+
+          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: pending.uid,
+              text: `✅ ${loginCredsMeta.name} сохранён! Ассистент теперь может входить автоматически — данные изолированы от чата.\n\nУправление: /secrets_list`,
+            }),
+          }).catch(e => console.error('[connect] tg notify failed:', e.message));
+          return;
+        }
+
+        res.writeHead(405).end(); return;
+      }
+
       const SERVICE_META = {
         github: { name: 'GitHub', placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', hint: 'github.com/settings/tokens → Generate new token (classic) → scopes: <b>repo</b>, <b>read:org</b>' },
         weeek:  { name: 'Weeek CRM', placeholder: 'Вставьте API токен', hint: 'Weeek → Settings → Integrations → API → Generate token' },
@@ -427,7 +524,21 @@ async function main() {
 
       if (req.method === 'GET') {
         const t = url.searchParams.get('t') || '';
-        const html = connectFormHtml(service, meta, t);
+        // Pre-fill from saved token if available
+        let savedValue = null;
+        try {
+          if (/^[a-f0-9]{32}$/.test(t)) {
+            const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
+            const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
+            if (pending.uid && pending.expires > Date.now()) {
+              const tokenFile = path.join(os.homedir(), 'agent-tokens', pending.uid, service);
+              if (fs.existsSync(tokenFile)) {
+                savedValue = fs.readFileSync(tokenFile, 'utf8').trim() || null;
+              }
+            }
+          }
+        } catch { /* non-critical */ }
+        const html = connectFormHtml(service, meta, t, savedValue);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
         return;
       }
