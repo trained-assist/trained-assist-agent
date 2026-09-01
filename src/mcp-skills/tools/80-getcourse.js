@@ -312,6 +312,13 @@ module.exports = {
           const page = opened.page;
 
           await page.goto(`https://${cfg.accountDomain}/pl/user/group/index`, { waitUntil: 'networkidle', timeout: 30000 });
+
+          // Detect session expiry: GetCourse silently redirects to /login/
+          if (page.url().includes('/login')) {
+            await browser.close();
+            return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+          }
+
           await page.waitForTimeout(1500);
 
           const { groups, hasMore } = await page.evaluate(() => {
@@ -393,6 +400,13 @@ module.exports = {
           const page = opened.page;
 
           await page.goto(`https://${cfg.accountDomain}/showcase/settings`, { waitUntil: 'networkidle', timeout: 30000 });
+
+          // Detect session expiry: GetCourse silently redirects to /login/
+          if (page.url().includes('/login')) {
+            await browser.close();
+            return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+          }
+
           await page.waitForTimeout(2000);
 
           // Extract course rows: each row has a name + trainingId link
