@@ -1,8 +1,9 @@
 'use strict';
 
 // GetCourse skill — two-level integration
-// L1 (API key):  user management, groups, orders  → /pl/api/*
-// L2 (session):  course/lesson/block creation     → /pl/teach/gcapi/* and /pl/lite/block/*
+// L1 (API key):  user management, orders           → /pl/api/*
+// L2 (session):  course/lesson/block creation,     → /pl/teach/gcapi/* and /pl/lite/block/*
+//                group listing (Playwright)
 
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +12,25 @@ const crypto = require('crypto');
 
 const USER_ID = process.env.USER_ID || '';
 const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
+
+// ── Playwright helper ────────────────────────────────────────────────────
+// Shared browser launch + cookie injection to avoid copy-paste across tools.
+async function openBrowserPage(cfg) {
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-setuid-sandbox'],
+  });
+  const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA });
+  await context.addCookies((cfg.sessionCookies || []).map(c => ({
+    name: c.name, value: c.value,
+    domain: c.domain.startsWith('.') ? c.domain : '.' + c.domain,
+    path: c.path || '/', secure: c.secure || false, httpOnly: c.httpOnly || false,
+  })));
+  const page = await context.newPage();
+  page.setDefaultTimeout(20000);
+  return { browser, page };
+}
 
 // ── Config ────────────────────────────────────────────────────────────────
 
@@ -273,7 +293,7 @@ module.exports = {
     },
 
     gc_group_list: {
-      description: 'List groups (группы доступа) in GetCourse via Playwright. Use to find correct group_name before gc_user_add. Takes ~15s.',
+      description: 'List groups (группы доступа) in GetCourse via Playwright. Requires L2 (session). Use to find correct group_name before gc_user_add. Takes ~15s. Returns has_more:true if the account has more groups than fit on the first page.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -287,21 +307,14 @@ module.exports = {
 
         let browser;
         try {
-          const { chromium } = require('playwright');
-          browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-setuid-sandbox'] });
-          const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA });
-          await context.addCookies((cfg.sessionCookies || []).map(c => ({
-            name: c.name, value: c.value,
-            domain: c.domain.startsWith('.') ? c.domain : '.' + c.domain,
-            path: c.path || '/', secure: c.secure || false, httpOnly: c.httpOnly || false,
-          })));
-          const page = await context.newPage();
-          page.setDefaultTimeout(20000);
+          const opened = await openBrowserPage(cfg);
+          browser = opened.browser;
+          const page = opened.page;
 
           await page.goto(`https://${cfg.accountDomain}/pl/user/group/index`, { waitUntil: 'networkidle', timeout: 30000 });
           await page.waitForTimeout(1500);
 
-          const groups = await page.evaluate(() => {
+          const { groups, hasMore } = await page.evaluate(() => {
             const results = [];
             // Group rows with data-id attribute
             document.querySelectorAll('tr[data-id], tr[id^="group-"]').forEach(row => {
@@ -320,15 +333,21 @@ module.exports = {
                 results.push({ id, name: a.textContent.trim().slice(0, 100) || '?' });
               });
             }
-            return results;
+            // Detect pagination: a next-page link/button that isn't disabled
+            const nextEl = document.querySelector(
+              'a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a, a[aria-label="Next"]'
+            );
+            return { groups: results, hasMore: !!nextEl };
           });
 
           await browser.close();
           let filtered = groups;
           if (query) filtered = groups.filter(g => g.name.toLowerCase().includes(query.toLowerCase()));
-          return { count: filtered.length, groups: filtered };
+          const result = { count: filtered.length, groups: filtered };
+          if (hasMore) result.warning = 'has_more: только первая страница групп — на аккаунте их больше. Используй query для поиска по имени.';
+          return result;
         } catch (e) {
-          browser?.close().catch(() => {});
+          await browser?.close().catch(() => {});
           return { error: `Ошибка получения списка групп: ${e.message.slice(0, 200)}` };
         }
       },
@@ -369,16 +388,9 @@ module.exports = {
 
         let browser;
         try {
-          const { chromium } = require('playwright');
-          browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-setuid-sandbox'] });
-          const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA });
-          await context.addCookies((cfg.sessionCookies || []).map(c => ({
-            name: c.name, value: c.value,
-            domain: c.domain.startsWith('.') ? c.domain : '.' + c.domain,
-            path: c.path || '/', secure: c.secure || false, httpOnly: c.httpOnly || false,
-          })));
-          const page = await context.newPage();
-          page.setDefaultTimeout(20000);
+          const opened = await openBrowserPage(cfg);
+          browser = opened.browser;
+          const page = opened.page;
 
           await page.goto(`https://${cfg.accountDomain}/showcase/settings`, { waitUntil: 'networkidle', timeout: 30000 });
           await page.waitForTimeout(2000);
@@ -414,7 +426,7 @@ module.exports = {
           }));
           return { count: withUrls.length, courses: withUrls };
         } catch (e) {
-          browser?.close().catch(() => {});
+          await browser?.close().catch(() => {});
           return { error: `Ошибка получения списка курсов: ${e.message.slice(0, 200)}` };
         }
       },
