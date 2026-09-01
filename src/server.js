@@ -4,7 +4,7 @@ const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
-const { runTask } = require('./runner');
+const { runTask, generateConnectLink } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData } = require('./session-store');
@@ -82,6 +82,49 @@ const GDRIVE_SCOPES = [
   'openid',
   'email',
 ].join(' ');
+
+function scheduleNalogExpiryChecks(secrets) {
+  const notified = new Set();
+  const AGENT_TOKENS_DIR = path.join(os.homedir(), 'agent-tokens');
+  const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+  const NOTIFY_WINDOW_MS  = 10 * 60 * 1000; // notify if expired within last 10 min
+
+  function check() {
+    if (!fs.existsSync(AGENT_TOKENS_DIR)) return;
+    const now = Date.now();
+    for (const userId of fs.readdirSync(AGENT_TOKENS_DIR)) {
+      const nalogFile = path.join(AGENT_TOKENS_DIR, userId, 'nalog');
+      if (!fs.existsSync(nalogFile)) continue;
+      let tokenData;
+      try { tokenData = JSON.parse(fs.readFileSync(nalogFile, 'utf8')); } catch { continue; }
+      if (!tokenData.expires || !tokenData.auth_token) continue;
+      const expiresMs = new Date(tokenData.expires).getTime();
+      if (isNaN(expiresMs)) continue;
+      const age = now - expiresMs;
+      if (age < 0 || age > NOTIFY_WINDOW_MS) continue;
+      const key = `${userId}-${tokenData.expires}`;
+      if (notified.has(key)) continue;
+      notified.add(key);
+      let connectUrl;
+      try { connectUrl = generateConnectLink(userId, 'nalog'); } catch (e) {
+        console.error('[nalog-expiry] generateConnectLink failed:', e.message); continue;
+      }
+      const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+      fetch(`${tgBase}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: userId,
+          text: `⚠️ Токен Налог.ру истёк. Хотите войти заново?\n\n👉 ${connectUrl}\n\nСсылка действительна 30 минут.`,
+        }),
+      }).catch(e => console.error('[nalog-expiry] tg notify failed:', e.message));
+      console.log('[nalog-expiry] notified userId=%s about expired token', userId);
+    }
+  }
+
+  setTimeout(check, 60 * 1000); // first check 1 min after start (tokens may be fresh on restart)
+  setInterval(check, CHECK_INTERVAL_MS);
+}
 
 async function main() {
   const secrets = await loadSecrets();
@@ -711,6 +754,8 @@ async function main() {
   const driveOpts = { botToken: secrets.BOT_TOKEN, tgBase: process.env.TELEGRAM_API_URL };
   pollDriveChanges(driveOpts).catch(() => {});
   setInterval(() => pollDriveChanges(driveOpts).catch(() => {}), 2 * 60 * 1000);
+
+  scheduleNalogExpiryChecks(secrets);
 
   const shutdown = () => {
     server.close(() => process.exit(0));
