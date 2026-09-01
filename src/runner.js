@@ -417,7 +417,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     const expandMarkup = activeSessionId && !isUtility
       ? { inline_keyboard: [[{ text: '↗️ вдумчивее плиз', callback_data: `ask_claude|${activeSessionId}` }]] }
       : null;
-    await tgSend(BOT_TOKEN, chatId, quickReply, expandMarkup ? { reply_markup: expandMarkup } : {});
+    await tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, expandMarkup ? { reply_markup: expandMarkup } : {});
     return quickReply;
   }
 
@@ -643,11 +643,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const final = result.slice(-MAX_MSG_LEN);
 
   if (msgId) {
-    await tgEdit(BOT_TOKEN, chatId, msgId, `✅ ${final}`).catch(() =>
-      tgSend(BOT_TOKEN, chatId, `✅ ${final}`)
+    await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`).catch(() =>
+      tgSend(BOT_TOKEN, chatId, `🧠 ${final}`)
     );
   } else {
-    await tgSend(BOT_TOKEN, chatId, `✅ ${final}`);
+    await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`);
   }
 
   // Append assistant reply to session history
