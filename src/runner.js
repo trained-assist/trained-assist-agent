@@ -398,7 +398,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : getQuickAnswer(task, user.id, user.workDir);
+  const quickReply = forceClaude ? null : getQuickAnswer(task, user.telegramUserId || user.id, user.workDir);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
@@ -435,7 +435,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const msgId = thinkMsg?.result?.message_id;
   const thinkingStart = Date.now();
 
-  const userTokens = loadUserTokens(user.id);
+  const userTokens = loadUserTokens(user.id, user.telegramUserId);
 
   // Expired nalog token — tell user immediately, don't waste Claude on it
   const needsNalog = /nalog|налог|нпд|lknpd|самозан|чек|фнс/i.test(task);

@@ -34,7 +34,39 @@ function appendSecretsLog(userId, services) {
   } catch { /* non-critical */ }
 }
 
-function loadUserTokens(userId) {
+function loadUserTokens(userId, telegramUserId) {
+  // telegramUserId (from.id) is the stable per-user key; userId (chatId) is the legacy per-chat key.
+  // When telegramUserId differs from userId, prefer the telegramUserId folder and auto-migrate
+  // files from the old chatId folder so GetCourse/nalog tokens survive group changes.
+  if (telegramUserId && String(telegramUserId) !== String(userId)) {
+    const tgDir = tokensDir(telegramUserId);
+    const legacyDir = tokensDir(userId);
+    const tgHasFiles = fs.existsSync(tgDir) &&
+      fs.readdirSync(tgDir).filter(f => !LOG_FILES.has(f)).length > 0;
+
+    if (!tgHasFiles && fs.existsSync(legacyDir)) {
+      // Migrate all token files from legacy chatId folder to telegramUserId folder
+      fs.mkdirSync(tgDir, { recursive: true });
+      for (const file of fs.readdirSync(legacyDir)) {
+        if (LOG_FILES.has(file)) continue;
+        try {
+          const src = path.join(legacyDir, file);
+          const dst = path.join(tgDir, file);
+          if (!fs.existsSync(dst)) {
+            if (fs.statSync(src).isDirectory()) {
+              fs.cpSync(src, dst, { recursive: true });
+            } else {
+              fs.copyFileSync(src, dst);
+            }
+          }
+        } catch { /* skip files we can't copy */ }
+      }
+      console.log(`[user-tokens] migrated tokens from chatId=${userId} → telegramUserId=${telegramUserId}`);
+    }
+
+    return loadUserTokens(telegramUserId);
+  }
+
   const dir = tokensDir(userId);
   const extra = {};
   if (!fs.existsSync(dir)) return extra;

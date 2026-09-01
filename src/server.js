@@ -675,13 +675,17 @@ async function main() {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude) return json(res, 400, { error: 'missing fields' });
       if (!/^-?\d{1,20}$/.test(String(userId))) {
         console.log('[/run] 400 invalid userId:', userId);
         return json(res, 400, { error: 'invalid userId' });
+      }
+      if (telegramUserId && !/^\d{1,20}$/.test(String(telegramUserId))) {
+        console.log('[/run] 400 invalid telegramUserId:', telegramUserId);
+        return json(res, 400, { error: 'invalid telegramUserId' });
       }
       if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32) {
         console.log('[/run] 400 invalid username:', username);
@@ -694,7 +698,7 @@ async function main() {
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
-      const user = { id: userId, name: username, username, workDir };
+      const user = { id: userId, name: username, username, workDir, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
       // Accept request immediately, run task in background
