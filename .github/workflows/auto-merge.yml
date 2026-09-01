@@ -18,13 +18,23 @@ jobs:
     steps:
       - name: Wait for CI to pass
         run: |
-          PR_URL="${{ github.event.pull_request.html_url }}"
+          SHA="${{ github.event.pull_request.head.sha }}"
+          STATUS="PENDING"
           for i in $(seq 1 60); do
-            STATUS=$(gh pr checks "$PR_URL" --json name,state \
-              --jq '.[] | select(.name == "ci") | .state' 2>/dev/null || echo "PENDING")
-            echo "Attempt $i: CI = $STATUS"
+            RUN=$(gh run list --commit "$SHA" --workflow ci.yml --limit 1 \
+              --json status,conclusion 2>/dev/null || echo "[]")
+            RUN_STATUS=$(echo "$RUN" | jq -r '.[0].status // "queued"')
+            RUN_CONCL=$(echo "$RUN"  | jq -r '.[0].conclusion // ""')
+            if [ "$RUN_STATUS" = "completed" ]; then
+              STATUS=$(echo "$RUN_CONCL" | tr '[:lower:]' '[:upper:]')
+            else
+              STATUS="PENDING"
+            fi
+            echo "Attempt $i: run_status=$RUN_STATUS conclusion=$RUN_CONCL → $STATUS"
             if [ "$STATUS" = "SUCCESS" ]; then break; fi
-            if [ "$STATUS" = "FAILURE" ]; then echo "CI failed — skipping merge"; exit 1; fi
+            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ]; then
+              echo "CI did not pass — skipping merge"; exit 1
+            fi
             sleep 10
           done
           if [ "$STATUS" != "SUCCESS" ]; then echo "Timed out waiting for CI"; exit 1; fi
