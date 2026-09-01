@@ -24,7 +24,7 @@ async function openBrowserPage(cfg) {
   const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA });
   await context.addCookies((cfg.sessionCookies || []).map(c => ({
     name: c.name, value: c.value,
-    domain: c.domain.startsWith('.') ? c.domain : '.' + c.domain,
+    domain: (c.domain || '').startsWith('.') ? c.domain : '.' + (c.domain || cfg.accountDomain),
     path: c.path || '/', secure: c.secure || false, httpOnly: c.httpOnly || false,
   })));
   const page = await context.newPage();
@@ -326,7 +326,7 @@ module.exports = {
             // Group rows with data-id attribute
             document.querySelectorAll('tr[data-id], tr[id^="group-"]').forEach(row => {
               const id = row.dataset.id || row.id.replace('group-', '');
-              const nameEl = row.querySelector('td:first-child a, td.name, td:first-child');
+              const nameEl = row.querySelector('td:first-child a') || row.querySelector('td.name') || row.querySelector('td:first-child');
               const name = nameEl?.textContent?.trim();
               if (id && name && name.length > 0) results.push({ id, name });
             });
@@ -337,7 +337,9 @@ module.exports = {
                 if (!m) return;
                 const id = m[1];
                 if (results.find(r => r.id === id)) return;
-                results.push({ id, name: a.textContent.trim().slice(0, 100) || '?' });
+                const name = a.textContent.trim().slice(0, 100);
+                if (!name) return; // skip icon-only anchors with no visible text
+                results.push({ id, name });
               });
             }
             // Detect pagination: a next-page link/button that isn't disabled
