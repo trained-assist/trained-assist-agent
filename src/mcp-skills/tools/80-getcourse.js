@@ -609,7 +609,7 @@ module.exports = {
     // ── L2: Course listing & creation ────────────────────────────────────────
 
     gc_course_list: {
-      description: 'List all courses (trainings) in the GetCourse account. Returns id, title, url for each course. Uses Playwright to scrape the admin showcase page — takes 15–25s.',
+      description: 'List all courses (trainings) in the GetCourse account. Returns id, title, url for each course. Uses Playwright to scrape the admin course tree — takes 15–25s.',
       inputSchema: { type: 'object', properties: {} },
       handler: async (_, ctx) => {
         const cfg = readConfig(ctx?.userId);
@@ -622,7 +622,7 @@ module.exports = {
           browser = opened.browser;
           const page = opened.page;
 
-          await page.goto(`https://${cfg.accountDomain}/showcase/settings`, { waitUntil: 'networkidle', timeout: 30000 });
+          await page.goto(`https://${cfg.accountDomain}/teach/control/stream/tree`, { waitUntil: 'networkidle', timeout: 30000 });
 
           // Detect session expiry: GetCourse silently redirects to /login/
           if (page.url().includes('/login')) {
@@ -632,26 +632,23 @@ module.exports = {
 
           await page.waitForTimeout(2000);
 
-          // Extract course rows: each row has a name + trainingId link
+          // Extract course links: /teach/control/stream/*/id/{id} or ?id={id}
           const courses = await page.evaluate(() => {
+            const seen = new Set();
             const results = [];
-            document.querySelectorAll('a[href*="trainingId="]').forEach(a => {
-              const m = a.href.match(/trainingId=(\d+)/);
-              if (!m) return;
-              const id = m[1];
-              if (results.find(r => r.id === id)) return;
-              // Walk up to find the row container and extract the course name
-              let el = a.parentElement;
-              for (let i = 0; i < 5; i++) {
-                if (!el) break;
-                const nameEl = el.querySelector('[class*="name"], [class*="title"], td:first-child, .name');
-                if (nameEl && nameEl.textContent?.trim().length > 2) {
-                  results.push({ id, title: nameEl.textContent.trim().slice(0, 120) });
-                  return;
-                }
-                el = el.parentElement;
-              }
-              results.push({ id, title: '?' });
+            document.querySelectorAll('a[href*="/teach/control/stream/"]').forEach(a => {
+              const href = a.getAttribute('href') || '';
+              // Match /id/{id} path segment or ?id={id} query param
+              let id = null;
+              const pathMatch = href.match(/\/id\/(\d+)/);
+              const queryMatch = href.match(/[?&]id=(\d+)/);
+              if (pathMatch) id = pathMatch[1];
+              else if (queryMatch) id = queryMatch[1];
+              if (!id || seen.has(id)) return;
+              const text = (a.innerText || a.textContent || '').trim().replace(/\s+/g, ' ');
+              if (!text || text.length < 2) return; // skip icon-only links
+              seen.add(id);
+              results.push({ id, title: text.slice(0, 120) });
             });
             return results;
           });
@@ -659,7 +656,7 @@ module.exports = {
           await browser.close();
           const withUrls = courses.map(c => ({
             ...c,
-            url: `https://${cfg.accountDomain}/teach/control/stream/view?id=${c.id}`,
+            url: `https://${cfg.accountDomain}/teach/control/stream/view/id/${c.id}`,
           }));
           return { count: withUrls.length, courses: withUrls };
         } catch (e) {
