@@ -273,7 +273,7 @@ module.exports = {
     },
 
     gc_group_list: {
-      description: 'List groups in the GetCourse account. Use to find the correct group_name before calling gc_user_add.',
+      description: 'List groups in the GetCourse account via Playwright. Use to find correct group_name before gc_user_add. Takes ~15s.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -282,13 +282,55 @@ module.exports = {
       },
       handler: async ({ query }, ctx) => {
         const cfg = readConfig(ctx?.userId);
-        const err = requireL1(cfg);
+        const err = requireL2(cfg);
         if (err) return err;
-        const result = await gcApiExport(cfg, '/pl/api/groups', { page: 1, count: 200 });
-        if (query && Array.isArray(result?.list)) {
-          result.list = result.list.filter(g => g.name && g.name.toLowerCase().includes(query.toLowerCase()));
+
+        let browser;
+        try {
+          const { chromium } = require('playwright');
+          browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-setuid-sandbox'] });
+          const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA });
+          await context.addCookies((cfg.sessionCookies || []).map(c => ({
+            name: c.name, value: c.value,
+            domain: c.domain.startsWith('.') ? c.domain : '.' + c.domain,
+            path: c.path || '/', secure: c.secure || false, httpOnly: c.httpOnly || false,
+          })));
+          const page = await context.newPage();
+          page.setDefaultTimeout(20000);
+
+          await page.goto(`https://${cfg.accountDomain}/pl/user/group/index`, { waitUntil: 'networkidle', timeout: 30000 });
+          await page.waitForTimeout(1500);
+
+          const groups = await page.evaluate(() => {
+            const results = [];
+            // Group rows typically have id in the URL and name in a cell
+            document.querySelectorAll('tr[data-id], tr[id^="group-"]').forEach(row => {
+              const id = row.dataset.id || row.id.replace('group-', '');
+              const nameEl = row.querySelector('td:first-child a, td:first-child span, td.name, td:first-child');
+              const name = nameEl?.textContent?.trim();
+              if (id && name && name.length > 0) results.push({ id, name });
+            });
+            // Fallback: look for table links with /group/ in href
+            if (results.length === 0) {
+              document.querySelectorAll('a[href*="/group/"]').forEach(a => {
+                const m = a.href.match(/\/group\/(?:view|edit)\/id\/(\d+)/);
+                if (!m) return;
+                const id = m[1];
+                if (results.find(r => r.id === id)) return;
+                results.push({ id, name: a.textContent.trim().slice(0, 100) || '?' });
+              });
+            }
+            return results;
+          });
+
+          await browser.close();
+          let filtered = groups;
+          if (query) filtered = groups.filter(g => g.name.toLowerCase().includes(query.toLowerCase()));
+          return { count: filtered.length, groups: filtered };
+        } catch (e) {
+          browser?.close().catch(() => {});
+          return { error: `Ошибка получения списка групп: ${e.message.slice(0, 200)}` };
         }
-        return result;
       },
     },
 
