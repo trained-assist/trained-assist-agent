@@ -18,6 +18,7 @@ const SERVICE_DISPLAY = {
   linear:          'Linear',
   tilda:           'Tilda',
   'tilda-session': 'Tilda (сессия)',
+  'tilda-creds':   'Tilda (логин)',
   dadata:          'DaData',
   gdrive:          'Google Drive',
 };
@@ -90,6 +91,7 @@ function revokeService(userId, serviceName) {
     notion: 'notion',
     linear: 'linear',
     tilda: 'tilda', тильда: 'tilda',
+    'tilda-creds': 'tilda-creds', тильдакред: 'tilda-creds',
     gdrive: 'gdrive', гугл: 'gdrive', google: 'gdrive',
     dadata: 'dadata',
   };

@@ -174,6 +174,69 @@ const tools = [
   },
 
   {
+    name: 'browser_session_autologin',
+    description: 'Log into a site using credentials stored in the agent credential store — credentials are never passed through Claude context. ' +
+      'Requires credentials saved via the tilda-creds (or similar) connect form first. ' +
+      'Returns login result or instructions if no stored credentials found.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        service: {
+          type: 'string',
+          description: 'Credential store key, e.g. "tilda-creds". Defaults to "tilda-creds".',
+          default: 'tilda-creds',
+        },
+        user_id: { type: 'string', description: 'User ID (optional, defaults to current session user)' },
+      },
+    },
+    handler: async ({ service = 'tilda-creds', user_id } = {}) => {
+      const uid = user_id || USER_ID;
+      if (!uid) return { error: 'No user_id' };
+
+      const credsFile = path.join(os.homedir(), 'agent-tokens', String(uid), service);
+      if (!fs.existsSync(credsFile)) {
+        return {
+          error: 'no_credentials',
+          message: `No stored credentials for "${service}". Ask the user to set them up first — I will send a secure connect link.`,
+        };
+      }
+
+      let creds;
+      try { creds = JSON.parse(fs.readFileSync(credsFile, 'utf8')); }
+      catch { return { error: 'invalid_credentials_file', message: `Could not read credentials for "${service}".` }; }
+
+      if (!creds.email || !creds.password) {
+        return { error: 'incomplete_credentials', message: `Credentials for "${service}" are incomplete. Ask the user to update them.` };
+      }
+
+      if (!isChromeRunning()) return { error: 'browser_not_running' };
+      const scriptPath = path.join(os.homedir(), 'browser-session', 'login.js');
+      if (!fs.existsSync(scriptPath)) return { error: 'login.js not found on VM' };
+
+      try {
+        const result = execSync(`node "${scriptPath}"`, {
+          timeout: 20000,
+          encoding: 'utf8',
+          env: { ...process.env, LOGIN_EMAIL: creds.email, LOGIN_PASSWORD: creds.password },
+        });
+        const data = JSON.parse(result.trim());
+        if (data.captcha) {
+          data.message = `Появилась CAPTCHA — открой браузер и пройди её вручную: ${BROWSER_SESSION_URL}`;
+        } else if (data.two_factor) {
+          data.message = `Нужен код 2FA — введи его в браузере: ${BROWSER_SESSION_URL}`;
+        } else if (data.error_on_page) {
+          data.message = 'Неверный логин или пароль — попроси пользователя обновить данные через connect-форму.';
+        } else if (data.navigated) {
+          data.message = 'Успешно залогинился. Теперь вызови browser_session_capture_cookies.';
+        }
+        return data;
+      } catch (e) {
+        return { error: 'login_failed', message: e.message };
+      }
+    },
+  },
+
+  {
     name: 'browser_session_login',
     description: 'Fill and submit a login form in the remote browser (already open at the login page). Use when the user provides their credentials. Returns whether login succeeded, or whether CAPTCHA/2FA appeared and the user needs to handle it via VNC.',
     inputSchema: {
