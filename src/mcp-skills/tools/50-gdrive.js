@@ -50,7 +50,7 @@ function makeJwt(sa) {
   const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(JSON.stringify({
     iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive', // full scope required — drive.readonly misses externally-shared files
+    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets',
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -94,6 +94,22 @@ function requireSa() {
   return sa;
 }
 
+// ── Sheets API helper ─────────────────────────────────────────────────────────
+
+async function sheetsApi(method, apiPath, body = null, sa = null) {
+  if (!sa) sa = requireSa();
+  const token = await getAccessToken(sa);
+  const res = await fetch(`https://sheets.googleapis.com/v4${apiPath}`, {
+    method,
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Sheets ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
+  return data;
+}
+
 // ── Drive API helper ──────────────────────────────────────────────────────────
 
 async function driveApi(method, apiPath, body = null, sa = null) {
@@ -121,7 +137,7 @@ async function driveApi(method, apiPath, body = null, sa = null) {
 async function exportFile(fileId, mimeType, sa) {
   const token = await getAccessToken(sa);
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(mimeType)}`,
+    `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(mimeType)}&supportsAllDrives=true`,
     { headers: { 'Authorization': `Bearer ${token}` }, signal: AbortSignal.timeout(15000) }
   );
   if (!res.ok) throw new Error(`Export ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -131,7 +147,7 @@ async function exportFile(fileId, mimeType, sa) {
 async function downloadFile(fileId, sa) {
   const token = await getAccessToken(sa);
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
     { headers: { 'Authorization': `Bearer ${token}` }, signal: AbortSignal.timeout(15000) }
   );
   if (!res.ok) throw new Error(`Download ${res.status}`);
@@ -221,6 +237,23 @@ module.exports = {
         }
         const saEmail = saData?.email || `${accountId}@${GCP_PROJECT}.iam.gserviceaccount.com`;
 
+        // Delete existing user-managed keys to avoid accumulation (GCP limit: 10 keys per SA)
+        try {
+          const keysRes = await fetch(
+            `https://iam.googleapis.com/v1/projects/${GCP_PROJECT}/serviceAccounts/${encodeURIComponent(saEmail)}/keys?keyTypes=USER_MANAGED`,
+            { headers: { 'Authorization': `Bearer ${adcToken}` }, signal: AbortSignal.timeout(10000) }
+          );
+          if (keysRes.ok) {
+            const { keys = [] } = await keysRes.json();
+            for (const k of keys) {
+              await fetch(`https://iam.googleapis.com/v1/${k.name}`, {
+                method: 'DELETE', headers: { 'Authorization': `Bearer ${adcToken}` }, signal: AbortSignal.timeout(5000),
+              }).catch(() => {});
+            }
+          }
+        } catch { /* non-critical — proceed to create new key */ }
+
+
         // Create key for the SA — retry up to 4x because GCP may return 404 briefly after SA creation (propagation delay)
         let keyData = null;
         for (let attempt = 0; attempt < 4; attempt++) {
@@ -246,7 +279,7 @@ module.exports = {
         const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
         fs.mkdirSync(tokensDir, { recursive: true });
         fs.writeFileSync(path.join(tokensDir, 'gdrive'), JSON.stringify(saJson), { mode: 0o600 });
-        process.env.GDRIVE_SA_JSON = JSON.stringify(saJson);
+        // Note: not setting GDRIVE_SA_JSON in process.env — the MCP server reads from disk via USER_ID
 
         return {
           status: 'created',
@@ -265,7 +298,7 @@ module.exports = {
           return { status: 'not_configured', message: 'Google Drive не настроен. Вызови gdrive_setup.' };
         }
         try {
-          const data = await driveApi('GET', '/drive/v3/files?pageSize=1&fields=files(id)', null, sa);
+          const data = await driveApi('GET', '/drive/v3/files?pageSize=1&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true', null, sa);
           return {
             status: 'connected',
             sa_email: sa.client_email,
@@ -295,7 +328,7 @@ module.exports = {
         let q       = 'trashed=false';
         if (folder_id) q += ` and '${folder_id.replace(/'/g, '')}' in parents`;
         const fields  = 'nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink)';
-        let apiPath   = `/drive/v3/files?pageSize=${limit}&orderBy=modifiedTime desc&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}`;
+        let apiPath   = `/drive/v3/files?pageSize=${limit}&orderBy=modifiedTime desc&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}&supportsAllDrives=true&includeItemsFromAllDrives=true`;
         if (page_token) apiPath += `&pageToken=${encodeURIComponent(page_token)}`;
         const data = await driveApi('GET', apiPath, null, sa);
         return {
@@ -321,7 +354,7 @@ module.exports = {
       },
       handler: async ({ file_id, max_chars = 8000 }) => {
         const sa   = requireSa();
-        const meta = await driveApi('GET', `/drive/v3/files/${file_id}?fields=id,name,mimeType,size`, null, sa);
+        const meta = await driveApi('GET', `/drive/v3/files/${file_id}?fields=id,name,mimeType,size&supportsAllDrives=true`, null, sa);
         const mime = meta.mimeType;
         let content;
         if (MIME_READABLE[mime] === null)  content = await downloadFile(file_id, sa);
@@ -350,7 +383,7 @@ module.exports = {
         let q         = `(name contains '${escaped}' or fullText contains '${escaped}') and trashed=false`;
         if (folder_id) q += ` and '${folder_id.replace(/'/g, '')}' in parents`;
         const fields  = 'files(id,name,mimeType,size,modifiedTime,webViewLink)';
-        const data    = await driveApi('GET', `/drive/v3/files?pageSize=${n}&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}`, null, sa);
+        const data    = await driveApi('GET', `/drive/v3/files?pageSize=${n}&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}&supportsAllDrives=true&includeItemsFromAllDrives=true`, null, sa);
         return {
           query,
           results: data.files?.map(f => ({ id: f.id, name: f.name, type: f.mimeType, modified: f.modifiedTime, url: f.webViewLink })) ?? [],
@@ -408,7 +441,7 @@ module.exports = {
         const sa    = requireSa();
         const token = await getAccessToken(sa);
         const res   = await fetch(
-          `https://www.googleapis.com/upload/drive/v3/files/${file_id}?uploadType=media&fields=id,name,modifiedTime`,
+          `https://www.googleapis.com/upload/drive/v3/files/${file_id}?uploadType=media&fields=id,name,modifiedTime&supportsAllDrives=true`,
           {
             method: 'PATCH',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain; charset=UTF-8' },
@@ -418,6 +451,63 @@ module.exports = {
         if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(`Update ${res.status}: ${err.error?.message || res.statusText}`); }
         const file = await res.json();
         return { updated: true, file_id: file.id, name: file.name, modified: file.modifiedTime };
+      },
+    },
+
+    gdrive_write_sheet: {
+      description: 'Write rows to a specific tab (sheet) in a Google Spreadsheet. Creates the tab if it does not exist. ' +
+        'Use this to save structured data (participants, results, reports) directly into a Google Sheet. ' +
+        'rows is an array of arrays — first row should be the header.\n\n' +
+        'Example: gdrive_write_sheet({ spreadsheet_id: "1abc...", sheet_name: "Lingerie Show", rows: [["Компания","Сайт","Целевая"],["Рога и копыта","rogaikopyta.ru","Да"]] })',
+      inputSchema: {
+        type: 'object',
+        required: ['spreadsheet_id', 'sheet_name', 'rows'],
+        properties: {
+          spreadsheet_id: { type: 'string', description: 'Google Spreadsheet ID' },
+          sheet_name:     { type: 'string', description: 'Tab name to write to (created if missing)' },
+          rows:           { type: 'array',  description: 'Array of rows; each row is array of cell values. First row = header.' },
+          clear_first:    { type: 'boolean', description: 'Clear existing data in the tab before writing (default true)' },
+        },
+      },
+      handler: async ({ spreadsheet_id, sheet_name, rows, clear_first = true }) => {
+        if (!spreadsheet_id || !sheet_name || !Array.isArray(rows) || rows.length === 0) {
+          return { error: 'Нужны: spreadsheet_id, sheet_name, rows (непустой массив)' };
+        }
+        const sa = requireSa();
+
+        // 1. Get existing sheets to check if tab exists
+        const meta = await sheetsApi('GET', `/spreadsheets/${spreadsheet_id}?fields=sheets.properties`, null, sa);
+        const sheets = meta.sheets || [];
+        const existing = sheets.find(s => s.properties?.title === sheet_name);
+
+        let sheetId;
+        if (!existing) {
+          // 2. Create new tab
+          const resp = await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}:batchUpdate`, {
+            requests: [{ addSheet: { properties: { title: sheet_name } } }],
+          }, sa);
+          sheetId = resp.replies?.[0]?.addSheet?.properties?.sheetId;
+        } else {
+          sheetId = existing.properties.sheetId;
+          if (clear_first) {
+            await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(sheet_name)}:clear`, {}, sa);
+          }
+        }
+
+        // 3. Write data
+        const range = `${sheet_name}!A1`;
+        await sheetsApi('PUT', `/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
+          values: rows,
+        }, sa);
+
+        return {
+          written: true,
+          spreadsheet_id,
+          sheet_name,
+          rows_written: rows.length,
+          tab_created: !existing,
+          url: `https://docs.google.com/spreadsheets/d/${spreadsheet_id}`,
+        };
       },
     },
 
@@ -434,10 +524,10 @@ module.exports = {
       handler: async ({ file_id, permanent = false }) => {
         const sa = requireSa();
         if (permanent) {
-          await driveApi('DELETE', `/drive/v3/files/${file_id}`, null, sa);
+          await driveApi('DELETE', `/drive/v3/files/${file_id}?supportsAllDrives=true`, null, sa);
           return { deleted: true, file_id, permanent: true };
         }
-        await driveApi('PATCH', `/drive/v3/files/${file_id}`, { trashed: true }, sa);
+        await driveApi('PATCH', `/drive/v3/files/${file_id}?supportsAllDrives=true`, { trashed: true }, sa);
         return { trashed: true, file_id };
       },
     },
