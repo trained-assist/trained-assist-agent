@@ -30,7 +30,7 @@ const INN_CAPABILITY_INTENT  = /(?:скил|skill|умееш|можешь|ест
 // Only capability/question words, NOT action verbs (собери/собрать/найди → those are tasks, go to Claude)
 const EXPO_CAPABILITY_INTENT = /(?:скил|skill|умееш|можешь|есть.{0,30}(?:скил|инструм|возможн)).{0,80}(?:участник|экспонент|выставк|expo)/i;
 const GC_CAPABILITY_INTENT   = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:геткурс|getcourse|курс|урок|ученик|школ)/i;
-const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}доступ|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
+const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}подключённых|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
 const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
 const REVOKE_SERVICE_RE     = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
@@ -396,6 +396,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
   const quickReply = forceClaude ? null : getQuickAnswer(task, user.id, user.workDir);
   if (quickReply) {
+    console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
       SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task);
