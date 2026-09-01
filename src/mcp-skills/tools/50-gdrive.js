@@ -121,7 +121,7 @@ async function driveApi(method, apiPath, body = null, sa = null) {
 async function exportFile(fileId, mimeType, sa) {
   const token = await getAccessToken(sa);
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(mimeType)}`,
+    `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(mimeType)}&supportsAllDrives=true`,
     { headers: { 'Authorization': `Bearer ${token}` }, signal: AbortSignal.timeout(15000) }
   );
   if (!res.ok) throw new Error(`Export ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -131,7 +131,7 @@ async function exportFile(fileId, mimeType, sa) {
 async function downloadFile(fileId, sa) {
   const token = await getAccessToken(sa);
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
     { headers: { 'Authorization': `Bearer ${token}` }, signal: AbortSignal.timeout(15000) }
   );
   if (!res.ok) throw new Error(`Download ${res.status}`);
@@ -265,7 +265,7 @@ module.exports = {
           return { status: 'not_configured', message: 'Google Drive не настроен. Вызови gdrive_setup.' };
         }
         try {
-          const data = await driveApi('GET', '/drive/v3/files?pageSize=1&fields=files(id)', null, sa);
+          const data = await driveApi('GET', '/drive/v3/files?pageSize=1&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true', null, sa);
           return {
             status: 'connected',
             sa_email: sa.client_email,
@@ -295,7 +295,7 @@ module.exports = {
         let q       = 'trashed=false';
         if (folder_id) q += ` and '${folder_id.replace(/'/g, '')}' in parents`;
         const fields  = 'nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink)';
-        let apiPath   = `/drive/v3/files?pageSize=${limit}&orderBy=modifiedTime desc&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}`;
+        let apiPath   = `/drive/v3/files?pageSize=${limit}&orderBy=modifiedTime desc&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}&supportsAllDrives=true&includeItemsFromAllDrives=true`;
         if (page_token) apiPath += `&pageToken=${encodeURIComponent(page_token)}`;
         const data = await driveApi('GET', apiPath, null, sa);
         return {
@@ -321,7 +321,7 @@ module.exports = {
       },
       handler: async ({ file_id, max_chars = 8000 }) => {
         const sa   = requireSa();
-        const meta = await driveApi('GET', `/drive/v3/files/${file_id}?fields=id,name,mimeType,size`, null, sa);
+        const meta = await driveApi('GET', `/drive/v3/files/${file_id}?fields=id,name,mimeType,size&supportsAllDrives=true`, null, sa);
         const mime = meta.mimeType;
         let content;
         if (MIME_READABLE[mime] === null)  content = await downloadFile(file_id, sa);
@@ -350,7 +350,7 @@ module.exports = {
         let q         = `(name contains '${escaped}' or fullText contains '${escaped}') and trashed=false`;
         if (folder_id) q += ` and '${folder_id.replace(/'/g, '')}' in parents`;
         const fields  = 'files(id,name,mimeType,size,modifiedTime,webViewLink)';
-        const data    = await driveApi('GET', `/drive/v3/files?pageSize=${n}&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}`, null, sa);
+        const data    = await driveApi('GET', `/drive/v3/files?pageSize=${n}&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}&supportsAllDrives=true&includeItemsFromAllDrives=true`, null, sa);
         return {
           query,
           results: data.files?.map(f => ({ id: f.id, name: f.name, type: f.mimeType, modified: f.modifiedTime, url: f.webViewLink })) ?? [],
