@@ -123,8 +123,9 @@ async function startGetcourseLogin(userId, domain, login, password) {
       gcSessionHash: localStorage.getItem('gcSessionHash'),
     })).catch(() => ({}));
 
-    // Save the exact UA Playwright used — L2 fetch requests must match it
-    const sessionUserAgent = await page.evaluate(() => navigator.userAgent).catch(() => null);
+    // Save the UA Playwright used — strip "Headless" so GetCourse doesn't reject it
+    const rawUA = await page.evaluate(() => navigator.userAgent).catch(() => null);
+    const sessionUserAgent = rawUA ? rawUA.replace('HeadlessChrome', 'Chrome') : null;
 
     await browser.close();
 
