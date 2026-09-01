@@ -244,7 +244,7 @@ describe.skipIf(!IS_LINUX)('gc_course_list Playwright scraping', () => {
     writeGcConfig(makeGcConfig());
   });
 
-  it('returns courses from showcase page', async () => {
+  it('returns courses from course tree page', async () => {
     const { gc_course_list } = loadGcTools();
     const result = await gc_course_list.handler({}, ctx);
 

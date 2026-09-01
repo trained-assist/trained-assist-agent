@@ -4,10 +4,10 @@
  * Mock HTTPS server that mimics GetCourse endpoints for E2E tests.
  *
  * Serves:
- *   GET /pl/user/group/index       → groups table (scenario-aware)
- *   GET /showcase/settings         → courses page (scenario-aware)
- *   GET /login/ or /cms/login      → login page (redirect target for expired sessions)
- *   POST /pl/api/*                 → stub JSON success
+ *   GET /pl/user/group/index              → groups table (scenario-aware)
+ *   GET /teach/control/stream/tree        → course tree page (scenario-aware)
+ *   GET /login/ or /cms/login             → login page (redirect target for expired sessions)
+ *   POST /pl/api/*                        → stub JSON success
  *
  * Scenario is switched via setScenario() before each test.
  *
@@ -64,11 +64,17 @@ const GROUPS_HTML_EMPTY = `<!DOCTYPE html><html><body>
 <table><thead><tr><th>Name</th></tr></thead><tbody></tbody></table>
 </body></html>`;
 
-const COURSES_HTML = `<!DOCTYPE html><html><body>
-<div class="name">Курс по Python</div>
-<a href="/showcase/settings?trainingId=201">Открыть</a>
-<div class="name">Английский A1</div>
-<a href="/showcase/settings?trainingId=202">Открыть</a>
+const COURSES_TREE_HTML = `<!DOCTYPE html><html><body>
+<table>
+  <tr>
+    <td><a href="/teach/control/stream/view/id/201">Курс по Python</a></td>
+    <td><a href="/teach/control/stream/edit/id/201"><i class="icon-edit"></i></a></td>
+  </tr>
+  <tr>
+    <td><a href="/teach/control/stream/view/id/202">Английский A1</a></td>
+    <td><a href="/teach/control/stream/edit/id/202"><i class="icon-edit"></i></a></td>
+  </tr>
+</table>
 </body></html>`;
 
 const LOGIN_HTML = `<!DOCTYPE html><html><body>
@@ -88,7 +94,7 @@ function handler(req, res) {
 
   // Expired session scenario: redirect group/course pages to /login/
   if (currentScenario === 'expired' &&
-      (p.includes('/group/index') || p.includes('/showcase'))) {
+      (p.includes('/group/index') || p.includes('/showcase') || p.includes('/teach/control/stream'))) {
     res.writeHead(302, { Location: '/login/' }).end();
     return;
   }
@@ -106,8 +112,8 @@ function handler(req, res) {
     return;
   }
 
-  if (p.includes('/showcase')) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(COURSES_HTML);
+  if (p.includes('/teach/control/stream/tree')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(COURSES_TREE_HTML);
     return;
   }
 
