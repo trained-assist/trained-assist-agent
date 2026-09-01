@@ -221,6 +221,22 @@ module.exports = {
         }
         const saEmail = saData?.email || `${accountId}@${GCP_PROJECT}.iam.gserviceaccount.com`;
 
+        // Delete existing user-managed keys to avoid accumulation (GCP limit: 10 keys per SA)
+        try {
+          const keysRes = await fetch(
+            `https://iam.googleapis.com/v1/projects/${GCP_PROJECT}/serviceAccounts/${encodeURIComponent(saEmail)}/keys?keyTypes=USER_MANAGED`,
+            { headers: { 'Authorization': `Bearer ${adcToken}` }, signal: AbortSignal.timeout(10000) }
+          );
+          if (keysRes.ok) {
+            const { keys = [] } = await keysRes.json();
+            for (const k of keys) {
+              await fetch(`https://iam.googleapis.com/v1/${k.name}`, {
+                method: 'DELETE', headers: { 'Authorization': `Bearer ${adcToken}` }, signal: AbortSignal.timeout(5000),
+              }).catch(() => {});
+            }
+          }
+        } catch { /* non-critical — proceed to create new key */ }
+
         // Create key for the SA — retry up to 4x because GCP may return 404 briefly after SA creation (propagation delay)
         let keyData = null;
         for (let attempt = 0; attempt < 4; attempt++) {
@@ -246,7 +262,7 @@ module.exports = {
         const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
         fs.mkdirSync(tokensDir, { recursive: true });
         fs.writeFileSync(path.join(tokensDir, 'gdrive'), JSON.stringify(saJson), { mode: 0o600 });
-        process.env.GDRIVE_SA_JSON = JSON.stringify(saJson);
+        // Note: not setting GDRIVE_SA_JSON in process.env — the MCP server reads from disk via USER_ID
 
         return {
           status: 'created',
@@ -408,7 +424,7 @@ module.exports = {
         const sa    = requireSa();
         const token = await getAccessToken(sa);
         const res   = await fetch(
-          `https://www.googleapis.com/upload/drive/v3/files/${file_id}?uploadType=media&fields=id,name,modifiedTime`,
+          `https://www.googleapis.com/upload/drive/v3/files/${file_id}?uploadType=media&fields=id,name,modifiedTime&supportsAllDrives=true`,
           {
             method: 'PATCH',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'text/plain; charset=UTF-8' },
@@ -434,10 +450,10 @@ module.exports = {
       handler: async ({ file_id, permanent = false }) => {
         const sa = requireSa();
         if (permanent) {
-          await driveApi('DELETE', `/drive/v3/files/${file_id}`, null, sa);
+          await driveApi('DELETE', `/drive/v3/files/${file_id}?supportsAllDrives=true`, null, sa);
           return { deleted: true, file_id, permanent: true };
         }
-        await driveApi('PATCH', `/drive/v3/files/${file_id}`, { trashed: true }, sa);
+        await driveApi('PATCH', `/drive/v3/files/${file_id}?supportsAllDrives=true`, { trashed: true }, sa);
         return { trashed: true, file_id };
       },
     },

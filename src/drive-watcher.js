@@ -219,7 +219,19 @@ async function _checkUser(userId, botToken) {
 
   console.log(`[drive-watcher] userId=${userId}: ${newFiles.length} new file(s) via Changes API`);
 
+  const catalogPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-catalog.json');
+  let existingIds = new Set();
+  try { existingIds = new Set(JSON.parse(fs.readFileSync(catalogPath, 'utf8')).map(e => e.id)); } catch {}
+
   for (const file of newFiles) {
+    const isNew = !existingIds.has(file.id);
+
+    _catalogFile(userId, file, token).catch(e =>
+      console.error(`[drive-watcher] catalog failed fileId=${file.id}:`, e.message)
+    );
+
+    if (!isNew) continue; // already known — don't spam notification on every edit
+
     const label = _mimeLabel(file.mimeType);
     const owner = file.owners?.[0]?.emailAddress || file.owners?.[0]?.displayName || '?';
     const name  = file.name || 'документ';
@@ -232,11 +244,8 @@ async function _checkUser(userId, botToken) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: userId, text, parse_mode: 'Markdown', disable_web_page_preview: false }),
+      signal: AbortSignal.timeout(8000),
     }).catch(e => console.error('[drive-watcher] TG send failed:', e.message));
-
-    _catalogFile(userId, file, token).catch(e =>
-      console.error(`[drive-watcher] catalog failed fileId=${file.id}:`, e.message)
-    );
   }
 }
 
