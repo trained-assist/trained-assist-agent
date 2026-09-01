@@ -75,7 +75,7 @@ const SKILLS = [
     tools: [
       'gc_status', 'gc_connect',
       'gc_user_add', 'gc_user_find', 'gc_group_list', 'gc_order_list',
-      'gc_course_create', 'gc_section_create', 'gc_lesson_create',
+      'gc_course_list', 'gc_course_create', 'gc_section_create', 'gc_lesson_create',
       'gc_lesson_add_video', 'gc_lesson_add_text', 'gc_lesson_sort',
     ],
     requires: 'Вызови gc_connect — получишь ссылку. Введи домен + API ключ (L1) и/или логин+пароль (L2).',
