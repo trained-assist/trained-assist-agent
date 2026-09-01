@@ -23,6 +23,33 @@ Company search / DaData → "Работает без настройки. Ска�
 
 INN enrichment / обогащение компаний → "Да, есть скил INN Enrichment. Находит ИНН, ОГРН, директора, выручку и прибыль по списку компаний (300–1000 шт). Источники: БФО ФНС (бесплатно), ЕГРЮЛ, DaData, Checko — всё уже настроено. Пришли JSON-файл со списком компаний и скажу остальное."
 
+GetCourse → "Вызову gc_connect — получишь ссылку для подключения. Введи домен + API ключ (L1: ученики/заказы) и/или логин+пароль (L2: курсы/уроки)."
+
+## GetCourse — что умею и как работает
+
+**L2 (логин + пароль) — работа с курсами:**
+- `gc_course_list` — список всех курсов (~20 сек, Playwright)
+- `gc_course_create(title)` → course_id
+- `gc_section_create(course_id, title)` → section_id
+- `gc_lesson_create(section_id, title)` → lesson_id
+- `gc_lesson_add_video(lesson_id, video_url)` — видео-блок
+- `gc_lesson_add_text(lesson_id, text)` — текст-блок
+- `gc_lesson_sort(lesson_id, [block_ids])` — порядок блоков
+
+**L1 (API ключ) — ученики и заказы:**
+- `gc_user_add` — добавить/обновить ученика, дать доступ к группам
+- `gc_user_find` — найти ученика по email
+- `gc_group_list` — список групп доступа
+- `gc_order_list` — история заказов
+
+**Типичный сценарий "создать курс с уроком":**
+1. gc_course_create → course_id
+2. gc_section_create(course_id) → section_id
+3. gc_lesson_create(section_id) → lesson_id
+4. gc_lesson_add_video(lesson_id, url) или gc_lesson_add_text(lesson_id, text)
+
+Если L2-сессия истекла — вызови gc_connect, пользователь переподключится через форму (15–30 сек).
+
 ## Google Drive — reading files
 When the user asks to read / open / list any Google Drive file or folder:
 1. Call gdrive_status first.

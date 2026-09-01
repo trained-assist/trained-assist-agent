@@ -29,6 +29,7 @@ const SETUP_INTENT          = /подключ|connect|настро|интегр|
 const INN_CAPABILITY_INTENT  = /(?:скил|skill|умееш|можешь|есть.{0,30}возможн|есть.{0,30}функц|есть.{0,30}инструм|что.{0,20}умееш).{0,80}(?:инн|огрн|компани|директор|выручк|реквизит)/i;
 // Only capability/question words, NOT action verbs (собери/собрать/найди → those are tasks, go to Claude)
 const EXPO_CAPABILITY_INTENT = /(?:скил|skill|умееш|можешь|есть.{0,30}(?:скил|инструм|возможн)).{0,80}(?:участник|экспонент|выставк|expo)/i;
+const GC_CAPABILITY_INTENT   = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:геткурс|getcourse|курс|урок|ученик|школ)/i;
 const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}доступ|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
 const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
@@ -269,6 +270,27 @@ function getQuickAnswer(task, userId, workDir) {
   // Capability question about INN enrichment — answer immediately without calling Claude
   if (INN_CAPABILITY_INTENT.test(task)) {
     return 'Да, есть скил INN Enrichment.\n\nНаходит для списка компаний (300–1000 шт): ИНН, ОГРН, директора, выручку и прибыль.\n\nИсточники: БФО ФНС (бесплатно), ЕГРЮЛ, DaData, Checko — всё уже настроено, ключи у платформы.\n\nЧасть запросов платные (DaData, Checko), но не переживайте — мы предоставляем пакет ощутимого размера, чтобы получить результат. Если понадобится больше — докупим вместе.\n\nПришли JSON-файл, CSV или ссылку на Google Sheet со списком компаний — и запущу.';
+  }
+
+  // Capability question about GetCourse
+  if (GC_CAPABILITY_INTENT.test(task)) {
+    return [
+      'Вот что умею в GetCourse:\n',
+      '📋 Курсы (L2 — через сессию):',
+      '• Список всех курсов — `gc_course_list`',
+      '• Создать курс — `gc_course_create`',
+      '• Создать раздел в курсе — `gc_section_create`',
+      '• Создать урок — `gc_lesson_create`',
+      '• Добавить видео-блок в урок — `gc_lesson_add_video`',
+      '• Добавить текст-блок в урок — `gc_lesson_add_text`',
+      '• Поменять порядок блоков — `gc_lesson_sort`\n',
+      '👤 Ученики и заказы (L1 — API ключ, нужно включить в настройках GetCourse):',
+      '• Добавить/обновить ученика — `gc_user_add`',
+      '• Найти ученика по email — `gc_user_find`',
+      '• Список групп доступа — `gc_group_list`',
+      '• Список заказов — `gc_order_list`\n',
+      'Если не подключён — скажи «подключи геткурс».',
+    ].join('\n');
   }
 
   if (!SETUP_INTENT.test(task)) {

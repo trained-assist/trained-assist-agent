@@ -306,24 +306,63 @@ module.exports = {
     // ── L2: Course listing & creation ────────────────────────────────────────
 
     gc_course_list: {
-      description: 'List all courses (trainings) in the GetCourse account. Returns id, title, status, url for each course.',
+      description: 'List all courses (trainings) in the GetCourse account. Returns id, title, url for each course. Uses Playwright to scrape the admin showcase page — takes 15–25s.',
       inputSchema: { type: 'object', properties: {} },
       handler: async (_, ctx) => {
         const cfg = readConfig(ctx?.userId);
         const err = requireL2(cfg);
         if (err) return err;
-        const result = await gcSessionJson(cfg, '/pl/teach/gcapi/training/getTrainingStatuses', {});
-        if (result.error) return result;
-        const trainings = result.data?.trainings || [];
-        const courses = trainings
-          .filter(t => !t.parentId)
-          .map(t => ({
-            id: t.id,
-            title: t.title || t.name,
-            status: t.status,
-            url: `https://${cfg.accountDomain}/teach/control/stream/view?id=${t.id}`,
+
+        let browser;
+        try {
+          const { chromium } = require('playwright');
+          browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-setuid-sandbox'] });
+          const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA });
+          await context.addCookies((cfg.sessionCookies || []).map(c => ({
+            name: c.name, value: c.value,
+            domain: c.domain.startsWith('.') ? c.domain : '.' + c.domain,
+            path: c.path || '/', secure: c.secure || false, httpOnly: c.httpOnly || false,
+          })));
+          const page = await context.newPage();
+          page.setDefaultTimeout(20000);
+
+          await page.goto(`https://${cfg.accountDomain}/showcase/settings`, { waitUntil: 'networkidle', timeout: 30000 });
+          await page.waitForTimeout(2000);
+
+          // Extract course rows: each row has a name + trainingId link
+          const courses = await page.evaluate(() => {
+            const results = [];
+            document.querySelectorAll('a[href*="trainingId="]').forEach(a => {
+              const m = a.href.match(/trainingId=(\d+)/);
+              if (!m) return;
+              const id = m[1];
+              if (results.find(r => r.id === id)) return;
+              // Walk up to find the row container and extract the course name
+              let el = a.parentElement;
+              for (let i = 0; i < 5; i++) {
+                if (!el) break;
+                const nameEl = el.querySelector('[class*="name"], [class*="title"], td:first-child, .name');
+                if (nameEl && nameEl.textContent?.trim().length > 2) {
+                  results.push({ id, title: nameEl.textContent.trim().slice(0, 120) });
+                  return;
+                }
+                el = el.parentElement;
+              }
+              results.push({ id, title: '?' });
+            });
+            return results;
+          });
+
+          await browser.close();
+          const withUrls = courses.map(c => ({
+            ...c,
+            url: `https://${cfg.accountDomain}/teach/control/stream/view?id=${c.id}`,
           }));
-        return { count: courses.length, courses };
+          return { count: withUrls.length, courses: withUrls };
+        } catch (e) {
+          browser?.close().catch(() => {});
+          return { error: `Ошибка получения списка курсов: ${e.message.slice(0, 200)}` };
+        }
       },
     },
 
