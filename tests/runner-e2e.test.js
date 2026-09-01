@@ -217,12 +217,12 @@ describe('Quick answer → Claude context injection', () => {
     expect(claudeMsg, 'Claude reply not found in session history').not.toBeUndefined();
   });
 
-  it('Claude Telegram output shows ✅ prefix', { timeout: 20000 }, async () => {
+  it('Claude Telegram output shows 🧠 prefix', { timeout: 20000 }, async () => {
     await chat('сделай анализ продаж', { claudeReply: 'Анализ выполнен: выручка 4.2M' });
 
     const texts = tgTexts();
     const finalMsg = texts[texts.length - 1];
-    expect(finalMsg).toMatch(/✅/);
+    expect(finalMsg).toMatch(/🧠/);
     expect(finalMsg).toMatch(/Анализ выполнен/);
   });
 
@@ -409,7 +409,7 @@ describe('Telegram delivery', () => {
     expect(sent[0].url).toMatch(/sendMessage/);
   });
 
-  it('Claude answer: thinking → edit with ✅', { timeout: 20000 }, async () => {
+  it('Claude answer: thinking → edit with 🧠', { timeout: 20000 }, async () => {
     await chat('сделай задачу', { claudeReply: 'Задача выполнена' });
 
     const sends = tgSent().filter(l => l.url.includes('sendMessage'));
@@ -420,7 +420,7 @@ describe('Telegram delivery', () => {
     expect(edits.length, 'should have at least 1 edit').toBeGreaterThanOrEqual(1);
 
     const lastEdit = edits[edits.length - 1];
-    expect(lastEdit.body.text).toMatch(/✅/);
+    expect(lastEdit.body.text).toMatch(/🧠/);
     expect(lastEdit.body.text).toMatch(/Задача выполнена/);
   });
 
@@ -473,8 +473,8 @@ describe('Expand button — forceClaude escalation', () => {
     const edits = tgSent().filter(l => l.url.includes('editMessageText'));
     expect(sends.length, 'should send thinking message').toBe(1);
     expect(sends[0].body.text).toMatch(/Думаю/);
-    expect(edits.length, 'should edit to ✅').toBeGreaterThanOrEqual(1);
-    expect(edits[edits.length - 1].body.text).toMatch(/✅/);
+    expect(edits.length, 'should edit to 🧠').toBeGreaterThanOrEqual(1);
+    expect(edits[edits.length - 1].body.text).toMatch(/🧠/);
   });
 
   it('forceClaude session history includes the original quick-answer exchange', { timeout: 20000 }, async () => {
@@ -539,7 +539,7 @@ describe('Dialogue: Google Drive file research (like выставки)', () => {
     expect(sessAfter.messages.length, 'expected 4 messages after 2 Claude turns').toBe(4);
 
     const texts = tgTexts();
-    expect(texts[texts.length - 1]).toMatch(/✅/);
+    expect(texts[texts.length - 1]).toMatch(/🧠/);
     expect(texts[texts.length - 1]).toMatch(/ExpoMos/);
   });
 
