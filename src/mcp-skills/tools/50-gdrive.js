@@ -253,6 +253,7 @@ module.exports = {
           }
         } catch { /* non-critical — proceed to create new key */ }
 
+
         // Create key for the SA — retry up to 4x because GCP may return 404 briefly after SA creation (propagation delay)
         let keyData = null;
         for (let attempt = 0; attempt < 4; attempt++) {

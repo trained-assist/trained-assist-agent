@@ -42,10 +42,7 @@ async function startGetcourseLogin(userId, domain, login, password) {
   }
 
   try {
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      locale: 'ru-RU',
-    });
+    const context = await browser.newContext();
     const page = await context.newPage();
     page.setDefaultTimeout(15000);
 
@@ -53,31 +50,61 @@ async function startGetcourseLogin(userId, domain, login, password) {
     console.log('[getcourse-login] navigating to %s/cms/system/login', baseUrl);
     await page.goto(`${baseUrl}/cms/system/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
+    // Wait for email input to appear
     const emailInput = page.locator('input[name="email"], input[type="email"], input[name="login"]').first();
     await emailInput.waitFor({ state: 'visible', timeout: 10000 });
-    await emailInput.fill(login);
 
-    const pwInput = page.locator('input[type="password"]').first();
-    await pwInput.waitFor({ state: 'visible' });
-    await pwInput.fill(password);
+    // Wait for cookie banner to appear, then dismiss via JS (appears after ~1-2s)
+    await page.waitForTimeout(2000);
+    await page.evaluate(() => {
+      for (const btn of document.querySelectorAll('button')) {
+        if (/^ok$/i.test(btn.textContent.trim())) { btn.click(); break; }
+      }
+    }).catch(() => {});
+    await page.waitForTimeout(300);
 
-    await page.locator('button[type="submit"], input[type="submit"]').first().click();
+    // Fill via evaluate + dispatch input events to trigger Vue reactivity
+    // (page.fill() doesn't trigger Vue — button stays disabled)
+    await page.evaluate(([email, pwd]) => {
+      const inputs = document.querySelectorAll('input');
+      const emailEl = inputs[0];
+      const pwEl = inputs[1];
+      emailEl.value = email;
+      emailEl.dispatchEvent(new Event('input', { bubbles: true }));
+      pwEl.value = pwd;
+      pwEl.dispatchEvent(new Event('input', { bubbles: true }));
+    }, [login, password]);
+    await page.waitForTimeout(500);
 
-    const outcome = await Promise.race([
-      page.waitForURL(u => !u.includes('/cms/system/login') && !u.includes('/login'), { timeout: 25000 })
-        .then(() => 'success'),
-      page.waitForSelector('.form-error, .alert-danger, [class*="error-message"]', { timeout: 25000 })
-        .then(() => 'login_error'),
-    ]).catch(() => 'timeout');
+    // force:true bypasses the disabled state — Vue handles the click and submits
+    await page.click('button[type="submit"]', { force: true });
 
-    if (outcome === 'login_error') {
-      const errEl = await page.$('.form-error, .alert-danger, [class*="error-message"]');
-      const errText = errEl ? (await errEl.textContent() || '').trim().slice(0, 200) : 'Неверный логин или пароль';
-      await browser.close();
-      return { error: errText || 'Неверный логин или пароль' };
+    // GetCourse uses Vue Router (client-side nav) — waitForURL misses it.
+    // Poll the URL for up to 20s instead.
+    let landed = false;
+    let loginError = null;
+    for (let i = 0; i < 20; i++) {
+      await page.waitForTimeout(1000);
+      const u = page.url();
+      if (!u.includes('/cms/system/login') && !u.includes('/login')) { landed = true; break; }
+      // Check for visible error message
+      const errEl = await page.$('.form-error, .alert-danger, [class*="error"]').catch(() => null);
+      if (errEl) {
+        loginError = (await errEl.textContent().catch(() => '')) || 'Неверный логин или пароль';
+        loginError = loginError.trim().slice(0, 200);
+        break;
+      }
     }
 
-    if (outcome === 'timeout') {
+    if (loginError) {
+      await browser.close();
+      return { error: loginError || 'Неверный логин или пароль' };
+    }
+
+    if (!landed) {
+      const screenshotPath = path.join(os.tmpdir(), `gc-login-fail-${Date.now()}.png`);
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+      console.error('[getcourse-login] timeout, url=%s, screenshot=%s', page.url(), screenshotPath);
       await browser.close();
       return { error: 'Тайм-аут — проверьте домен, логин и пароль' };
     }

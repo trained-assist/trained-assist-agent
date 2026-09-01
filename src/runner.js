@@ -27,7 +27,8 @@ const CLAUDE_TIMEOUT_MS = 5 * 60 * 1000; // 5 min hard limit — kills Claude if
 
 const SETUP_INTENT          = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
 const INN_CAPABILITY_INTENT  = /(?:скил|skill|умееш|можешь|есть.{0,30}возможн|есть.{0,30}функц|есть.{0,30}инструм|что.{0,20}умееш).{0,80}(?:инн|огрн|компани|директор|выручк|реквизит)/i;
-const EXPO_CAPABILITY_INTENT = /(?:скил|skill|умееш|можешь|собер|парс|найд|сделаеш|достан).{0,60}(?:участник|экспонент|выставк|expo)|(?:участник|экспонент).{0,40}(?:выставк|выставок|expo)/i;
+// Only capability/question words, NOT action verbs (собери/собрать/найди → those are tasks, go to Claude)
+const EXPO_CAPABILITY_INTENT = /(?:скил|skill|умееш|можешь|есть.{0,30}(?:скил|инструм|возможн)).{0,80}(?:участник|экспонент|выставк|expo)/i;
 const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}доступ|какие.{0,15}подключ|покажи.{0,15}сервис|мои.{0,15}доступ/i;
 const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
@@ -260,14 +261,14 @@ function getQuickAnswer(task, userId, workDir) {
     return null; // share intent without config — let Claude call gdrive_setup automatically
   }
 
+  // Capability question about exhibition participants — check before INN (expo+INN combo questions → expo answer)
+  if (EXPO_CAPABILITY_INTENT.test(task)) {
+    return 'Да, умею собирать участников выставок.\n\nДай мне ссылку на сайт выставки — зайду, найду страницу участников и верну список компаний в CSV.\n\nДальше могу обогатить по ИНН: директор, выручка, сайт — скидывай сразу с таким запросом, если нужно.\n\nПришли URL сайта выставки.';
+  }
+
   // Capability question about INN enrichment — answer immediately without calling Claude
   if (INN_CAPABILITY_INTENT.test(task)) {
     return 'Да, есть скил INN Enrichment.\n\nНаходит для списка компаний (300–1000 шт): ИНН, ОГРН, директора, выручку и прибыль.\n\nИсточники: БФО ФНС (бесплатно), ЕГРЮЛ, DaData, Checko — всё уже настроено, ключи у платформы.\n\nЧасть запросов платные (DaData, Checko), но не переживайте — мы предоставляем пакет ощутимого размера, чтобы получить результат. Если понадобится больше — докупим вместе.\n\nПришли JSON-файл, CSV или ссылку на Google Sheet со списком компаний — и запущу.';
-  }
-
-  // Capability question about exhibition participants
-  if (EXPO_CAPABILITY_INTENT.test(task)) {
-    return 'Да, умею собирать участников выставок.\n\nДай мне ссылку на сайт выставки — зайду, найду страницу участников и верну список компаний в CSV.\n\nДальше могу обогатить по ИНН: директор, выручка, сайт — скидывай сразу с таким запросом, если нужно.\n\nПришли URL сайта выставки.';
   }
 
   if (!SETUP_INTENT.test(task)) {
