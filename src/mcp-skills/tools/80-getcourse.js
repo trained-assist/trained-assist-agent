@@ -68,18 +68,27 @@ async function gcApiImport(cfg, endpoint, payload) {
   try { return JSON.parse(text); } catch { return { error: 'non-json response', preview: text.slice(0, 500) }; }
 }
 
+const FALLBACK_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+function l2Headers(cfg, extra = {}) {
+  return {
+    'User-Agent': cfg.sessionUserAgent || FALLBACK_UA,
+    'Cookie': buildCookieHeader(cfg),
+    'x-requested-with': 'XMLHttpRequest',
+    'Origin': `https://${cfg.accountDomain}`,
+    'Referer': `https://${cfg.accountDomain}/`,
+    ...extra,
+  };
+}
+
 // L2: JSON POST (createTraining, createLesson)
 async function gcSessionJson(cfg, endpoint, payload) {
-  const cookie = buildCookieHeader(cfg);
   const res = await fetch(`https://${cfg.accountDomain}${endpoint}`, {
     method: 'POST',
-    headers: {
-      'Cookie': cookie,
+    headers: l2Headers(cfg, {
       'Content-Type': 'application/json',
-      'x-requested-with': 'XMLHttpRequest',
       'Accept': 'application/json, text/plain, */*',
-      'Referer': `https://${cfg.accountDomain}/`,
-    },
+    }),
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(20000),
   });
@@ -89,6 +98,9 @@ async function gcSessionJson(cfg, endpoint, payload) {
   const text = await res.text();
   try {
     const data = JSON.parse(text);
+    if (data && (data.accountUserId === -1 || data.user_id === -1)) {
+      return { error: 'session_expired', message: 'Сессия истекла (accountUserId=-1). Вызови gc_connect чтобы войти заново.' };
+    }
     if (data && data.success === false) return { error: data.error || 'request failed', raw: data };
     return data;
   } catch { return { error: 'non-json response', preview: text.slice(0, 500) }; }
@@ -105,15 +117,11 @@ async function gcSessionForm(cfg, endpoint, fields) {
   for (const [k, v] of Object.entries(fields)) {
     form.append(k, v == null ? '' : String(v));
   }
-  const cookie = buildCookieHeader(cfg);
   const res = await fetch(`https://${cfg.accountDomain}${endpoint}`, {
     method: 'POST',
-    headers: {
-      'Cookie': cookie,
-      'x-requested-with': 'XMLHttpRequest',
+    headers: l2Headers(cfg, {
       'Accept': 'application/json, text/plain, */*',
-      'Referer': `https://${cfg.accountDomain}/`,
-    },
+    }),
     body: form,
     signal: AbortSignal.timeout(20000),
   });
@@ -123,6 +131,9 @@ async function gcSessionForm(cfg, endpoint, fields) {
   const text = await res.text();
   try {
     const data = JSON.parse(text);
+    if (data && (data.accountUserId === -1 || data.user_id === -1)) {
+      return { error: 'session_expired', message: 'Сессия истекла (accountUserId=-1). Вызови gc_connect чтобы войти заново.' };
+    }
     if (data && data.success === false) return { error: data.error || 'request failed', raw: data };
     return data;
   } catch { return { error: 'non-json response', preview: text.slice(0, 500) }; }
@@ -464,12 +475,7 @@ module.exports = {
 
         const res = await fetch(`https://${cfg.accountDomain}/pl/lite/block/save-sorting`, {
           method: 'POST',
-          headers: {
-            'Cookie': buildCookieHeader(cfg),
-            'x-requested-with': 'XMLHttpRequest',
-            'Accept': 'application/json, text/plain, */*',
-            'Referer': `https://${cfg.accountDomain}/`,
-          },
+          headers: l2Headers(cfg, { 'Accept': 'application/json, text/plain, */*' }),
           body: form,
           signal: AbortSignal.timeout(10000),
         });
