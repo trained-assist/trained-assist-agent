@@ -74,7 +74,7 @@ function buildStorageState(tokensDir) {
  * Writes per-user .mcp.json with Playwright MCP scoped to this user's Chrome profile.
  * If the user has captured service cookies (via Chrome extension), injects them via --storage-state.
  */
-function writeMcpConfig(workDir, userId) {
+function writeMcpConfig(workDir, userId, { userName, userHandle } = {}) {
   // Note: --user-data-dir creates a persistent context, which is incompatible
   // with --storage-state (Playwright limitation). We rely on --storage-state
   // for both cookie injection and session persistence. Per-user isolation is
@@ -144,6 +144,8 @@ function writeMcpConfig(workDir, userId) {
           ...(process.env.GOOGLE_OAUTH_CLIENT_ID     ? { GOOGLE_OAUTH_CLIENT_ID:     process.env.GOOGLE_OAUTH_CLIENT_ID }     : {}),
           ...(process.env.GOOGLE_OAUTH_CLIENT_SECRET ? { GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET } : {}),
           ...(process.env.AGENT_PUBLIC_URL            ? { AGENT_PUBLIC_URL:           process.env.AGENT_PUBLIC_URL }            : {}),
+          ...(userName   ? { AGENT_USER_NAME:   userName }   : {}),
+          ...(userHandle ? { AGENT_USER_HANDLE: userHandle } : {}),
         },
       },
     },
