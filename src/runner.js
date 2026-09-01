@@ -253,7 +253,11 @@ function getQuickAnswer(task, userId, workDir) {
         ].join('\n');
       }
     } catch {}
-    return null; // not configured — let Claude call gdrive_setup automatically
+    // SA email asked explicitly — give a helpful "not configured" message instead of routing to Claude
+    if (GDRIVE_SA_EMAIL_INTENT.test(task)) {
+      return 'Google Drive не настроен. Напиши «подключи Google Drive» — помогу настроить за пару минут.';
+    }
+    return null; // share intent without config — let Claude call gdrive_setup automatically
   }
 
   // Capability question about INN enrichment — answer immediately without calling Claude
@@ -441,7 +445,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const fullOutput = { text: '' };
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
-  const mcpConfig = writeMcpConfig(user.workDir, user.id);
+  const mcpConfig = writeMcpConfig(user.workDir, user.id, { userName: user.name, userHandle: user.username });
 
   // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.

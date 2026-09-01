@@ -109,10 +109,7 @@ describe('Service setup', () => {
     ['подключи Weeek', 'weeek'],
     ['настрой Weeek CRM', 'weeek'],
     ['интеграция вик', 'weeek'],
-    // Google Drive
-    ['подключи Google Drive', 'gdrive'],
-    ['настрой гугл диск', 'gdrive'],
-    ['как подключить gdrive', 'gdrive'],
+    // Google Drive: intentionally routed to Claude (calls gdrive_setup automatically) — not a quick answer
     // Nalog
     ['подключи налог.ру', 'nalog'],
     ['настрой самозанятый', 'nalog'],
