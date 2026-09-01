@@ -32,27 +32,37 @@ function setScenario(s) {
 
 // ── HTML fixtures ─────────────────────────────────────────────────────────────
 
+// GetCourse 2025+ UI: li[data-type="group"] with .rd-group-name
 const GROUPS_HTML_NORMAL = `<!DOCTYPE html><html><body>
-<table>
-  <tr data-id="101">
-    <td><a href="/pl/user/group/view/id/101">Базовый доступ</a></td>
-  </tr>
-  <tr data-id="102">
-    <td><a href="/pl/user/group/view/id/102">Премиум</a><span class="badge">3</span></td>
-  </tr>
-  <tr data-id="103">
-    <td><a href="/pl/user/group/edit/id/103"><i class="icon-edit"></i></a></td>
-  </tr>
-</table>
+<ul class="dd-list">
+  <li class="dd-item" data-type="group" data-id="101">
+    <a class="dd3-content" href="/pl/user/group/update?id=101">
+      <span class="users-count">5 пользователей</span>
+      <div class="rd-h4 rd-group-name">Базовый доступ</div>
+    </a>
+  </li>
+  <li class="dd-item" data-type="group" data-id="102">
+    <a class="dd3-content" href="/pl/user/group/update?id=102">
+      <span class="users-count">3 пользователя</span>
+      <div class="rd-h4 rd-group-name">Премиум</div>
+    </a>
+  </li>
+  <li class="dd-item" data-type="folder" data-id="103">
+    <a href="/pl/user/group/folder/id/103"><i class="gc-icons gc-folder"></i></a>
+  </li>
+</ul>
 </body></html>`;
 
 // Same groups but with a working "next page" link
 const GROUPS_HTML_PAGED = `<!DOCTYPE html><html><body>
-<table>
-  <tr data-id="101">
-    <td><a href="/pl/user/group/view/id/101">Группа первой страницы</a></td>
-  </tr>
-</table>
+<ul class="dd-list">
+  <li class="dd-item" data-type="group" data-id="101">
+    <a class="dd3-content" href="/pl/user/group/update?id=101">
+      <span class="users-count">2 пользователя</span>
+      <div class="rd-h4 rd-group-name">Группа первой страницы</div>
+    </a>
+  </li>
+</ul>
 <ul class="pagination">
   <li class="prev disabled"><a>«</a></li>
   <li class="next"><a href="/pl/user/group/index?page=2">»</a></li>
@@ -61,7 +71,7 @@ const GROUPS_HTML_PAGED = `<!DOCTYPE html><html><body>
 
 // No group rows at all (e.g. account with zero groups)
 const GROUPS_HTML_EMPTY = `<!DOCTYPE html><html><body>
-<table><thead><tr><th>Name</th></tr></thead><tbody></tbody></table>
+<ul class="dd-list"></ul>
 </body></html>`;
 
 const COURSES_TREE_HTML = `<!DOCTYPE html><html><body>

@@ -362,32 +362,35 @@ module.exports = {
             return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
           }
 
-          await page.waitForTimeout(1500);
+          // GetCourse renders via Vue — wait for content to appear
+          await page.waitForTimeout(4000);
 
           const { groups, hasMore } = await page.evaluate(() => {
             const results = [];
-            // Group rows with data-id attribute
-            document.querySelectorAll('tr[data-id], tr[id^="group-"]').forEach(row => {
-              const id = row.dataset.id || row.id.replace('group-', '');
-              const nameEl = row.querySelector('td:first-child a') || row.querySelector('td.name') || row.querySelector('td:first-child');
-              const name = nameEl?.textContent?.trim();
-              if (id && name && name.length > 0) results.push({ id, name });
+            // New GetCourse UI (2025+): li[data-type="group"] with .rd-group-name
+            document.querySelectorAll('li[data-type="group"]').forEach(li => {
+              const id = li.dataset.id;
+              const nameEl = li.querySelector('.rd-group-name');
+              const name = nameEl?.textContent?.trim().replace(/\s+/g, ' ');
+              if (id && name && name.length > 1) results.push({ id, name });
             });
-            // Fallback: look for table links with /group/ in href
+            // Fallback: links to /group/update?id={id} (new URL pattern)
             if (results.length === 0) {
-              document.querySelectorAll('a[href*="/group/"]').forEach(a => {
-                const m = a.href.match(/\/group\/(?:view|edit)\/id\/(\d+)/);
+              document.querySelectorAll('a[href]').forEach(a => {
+                const href = a.getAttribute('href') || '';
+                const m = href.match(/group\/update\?id=(\d+)/);
                 if (!m) return;
                 const id = m[1];
                 if (results.find(r => r.id === id)) return;
-                const name = a.textContent.trim().slice(0, 100);
-                if (!name) return; // skip icon-only anchors with no visible text
+                const nameEl = a.querySelector('.rd-group-name');
+                const name = (nameEl?.textContent || a.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+                if (!name || name.length < 2) return;
                 results.push({ id, name });
               });
             }
-            // Detect pagination: a next-page link/button that isn't disabled
+            // Pagination: new UI may use different controls
             const nextEl = document.querySelector(
-              'a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a, a[aria-label="Next"]'
+              'a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a, a[aria-label="Next"], [class*="pagination"] [class*="next"]:not([class*="disabled"])'
             );
             return { groups: results, hasMore: !!nextEl };
           });
