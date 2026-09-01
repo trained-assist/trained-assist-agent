@@ -221,25 +221,23 @@ module.exports = {
         }
         const saEmail = saData?.email || `${accountId}@${GCP_PROJECT}.iam.gserviceaccount.com`;
 
-        // Create key for the SA — retry up to 4x because GCP may return 404 briefly after SA creation (propagation delay)
-        let keyData = null;
-        for (let attempt = 0; attempt < 4; attempt++) {
-          if (attempt > 0) await new Promise(r => setTimeout(r, 3000 * attempt));
-          const keyRes = await fetch(
-            `https://iam.googleapis.com/v1/projects/${GCP_PROJECT}/serviceAccounts/${encodeURIComponent(saEmail)}/keys`,
-            {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${adcToken}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ privateKeyType: 'TYPE_GOOGLE_CREDENTIALS_FILE' }),
-              signal: AbortSignal.timeout(15000),
-            }
-          );
-          if (keyRes.ok) { keyData = await keyRes.json(); break; }
-          const err = await keyRes.json().catch(() => ({}));
-          if (keyRes.status !== 404 || attempt === 3) {
-            throw new Error(`Не удалось создать ключ SA (${keyRes.status}): ${err.error?.message || keyRes.statusText}`);
+        // Create key for the SA
+        const keyRes = await fetch(
+          `https://iam.googleapis.com/v1/projects/${GCP_PROJECT}/serviceAccounts/${encodeURIComponent(saEmail)}/keys`,
+          {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${adcToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ privateKeyType: 'TYPE_GOOGLE_CREDENTIALS_FILE' }),
+            signal: AbortSignal.timeout(15000),
           }
+        );
+
+        if (!keyRes.ok) {
+          const err = await keyRes.json().catch(() => ({}));
+          throw new Error(`Не удалось создать ключ SA (${keyRes.status}): ${err.error?.message || keyRes.statusText}`);
         }
+
+        const keyData = await keyRes.json();
         const saJson  = JSON.parse(Buffer.from(keyData.privateKeyData, 'base64').toString('utf8'));
 
         // Save to user token file
