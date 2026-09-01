@@ -573,7 +573,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     });
   } catch (err) {
     console.error(`[${taskId}] claude process error:`, err.message);
-    if (timedOut) fullOutput.text += '\n\n⏱ Задача прервана по таймауту (5 мин).';
+    if (timedOut) fullOutput.text += `\n\n⏱ Задача прервана по таймауту (${CLAUDE_TIMEOUT_MS / 60000} мин).`;
   } finally {
     clearInterval(streamTimer);
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }

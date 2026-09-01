@@ -290,7 +290,9 @@ module.exports = {
     },
 
     gdrive_status: {
-      description: 'Check Google Drive connection. Shows the SA email to share folders with.',
+      description: 'Check Google Drive connection. Shows the SA email to share files/folders with. ' +
+        'NOTE: files_accessible counts only folder-shared files via files.list — files shared directly by ID return 0 here but are still readable via gdrive_read_file(file_id). ' +
+        'If files_accessible=0 but you have a file ID, try gdrive_read_file directly before concluding access is broken.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
         const sa = parseSaJson();
@@ -304,7 +306,8 @@ module.exports = {
             sa_email: sa.client_email,
             project_id: sa.project_id,
             files_accessible: data.files?.length ?? 0,
-            instruction: `Поделись папкой Drive с: ${sa.client_email}`,
+            note: 'files_accessible=0 is normal if files are shared directly by ID (not via folder). Use gdrive_read_file(file_id) to confirm access.',
+            instruction: `Поделись папкой или файлом Drive с: ${sa.client_email}`,
           };
         } catch (e) {
           return { status: 'error', sa_email: sa.client_email, error: e.message };

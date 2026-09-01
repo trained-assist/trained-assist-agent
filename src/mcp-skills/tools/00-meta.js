@@ -65,8 +65,8 @@ const SKILLS = [
     id: 'google-drive',
     name: 'Google Drive',
     description: 'Читать, создавать и редактировать файлы в Google Drive через персональный Service Account. Настройка за одну команду — gdrive_setup автоматически создаёт SA.',
-    tools: ['gdrive_setup', 'gdrive_status', 'gdrive_list_files', 'gdrive_read_file', 'gdrive_search', 'gdrive_create_file', 'gdrive_update_file', 'gdrive_delete_file'],
-    requires: 'Вызови gdrive_setup → получишь email → расшарь папки Drive с этим email.',
+    tools: ['gdrive_setup', 'gdrive_status', 'gdrive_list_files', 'gdrive_read_file', 'gdrive_search', 'gdrive_create_file', 'gdrive_update_file', 'gdrive_delete_file', 'gdrive_write_sheet'],
+    requires: 'Вызови gdrive_setup → получишь email → расшарь папки/файлы Drive с этим email. gdrive_write_sheet создаёт/перезаписывает вкладку в Google Spreadsheet.',
   },
   {
     id: 'getcourse',
