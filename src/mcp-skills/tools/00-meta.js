@@ -82,12 +82,39 @@ const SKILLS = [
   },
   {
     id: 'expo-participants',
-    name: 'Выставки — список участников',
-    description: 'Стандартный скил для сбора участников выставки: найти страницу участников/экспонентов → спарсить компании → CSV для обогащения ИНН. ' +
-      'Для JS-сайтов — используй browser/WebFetch чтобы получить HTML, затем expo_parse_participants. ' +
-      'Результат сразу совместим с inn_enrich_batch.',
-    tools: ['expo_find_participants', 'expo_parse_participants'],
-    requires: 'Ничего — достаточно URL сайта выставки. Для JS-сайтов нужен Browser Session или Playwright.',
+    name: 'Выставки — сбор и обогащение участников',
+    description:
+      'Полный пайплайн для выставочной разведки: от URL каталога до Google Sheet с ИНН, выручкой и колонкой "Целевая?".\n\n' +
+      'СТАНДАРТНЫЙ ПАЙПЛАЙН (в порядке шагов):\n' +
+      '1. expo_find_participants(site_url) — найти каталог, спарсить список компаний\n' +
+      '   → Для JS/Tilda сайтов: Browser Session + expo_parse_participants(html)\n' +
+      '2. expo_fetch_company_contacts(catalog_base, companies) — обойти карточки компаний → +сайт, +email\n' +
+      '   → Используй для CPM-style каталогов (cpm-digital.ru, catalog.textile-salon.ru, catalog.tourismexpo.ru и подобных)\n' +
+      '   → Не нужен если expo_find_participants уже вернул сайты\n' +
+      '3. expo_find_inn(companies, out_file) — ИНН для каждой компании\n' +
+      '   → Источники: сайт компании (regex) → DaData по названию (4-pass алгоритм)\n' +
+      '   → Типичное покрытие: 30–60%. Иностранные бренды без российского юрлица — ИНН нет.\n' +
+      '4. expo_enrich_finances(file, criteria) — ОГРН + директор (DaData) + выручка + прибыль (Checko) + Целевая?\n' +
+      '   → Критерий по умолчанию: 150–1000 млн любая прибыль / 1000–5000 млн прибыль ≤100 млн\n' +
+      '5. gdrive_write_sheet(spreadsheet_id, sheet_name, rows) — записать в Google Sheet\n\n' +
+      'ВАЖНЫЕ ОСОБЕННОСТИ:\n' +
+      '- Выставочные каталоги — это торговые марки, а не юрлица. ИНН по названию работает плохо для иностранных брендов.\n' +
+      '- Лучший источник ИНН: сайт компании → футер/реквизиты → regex.\n' +
+      '- DaData suggest/party (по имени и домену) = бесплатно, квота 10k/день.\n' +
+      '- Checko — платный, только для финансов по ИНН. Ключ BcCm6AGdVBx9j0MC — пишется в параметре или env.\n\n' +
+      'РЕФЕРЕНСНЫЕ СКРИПТЫ (на GCP VM flexi-consult):\n' +
+      '- /home/vova/users/flexi-consult/participants/find-inn-cpm.js — ИНН с сайта + DaData\n' +
+      '- /home/vova/users/flexi-consult/participants/enrich-finances.js — Checko финансы\n' +
+      '- github:flexi-consulting/exhibitions/scripts/enrich_dadata.py — Python-референс алгоритма\n' +
+      '- github:flexi-consulting/exhibitions/docs/data-pipeline.md — описание пайплайна',
+    tools: [
+      'expo_find_participants',
+      'expo_parse_participants',
+      'expo_fetch_company_contacts',
+      'expo_find_inn',
+      'expo_enrich_finances',
+    ],
+    requires: 'Ничего для шагов 1–4. Для шага 5: gdrive_write_sheet требует настроенный Google Drive SA (gdrive_setup).',
   },
 ];
 
