@@ -119,16 +119,26 @@ module.exports = {
     inn_enrich_batch: {
       description: `Enrich a list of Russian companies with INN, OGRN, director, revenue, and profit.
 Sources (in priority order): BFO ФНС (free), company websites, DaData, ЕГРЮЛ, Checko.
-Input: path to exhibitors.json (array of {id, name, city?, website?, email?, country?}).
-Output: writes requisites_enrichment.json and requisites_report.json in the same directory.
-Estimated time: 10–15 min for 300 companies.`,
+Input: EITHER a path to exhibitors.json OR inline companies array — no file prep needed for small lists.
+Output: writes requisites_enrichment.json and requisites_report.json to out_dir (or input file dir).
+Estimated time: 10–15 min for 300 companies. Timeout is 15 min — do not cancel early.
+
+NOTE: Works well for Russian legal entity names. Brand names (Latin, foreign) → poor match rate.`,
       inputSchema: {
         type: 'object',
-        required: ['file'],
         properties: {
           file: {
             type: 'string',
-            description: 'Path to exhibitors.json (absolute or relative to cwd)',
+            description: 'Path to exhibitors.json (array of {id, name, ...}). Use this OR companies.',
+          },
+          companies: {
+            type: 'array',
+            items: { type: 'object' },
+            description: 'Inline array of {id, name, city?, website?} — skip file prep for ≤500 companies.',
+          },
+          out_dir: {
+            type: 'string',
+            description: 'Directory for output files (default: input file dir, or cwd for inline companies).',
           },
           workers: {
             type: 'number',
@@ -141,20 +151,29 @@ Estimated time: 10–15 min for 300 companies.`,
           },
         },
       },
-      handler: async ({ file, workers = 8, sources }, ctx) => {
-        const filePath = path.resolve(file);
-        if (!fs.existsSync(filePath)) return { error: `File not found: ${filePath}` };
-
+      handler: async ({ file, companies, out_dir, workers = 8, sources }, ctx) => {
         let exhibitors;
-        try {
-          exhibitors = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-          if (!Array.isArray(exhibitors)) return { error: 'exhibitors.json must be a JSON array' };
-        } catch (e) {
-          return { error: `Failed to parse ${filePath}: ${e.message}` };
+        let outDir;
+
+        if (companies && Array.isArray(companies) && companies.length > 0) {
+          exhibitors = companies.map((c, i) => ({ id: c.id ?? i + 1, name: c.name ?? c, ...c }));
+          outDir = out_dir ? path.resolve(out_dir) : process.cwd();
+        } else if (file) {
+          const filePath = path.resolve(file);
+          if (!fs.existsSync(filePath)) return { error: `File not found: ${filePath}` };
+          try {
+            exhibitors = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            if (!Array.isArray(exhibitors)) return { error: 'exhibitors.json must be a JSON array' };
+          } catch (e) {
+            return { error: `Failed to parse ${filePath}: ${e.message}` };
+          }
+          outDir = out_dir ? path.resolve(out_dir) : path.dirname(filePath);
+        } else {
+          return { error: 'Нужен file (путь) или companies (массив объектов {name, ...})' };
         }
 
+        if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
         const cfg = readConfig(ctx?.userId);
-        const outDir = path.dirname(filePath);
         const cacheDir = path.join(outDir, '.inn-cache');
 
         const config = {
