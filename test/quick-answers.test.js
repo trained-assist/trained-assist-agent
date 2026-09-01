@@ -195,6 +195,37 @@ describe('Revoke service access', () => {
   });
 });
 
+// ── Expo participants capability ──────────────────────────────────────────────
+
+describe('Expo participants capability questions', () => {
+  it.each([
+    'умеешь собрать участников выставки?',
+    'можешь собрать список экспонентов?',
+    'умеешь собрать участников выставки и обогатить по ИНН?',
+    'есть скил для сбора участников выставки?',
+    'есть инструмент для экспонентов?',
+    'умеешь парсить участников expo?',
+  ])('expo capability: "%s" → quick', (task) => {
+    expect(qa(task)).not.toBeNull();
+  });
+
+  it.each([
+    'собери список участников с этого сайта https://aquatherm.ru',
+    'отлично! вот сайт выставки — https://aquatherm.ru — собери список участников в CSV',
+    'зайди на страницу участников выставки и скачай список',
+    'найди участников на сайте выставки agros.org.ru',
+  ])('actual expo task NOT intercepted: "%s"', (task) => {
+    expect(qa(task)).toBeNull();
+  });
+
+  it('expo+INN combo question → expo answer (not INN answer)', () => {
+    const r = qa('умеешь собрать участников выставки и обогатить по ИНН?');
+    expect(r).not.toBeNull();
+    // Should be expo answer mentioning "выставок", not INN enrichment answer
+    expect(r).toMatch(/выставок|выставк/i);
+  });
+});
+
 // ── INN Enrichment capability ─────────────────────────────────────────────────
 
 describe('INN Enrichment capability questions', () => {

@@ -78,8 +78,12 @@ async function startGetcourseLogin(userId, domain, login, password) {
     }
 
     if (outcome === 'timeout') {
+      const screenshotPath = path.join(os.tmpdir(), `gc-login-fail-${Date.now()}.png`);
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+      const currentUrl = page.url();
+      console.error('[getcourse-login] timeout, url=%s, screenshot=%s', currentUrl, screenshotPath);
       await browser.close();
-      return { error: 'Тайм-аут — проверьте домен, логин и пароль' };
+      return { error: `Тайм-аут — проверьте домен, логин и пароль (url: ${currentUrl})` };
     }
 
     // Grab cookies (filter to the account domain)
