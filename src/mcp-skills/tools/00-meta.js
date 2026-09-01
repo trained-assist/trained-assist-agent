@@ -80,6 +80,15 @@ const SKILLS = [
     ],
     requires: 'Вызови gc_connect — получишь ссылку. Введи домен + API ключ (L1) и/или логин+пароль (L2).',
   },
+  {
+    id: 'expo-participants',
+    name: 'Выставки — список участников',
+    description: 'Стандартный скил для сбора участников выставки: найти страницу участников/экспонентов → спарсить компании → CSV для обогащения ИНН. ' +
+      'Для JS-сайтов — используй browser/WebFetch чтобы получить HTML, затем expo_parse_participants. ' +
+      'Результат сразу совместим с inn_enrich_batch.',
+    tools: ['expo_find_participants', 'expo_parse_participants'],
+    requires: 'Ничего — достаточно URL сайта выставки. Для JS-сайтов нужен Browser Session или Playwright.',
+  },
 ];
 
 module.exports = {
