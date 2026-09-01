@@ -273,7 +273,7 @@ module.exports = {
     },
 
     gc_user_find: {
-      description: 'Find a GetCourse user by email. Returns profile, groups, and order count.',
+      description: 'Find a GetCourse user by email via Playwright (L2 session). Returns user id, name, groups, registration date. Requires L2 session. Takes ~15s.',
       inputSchema: {
         type: 'object',
         required: ['email'],
@@ -283,12 +283,55 @@ module.exports = {
       },
       handler: async ({ email }, ctx) => {
         const cfg = readConfig(ctx?.userId);
-        const err = requireL1(cfg);
+        const err = requireL2(cfg);
         if (err) return err;
-        return gcApiExport(cfg, '/pl/api/users', {
-          page: 1, count: 10,
-          rules: [{ field: 'email', condition: 'equal', value: email }],
-        });
+
+        let browser;
+        try {
+          const opened = await openBrowserPage(cfg);
+          browser = opened.browser;
+          const page = opened.page;
+
+          const searchUrl = `https://${cfg.accountDomain}/pl/user/user/index?search[email]=${encodeURIComponent(email)}`;
+          await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+          if (page.url().includes('/login')) {
+            await browser.close();
+            return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+          }
+
+          // Extract user rows — links like /user/control/user/update/id/{id}
+          const users = await page.evaluate(() => {
+            const rows = [];
+            document.querySelectorAll('a[href*="/user/control/user/update/id/"]').forEach(a => {
+              const m = a.href.match(/\/user\/control\/user\/update\/id\/(\d+)/);
+              if (!m) return;
+              const id = m[1];
+              if (rows.find(r => r.id === id)) return; // deduplicate
+              const row = a.closest('tr') || a.closest('li') || a.parentElement;
+              const text = row ? row.innerText.trim() : a.innerText.trim();
+              rows.push({ id, text });
+            });
+            return rows;
+          });
+
+          await browser.close();
+
+          if (!users.length) return { found: false, message: `Пользователь с email ${email} не найден.` };
+
+          // Parse first result
+          const first = users[0];
+          return {
+            found: true,
+            user_id: first.id,
+            profile_url: `https://${cfg.accountDomain}/user/control/user/update/id/${first.id}`,
+            raw_text: first.text,
+            total_found: users.length,
+          };
+        } catch (e) {
+          if (browser) await browser.close().catch(() => {});
+          return { error: 'playwright_error', message: e.message };
+        }
       },
     },
 
