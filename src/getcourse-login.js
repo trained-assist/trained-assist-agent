@@ -123,11 +123,15 @@ async function startGetcourseLogin(userId, domain, login, password) {
       gcSessionHash: localStorage.getItem('gcSessionHash'),
     })).catch(() => ({}));
 
+    // Save the exact UA Playwright used — L2 fetch requests must match it
+    const sessionUserAgent = await page.evaluate(() => navigator.userAgent).catch(() => null);
+
     await browser.close();
 
     mergeConfig(userId, {
       sessionCookies,
       sessionVars,
+      sessionUserAgent,
       loginSavedAt: new Date().toISOString(),
     });
 
