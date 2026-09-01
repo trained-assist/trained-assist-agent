@@ -495,6 +495,117 @@ module.exports = {
       },
     },
 
+    gc_user_notifications: {
+      description: 'List email notifications sent to a GetCourse user. Takes user_id (from gc_user_find) or email. Returns subject, date, open status. Requires L2 session. Takes ~20s.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'GetCourse user ID (from gc_user_find)' },
+          email:   { type: 'string', description: 'User email — will search for user_id automatically' },
+          count:   { type: 'number', description: 'Max notifications to return (default 20)' },
+        },
+      },
+      handler: async ({ user_id, email, count = 20 }, ctx) => {
+        const cfg = readConfig(ctx?.userId);
+        const err = requireL2(cfg);
+        if (err) return err;
+        if (!user_id && !email) return { error: 'missing_param', message: 'Укажи user_id или email.' };
+
+        let uid = user_id;
+
+        // Resolve email → user_id via admin search
+        if (!uid && email) {
+          let browser2;
+          try {
+            const opened = await openBrowserPage(cfg);
+            browser2 = opened.browser;
+            const p2 = opened.page;
+            await p2.goto(`https://${cfg.accountDomain}/pl/user/user/index?search[email]=${encodeURIComponent(email)}`, { waitUntil: 'networkidle', timeout: 30000 });
+            if (p2.url().includes('/login')) {
+              await browser2.close();
+              return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+            }
+            uid = await p2.evaluate(() => {
+              const a = document.querySelector('a[href*="/user/control/user/update/id/"]');
+              return a?.href.match(/\/id\/(\d+)/)?.[1] || null;
+            });
+            await browser2.close();
+          } catch (e) {
+            await browser2?.close().catch(() => {});
+            return { error: 'playwright_error', message: `Не удалось найти user_id для ${email}: ${e.message.slice(0, 200)}` };
+          }
+          if (!uid) return { found: false, message: `Пользователь с email ${email} не найден.` };
+        }
+
+        let browser;
+        try {
+          const opened = await openBrowserPage(cfg);
+          browser = opened.browser;
+          const page = opened.page;
+
+          // Navigate to user profile, then find the "Letters/Письма" tab
+          const profileUrl = `https://${cfg.accountDomain}/user/control/user/update/id/${uid}`;
+          await page.goto(profileUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+          if (page.url().includes('/login')) {
+            await browser.close();
+            return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+          }
+
+          // Try to find and click the letters/notifications tab
+          const tabClicked = await page.evaluate(() => {
+            const tabs = Array.from(document.querySelectorAll('a[href], li a, .nav a, .tab a'));
+            const lettersTab = tabs.find(a =>
+              /письм|уведомл|рассылк|letter|mail|notif/i.test(a.textContent || '') ||
+              /letter|mail|notif/i.test(a.href || '')
+            );
+            if (lettersTab) { lettersTab.click(); return true; }
+            return false;
+          });
+
+          if (tabClicked) await page.waitForTimeout(2000);
+
+          // Try direct URL for user mail log
+          if (!tabClicked) {
+            await page.goto(`https://${cfg.accountDomain}/pl/user/mail/index?search[user_id]=${uid}`, { waitUntil: 'networkidle', timeout: 30000 });
+            if (page.url().includes('/login')) {
+              await browser.close();
+              return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+            }
+            await page.waitForTimeout(1000);
+          }
+
+          const { notifications, hasMore } = await page.evaluate((maxCount) => {
+            const results = [];
+            // Try table rows
+            document.querySelectorAll('tr[data-id], tr').forEach(row => {
+              if (results.length >= maxCount) return;
+              const cells = Array.from(row.querySelectorAll('td'));
+              if (cells.length < 2) return;
+              const texts = cells.map(td => td.innerText.trim()).filter(Boolean);
+              if (texts.length < 2) return;
+              const id = row.dataset.id || '';
+              results.push({ id, cells: texts.slice(0, 6) });
+            });
+            const nextEl = document.querySelector('a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a');
+            return { notifications: results, hasMore: !!nextEl };
+          }, count);
+
+          await browser.close();
+
+          if (!notifications.length) {
+            return { found: false, user_id: uid, message: 'Письма/уведомления не найдены. Возможно, вкладка называется иначе — проверь профиль ученика вручную.' };
+          }
+          const result = { user_id: uid, count: notifications.length, notifications };
+          if (hasMore) result.warning = 'Показана только первая страница.';
+          return result;
+        } catch (e) {
+          await browser?.close().catch(() => {});
+          return { error: 'playwright_error', message: e.message };
+        }
+      },
+    },
+
     // ── L2: Course listing & creation ────────────────────────────────────────
 
     gc_course_list: {
