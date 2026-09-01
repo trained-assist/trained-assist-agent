@@ -21,7 +21,7 @@ async function openBrowserPage(cfg) {
     headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-setuid-sandbox'],
   });
-  const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA });
+  const context = await browser.newContext({ userAgent: cfg.sessionUserAgent || FALLBACK_UA, ignoreHTTPSErrors: true });
   await context.addCookies((cfg.sessionCookies || []).map(c => ({
     name: c.name, value: c.value,
     domain: (c.domain || '').startsWith('.') ? c.domain : '.' + (c.domain || cfg.accountDomain),
@@ -406,25 +406,92 @@ module.exports = {
     },
 
     gc_order_list: {
-      description: 'List orders, optionally filtered by email or date range.',
+      description: 'List orders via Playwright (L2 session). Filter by email and/or date range. Returns order id, status, amount, product, date. Takes ~15s.',
       inputSchema: {
         type: 'object',
         properties: {
-          email:     { type: 'string',  description: 'Filter by user email' },
-          date_from: { type: 'string',  description: 'Start date YYYY-MM-DD' },
-          date_to:   { type: 'string',  description: 'End date YYYY-MM-DD' },
-          count:     { type: 'number',  description: 'Max records (default 20)' },
+          email:     { type: 'string', description: 'Filter by user email' },
+          date_from: { type: 'string', description: 'Start date YYYY-MM-DD' },
+          date_to:   { type: 'string', description: 'End date YYYY-MM-DD' },
+          count:     { type: 'number', description: 'Max records to return (default 20)' },
         },
       },
       handler: async ({ email, date_from, date_to, count = 20 }, ctx) => {
         const cfg = readConfig(ctx?.userId);
-        const err = requireL1(cfg);
+        const err = requireL2(cfg);
         if (err) return err;
-        const rules = [];
-        if (email)     rules.push({ field: 'user_email', condition: 'equal',     value: email });
-        if (date_from) rules.push({ field: 'created_at', condition: 'more_than', value: date_from });
-        if (date_to)   rules.push({ field: 'created_at', condition: 'less_than', value: date_to });
-        return gcApiExport(cfg, '/pl/api/deals', { page: 1, count, ...(rules.length && { rules }) });
+
+        let browser;
+        try {
+          const opened = await openBrowserPage(cfg);
+          browser = opened.browser;
+          const page = opened.page;
+
+          // Build search URL with filters
+          const params = new URLSearchParams();
+          if (email)     params.set('search[user_email]', email);
+          if (date_from) params.set('search[created_at_from]', date_from);
+          if (date_to)   params.set('search[created_at_to]', date_to);
+          const searchUrl = `https://${cfg.accountDomain}/pl/user/order/index?${params.toString()}`;
+
+          await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+          if (page.url().includes('/login')) {
+            await browser.close();
+            return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+          }
+
+          await page.waitForTimeout(1500);
+
+          const { orders, hasMore } = await page.evaluate((maxCount) => {
+            const results = [];
+            // Order rows: tr with data-id or links to /order/view/id/{id}
+            const rows = document.querySelectorAll('tr[data-id]');
+            rows.forEach(row => {
+              if (results.length >= maxCount) return;
+              const id = row.dataset.id;
+              const cells = row.querySelectorAll('td');
+              // Extract text from each cell
+              const cellTexts = Array.from(cells).map(td => td.innerText.trim());
+              // Look for order link to get id from href if data-id absent
+              const link = row.querySelector('a[href*="/order/"]');
+              const orderId = id || (link?.href.match(/\/order\/(?:view|edit)\/id\/(\d+)/)?.[1]);
+              if (!orderId) return;
+              results.push({ id: orderId, cells: cellTexts.slice(0, 8) });
+            });
+            // Fallback: look for links with /order/ pattern
+            if (results.length === 0) {
+              document.querySelectorAll('a[href*="/order/view/id/"], a[href*="/order/edit/id/"]').forEach(a => {
+                if (results.length >= maxCount) return;
+                const m = a.href.match(/\/order\/(?:view|edit)\/id\/(\d+)/);
+                if (!m) return;
+                const id = m[1];
+                if (results.find(r => r.id === id)) return;
+                const row = a.closest('tr');
+                const cellTexts = row ? Array.from(row.querySelectorAll('td')).map(td => td.innerText.trim()) : [a.innerText.trim()];
+                results.push({ id, cells: cellTexts.slice(0, 8) });
+              });
+            }
+            const nextEl = document.querySelector(
+              'a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a'
+            );
+            return { orders: results, hasMore: !!nextEl };
+          }, count);
+
+          await browser.close();
+
+          if (!orders.length) {
+            const desc = email ? `для ${email}` : 'по заданным фильтрам';
+            return { found: false, message: `Заказы ${desc} не найдены.` };
+          }
+
+          const result = { count: orders.length, orders };
+          if (hasMore) result.warning = 'has_more: показана только первая страница заказов.';
+          return result;
+        } catch (e) {
+          await browser?.close().catch(() => {});
+          return { error: 'playwright_error', message: e.message };
+        }
       },
     },
 

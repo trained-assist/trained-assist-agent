@@ -91,7 +91,9 @@ function revokeService(userId, serviceName) {
     notion: 'notion',
     linear: 'linear',
     tilda: 'tilda', тильда: 'tilda',
-    'tilda-creds': 'tilda-creds', тильдакред: 'tilda-creds',
+    // 'tilda-creds' → stripped of dash → 'tildacreds'
+    'tilda-creds': 'tilda-creds', tildacreds: 'tilda-creds', тильдакред: 'tilda-creds',
+    getcourse: 'getcourse', геткурс: 'getcourse',
     gdrive: 'gdrive', гугл: 'gdrive', google: 'gdrive',
     dadata: 'dadata',
   };
@@ -100,7 +102,13 @@ function revokeService(userId, serviceName) {
 
   const filePath = path.join(dir, key);
   if (!fs.existsSync(filePath)) return 'not_found';
-  try { fs.unlinkSync(filePath); } catch { return 'not_found'; } // TOCTOU: already deleted
+  try {
+    if (fs.statSync(filePath).isDirectory()) {
+      fs.rmSync(filePath, { recursive: true });
+    } else {
+      fs.unlinkSync(filePath);
+    }
+  } catch { return 'not_found'; }
   appendSecretsLog(userId, [`revoke:${key}`]);
   return key;
 }

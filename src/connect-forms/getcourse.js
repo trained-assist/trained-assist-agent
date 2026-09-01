@@ -2,7 +2,9 @@
 function getcourseFormHtml(token, saved) {
   saved = saved || {};
   const hasSaved = !!(saved.domain || saved.apiKey || saved.login);
-  function jsStr(v) { return v ? JSON.stringify(String(v)) : 'null'; }
+  function jsStr(v) {
+    return v ? JSON.stringify(String(v)).replace(/</g, '\\u003c').replace(/>/g, '\\u003e') : 'null';
+  }
   const savedJs = `{domain:${jsStr(saved.domain)},apiKey:${jsStr(saved.apiKey)},login:${jsStr(saved.login)},password:${jsStr(saved.password)},hasSession:${!!saved.hasSession}}`;
 
   return `<!DOCTYPE html>

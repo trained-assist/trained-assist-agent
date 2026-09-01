@@ -1,8 +1,10 @@
 // savedValue: existing stored token string, or null
 function connectFormHtml(service, meta, token, savedValue) {
   const hasSaved = !!savedValue;
-  // Safely embed saved value as JS string literal
-  const savedJs = hasSaved ? JSON.stringify(String(savedValue)) : 'null';
+  // Safely embed saved value as JS string literal; escape < > to prevent script injection
+  const savedJs = hasSaved
+    ? JSON.stringify(String(savedValue)).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')
+    : 'null';
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -51,6 +53,8 @@ function connectFormHtml(service, meta, token, savedValue) {
 <script>
 const T = '${token.replace(/'/g, "\\'")}';
 const SAVED = ${savedJs};
+const BTN_CONNECT = 'Подключить';
+const BTN_RECONNECT = ${hasSaved ? "'Переподключить'" : "'Подключить'"};
 let usingCleared = false;
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -90,11 +94,11 @@ async function submit() {
       document.getElementById('tok').disabled = true;
     } else {
       show('err', d.error || 'Ошибка');
-      btn.disabled = false; btn.textContent = SAVED && !usingCleared ? 'Переподключить' : 'Подключить';
+      btn.disabled = false; btn.textContent = SAVED && !usingCleared ? BTN_RECONNECT : BTN_CONNECT;
     }
   } catch(e) {
     show('err', 'Сетевая ошибка: ' + e.message);
-    btn.disabled = false; btn.textContent = SAVED && !usingCleared ? 'Переподключить' : 'Подключить';
+    btn.disabled = false; btn.textContent = SAVED && !usingCleared ? BTN_RECONNECT : BTN_CONNECT;
   }
 }
 function show(cls, text) {

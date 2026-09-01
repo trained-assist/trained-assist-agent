@@ -6,7 +6,9 @@
 function loginCredsFormHtml(service, meta, token, saved) {
   saved = saved || {};
   const hasSaved = !!(saved.email);
-  function jsStr(v) { return v ? JSON.stringify(String(v)) : 'null'; }
+  function jsStr(v) {
+    return v ? JSON.stringify(String(v)).replace(/</g, '\\u003c').replace(/>/g, '\\u003e') : 'null';
+  }
   const savedJs = `{email:${jsStr(saved.email)},password:${jsStr(saved.password)}}`;
 
   return `<!DOCTYPE html>
