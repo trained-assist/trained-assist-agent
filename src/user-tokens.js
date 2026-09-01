@@ -34,24 +34,22 @@ function appendSecretsLog(userId, services) {
   } catch { /* non-critical */ }
 }
 
-function loadUserTokens(userId, telegramUserId) {
-  // telegramUserId (from.id) is the stable per-user key; userId (chatId) is the legacy per-chat key.
-  // When telegramUserId differs from userId, prefer the telegramUserId folder and auto-migrate
-  // files from the old chatId folder so GetCourse/nalog tokens survive group changes.
-  if (telegramUserId && String(telegramUserId) !== String(userId)) {
-    const tgDir = tokensDir(telegramUserId);
-    const legacyDir = tokensDir(userId);
-    const tgHasFiles = fs.existsSync(tgDir) &&
-      fs.readdirSync(tgDir).filter(f => !LOG_FILES.has(f)).length > 0;
+function loadUserTokens(userId, legacyChatId) {
+  // userId is now a username (e.g. "efi"), legacyChatId is the group chatId for one-time migration.
+  // If the username folder is empty but the old chatId folder has tokens, migrate them automatically.
+  if (legacyChatId && String(legacyChatId) !== String(userId)) {
+    const userDir = tokensDir(userId);
+    const legacyDir = tokensDir(legacyChatId);
+    const userHasFiles = fs.existsSync(userDir) &&
+      fs.readdirSync(userDir).filter(f => !LOG_FILES.has(f) && !f.startsWith('.')).length > 0;
 
-    if (!tgHasFiles && fs.existsSync(legacyDir)) {
-      // Migrate all token files from legacy chatId folder to telegramUserId folder
-      fs.mkdirSync(tgDir, { recursive: true });
+    if (!userHasFiles && fs.existsSync(legacyDir)) {
+      fs.mkdirSync(userDir, { recursive: true });
       for (const file of fs.readdirSync(legacyDir)) {
-        if (LOG_FILES.has(file)) continue;
+        if (LOG_FILES.has(file) || file.startsWith('.')) continue;
         try {
           const src = path.join(legacyDir, file);
-          const dst = path.join(tgDir, file);
+          const dst = path.join(userDir, file);
           if (!fs.existsSync(dst)) {
             if (fs.statSync(src).isDirectory()) {
               fs.cpSync(src, dst, { recursive: true });
@@ -61,10 +59,8 @@ function loadUserTokens(userId, telegramUserId) {
           }
         } catch { /* skip files we can't copy */ }
       }
-      console.log(`[user-tokens] migrated tokens from chatId=${userId} → telegramUserId=${telegramUserId}`);
+      console.log(`[user-tokens] migrated tokens from chatId=${legacyChatId} → username=${userId}`);
     }
-
-    return loadUserTokens(telegramUserId);
   }
 
   const dir = tokensDir(userId);

@@ -398,7 +398,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : getQuickAnswer(task, user.telegramUserId || user.id, user.workDir);
+  const quickReply = forceClaude ? null : getQuickAnswer(task, user.username, user.workDir);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
@@ -435,7 +435,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const msgId = thinkMsg?.result?.message_id;
   const thinkingStart = Date.now();
 
-  const userTokens = loadUserTokens(user.id, user.telegramUserId);
+  const userTokens = loadUserTokens(user.username, user.id);
+
+  // Store chatId so nalog expiry notifier (server.js) can find it by username
+  try {
+    const tDir = path.join(os.homedir(), 'agent-tokens', String(user.username));
+    fs.mkdirSync(tDir, { recursive: true });
+    fs.writeFileSync(path.join(tDir, '.chatid'), String(chatId), { mode: 0o600 });
+  } catch { /* non-critical */ }
 
   // Expired nalog token — tell user immediately, don't waste Claude on it
   const needsNalog = /nalog|налог|нпд|lknpd|самозан|чек|фнс/i.test(task);
@@ -473,7 +480,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const fullOutput = { text: '' };
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
-  const mcpConfig = writeMcpConfig(user.workDir, user.id, { userName: user.name, userHandle: user.username });
+  const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username });
 
   // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
@@ -497,7 +504,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     env: {
       ...cleanEnv,
       ...userTokens,
-      AGENT_USER_ID: String(user.id),
+      AGENT_USER_ID: String(user.username),
       ...(user.name     ? { AGENT_USER_NAME: user.name }         : {}),
       ...(user.username ? { AGENT_USER_HANDLE: user.username }   : {}),
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),

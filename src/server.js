@@ -84,6 +84,11 @@ const GDRIVE_SCOPES = [
   'email',
 ].join(' ');
 
+function readChatId(username) {
+  try { return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', String(username), '.chatid'), 'utf8').trim() || null; }
+  catch { return null; }
+}
+
 function scheduleNalogExpiryChecks(secrets) {
   const notified = new Set();
   const AGENT_TOKENS_DIR = path.join(os.homedir(), 'agent-tokens');
@@ -93,8 +98,8 @@ function scheduleNalogExpiryChecks(secrets) {
   function check() {
     if (!fs.existsSync(AGENT_TOKENS_DIR)) return;
     const now = Date.now();
-    for (const userId of fs.readdirSync(AGENT_TOKENS_DIR)) {
-      const nalogFile = path.join(AGENT_TOKENS_DIR, userId, 'nalog');
+    for (const username of fs.readdirSync(AGENT_TOKENS_DIR)) {
+      const nalogFile = path.join(AGENT_TOKENS_DIR, username, 'nalog');
       if (!fs.existsSync(nalogFile)) continue;
       let tokenData;
       try { tokenData = JSON.parse(fs.readFileSync(nalogFile, 'utf8')); } catch { continue; }
@@ -103,11 +108,18 @@ function scheduleNalogExpiryChecks(secrets) {
       if (isNaN(expiresMs)) continue;
       const age = now - expiresMs;
       if (age < 0 || age > NOTIFY_WINDOW_MS) continue;
-      const key = `${userId}-${tokenData.expires}`;
+      const key = `${username}-${tokenData.expires}`;
       if (notified.has(key)) continue;
       notified.add(key);
+
+      // Read the chatId stored by runner.js so we can send Telegram notification
+      const chatIdFile = path.join(AGENT_TOKENS_DIR, username, '.chatid');
+      let chatId;
+      try { chatId = fs.readFileSync(chatIdFile, 'utf8').trim(); } catch { continue; }
+      if (!chatId || !/^-?\d+$/.test(chatId)) continue;
+
       let connectUrl;
-      try { connectUrl = generateConnectLink(userId, 'nalog'); } catch (e) {
+      try { connectUrl = generateConnectLink(username, 'nalog'); } catch (e) {
         console.error('[nalog-expiry] generateConnectLink failed:', e.message); continue;
       }
       const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
@@ -115,11 +127,11 @@ function scheduleNalogExpiryChecks(secrets) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          chat_id: userId,
+          chat_id: chatId,
           text: `⚠️ Токен Налог.ру истёк. Хотите войти заново?\n\n👉 ${connectUrl}\n\nСсылка действительна 30 минут.`,
         }),
       }).catch(e => console.error('[nalog-expiry] tg notify failed:', e.message));
-      console.log('[nalog-expiry] notified userId=%s about expired token', userId);
+      console.log('[nalog-expiry] notified username=%s chatId=%s about expired token', username, chatId);
     }
   }
 
@@ -152,7 +164,10 @@ async function main() {
       if (result.error) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: result.error })); return; }
 
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, expires: result.expires }));
-      if (result.userId) tgNotifyNalog(secrets.BOT_TOKEN, result.userId, result.expires);
+      if (result.userId) {
+        const chatId = readChatId(result.userId);
+        if (chatId) tgNotifyNalog(secrets.BOT_TOKEN, chatId, result.expires);
+      }
       return;
     }
 
@@ -283,16 +298,19 @@ async function main() {
       fs.writeFileSync(path.join(tokensDir, 'gdrive'), JSON.stringify(credData), { mode: 0o600 });
       console.log(`[gdrive/callback] saved tokens for userId=${userId} email=${email}`);
 
-      // Notify user in Telegram
-      const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-      fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: userId,
-          text: `✅ Google Drive подключён!${email ? ` (${email})` : ''}\n\nТеперь расшари нужные папки/файлы с ассистентом — он попросит тебя об этом когда нужно. Управление доступами: /secrets_list`,
-        }),
-      }).catch(e => console.error('[gdrive/callback] tg notify failed:', e.message));
+      // Notify user in Telegram (userId is username; look up chatId from .chatid file)
+      const notifyChatId = readChatId(userId);
+      if (notifyChatId) {
+        const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+        fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: notifyChatId,
+            text: `✅ Google Drive подключён!${email ? ` (${email})` : ''}\n\nТеперь расшари нужные папки/файлы с ассистентом — он попросит тебя об этом когда нужно. Управление доступами: /secrets_list`,
+          }),
+        }).catch(e => console.error('[gdrive/callback] tg notify failed:', e.message));
+      }
 
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveSuccessHtml(email));
       return;
@@ -325,7 +343,7 @@ async function main() {
           try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
           if (pending.service !== 'nalog') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
-          if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
+          if (!/^[a-zA-Z0-9_]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
 
           try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; } // one-time use
 
@@ -339,7 +357,8 @@ async function main() {
 
           if (result.status === 'ok') {
             res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ status: 'ok', expires: result.expires }));
-            tgNotifyNalog(secrets.BOT_TOKEN, pending.uid, result.expires);
+            const nalogChatId = readChatId(pending.uid);
+            if (nalogChatId) tgNotifyNalog(secrets.BOT_TOKEN, nalogChatId, result.expires);
             return;
           }
 
@@ -407,7 +426,7 @@ async function main() {
           try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
           if (pending.service !== 'getcourse') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
-          if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
+          if (!/^[a-zA-Z0-9_]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
 
           try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; } // one-time use
 
@@ -435,7 +454,8 @@ async function main() {
           if (!level.length) level.push('domain-only');
 
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, level }));
-          tgNotifyGetcourse(secrets.BOT_TOKEN, pending.uid, cleanDomain, level, cookiesCount);
+          const gcChatId = readChatId(pending.uid);
+          if (gcChatId) tgNotifyGetcourse(secrets.BOT_TOKEN, gcChatId, cleanDomain, level, cookiesCount);
           return;
         }
 
@@ -487,7 +507,7 @@ async function main() {
           try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
           if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
-          if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
+          if (!/^[a-zA-Z0-9_]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
 
           const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
           fs.mkdirSync(tokensDir, { recursive: true });
@@ -500,15 +520,18 @@ async function main() {
           console.log(`[connect] saved ${service} creds for uid=${pending.uid}`);
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
 
-          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: pending.uid,
-              text: `✅ ${loginCredsMeta.name} сохранён! Ассистент теперь может входить автоматически — данные изолированы от чата.\n\nУправление: /secrets_list`,
-            }),
-          }).catch(e => console.error('[connect] tg notify failed:', e.message));
+          const lcChatId = readChatId(pending.uid);
+          if (lcChatId) {
+            const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: lcChatId,
+                text: `✅ ${loginCredsMeta.name} сохранён! Ассистент теперь может входить автоматически — данные изолированы от чата.\n\nУправление: /secrets_list`,
+              }),
+            }).catch(e => console.error('[connect] tg notify failed:', e.message));
+          }
           return;
         }
 
@@ -557,7 +580,7 @@ async function main() {
         if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
         if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
 
-        if (!/^-?\d{1,20}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
+        if (!/^[a-zA-Z0-9_]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
         const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
         fs.mkdirSync(tokensDir, { recursive: true });
         fs.writeFileSync(path.join(tokensDir, service), String(value).trim(), { mode: 0o600 });
@@ -566,16 +589,19 @@ async function main() {
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
 
         // Notify user in Telegram (fire-and-forget)
-        const SERVICE_NAMES = { github: 'GitHub', weeek: 'Weeek CRM' };
-        const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-        fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: pending.uid,
-            text: `✅ ${SERVICE_NAMES[service] || service} подключён! Данные для входа сохранены в изолированном хранилище — в чат не попадают.\n\nУправление доступами: /secrets_list`,
-          }),
-        }).catch(e => console.error('[connect] tg notify failed:', e.message));
+        const svcChatId = readChatId(pending.uid);
+        if (svcChatId) {
+          const SERVICE_NAMES = { github: 'GitHub', weeek: 'Weeek CRM' };
+          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: svcChatId,
+              text: `✅ ${SERVICE_NAMES[service] || service} подключён! Данные для входа сохранены в изолированном хранилище — в чат не попадают.\n\nУправление доступами: /secrets_list`,
+            }),
+          }).catch(e => console.error('[connect] tg notify failed:', e.message));
+        }
         return;
       }
 
@@ -596,7 +622,7 @@ async function main() {
     // GET /capabilities?userId=XXX — list services with tokens on this machine
     if (req.method === 'GET' && url.pathname === '/capabilities') {
       const userId = url.searchParams.get('userId') || '';
-      if (!userId || !/^-?\d{1,20}$/.test(userId)) return json(res, 400, { error: 'invalid userId' });
+      if (!userId || !/^[a-zA-Z0-9_]{1,64}$/.test(userId)) return json(res, 400, { error: 'invalid userId' });
       const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
       const SKIP = new Set(['.secrets_log', 'gdrive-seen', 'gdrive-catalog', 'gdrive-catalog.json']);
       let capabilities = [];
@@ -719,7 +745,7 @@ async function main() {
 
       const { userId, label, value } = payload;
       if (!userId || !label || !value) return json(res, 400, { error: 'missing fields' });
-      if (!/^-?\d{1,20}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
+      if (!/^[a-zA-Z0-9_]{1,64}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 
