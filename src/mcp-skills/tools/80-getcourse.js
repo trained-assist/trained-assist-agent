@@ -409,20 +409,46 @@ module.exports = {
     },
 
     gc_order_list: {
-      description: 'List orders via Playwright (L2 session). Filter by email and/or date range. Returns order id, status, amount, product, date. Takes ~15s.',
+      description: 'List purchases/orders for a GetCourse user via Playwright (L2 session). Provide user_id (from gc_user_find) or email. Returns deal id, title, number, status, price. Takes ~20s.',
       inputSchema: {
         type: 'object',
         properties: {
-          email:     { type: 'string', description: 'Filter by user email' },
-          date_from: { type: 'string', description: 'Start date YYYY-MM-DD' },
-          date_to:   { type: 'string', description: 'End date YYYY-MM-DD' },
-          count:     { type: 'number', description: 'Max records to return (default 20)' },
+          user_id: { type: 'string', description: 'GetCourse user ID (from gc_user_find)' },
+          email:   { type: 'string', description: 'User email — will search for user_id automatically' },
+          count:   { type: 'number', description: 'Max records to return (default 20)' },
         },
       },
-      handler: async ({ email, date_from, date_to, count = 20 }, ctx) => {
+      handler: async ({ user_id, email, count = 20 }, ctx) => {
         const cfg = readConfig(ctx?.userId);
         const err = requireL2(cfg);
         if (err) return err;
+        if (!user_id && !email) return { error: 'missing_param', message: 'Укажи user_id или email.' };
+
+        let uid = user_id;
+
+        // Resolve email → user_id via admin search
+        if (!uid && email) {
+          let browser2;
+          try {
+            const opened = await openBrowserPage(cfg);
+            browser2 = opened.browser;
+            const p2 = opened.page;
+            await p2.goto(`https://${cfg.accountDomain}/pl/user/user/index?search[email]=${encodeURIComponent(email)}`, { waitUntil: 'networkidle', timeout: 30000 });
+            if (p2.url().includes('/login')) {
+              await browser2.close();
+              return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
+            }
+            uid = await p2.evaluate(() => {
+              const a = document.querySelector('a[href*="/user/control/user/update/id/"]');
+              return a?.href.match(/\/id\/(\d+)/)?.[1] || null;
+            });
+            await browser2.close();
+          } catch (e) {
+            await browser2?.close().catch(() => {});
+            return { error: 'playwright_error', message: `Не удалось найти user_id для ${email}: ${e.message.slice(0, 200)}` };
+          }
+          if (!uid) return { found: false, message: `Пользователь с email ${email} не найден.` };
+        }
 
         let browser;
         try {
@@ -430,53 +456,40 @@ module.exports = {
           browser = opened.browser;
           const page = opened.page;
 
-          // Build search URL with filters
-          const params = new URLSearchParams();
-          if (email)     params.set('search[user_email]', email);
-          if (date_from) params.set('search[created_at_from]', date_from);
-          if (date_to)   params.set('search[created_at_to]', date_to);
-          const searchUrl = `https://${cfg.accountDomain}/pl/user/order/index?${params.toString()}`;
-
-          await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+          // GetCourse 2025+: purchases per user at /sales/control/userProduct/user/userId/{uid}
+          await page.goto(`https://${cfg.accountDomain}/sales/control/userProduct/user/userId/${uid}`, { waitUntil: 'networkidle', timeout: 30000 });
 
           if (page.url().includes('/login')) {
             await browser.close();
             return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
           }
 
-          await page.waitForTimeout(1500);
+          await page.waitForTimeout(4000);
 
           const { orders, hasMore } = await page.evaluate((maxCount) => {
             const results = [];
-            // Order rows: tr with data-id or links to /order/view/id/{id}
-            const rows = document.querySelectorAll('tr[data-id]');
-            rows.forEach(row => {
+            document.querySelectorAll('tr.t-rows').forEach(tr => {
               if (results.length >= maxCount) return;
-              const id = row.dataset.id;
-              const cells = row.querySelectorAll('td');
-              // Extract text from each cell
-              const cellTexts = Array.from(cells).map(td => td.innerText.trim());
-              // Look for order link to get id from href if data-id absent
-              const link = row.querySelector('a[href*="/order/"]');
-              const orderId = id || (link?.href.match(/\/order\/(?:view|edit)\/id\/(\d+)/)?.[1]);
-              if (!orderId) return;
-              results.push({ id: orderId, cells: cellTexts.slice(0, 8) });
-            });
-            // Fallback: look for links with /order/ pattern
-            if (results.length === 0) {
-              document.querySelectorAll('a[href*="/order/view/id/"], a[href*="/order/edit/id/"]').forEach(a => {
-                if (results.length >= maxCount) return;
-                const m = a.href.match(/\/order\/(?:view|edit)\/id\/(\d+)/);
-                if (!m) return;
-                const id = m[1];
-                if (results.find(r => r.id === id)) return;
-                const row = a.closest('tr');
-                const cellTexts = row ? Array.from(row.querySelectorAll('td')).map(td => td.innerText.trim()) : [a.innerText.trim()];
-                results.push({ id, cells: cellTexts.slice(0, 8) });
+              const dealLink = tr.querySelector('a[href*="/sales/control/deal/update/id/"]');
+              if (!dealLink) return;
+              const m = (dealLink.getAttribute('href') || '').match(/\/id\/(\d+)/);
+              if (!m) return;
+              const id = m[1];
+              const titleEl = dealLink.querySelector('div') || dealLink;
+              const title = (titleEl.innerText || titleEl.textContent || '').trim().replace(/\s+/g, ' ');
+              const numberCell = tr.querySelector('.number-cell, [data-title="Номер"]');
+              const statusCell = tr.querySelector('.status-cell, [data-title="Статус"]');
+              const priceCell  = tr.querySelector('.price-cell,  [data-title="Стоимость"]');
+              results.push({
+                id,
+                title: title.slice(0, 120),
+                number: (numberCell?.innerText || '').trim() || undefined,
+                status: (statusCell?.innerText || '').trim() || undefined,
+                price:  (priceCell?.innerText  || '').trim() || undefined,
               });
-            }
+            });
             const nextEl = document.querySelector(
-              'a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a'
+              'a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a, [class*="pagination"] [class*="next"]:not([class*="disabled"])'
             );
             return { orders: results, hasMore: !!nextEl };
           }, count);
@@ -484,11 +497,10 @@ module.exports = {
           await browser.close();
 
           if (!orders.length) {
-            const desc = email ? `для ${email}` : 'по заданным фильтрам';
-            return { found: false, message: `Заказы ${desc} не найдены.` };
+            return { found: false, user_id: uid, message: 'Заказы не найдены — возможно у пользователя нет покупок, или изменилась структура страницы.' };
           }
 
-          const result = { count: orders.length, orders };
+          const result = { user_id: uid, count: orders.length, orders };
           if (hasMore) result.warning = 'has_more: показана только первая страница заказов.';
           return result;
         } catch (e) {
@@ -546,61 +558,45 @@ module.exports = {
           browser = opened.browser;
           const page = opened.page;
 
-          // Navigate to user profile, then find the "Letters/Письма" tab
-          const profileUrl = `https://${cfg.accountDomain}/user/control/user/update/id/${uid}`;
-          await page.goto(profileUrl, { waitUntil: 'networkidle', timeout: 30000 });
+          // GetCourse 2025+: notifications per user at /notifications/control/messages/user/id/{uid}
+          await page.goto(`https://${cfg.accountDomain}/notifications/control/messages/user/id/${uid}`, { waitUntil: 'networkidle', timeout: 30000 });
 
           if (page.url().includes('/login')) {
             await browser.close();
             return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
           }
 
-          // Try to find and click the letters/notifications tab
-          const tabClicked = await page.evaluate(() => {
-            const tabs = Array.from(document.querySelectorAll('a[href], li a, .nav a, .tab a'));
-            const lettersTab = tabs.find(a =>
-              /письм|уведомл|рассылк|letter|mail|notif/i.test(a.textContent || '') ||
-              /letter|mail|notif/i.test(a.href || '')
-            );
-            if (lettersTab) { lettersTab.click(); return true; }
-            return false;
-          });
-
-          if (tabClicked) await page.waitForTimeout(2000);
-
-          // Try direct URL for user mail log
-          if (!tabClicked) {
-            await page.goto(`https://${cfg.accountDomain}/pl/user/mail/index?search[user_id]=${uid}`, { waitUntil: 'networkidle', timeout: 30000 });
-            if (page.url().includes('/login')) {
-              await browser.close();
-              return { error: 'session_expired', message: 'Сессия истекла. Вызови gc_connect чтобы войти заново.' };
-            }
-            await page.waitForTimeout(1000);
-          }
+          await page.waitForTimeout(4000);
 
           const { notifications, hasMore } = await page.evaluate((maxCount) => {
             const results = [];
-            // Try table rows
-            document.querySelectorAll('tr[data-id], tr').forEach(row => {
+            document.querySelectorAll('[data-message-id]').forEach(el => {
               if (results.length >= maxCount) return;
-              const cells = Array.from(row.querySelectorAll('td'));
-              if (cells.length < 2) return;
-              const texts = cells.map(td => td.innerText.trim()).filter(Boolean);
-              if (texts.length < 2) return;
-              const id = row.dataset.id || '';
-              results.push({ id, cells: texts.slice(0, 6) });
+              const id = el.dataset.messageId;
+              if (!id) return;
+              const subjectEl = el.querySelector('.rd-h5');
+              const subject = (subjectEl?.innerText || subjectEl?.textContent || '').trim();
+              if (!subject) return;
+              const viewLink = el.querySelector('a[href*="/messages/view/id/"]');
+              const viewUrl  = viewLink ? viewLink.getAttribute('href') : null;
+              // Date: first element whose text looks like a date/time
+              const dateEl = el.querySelector('[class*="date"], [class*="time"], .message-date, .message-time');
+              const date = dateEl ? (dateEl.innerText || '').trim() : undefined;
+              results.push({ id, subject: subject.slice(0, 200), date: date || undefined, url: viewUrl || undefined });
             });
-            const nextEl = document.querySelector('a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a');
+            const nextEl = document.querySelector(
+              'a[rel="next"], li.next:not(.disabled) a, .pagination .next:not(.disabled) a, [class*="pagination"] [class*="next"]:not([class*="disabled"])'
+            );
             return { notifications: results, hasMore: !!nextEl };
           }, count);
 
           await browser.close();
 
           if (!notifications.length) {
-            return { found: false, user_id: uid, message: 'Письма/уведомления не найдены. Возможно, вкладка называется иначе — проверь профиль ученика вручную.' };
+            return { found: false, user_id: uid, message: 'Уведомления не найдены — возможно пользователю ещё не отправляли письма, или изменилась структура страницы.' };
           }
           const result = { user_id: uid, count: notifications.length, notifications };
-          if (hasMore) result.warning = 'Показана только первая страница.';
+          if (hasMore) result.warning = 'has_more: показана только первая страница.';
           return result;
         } catch (e) {
           await browser?.close().catch(() => {});
