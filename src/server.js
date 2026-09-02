@@ -13,6 +13,7 @@ const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./ge
 const { nalogFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
+const { hhSuccessHtml, hhErrorHtml } = require('./connect-forms/hh');
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 
@@ -145,6 +146,12 @@ async function main() {
   const GDRIVE_CLIENT_ID     = secrets.GOOGLE_OAUTH_CLIENT_ID;
   const GDRIVE_CLIENT_SECRET = secrets.GOOGLE_OAUTH_CLIENT_SECRET;
   const GDRIVE_REDIRECT_URI  = `${(process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '')}/connect/gdrive/callback`;
+
+  const HH_CLIENT_ID     = secrets.HH_CLIENT_ID;
+  const HH_CLIENT_SECRET = secrets.HH_CLIENT_SECRET;
+  const HH_REDIRECT_URI  = process.env.HH_REDIRECT_URI || 'https://recruiter-assistant.ru/hh-callback';
+  // Parse callback path from the registered redirect URI so the route handler matches regardless of domain
+  const HH_CALLBACK_PATH = (() => { try { return new URL(HH_REDIRECT_URI).pathname; } catch { return '/hh-callback'; } })();
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -316,6 +323,156 @@ async function main() {
       return;
     }
 
+    // ── GET /connect/hh/start?t=TOKEN — redirect to hh.ru OAuth2 ─────────────
+    if (req.method === 'GET' && url.pathname === '/connect/hh/start') {
+      const t = url.searchParams.get('t') || '';
+      if (!/^[a-f0-9]{32}$/.test(t)) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный токен.'));
+        return;
+      }
+      if (!HH_CLIENT_ID) {
+        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('HH OAuth не настроен на сервере.'));
+        return;
+      }
+
+      const CONNECT_PENDING_DIR_HH = path.join(os.homedir(), 'connect-pending');
+      const pendingFile = path.join(CONNECT_PENDING_DIR_HH, `${t}.json`);
+      let pending;
+      try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка недействительна или устарела.'));
+        return;
+      }
+      if (pending.expires < Date.now()) {
+        try { fs.unlinkSync(pendingFile); } catch {}
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка устарела. Попроси новую через Telegram.'));
+        return;
+      }
+      if (pending.service !== 'hh') {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный сервис.'));
+        return;
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(pending.uid)) {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный UID.'));
+        return;
+      }
+
+      try { fs.unlinkSync(pendingFile); } catch {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка уже использована.'));
+        return;
+      }
+      const crypto = require('crypto');
+      const hhStateToken = crypto.randomBytes(16).toString('hex');
+      oauthStateStore.set(hhStateToken, { userId: pending.uid, expires: Date.now() + 15 * 60 * 1000 });
+
+      const hhAuthUrl = new URL('https://hh.ru/oauth/authorize');
+      hhAuthUrl.searchParams.set('response_type', 'code');
+      hhAuthUrl.searchParams.set('client_id', HH_CLIENT_ID);
+      hhAuthUrl.searchParams.set('redirect_uri', HH_REDIRECT_URI);
+      hhAuthUrl.searchParams.set('state', hhStateToken);
+
+      res.writeHead(302, { 'Location': hhAuthUrl.toString() }).end();
+      return;
+    }
+
+    // ── GET /hh-callback?code=...&state=... (path derived from HH_REDIRECT_URI) ──
+    if (req.method === 'GET' && url.pathname === HH_CALLBACK_PATH) {
+      const code  = url.searchParams.get('code')  || '';
+      const state = url.searchParams.get('state') || '';
+      const error = url.searchParams.get('error') || '';
+
+      if (error) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml(`Ошибка авторизации: ${error}`));
+        return;
+      }
+      if (!code || !state) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный callback.'));
+        return;
+      }
+
+      const hhStateData = oauthStateStore.get(state);
+      if (!hhStateData || hhStateData.expires < Date.now()) {
+        oauthStateStore.delete(state);
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Сессия авторизации устарела. Начни заново через Telegram.'));
+        return;
+      }
+      oauthStateStore.delete(state);
+      const hhUserId = hhStateData.userId; // username (profile name)
+
+      // Exchange code for tokens
+      let hhTokenData;
+      try {
+        const tokenRes = await fetch('https://hh.ru/oauth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            client_id: HH_CLIENT_ID,
+            client_secret: HH_CLIENT_SECRET,
+            code,
+            redirect_uri: HH_REDIRECT_URI,
+          }).toString(),
+          signal: AbortSignal.timeout(10000),
+        });
+        hhTokenData = await tokenRes.json();
+        if (!hhTokenData.access_token) {
+          throw new Error(hhTokenData.error_description || hhTokenData.error || 'no access_token');
+        }
+      } catch (e) {
+        console.error('[hh/callback] token exchange failed:', e.message);
+        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml(`Ошибка получения токена: ${e.message}`));
+        return;
+      }
+
+      // Get user info from HH
+      let hhDisplayName = '';
+      let hhEmployerId = null;
+      try {
+        const meRes = await fetch('https://api.hh.ru/me', {
+          headers: {
+            Authorization: `Bearer ${hhTokenData.access_token}`,
+            'User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+            'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+          },
+          signal: AbortSignal.timeout(5000),
+        });
+        const me = await meRes.json();
+        hhDisplayName = [me.last_name, me.first_name].filter(Boolean).join(' ');
+        hhEmployerId = (me.employer && me.employer.id) || null;
+      } catch { /* non-critical */ }
+
+      // Save token to ~/agent-tokens/{username}/hh
+      const hhTokensDir = path.join(os.homedir(), 'agent-tokens', hhUserId);
+      fs.mkdirSync(hhTokensDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hhTokensDir, 'hh'),
+        JSON.stringify({
+          access_token:  hhTokenData.access_token,
+          refresh_token: hhTokenData.refresh_token || null,
+          employer_id:   hhEmployerId,
+          saved_at:      new Date().toISOString(),
+        }),
+        { mode: 0o600 },
+      );
+      console.log(`[hh/callback] saved token for userId=${hhUserId} name=${hhDisplayName} employer_id=${hhEmployerId}`);
+
+      // Notify user in Telegram
+      const hhChatId = readChatId(hhUserId);
+      if (hhChatId) {
+        const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+        fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: hhChatId,
+            text: `✅ HeadHunter подключён!${hhDisplayName ? ` (${hhDisplayName})` : ''}\n\nМожешь начинать работу с вакансиями и откликами.`,
+          }),
+        }).catch(e => console.error('[hh/callback] tg notify failed:', e.message));
+      }
+
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhSuccessHtml(hhDisplayName));
+      return;
+    }
+
     // ── /connect/:service — token collection form (no AGENT_SECRET needed) ──
     const connectMatch = url.pathname.match(/^\/connect\/([a-z0-9_-]+)$/);
     if (connectMatch) {
@@ -371,6 +528,16 @@ async function main() {
           return;
         }
 
+        res.writeHead(405).end(); return;
+      }
+
+      // ── hh — redirect to OAuth2 start ───────────────────────────────────────
+      if (service === 'hh') {
+        if (req.method === 'GET') {
+          const t = url.searchParams.get('t') || '';
+          res.writeHead(302, { Location: `/connect/hh/start?t=${encodeURIComponent(t)}` }).end();
+          return;
+        }
         res.writeHead(405).end(); return;
       }
 
