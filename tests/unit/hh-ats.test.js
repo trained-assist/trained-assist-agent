@@ -1,0 +1,305 @@
+// Unit tests for the 90-hh.js skill — all external calls are intercepted.
+// HH API calls → real HTTP to mock-hh-server (127.0.0.1)
+// OpenRouter calls → nock interception (https://openrouter.ai)
+
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { createRequire } from 'module';
+import nock from 'nock';
+import { createMockHhServer } from '../helpers/mock-hh-server.js';
+
+const require = createRequire(import.meta.url);
+
+const TEST_UID = 'hh-ats-test-0001';
+let tokensDir, mockHh;
+
+// Reload module fresh each call so env vars (USER_ID, HH_API_BASE_URL) are picked up.
+function tools() {
+  const key = require.resolve('../../src/mcp-skills/tools/90-hh.js');
+  delete require.cache[key];
+  return require('../../src/mcp-skills/tools/90-hh.js').tools;
+}
+
+// ATS config for all evaluation tests
+const ATS = {
+  vacancy_title: 'Backend Developer (Node.js)',
+  vacancy_context: 'Продуктовый стартап, высокая нагрузка',
+  knockout: ['нет опыта программирования'],
+  required: [
+    { name: 'Node.js', weight: 3.0 },
+    { name: 'PostgreSQL', weight: 2.0 },
+  ],
+  preferred: [
+    { name: 'Docker', weight: 1.0 },
+  ],
+  filters: { min_experience_years: 2 },
+  pass_threshold: 6.5,
+  review_threshold: 4.0,
+};
+
+// Nock helper — intercept one OpenRouter chat completion call
+function mockOr(content) {
+  return nock('https://openrouter.ai')
+    .post('/api/v1/chat/completions')
+    .reply(200, { choices: [{ message: { content } }] });
+}
+
+// ── Setup / Teardown ────────────────────────────────────────────────────────
+
+beforeAll(async () => {
+  // Temp tokens dir
+  tokensDir = mkdtempSync(join(tmpdir(), 'hh-ats-tokens-'));
+  const tokenDir = join(tokensDir, TEST_UID);
+  mkdirSync(tokenDir, { recursive: true });
+  writeFileSync(
+    join(tokenDir, 'hh'),
+    JSON.stringify({
+      access_token: 'test-hh-access-token',
+      refresh_token: null,
+      employer_id: 'emp-001',
+    }),
+    { mode: 0o600 },
+  );
+
+  // Start mock HH server
+  mockHh = createMockHhServer();
+  await mockHh.start();
+
+  // Set env vars before first module load
+  process.env.USER_ID           = TEST_UID;
+  process.env.AGENT_TOKENS_DIR  = tokensDir;
+  process.env.HH_API_BASE_URL   = mockHh.baseUrl;
+  process.env.OPENROUTER_API_KEY = 'test-or-key';
+
+  // Block all real network except 127.0.0.1 (mock HH server)
+  nock.disableNetConnect();
+  nock.enableNetConnect('127.0.0.1');
+});
+
+afterAll(async () => {
+  delete process.env.USER_ID;
+  delete process.env.AGENT_TOKENS_DIR;
+  delete process.env.HH_API_BASE_URL;
+  delete process.env.OPENROUTER_API_KEY;
+
+  nock.enableNetConnect();
+  nock.cleanAll();
+
+  await mockHh.stop();
+  try { rmSync(tokensDir, { recursive: true, force: true }); } catch {}
+});
+
+beforeEach(() => {
+  nock.cleanAll();
+  mockHh.reset();
+});
+
+// ── hh_status ───────────────────────────────────────────────────────────────
+
+describe('hh_status', () => {
+  it('no token → connected: false', async () => {
+    process.env.USER_ID = 'no-token-uid';
+    const r = await tools().hh_status.handler({});
+    process.env.USER_ID = TEST_UID;
+    expect(r.connected).toBe(false);
+  });
+
+  it('valid token → calls /me, returns connected info', async () => {
+    const r = await tools().hh_status.handler({});
+    expect(r.connected).toBe(true);
+    expect(r.email).toBe('recruiter@test.example');
+    expect(r.employer_id).toBe('emp-001');
+    expect(r.token_prefix).toMatch(/^test-hh/);
+  });
+});
+
+// ── hh_list_vacancies ────────────────────────────────────────────────────────
+
+describe('hh_list_vacancies', () => {
+  it('returns vacancies for the employer', async () => {
+    const r = await tools().hh_list_vacancies.handler({ status: 'active' });
+    expect(r.total).toBe(2);
+    expect(r.vacancies[0].id).toBe('vac-001');
+    expect(r.vacancies[0].name).toBe('Backend Developer (Node.js)');
+  });
+});
+
+// ── hh_list_responses ────────────────────────────────────────────────────────
+
+describe('hh_list_responses', () => {
+  it('returns new responses for a vacancy', async () => {
+    const r = await tools().hh_list_responses.handler({ vacancy_id: 'vac-001', state: 'response' });
+    expect(r.total).toBe(3);
+    expect(r.items.map(i => i.id)).toEqual(['neg-001', 'neg-002', 'neg-003']);
+  });
+
+  it('returns empty when state has no candidates', async () => {
+    const r = await tools().hh_list_responses.handler({ vacancy_id: 'vac-001', state: 'interview' });
+    expect(r.total).toBe(0);
+    expect(r.items).toEqual([]);
+  });
+});
+
+// ── hh_evaluate_candidate ────────────────────────────────────────────────────
+
+describe('hh_evaluate_candidate', () => {
+  it('strong candidate (neg-001) → ПРОПУСТИТЬ, score ≥ 6.5', async () => {
+    // Node.js=3, PostgreSQL=2, Docker=2 → raw=9+4+2=15, max=9+6+3=18 → 8.3
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true, location_ok: true, salary_ok: true },
+      criteria: [
+        { name: 'Node.js',    score: 3, evidence: '5 лет Node.js в Яндексе' },
+        { name: 'PostgreSQL', score: 2, evidence: 'PostgreSQL в опыте работы' },
+        { name: 'Docker',     score: 2, evidence: 'Docker в стеке' },
+      ],
+      reasoning: 'Отличный кандидат с релевантным стеком и сильным опытом.',
+    }));
+
+    const r = await tools().hh_evaluate_candidate.handler({ negotiation_id: 'neg-001', ats_config: ATS });
+
+    expect(r.verdict).toBe('ПРОПУСТИТЬ');
+    expect(r.score).toBeGreaterThanOrEqual(6.5);
+    expect(r.name).toContain('Иванов');
+    expect(r.matched.length).toBeGreaterThan(0);
+  });
+
+  it('borderline candidate (neg-003) → УТОЧНИТЬ', async () => {
+    // Node.js=1, PostgreSQL=2, Docker=2 → raw=3+4+2=9, max=18 → 5.0
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true, location_ok: true, salary_ok: true },
+      criteria: [
+        { name: 'Node.js',    score: 1, evidence: 'Go а не Node.js' },
+        { name: 'PostgreSQL', score: 2, evidence: 'PostgreSQL в опыте' },
+        { name: 'Docker',     score: 2, evidence: 'Docker/Kubernetes' },
+      ],
+      reasoning: 'Хороший бэкенд, но стек частично не совпадает.',
+    }));
+
+    const r = await tools().hh_evaluate_candidate.handler({ negotiation_id: 'neg-003', ats_config: ATS });
+
+    expect(r.verdict).toBe('УТОЧНИТЬ');
+    expect(r.score).toBeGreaterThanOrEqual(4.0);
+    expect(r.score).toBeLessThan(6.5);
+  });
+
+  it('weak candidate — filter fails (neg-002) → ОТКЛОНИТЬ, score 0', async () => {
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: false, location_ok: true, salary_ok: true },
+      criteria: [
+        { name: 'Node.js',    score: 0, evidence: '' },
+        { name: 'PostgreSQL', score: 0, evidence: '' },
+        { name: 'Docker',     score: 0, evidence: '' },
+      ],
+      reasoning: 'Нет нужного опыта, не проходит по фильтру лет.',
+    }));
+
+    const r = await tools().hh_evaluate_candidate.handler({ negotiation_id: 'neg-002', ats_config: ATS });
+
+    expect(r.verdict).toBe('ОТКЛОНИТЬ');
+    expect(r.score).toBe(0);
+  });
+
+  it('knockout candidate → ОТКЛОНИТЬ, score 0, knockout_failed populated', async () => {
+    mockOr(JSON.stringify({
+      knockout_failed: ['нет опыта программирования'],
+      filters_ok: { experience_years_ok: true, location_ok: true, salary_ok: true },
+      criteria: [],
+      reasoning: 'Нокаут-критерий сработал.',
+    }));
+
+    const r = await tools().hh_evaluate_candidate.handler({ negotiation_id: 'neg-002', ats_config: ATS });
+
+    expect(r.verdict).toBe('ОТКЛОНИТЬ');
+    expect(r.score).toBe(0);
+    expect(r.knockout_failed).toContain('нет опыта программирования');
+  });
+});
+
+// ── hh_generate_message ──────────────────────────────────────────────────────
+
+describe('hh_generate_message', () => {
+  it('returns a draft message for a candidate', async () => {
+    mockOr('Добрый день, Алексей! Нашли ваше резюме очень интересным. Расскажите подробнее о вашем опыте с Node.js в Яндексе.');
+
+    const r = await tools().hh_generate_message.handler({
+      negotiation_id: 'neg-001',
+      vacancy_context: 'Senior Node.js Backend, нагруженная система',
+    });
+
+    expect(r.negotiation_id).toBe('neg-001');
+    expect(typeof r.message).toBe('string');
+    expect(r.message.length).toBeGreaterThan(10);
+    expect(r.note).toMatch(/hh_send_message/);
+  });
+});
+
+// ── hh_send_message ──────────────────────────────────────────────────────────
+
+describe('hh_send_message', () => {
+  it('posts message and returns ok', async () => {
+    const msg = 'Добрый день, Алексей! Рассмотрели ваше резюме и хотим пообщаться.';
+    const r = await tools().hh_send_message.handler({ negotiation_id: 'neg-001', message: msg });
+
+    expect(r.ok).toBe(true);
+    expect(r.negotiation_id).toBe('neg-001');
+    // Verify the mock server received the message
+    expect(mockHh.state.messages['neg-001']).toContain(msg);
+  });
+
+  it('multiple messages accumulate in mock state', async () => {
+    await tools().hh_send_message.handler({ negotiation_id: 'neg-001', message: 'Первое сообщение' });
+    await tools().hh_send_message.handler({ negotiation_id: 'neg-001', message: 'Второе сообщение' });
+
+    expect(mockHh.state.messages['neg-001']).toHaveLength(2);
+  });
+});
+
+// ── hh_move_candidate ────────────────────────────────────────────────────────
+
+describe('hh_move_candidate', () => {
+  it('moves candidate to phone_interview', async () => {
+    const r = await tools().hh_move_candidate.handler({ negotiation_id: 'neg-001', action: 'phone_interview' });
+
+    expect(r.ok).toBe(true);
+    expect(r.new_state).toBe('phone_interview');
+    expect(mockHh.state.moves['neg-001']).toBe('phone_interview');
+  });
+});
+
+// ── hh_bulk_reject ───────────────────────────────────────────────────────────
+
+describe('hh_bulk_reject', () => {
+  it('dry_run → reports candidates without mutating state', async () => {
+    const r = await tools().hh_bulk_reject.handler({ vacancy_ids: ['vac-001'], dry_run: true });
+
+    expect(r.dry_run).toBe(true);
+    expect(r.summary).toMatch(/\[DRY RUN\]/);
+    // All 3 candidates in 'response' state should be counted
+    const vac = r.vacancies[0];
+    expect(vac.total).toBeGreaterThanOrEqual(3);
+    expect(vac.rejected).toBe(vac.total);
+    // Nothing actually discarded
+    expect(mockHh.state.discarded.size).toBe(0);
+  });
+
+  it('real run → discards candidates in mock', async () => {
+    const r = await tools().hh_bulk_reject.handler({ vacancy_ids: ['vac-001'], dry_run: false });
+
+    expect(r.dry_run).toBe(false);
+    expect(mockHh.state.discarded.size).toBeGreaterThanOrEqual(3);
+    expect(mockHh.state.discarded.has('neg-001')).toBe(true);
+    expect(mockHh.state.discarded.has('neg-002')).toBe(true);
+    expect(mockHh.state.discarded.has('neg-003')).toBe(true);
+  });
+
+  it('after bulk reject — list returns 0 candidates', async () => {
+    await tools().hh_bulk_reject.handler({ vacancy_ids: ['vac-001'], dry_run: false });
+    const r = await tools().hh_list_responses.handler({ vacancy_id: 'vac-001', state: 'response' });
+    expect(r.total).toBe(0);
+  });
+});
