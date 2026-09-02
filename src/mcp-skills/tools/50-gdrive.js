@@ -9,7 +9,7 @@
 //   3. gdrive_list_files / gdrive_read_file / etc. work from that point
 //
 // Note: SA is created in a separate GCP project (trained-assist-gdrive-sa) that has
-// no org policies blocking key creation, unlike the main project (alesa-personal-assistent).
+// no org policies blocking key creation, unlike the main GCP project.
 
 const crypto = require('crypto');
 const fs     = require('fs');

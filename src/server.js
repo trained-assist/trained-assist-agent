@@ -701,7 +701,7 @@ async function main() {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude) return json(res, 400, { error: 'missing fields' });
@@ -732,7 +732,7 @@ async function main() {
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: task || '', context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, secrets }).catch(err =>
+      runTask({ taskId, user, task: task || '', context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
