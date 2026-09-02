@@ -211,6 +211,7 @@ function createMockHhServer(options = {}) {
     const negMsg = p.match(/^\/negotiations\/([^/]+)\/messages$/);
     if (req.method === 'POST' && negMsg) {
       const negId = negMsg[1];
+      if (!negotiations.find(n => n.id === negId)) return send(404, { error: 'Negotiation not found' });
       return readBody(({ message }) => {
         if (!state.messages[negId]) state.messages[negId] = [];
         state.messages[negId].push(message);
