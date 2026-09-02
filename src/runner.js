@@ -353,26 +353,25 @@ function runTask(opts) {
   return current;
 }
 
+// Returns context card string, or null if no skills configured (no pin needed).
 function buildContextCard(username, workDir) {
-  const lines = ['📌 Контекст'];
+  const services = username ? listConnectedServices(username) : [];
+  if (!services || !services.length) return null;
 
-  // Connected integrations
-  const services = username ? listConnectedServices(username) : null;
-  if (services && services.length) {
-    lines.push('');
-    lines.push('🔗 ' + services.map(s => s.name).join(' · '));
-  }
-
-  // GetCourse account domain (public — not secret)
+  // Build service labels, merging inline details where available
   const gcConfig = path.join(os.homedir(), 'agent-tokens', String(username), 'getcourse', 'config.json');
+  let gcDomain = null;
   if (fs.existsSync(gcConfig)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(gcConfig, 'utf8'));
-      if (cfg.accountDomain) lines.push(`🌐 ${cfg.accountDomain}`);
-    } catch {}
+    try { gcDomain = JSON.parse(fs.readFileSync(gcConfig, 'utf8')).accountDomain || null; } catch {}
   }
 
-  // Important context values from context-store
+  const serviceLabels = services.map(s => {
+    if (s.file === 'getcourse' && gcDomain) return `getcourse: ${gcDomain}`;
+    return s.name;
+  });
+
+  const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
+
   const PINNED_CONTEXTS = [
     { skill: 'hh', key: 'active_vacancy', label: '💼' },
     { skill: 'gdrive', key: 'pinned_folder', label: '📁' },
@@ -395,6 +394,40 @@ function buildContextCard(username, workDir) {
   lines.push(`⏱ ${time} МСК`);
 
   return lines.join('\n');
+}
+
+// Creates or silently updates the context pin after task completion.
+// State (msgId of the pinned card) is stored in workDir/.pin_state.json.
+async function updateContextPin(token, chatId, workDir, card) {
+  const pinFile = path.join(workDir, '.pin_state.json');
+  let state = null;
+  try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch {}
+
+  if (state?.msgId) {
+    const edited = await tgEdit(token, chatId, state.msgId, card).catch(() => null);
+    if (edited?.ok) {
+      fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId }));
+      return;
+    }
+    // Edit failed (message deleted?) — fall through to create new
+  }
+
+  // No existing pin — send new card message and pin it
+  const msg = await tgSend(token, chatId, card);
+  const newId = msg?.result?.message_id;
+  if (!newId) return;
+
+  const res = await fetch(`${TG_API}/bot${token}/pinChatMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: newId, disable_notification: false }),
+  });
+  const pinData = await res.json();
+  if (!pinData.ok) {
+    console.error(`[pin] failed chat=${chatId}:`, JSON.stringify(pinData));
+  } else {
+    fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId }));
+  }
 }
 
 async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets }) {
@@ -726,18 +759,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
   const final = result.slice(-MAX_MSG_LEN);
 
-  if (pinnedMsgId) {
-    // Pin is the progress indicator — send result as a new message, then silently update pin with context card
-    await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`);
-    const card = buildContextCard(user.username, user.workDir);
-    tgEdit(BOT_TOKEN, chatId, pinnedMsgId, card).catch(() => {});
-  } else if (msgId) {
+  // Send result
+  if (msgId) {
     await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`).catch(() =>
       tgSend(BOT_TOKEN, chatId, `🧠 ${final}`)
     );
   } else {
     await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`);
   }
+
+  // Update context pin after task (only if skills are configured)
+  const card = buildContextCard(user.username, user.workDir);
+  if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card).catch(() => {});
 
   // Append assistant reply to session history
   if (activeSessionId) {

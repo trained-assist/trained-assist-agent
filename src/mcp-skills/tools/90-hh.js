@@ -3,18 +3,23 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const http = require('http');
 const https = require('https');
 
 const USER_ID = process.env.USER_ID || '';
 
 // ── Token storage ──────────────────────────────────────────────────────────
 
+function tokenBase() {
+  return process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+}
+
 function hhTokenPath(userId) {
-  return path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'hh');
+  return path.join(tokenBase(), String(userId || USER_ID), 'hh');
 }
 
 function orKeyPath(userId) {
-  return path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'openrouter');
+  return path.join(tokenBase(), String(userId || USER_ID), 'openrouter');
 }
 
 function readHhToken(userId) {
@@ -36,9 +41,12 @@ function readOrKey(userId) {
 
 function hhRequest(method, apiPath, accessToken, body) {
   return new Promise((resolve, reject) => {
+    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
+    const u = new URL(base);
+    const lib = u.protocol === 'https:' ? https : http;
     const bodyStr = body ? JSON.stringify(body) : undefined;
-    const req = https.request({
-      hostname: 'api.hh.ru',
+    const options = {
+      hostname: u.hostname,
       path: apiPath,
       method,
       headers: {
@@ -49,7 +57,9 @@ function hhRequest(method, apiPath, accessToken, body) {
           ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) }
           : {}),
       },
-    }, (res) => {
+    };
+    if (u.port) options.port = parseInt(u.port, 10);
+    const req = lib.request(options, (res) => {
       let data = '';
       res.on('data', c => (data += c));
       res.on('end', () => {
