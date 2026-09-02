@@ -21,6 +21,7 @@ const SERVICE_DISPLAY = {
   'tilda-creds':   'Tilda (логин)',
   dadata:          'DaData',
   gdrive:          'Google Drive',
+  hh:              'HeadHunter',
 };
 
 function tokensDir(userId) {

@@ -82,6 +82,11 @@ const QUICK_SETUPS = [
     service: 'getcourse',
     hint: 'Введи домен + API ключ (L1: ученики/заказы) и/или логин+пароль (L2: курсы/уроки).',
   },
+  {
+    match: /head.?hunter|hh\.ru|хантер|подключ.*hh|hh.*подключ|рекрут.*hh|hh.*рекрут/i,
+    service: 'hh',
+    hint: 'Войдёшь через hh.ru как работодатель — страница защищена, токен не проходит через чат.',
+  },
 ];
 
 function getQuickAnswer(task, userId, workDir) {
