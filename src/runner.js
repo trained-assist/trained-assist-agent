@@ -18,7 +18,7 @@ const {
 const { initLog, readLog } = require('./requirements-log');
 
 const STREAM_INTERVAL_MS = 3000;
-const HEARTBEAT_INTERVAL_MS = 12000;
+const HEARTBEAT_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min hard limit — batch INN enrichment takes 10-15 min for 300 companies
 
@@ -553,9 +553,21 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     streamTimer = setInterval(async () => {
       const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
-      if (snippet === lastSent || !snippet) return;
-      lastSent = snippet;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${snippet}`).catch(() => {});
+      const secs = Math.round((Date.now() - thinkingStart) / 1000);
+      if (snippet) {
+        // Content available — update on change or every ~10s to show we're alive
+        const newText = `⏳ ${snippet}`;
+        if (newText === lastSent && secs % 10 !== 0) return;
+        lastSent = newText;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
+      } else {
+        // No text yet (e.g. Claude running tools) — show activity + elapsed
+        const label = lastActivity || 'Думаю…';
+        const newText = `⏳ ${label} (${secs}с)`;
+        if (newText === lastSent) return;
+        lastSent = newText;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
+      }
     }, STREAM_INTERVAL_MS);
   }
 
