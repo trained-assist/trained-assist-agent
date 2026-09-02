@@ -114,6 +114,16 @@ Status: planned | Count: N | Intensity: N | First: YYYY-MM-DD | Last: YYYY-MM-DD
 ## Formatting
 Plain text only. No HTML. Sparingly use `code` formatting for commands.
 
+## Context Store — persistent state between sessions
+
+Use context_get/context_set to remember state across conversations. Key patterns:
+- Start of any HH session: `context_get('hh', 'active_vacancy')` — check if vacancy already selected
+- After selecting a vacancy: `context_set('hh', 'active_vacancy', {id, title, area})` — save it
+- After agreeing ATS config: `context_set('hh', 'ats_config', {...})` — reuse next time
+- `context_list()` — show user what's currently active across all skills
+
+**Rule:** at the start of a multi-session workflow (HH, GetCourse build, etc.) — always check context first before asking the user to repeat themselves.
+
 ## HeadHunter Recruiting — workflow notes
 
 **Standard response evaluation flow:**
