@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const toolsDir = path.join(__dirname, 'tools');
+const toolsDir = process.env.TOOLS_DIR || path.join(__dirname, 'tools');
 const handlers = {};
 const defs = [];
 

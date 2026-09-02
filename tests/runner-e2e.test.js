@@ -83,7 +83,6 @@ echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output
 // Loaded once — we patch env vars before loading
 let runTask;
 let sessionStore;
-let origPath;
 let origTgUrl;
 
 beforeAll(async () => {
@@ -91,10 +90,9 @@ beforeAll(async () => {
   buildFakeClaudeBinary();
 
   // Patch env BEFORE loading runner.js (runner reads TG_API at module level)
-  origPath = process.env.PATH;
   origTgUrl = process.env.TELEGRAM_API_URL;
-  process.env.PATH = fakeBinDir + ':' + (origPath || '');
   process.env.TELEGRAM_API_URL = `http://127.0.0.1:${tgPort}`;
+  process.env.CLAUDE_BIN = join(fakeBinDir, 'claude'); // explicit path, no PATH manipulation
 
   const mod = require('../src/runner.js');
   runTask = mod.runTask;
@@ -102,8 +100,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  process.env.PATH = origPath;
   process.env.TELEGRAM_API_URL = origTgUrl;
+  delete process.env.CLAUDE_BIN;
   await stopTgServer();
   rmSync(fakeBinDir, { recursive: true, force: true });
 });
