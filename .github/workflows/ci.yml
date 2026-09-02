@@ -21,6 +21,7 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  # On PRs: squash-merge to main after CI passes
   merge:
     needs: ci
     if: github.event_name == 'pull_request'
@@ -37,8 +38,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # On pushes to main (including after squash-merge): deploy to both VMs
   deploy-gcp:
-    needs: merge
+    needs: ci
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to GCP VM
@@ -60,7 +63,8 @@ jobs:
             bash scripts/deploy.sh
 
   deploy-ru:
-    needs: merge
+    needs: ci
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to RU VM
