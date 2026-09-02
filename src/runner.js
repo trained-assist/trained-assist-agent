@@ -358,16 +358,19 @@ function buildContextCard(username, workDir) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
 
-  const lines = ['📌 Контекст', ''];
-  lines.push('🔗 ' + services.map(s => s.name).join(' · '));
-
+  // Build service labels, merging inline details where available
   const gcConfig = path.join(os.homedir(), 'agent-tokens', String(username), 'getcourse', 'config.json');
+  let gcDomain = null;
   if (fs.existsSync(gcConfig)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(gcConfig, 'utf8'));
-      if (cfg.accountDomain) lines.push(`🌐 ${cfg.accountDomain}`);
-    } catch {}
+    try { gcDomain = JSON.parse(fs.readFileSync(gcConfig, 'utf8')).accountDomain || null; } catch {}
   }
+
+  const serviceLabels = services.map(s => {
+    if (s.file === 'getcourse' && gcDomain) return `getcourse: ${gcDomain}`;
+    return s.name;
+  });
+
+  const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
   const PINNED_CONTEXTS = [
     { skill: 'hh', key: 'active_vacancy', label: '💼' },
