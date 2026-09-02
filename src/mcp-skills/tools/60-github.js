@@ -55,6 +55,13 @@ async function ghFetch(path, opts = {}) {
 }
 
 module.exports = {
+  isReady: () => {
+    if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) return true;
+    if (!USER_ID) return false;
+    return fs.existsSync(path.join(os.homedir(), 'agent-tokens', USER_ID, 'github'));
+  },
+  setupTools: ['github_status'],
+
   tools: {
 
     github_status: {

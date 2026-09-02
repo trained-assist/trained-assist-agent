@@ -201,6 +201,9 @@ function generateConnectLink(userId) {
 // ── Tools ─────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: () => USER_ID ? fs.existsSync(configPath(USER_ID)) : false,
+  setupTools: ['gc_status', 'gc_connect'],
+
   tools: {
 
     gc_status: {

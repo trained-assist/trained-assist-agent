@@ -169,6 +169,12 @@ async function withAuth(userId, fn) {
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: () => {
+    const cookies = readSessionCookies(USER_ID);
+    return cookieStringHasAuth(cookies);
+  },
+  setupTools: ['tilda_set_config', 'tilda_status'],
+
   tools: {
 
     tilda_list_all_projects: {
