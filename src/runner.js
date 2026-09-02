@@ -353,7 +353,51 @@ function runTask(opts) {
   return current;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, secrets }) {
+function buildContextCard(username, workDir) {
+  const lines = ['📌 Контекст'];
+
+  // Connected integrations
+  const services = username ? listConnectedServices(username) : null;
+  if (services && services.length) {
+    lines.push('');
+    lines.push('🔗 ' + services.map(s => s.name).join(' · '));
+  }
+
+  // GetCourse account domain (public — not secret)
+  const gcConfig = path.join(os.homedir(), 'agent-tokens', String(username), 'getcourse', 'config.json');
+  if (fs.existsSync(gcConfig)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(gcConfig, 'utf8'));
+      if (cfg.accountDomain) lines.push(`🌐 ${cfg.accountDomain}`);
+    } catch {}
+  }
+
+  // Important context values from context-store
+  const PINNED_CONTEXTS = [
+    { skill: 'hh', key: 'active_vacancy', label: '💼' },
+    { skill: 'gdrive', key: 'pinned_folder', label: '📁' },
+  ];
+  for (const { skill, key, label } of PINNED_CONTEXTS) {
+    const file = path.join(workDir, 'contexts', skill, `${key}.json`);
+    if (fs.existsSync(file)) {
+      try {
+        const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (d.value) {
+          const v = typeof d.value === 'string' ? d.value : JSON.stringify(d.value);
+          lines.push(`${label} ${v.slice(0, 80)}`);
+        }
+      } catch {}
+    }
+  }
+
+  const time = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+  lines.push('');
+  lines.push(`⏱ ${time} МСК`);
+
+  return lines.join('\n');
+}
+
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
@@ -434,9 +478,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
   }
 
-  // Send "thinking" message, get message_id for streaming edits
-  const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
-  const msgId = thinkMsg?.result?.message_id;
+  // Use bot's pinned placeholder if provided; otherwise send our own
+  let msgId = initialMsgId || null;
+  if (!msgId) {
+    const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
+    msgId = thinkMsg?.result?.message_id;
+  }
   const thinkingStart = Date.now();
 
   const userTokens = loadUserTokens(user.username, user.id);
@@ -679,7 +726,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
   const final = result.slice(-MAX_MSG_LEN);
 
-  if (msgId) {
+  if (pinnedMsgId) {
+    // Pin is the progress indicator — send result as a new message, then silently update pin with context card
+    await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`);
+    const card = buildContextCard(user.username, user.workDir);
+    tgEdit(BOT_TOKEN, chatId, pinnedMsgId, card).catch(() => {});
+  } else if (msgId) {
     await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`).catch(() =>
       tgSend(BOT_TOKEN, chatId, `🧠 ${final}`)
     );
