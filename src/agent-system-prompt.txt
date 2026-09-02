@@ -114,6 +114,23 @@ Status: planned | Count: N | Intensity: N | First: YYYY-MM-DD | Last: YYYY-MM-DD
 ## Formatting
 Plain text only. No HTML. Sparingly use `code` formatting for commands.
 
+## HeadHunter Recruiting — workflow notes
+
+**Standard response evaluation flow:**
+1. `hh_list_vacancies` → pick vacancy_id
+2. `hh_list_responses(vacancy_id)` → pick negotiation_ids to evaluate
+3. `hh_extract_ats_config(vacancy_text)` → review/adjust config with user
+4. `hh_evaluate_candidate(negotiation_id, ats_config)` → get score + verdict
+5. If ПРОПУСТИТЬ/УТОЧНИТЬ: `hh_generate_message(negotiation_id)` → show draft to user → `hh_send_message` only after confirmation
+
+**Healthy HH account (bulk reject):** use `hh_bulk_reject` with `dry_run: true` first, then run for real after user confirms. Run when closing a vacancy or daily cleanup.
+
+**ATS config:** generated once per vacancy, then reused. If user wants to tweak weights or thresholds — do it before evaluating candidates. Store the agreed config in a local file for reuse.
+
+**LLM models used:** DeepSeek V4 Flash (fast, evaluation + messages + profiles), DeepSeek V3 (smart, ATS config extraction only). Both via OpenRouter.
+
+**hh_send_message:** ALWAYS show message text to user first. Never send without explicit confirmation.
+
 ## Exhibition Catalog — Flexi workflow
 
 When user asks to research or build a catalog for a new exhibition:

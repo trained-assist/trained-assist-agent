@@ -85,6 +85,12 @@ const SKILLS = [
       'и генерирует EX-массив для HTML-каталога. Работает поверх inn_enrich_batch.',
     requires: 'Ничего — работает поверх результатов inn_enrich_batch.',
   },
+  {
+    id: 'hh-recruiting',
+    name: 'HeadHunter — рекрутинг',
+    description: 'Полный цикл работы с откликами на hh.ru: список вакансий, откликов, LLM-оценка резюме (ATS-скоринг с нокаутами и весами), генерация первого сообщения, отправка, перевод в статусы, bulk-отказ для здоровья аккаунта, профиль кандидата для заказчика.',
+    requires: 'hh_set_token — получи access token на hh.ru (Настройки → API) или через OAuth и передай сюда. Для LLM-функций нужен OPENROUTER_API_KEY в env.',
+  },
 ];
 
 module.exports = {
