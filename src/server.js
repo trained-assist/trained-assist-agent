@@ -13,7 +13,7 @@ const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./ge
 const { nalogFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
-const { hhSuccessHtml, hhErrorHtml } = require('./connect-forms/hh');
+const { hhSuccessHtml, hhErrorHtml, hhLandingHtml } = require('./connect-forms/hh');
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 
@@ -385,7 +385,7 @@ async function main() {
         return;
       }
       if (!code || !state) {
-        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный callback.'));
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhLandingHtml());
         return;
       }
 
