@@ -57,6 +57,26 @@ trained-assist-tg-bot  (Cloudflare Worker — stateless)
 5. Stream stdout chunks → `editMessage` Telegram API calls on the placeholder message
 6. On exit: update session metadata (topic, lastAt, lastUserMessage)
 
+## Key Entities
+
+Three distinct concepts that the codebase uses — understanding them prevents confusion:
+
+| Entity | Field name | Type | Meaning |
+|--------|-----------|------|---------|
+| **Profile** | `username` | `string` (alphanumeric) | The identity unit. Owns all state: tokens, files, sessions, MCP skills. One profile can be used by many people from many chats. Example: `"efi"`, `"recruiter-skillset"` |
+| **Chat** | `userId` in `/run` | `number` (Telegram chat ID) | Where Claude's output streams to — a Telegram private chat or group. Many chats can route to the same profile. The bot decides the mapping. |
+| **Telegram User** | `telegramUserId` | `number` | The individual human who sent the message. Informational only — does not control routing or state. |
+
+**Profile is the unit of isolation.** Tokens live at `~/agent-tokens/{username}/`, sessions at `~/agent-data/sessions/{username}/`, Claude sees `USER_ID={username}`.
+
+**Many chats → one profile** is supported by design. A recruiter profile shared across 5 people and 2 groups all use the same HH token, same session history, same ATS configs.
+
+> **Known naming issue:** `userId` means different things across endpoints:
+> - `/run` body: numeric **chat ID** (where to stream Telegram output)
+> - `/capabilities?userId=`, `/tokens` body: alphanumeric **profile name** (= `username`)
+>
+> The code itself corrects this on line 435 of `runner.js`: `const chatId = user.id`. Future cleanup: rename `/run`'s `userId` → `chatId`.
+
 ## Repos
 
 | Repo | Description |
@@ -72,16 +92,16 @@ All endpoints (except `/health`, `/connect/*`) require `Authorization: Bearer <A
 |--------|------|-------------|
 | `GET` | `/health` | Liveness check (no auth) |
 | `GET` | `/health-full` | Health + Claude version |
-| `GET` | `/capabilities` | List RU-only services this user has tokens for (`?userId=…`) |
+| `GET` | `/capabilities` | List RU-only services this profile has tokens for (`?userId={username}`) |
 | `GET` | `/skills` | List available MCP skills |
 | `GET` | `/stats` | Session and task stats |
 | `POST` | `/run` | Run a Claude Code task |
 | `POST` | `/classify` | Classify a message to an existing session (Claude Haiku) |
-| `GET` | `/sessions` | List recent sessions for a user |
+| `GET` | `/sessions` | List recent sessions for a profile |
 | `GET` | `/sessions/:id` | Get session details |
-| `POST` | `/tokens` | Store an auth token for a user (`userId`, `label`, `value`) |
-| `GET` | `/files` | List files in a user's session dir |
-| `GET` | `/files/read` | Read a file from a user's session dir |
+| `POST` | `/tokens` | Store an auth token for a profile (`userId`=username, `label`, `value`) |
+| `GET` | `/files` | List files in a profile's session dir |
+| `GET` | `/files/read` | Read a file from a profile's session dir |
 | `GET` | `/connect/:service` | OAuth / login form for a service (nalog, getcourse, gdrive, …) |
 | `POST` | `/connect/nalog` | Submit nalog.ru credentials (headless Playwright) |
 | `POST` | `/connect/nalog/code` | Submit SMS code for nalog.ru 2FA |
@@ -100,6 +120,8 @@ All endpoints (except `/health`, `/connect/*`) require `Authorization: Bearer <A
   "telegramUserId": 123456789
 }
 ```
+
+> `userId` here is the **Telegram chat ID** (numeric) — where output is streamed. `username` is the **profile** — the identity that owns state and tokens. They are different things. The bot decides which `username` to assign to each chat.
 
 Returns `202 { "taskId": "alice-1234567890" }` immediately. Output streamed to Telegram via `editMessage`.
 
