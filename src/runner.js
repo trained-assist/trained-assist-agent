@@ -555,7 +555,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   const systemPromptFile = path.join(__dirname, 'agent-system-prompt.txt');
 
-  const proc = spawn('claude', [
+  const proc = spawn(process.env.CLAUDE_BIN || 'claude', [
     '--dangerously-skip-permissions',
     '--output-format', 'stream-json',
     '--verbose',
