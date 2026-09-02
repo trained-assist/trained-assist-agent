@@ -9,6 +9,12 @@
 
 const SKILLS = [
   {
+    id: 'cron',
+    name: 'Cron — расписание задач',
+    description: 'Создаёт повторяющиеся задачи через Google Cloud Scheduler. Задача запускается по расписанию с полным доступом ко всем скилам. Готовый шаблон: cron_hh_digest для дайджеста откликов HH.',
+    requires: 'Работает только на GCP VM (нужен VM service account). AGENT_SECRET должен быть в secrets.env.',
+  },
+  {
     id: 'context-store',
     name: 'Context Store',
     description: 'Persistent key-value store per skill — survives session restarts. Used to remember active vacancy, ATS config, in-progress work, user preferences across sessions.',
