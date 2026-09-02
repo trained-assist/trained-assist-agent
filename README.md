@@ -5,19 +5,57 @@ HTTP API server running on GCP VM — receives tasks from the Telegram bot and r
 ## Architecture
 
 ```
-tg-bot (CF Worker) → POST /run → trained-assist-agent (GCP VM)
-                                          ↓
-                                   claude --dangerously-skip-permissions
-                                          ↓
-                              streams output → Telegram API directly
+User (Telegram)
+      │
+      ▼
+trained-assist-tg-bot  (Cloudflare Worker — stateless)
+      │
+      ├── simple commands handled locally
+      ├── voice → Deepgram STR → text
+      │
+      └── task ──── smart routing ────────────────────────────────────┐
+                         │                                             │
+              probe /capabilities?userId=…  (2.5s, fail-open)        │
+                         │                                             │
+              user has nalog/gosuslugi token?                         │
+                    YES → RU VM (178.212.14.192)                      │
+                    NO  → GCP VM (136.65.7.197)  ◄────────────────────┘
+                         │
+                         ▼
+               POST /run  (Bearer AGENT_SECRET)
+                         │
+                         ▼
+              trained-assist-agent  (this repo, Node.js)
+                         │
+                ┌────────┴────────┐
+                │                 │
+          quick answer?      spawn Claude Code
+          (deterministic)    --dangerously-skip-permissions
+                │            --print "<task>"
+                │                 │
+                └────────┬────────┘
+                         │
+                         ▼
+              stream output → Telegram API directly
 ```
 
-**trained-assist-agent** is the VM-side of the system. It manages:
+**trained-assist-agent** manages:
 - Per-user working directories (`~/agent-data/sessions/<username>/`)
-- Session state (in-memory + disk persistence)
-- User registry with scrypt-hashed passwords
+- Session state and topics (in-memory + disk persistence)
 - Claude Code process lifecycle
 - MCP skills server (`trained-skills`) per session
+- Quick answers — deterministic responses that bypass Claude entirely
+- `/capabilities` endpoint — tells the bot which RU-only services (nalog, gosuslugi) a user has tokens for
+- `/classify` endpoint — Claude Haiku call to match an incoming message to an existing session
+
+### Request flow (POST /run)
+
+1. Auth check: `Authorization: Bearer AGENT_SECRET`
+2. `getQuickAnswer()` — if the task matches a known intent (capability question, setup flow), return immediately without touching Claude
+3. Resolve or create session directory for `username`
+4. Spawn `claude --dangerously-skip-permissions --print "<task>"` in the session workDir
+5. Stream stdout chunks → `editMessage` Telegram API calls on the placeholder message
+6. On exit: update session metadata (topic, lastAt, lastUserMessage)
 
 ## Repos
 
@@ -28,14 +66,25 @@ tg-bot (CF Worker) → POST /run → trained-assist-agent (GCP VM)
 
 ## API
 
-All endpoints require `Authorization: Bearer <AGENT_SECRET>`.
+All endpoints (except `/health`, `/connect/*`) require `Authorization: Bearer <AGENT_SECRET>`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Liveness check |
+| `GET` | `/health` | Liveness check (no auth) |
+| `GET` | `/health-full` | Health + Claude version |
+| `GET` | `/capabilities` | List RU-only services this user has tokens for (`?userId=…`) |
+| `GET` | `/skills` | List available MCP skills |
+| `GET` | `/stats` | Session and task stats |
 | `POST` | `/run` | Run a Claude Code task |
-| `GET` | `/logs/:taskId` | Stream task logs (TODO) |
-| `POST` | `/auth/verify` | Verify username/password (TODO) |
+| `POST` | `/classify` | Classify a message to an existing session (Claude Haiku) |
+| `GET` | `/sessions` | List recent sessions for a user |
+| `GET` | `/sessions/:id` | Get session details |
+| `POST` | `/tokens` | Store an auth token for a user (`userId`, `label`, `value`) |
+| `GET` | `/files` | List files in a user's session dir |
+| `GET` | `/files/read` | Read a file from a user's session dir |
+| `GET` | `/connect/:service` | OAuth / login form for a service (nalog, getcourse, gdrive, …) |
+| `POST` | `/connect/nalog` | Submit nalog.ru credentials (headless Playwright) |
+| `POST` | `/connect/nalog/code` | Submit SMS code for nalog.ru 2FA |
 
 ### POST /run
 
@@ -44,11 +93,36 @@ All endpoints require `Authorization: Bearer <AGENT_SECRET>`.
   "userId": 123456789,
   "username": "alice",
   "task": "Напиши скрипт для...",
-  "context": "О пользователе: ..."
+  "context": "О пользователе: ...",
+  "sessionId": "s-123456789-1234567890",
+  "initialMsgId": 42,
+  "pinnedMsgId": 42,
+  "telegramUserId": 123456789
 }
 ```
 
-Returns `202 { "taskId": "alice-1234567890" }` immediately. Output streamed to Telegram.
+Returns `202 { "taskId": "alice-1234567890" }` immediately. Output streamed to Telegram via `editMessage`.
+
+### GET /capabilities
+
+Returns which RU-only services a user has tokens for. Used by the bot to decide GCP vs RU VM routing.
+
+```json
+{ "capabilities": ["nalog"] }
+```
+
+### POST /classify
+
+Asks Claude Haiku which existing session a new message belongs to.
+
+```json
+// request
+{ "message": "что там с задачей по Weeek?", "sessions": [...] }
+// response
+{ "sessionId": "s-123-456", "confidence": "high" }
+// or
+{ "sessionId": null, "confidence": "low" }
+```
 
 ## Setup
 
