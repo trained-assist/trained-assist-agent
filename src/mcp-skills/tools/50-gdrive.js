@@ -165,6 +165,9 @@ const MIME_READABLE = {
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: () => !!parseSaJson(USER_ID),
+  setupTools: ['gdrive_setup', 'gdrive_status'],
+
   tools: {
 
     gdrive_setup: {

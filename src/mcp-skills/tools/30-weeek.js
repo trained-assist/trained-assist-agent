@@ -62,6 +62,9 @@ async function weeekCall(apiPath, opts, userId) {
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: () => !!readToken(USER_ID),
+  setupTools: ['weeek_status', 'weeek_set_token'],
+
   tools: {
 
     weeek_set_token: {

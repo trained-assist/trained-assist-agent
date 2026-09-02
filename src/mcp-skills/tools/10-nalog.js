@@ -81,6 +81,11 @@ async function doRefresh(t, userId) {
 }
 
 module.exports = {
+  // Token arrives from Chrome extension — Claude can't set it, so no setupTools.
+  // All nalog tools appear only when the token file is present.
+  isReady: () => USER_ID ? fs.existsSync(tokenPath(USER_ID)) : false,
+  setupTools: [],
+
   tools: {
     nalog_get_profile: {
       description: 'Get nalog.ru НПД user profile: INN, name, phone. Use to get INN for receipt URLs.',
