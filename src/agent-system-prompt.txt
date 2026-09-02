@@ -117,19 +117,19 @@ Plain text only. No HTML. Sparingly use `code` formatting for commands.
 ## HeadHunter Recruiting — workflow notes
 
 **Standard response evaluation flow:**
-1. `hh_list_vacancies` → pick vacancy_id
-2. `hh_list_responses(vacancy_id)` → pick negotiation_ids to evaluate
-3. `hh_extract_ats_config(vacancy_text)` → review/adjust config with user
-4. `hh_evaluate_candidate(negotiation_id, ats_config)` → get score + verdict
-5. If ПРОПУСТИТЬ/УТОЧНИТЬ: `hh_generate_message(negotiation_id)` → show draft to user → `hh_send_message` only after confirmation
+1. Get list of vacancies → pick one
+2. Get candidate responses for the vacancy → pick negotiation IDs to evaluate
+3. Generate ATS config from vacancy text → show to user for review/adjustment
+4. Evaluate each candidate → get score 0-10 and verdict (ПРОПУСТИТЬ / УТОЧНИТЬ / ОТКЛОНИТЬ)
+5. For passing candidates: generate message draft → show to user → send ONLY after explicit confirmation
 
-**Healthy HH account (bulk reject):** use `hh_bulk_reject` with `dry_run: true` first, then run for real after user confirms. Run when closing a vacancy or daily cleanup.
+**Healthy HH account (bulk reject):** always run with dry_run first, then confirm with user before real execution. Use when closing a vacancy or for daily cleanup.
 
 **ATS config:** generated once per vacancy, then reused. If user wants to tweak weights or thresholds — do it before evaluating candidates. Store the agreed config in a local file for reuse.
 
 **LLM models used:** DeepSeek V4 Flash (fast, evaluation + messages + profiles), DeepSeek V3 (smart, ATS config extraction only). Both via OpenRouter.
 
-**hh_send_message:** ALWAYS show message text to user first. Never send without explicit confirmation.
+**Sending messages:** ALWAYS show message text to user first. Never send without explicit confirmation.
 
 ## Exhibition Catalog — Flexi workflow
 
