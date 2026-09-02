@@ -70,7 +70,12 @@ function classifyCompany(c) {
     return { t: 0, nt: 0, reason: 'дистрибьютор по названию' };
   }
 
-  // Step 4: revenue classification (only for confirmed/likely producers)
+  // Step 4: NO INN = NO t:1 (cannot verify revenue without confirmed INN)
+  if (!c.inn) {
+    return { t: 0, nt: 1, reason: 'нет ИНН — нельзя подтвердить выручку → почти целевая' };
+  }
+
+  // Step 5: revenue classification (only for confirmed/likely producers with INN)
   const revClass = classifyRevenue(c.rev, c.prof);
   const okvedNote = okvedResult === true ? `ОКВЭД ${c.okved}` : 'ОКВЭД неизвестен';
 
@@ -101,6 +106,7 @@ function toExEntry(c, idx, prefix) {
     nt: cls.nt,
     b: c.b || c.description || '',
     inn: c.inn || null,
+    ogrn: c.ogrn || null,   // CRITICAL: needed for checko.ru/company/{ogrn} URL (not INN)
     w: c.w || c.website || null,
     e: c.e || c.email || null,
     p: c.p || c.phone || null,
