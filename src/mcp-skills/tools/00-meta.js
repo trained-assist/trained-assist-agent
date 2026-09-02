@@ -9,6 +9,12 @@
 
 const SKILLS = [
   {
+    id: 'context-store',
+    name: 'Context Store',
+    description: 'Persistent key-value store per skill — survives session restarts. Used to remember active vacancy, ATS config, in-progress work, user preferences across sessions.',
+    requires: 'Ничего — всегда доступно.',
+  },
+  {
     id: 'nalog-npd',
     name: 'Самозанятый НПД (nalog.ru)',
     description: 'Доходы, чеки НПД через API lknpd.nalog.ru. Токен нужен с Chrome extension.',
