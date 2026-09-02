@@ -437,11 +437,16 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   const userTokens = loadUserTokens(user.username, user.id);
 
-  // Store chatId so nalog expiry notifier (server.js) can find it by username
+  // Store chatId in username folder (for nalog expiry notifier)
+  // Also mark any existing chatId folder with .username so migration can identify its owner
   try {
     const tDir = path.join(os.homedir(), 'agent-tokens', String(user.username));
     fs.mkdirSync(tDir, { recursive: true });
     fs.writeFileSync(path.join(tDir, '.chatid'), String(chatId), { mode: 0o600 });
+    const oldChatDir = path.join(os.homedir(), 'agent-tokens', String(user.id));
+    if (fs.existsSync(oldChatDir)) {
+      fs.writeFileSync(path.join(oldChatDir, '.username'), String(user.username), { mode: 0o600 });
+    }
   } catch { /* non-critical */ }
 
   // Expired nalog token — tell user immediately, don't waste Claude on it

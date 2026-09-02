@@ -35,15 +35,34 @@ function appendSecretsLog(userId, services) {
 }
 
 function loadUserTokens(userId, legacyChatId) {
-  // userId is now a username (e.g. "efi"), legacyChatId is the group chatId for one-time migration.
-  // If the username folder is empty but the old chatId folder has tokens, migrate them automatically.
-  if (legacyChatId && String(legacyChatId) !== String(userId)) {
-    const userDir = tokensDir(userId);
-    const legacyDir = tokensDir(legacyChatId);
-    const userHasFiles = fs.existsSync(userDir) &&
-      fs.readdirSync(userDir).filter(f => !LOG_FILES.has(f) && !f.startsWith('.')).length > 0;
+  // userId is now a username (e.g. "efi"), legacyChatId is the current group chatId for migration hint.
+  // If the username folder is empty, try to migrate from any chatId folder that has tokens.
+  // Priority: 1) the supplied legacyChatId, 2) any other chatId-like folder (negative integer).
+  const userDir = tokensDir(userId);
+  const userHasFiles = () => fs.existsSync(userDir) &&
+    fs.readdirSync(userDir).filter(f => !LOG_FILES.has(f) && !f.startsWith('.')).length > 0;
 
-    if (!userHasFiles && fs.existsSync(legacyDir)) {
+  if (!userHasFiles()) {
+    // Build candidate list: supplied chatId first, then scan for other chatId-like dirs
+    const candidates = [];
+    if (legacyChatId && String(legacyChatId) !== String(userId)) candidates.push(String(legacyChatId));
+    try {
+      for (const name of fs.readdirSync(TOKENS_ROOT)) {
+        if (/^-?\d+$/.test(name) && name !== String(legacyChatId)) candidates.push(name);
+      }
+    } catch { /* no tokens root yet */ }
+
+    for (const candidate of candidates) {
+      const legacyDir = path.join(TOKENS_ROOT, candidate);
+      if (!fs.existsSync(legacyDir)) continue;
+      const hasContent = fs.readdirSync(legacyDir).filter(f => !LOG_FILES.has(f) && !f.startsWith('.')).length > 0;
+      if (!hasContent) continue;
+      // Check if this folder's .chatid username matches (skip if it belongs to someone else)
+      const markerFile = path.join(legacyDir, '.username');
+      if (fs.existsSync(markerFile)) {
+        const owner = fs.readFileSync(markerFile, 'utf8').trim();
+        if (owner && owner !== String(userId)) continue; // belongs to a different user
+      }
       fs.mkdirSync(userDir, { recursive: true });
       for (const file of fs.readdirSync(legacyDir)) {
         if (LOG_FILES.has(file) || file.startsWith('.')) continue;
@@ -57,9 +76,10 @@ function loadUserTokens(userId, legacyChatId) {
               fs.copyFileSync(src, dst);
             }
           }
-        } catch { /* skip files we can't copy */ }
+        } catch { /* skip */ }
       }
-      console.log(`[user-tokens] migrated tokens from chatId=${legacyChatId} → username=${userId}`);
+      console.log(`[user-tokens] migrated tokens from chatId=${candidate} → username=${userId}`);
+      break; // stop after first successful migration
     }
   }
 
