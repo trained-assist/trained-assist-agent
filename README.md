@@ -69,7 +69,7 @@ Three distinct concepts — understanding them prevents confusion:
 
 **Profile is the unit of isolation.** Tokens: `~/agent-tokens/{username}/`. Sessions: `~/agent-data/sessions/{username}/`. Claude sees `USER_ID={username}`.
 
-**Many chats → one profile** is supported by design. A recruiter profile shared across 5 people and 2 groups all use the same HH token, same session history, same ATS configs. See [tg-bot#16](https://github.com/trained-assist/trained-assist-tg-bot/issues/16) for chat-to-profile mapping.
+**Many chats → one profile** is supported by design. A recruiter profile shared across 5 people and 2 groups all use the same HH token, same session history, same ATS configs. The bot implements this via `CHAT_MAPPINGS` env var (see [tg-bot#17](https://github.com/trained-assist/trained-assist-tg-bot/pull/17)).
 
 > **Known naming inconsistency:** `userId` means different things across endpoints:
 > - `/run` body: numeric **chat ID** (Telegram destination for output)
