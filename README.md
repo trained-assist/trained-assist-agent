@@ -57,6 +57,26 @@ trained-assist-tg-bot  (Cloudflare Worker — stateless)
 5. Stream stdout chunks → `editMessage` Telegram API calls on the placeholder message
 6. On exit: update session metadata (topic, lastAt, lastUserMessage)
 
+## Key Entities
+
+Three distinct concepts — understanding them prevents confusion:
+
+| Entity | Field | Type | Meaning |
+|--------|-------|------|---------|
+| **Profile** | `username` | `string` (alphanumeric) | The identity unit. Owns all state: tokens, files, sessions, MCP skills. One profile can be used by many people from many chats. Example: `"efi"`, `"recruiter-skillset"` |
+| **Chat** | `userId` in `/run` | `number` (Telegram chat ID) | Where Claude's output streams to — a private chat or group. Many chats → one profile. The bot controls the mapping. |
+| **Telegram User** | `telegramUserId` | `number` | The individual human who sent the message. Informational only — does not control routing or state. |
+
+**Profile is the unit of isolation.** Tokens: `~/agent-tokens/{username}/`. Sessions: `~/agent-data/sessions/{username}/`. Claude sees `USER_ID={username}`.
+
+**Many chats → one profile** is supported by design. A recruiter profile shared across 5 people and 2 groups all use the same HH token, same session history, same ATS configs. See [tg-bot#16](https://github.com/trained-assist/trained-assist-tg-bot/issues/16) for chat-to-profile mapping.
+
+> **Known naming inconsistency:** `userId` means different things across endpoints:
+> - `/run` body: numeric **chat ID** (Telegram destination for output)
+> - `/capabilities?userId=`, `/tokens` body: alphanumeric **profile name** (= `username`)
+>
+> Future cleanup: rename `/run`'s `userId` → `chatId`.
+
 ## Repos
 
 | Repo | Description |
@@ -102,6 +122,8 @@ All endpoints (except `/health`, `/connect/*`) require `Authorization: Bearer <A
 ```
 
 Returns `202 { "taskId": "alice-1234567890" }` immediately. Output streamed to Telegram via `editMessage`.
+
+> `userId` = Telegram **chat ID** (numeric, where to send output). `username` = **profile** (alphanumeric, owns state). They are different things — the bot decides which profile maps to which chat.
 
 ### GET /capabilities
 
