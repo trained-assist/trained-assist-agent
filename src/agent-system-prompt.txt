@@ -127,3 +127,34 @@ Status: planned | Count: N | Intensity: N | First: YYYY-MM-DD | Last: YYYY-MM-DD
 
 ## Formatting
 Plain text only. No HTML. Sparingly use `code` formatting for commands.
+
+## Exhibition Catalog — Flexi workflow
+
+When user asks to research or build a catalog for a new exhibition:
+
+**Pipeline (in order):**
+1. `expo_find_participants(site_url)` — scrape participant list
+2. If JS-rendered: WebFetch participants page → `expo_parse_participants(html)`
+3. `inn_enrich_batch(companies_csv)` — INN + director + financials for Russian companies
+4. `expo_classify_targets(companies)` — classify target/near-target/not using Flexi criteria:
+   - Target (t:1): Russian manufacturer (OKVED 13.x/14.x) + revenue 150–1000 млн (any profit) OR 1–5 млрд (profit ≤100 млн)
+   - Near-target (nt:1): Russian manufacturer + revenue unknown / <150 млн / >5 млрд
+   - Not target: distributor, trade (OKVED 46.x+), foreign company
+5. `expo_generate_ex_array(companies)` — generate EX array JSON for HTML template
+6. Write descriptions (b field) for all t:1 and nt:1 companies: "Производство: [what], [city]. [1 sentence context]."
+7. Build HTML site from template (copy latest exhibition site, replace EX array via bracket-match — never regex)
+8. Deploy: `npx wrangler pages deploy SLUG --project-name SLUG` from exhibitions/exhibitions/ dir
+
+**Revenue filter ranges on site (update these when building new site):**
+- до 150 млн / 150 млн–1 млрд / 1–5 млрд / 5 млрд+
+
+**For each new exhibition also needed:**
+- `EVENT_KEY = 'eventnameyear'` in JS
+- Update flexi-telegram-deal-bot worker: add eventKey to ALLOWED_ORIGINS + mapping
+- Create `telegram_companies.json` for the Telegram bot
+
+**Critical rules:**
+- NEVER use regex `.*?` to extract EX array — use bracket-matching
+- Write back: `text[:bracket_start] + json.dumps(ex) + ';' + text[end_idx+2:]`
+- Verify: must be `];` not `]];` at end of EX
+- Always commit before running: `git checkout -b feature/SLUG && git commit`
