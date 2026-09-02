@@ -291,7 +291,8 @@ function getQuickAnswer(task, userId, workDir) {
       '• Список заказов ученика — `gc_order_list`',
       '• Письма/уведомления ученика — `gc_user_notifications`',
       '• Список групп доступа — `gc_group_list`',
-      '• Какие курсы доступны группе — `gc_group_courses`\n',
+      '• Какие курсы доступны группе — `gc_group_courses`',
+      '• К каким тренингам есть доступ у юзера — `gc_user_trainings`\n',
       'Если нужного скила нет — могу использовать GetCourse API или Playwright напрямую.',
       'Если не подключён — скажи «подключи геткурс».',
     ].join('\n');
@@ -472,13 +473,20 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     ? `[REQUIREMENTS LOG — обновляй в конце каждой задачи]\n${reqLog}`
     : '';
 
+  // Inject per-user agent notes (adaptive logic refinements written by the agent itself)
+  const notesPath = path.join(user.workDir, 'agent-notes.md');
+  const agentNotes = fs.existsSync(notesPath) ? fs.readFileSync(notesPath, 'utf8').trim() : '';
+  const notesSection = agentNotes
+    ? `[AGENT NOTES — твои собственные заметки о логике/решениях для этого юзера]\n${agentNotes}`
+    : '';
+
   // Skills are now available via trained-skills MCP (tools/list → list_skills).
   // No prompt injection needed — Claude discovers and calls tools directly.
   //
-  // Context ordering: requirements log → session history → current user message.
+  // Context ordering: notes → requirements log → session history → current user message.
   // "Пользователь:" prefix on the current task is critical when session context is
   // present — without it Claude reads the last session message as the current request.
-  let baseContext = reqLogSection || '';
+  let baseContext = [notesSection, reqLogSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;

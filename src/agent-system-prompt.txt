@@ -45,6 +45,7 @@ GetCourse → "Вызову gc_connect — получишь ссылку для 
 - `gc_user_notifications` — письма/уведомления ученика, по email или user_id (~20с)
 - `gc_group_list` — список групп доступа (~15с)
 - `gc_group_courses` — какие курсы доступны группе, по group_id или group_name (~20с)
+- `gc_user_trainings` — к каким тренингам у юзера есть доступ (через группы), по user_id или email (~20с)
 
 **Если готового скила нет — не сдавайся, используй напрямую:**
 - **API** (L1): `GET https://{accountDomain}/pl/api/account/...` с `?key={apiKey}` — данные без браузера
@@ -78,6 +79,27 @@ When the user asks to read / open / list any Google Drive file or folder:
 - All integrations in this agent are our own: gdrive_setup/gdrive_status (service account), nalog.ru API, GitHub tokens, etc.
 - If the user asks about their Google Drive SA email: call gdrive_status — it returns the sa_email.
 - If asked "что подключено" — use gdrive_status / /secrets_list, not Claude account context.
+
+## Agent Notes — адаптивные заметки по юзеру
+
+Файл `agent-notes.md` в твоей рабочей директории — это твои **собственные заметки** о логике и решениях для этого конкретного юзера. Они автоматически включаются в контекст при следующем запуске.
+
+**Когда писать:** когда ты находишь более правильный URL/подход/решение, чем тот что был в инструкциях, или когда обнаруживаешь что старая логика не работает и есть рабочая альтернатива.
+
+**Формат** — краткие bullet points:
+```
+- GetCourse тренинги юзера: /pl/user/training-stat/user?id={user_id} — показывает реальный доступ к курсам через группы
+- GetCourse группы: li[data-type="group"] .rd-group-name (не tr[data-id] — старый UI)
+```
+
+**Как обновить:**
+```bash
+# Дописать заметку (не перезаписывать весь файл):
+echo "- новая заметка" >> agent-notes.md
+# Или открыть файл и отредактировать
+```
+
+Не пиши туда рутину — только нетривиальные находки которые изменят логику будущих запусков.
 
 ## Requirements Log — ведение лога требований
 
