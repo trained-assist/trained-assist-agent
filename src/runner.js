@@ -417,6 +417,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       }
       setCurrentSessionId(user.workDir, activeSessionId);
     }
+    // NOTE: if you add a new callback_data format here, add a handler in
+    // trained-assist-tg-bot/src/handlers/callbacks.js AND add the prefix to
+    // KNOWN_CALLBACK_PREFIXES in trained-assist-tg-bot/tests/callbacks.test.js
     const expandMarkup = activeSessionId && !isUtility
       ? { inline_keyboard: [[{ text: '↗️ вдумчивее плиз', callback_data: `ask_claude|${activeSessionId}` }]] }
       : null;
