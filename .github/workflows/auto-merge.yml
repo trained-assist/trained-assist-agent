@@ -18,23 +18,19 @@ jobs:
     steps:
       - name: Wait for CI to pass
         run: |
-          BRANCH="${{ github.event.pull_request.head.ref }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
           STATUS="PENDING"
           for i in $(seq 1 60); do
-            RUN=$(gh run list --branch "$BRANCH" --workflow ci.yml --limit 1 \
-              --json status,conclusion 2>/dev/null || echo "[]")
-            RUN_STATUS=$(echo "$RUN" | jq -r '.[0].status // "queued"')
-            RUN_CONCL=$(echo "$RUN"  | jq -r '.[0].conclusion // ""')
-            if [ "$RUN_STATUS" = "completed" ]; then
-              STATUS=$(echo "$RUN_CONCL" | tr '[:lower:]' '[:upper:]')
-            else
-              STATUS="PENDING"
-            fi
-            echo "Attempt $i: run_status=$RUN_STATUS conclusion=$RUN_CONCL → $STATUS"
+            CHECKS=$(gh pr checks "$PR_URL" --json name,state,conclusion 2>/dev/null || echo "[]")
+            STATUS=$(echo "$CHECKS" | jq -r '
+              if length == 0 then "PENDING"
+              elif any(.state == "PENDING" or .state == "IN_PROGRESS") then "PENDING"
+              elif all(.conclusion == "success" or .conclusion == "skipped") then "SUCCESS"
+              else "FAILURE"
+              end')
+            echo "Attempt $i: $STATUS ($(echo "$CHECKS" | jq -r '[.[] | .name + "=" + .state] | join(", ")'))"
             if [ "$STATUS" = "SUCCESS" ]; then break; fi
-            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ]; then
-              echo "CI did not pass — skipping merge"; exit 1
-            fi
+            if [ "$STATUS" = "FAILURE" ]; then echo "CI did not pass — skipping merge"; exit 1; fi
             sleep 10
           done
           if [ "$STATUS" != "SUCCESS" ]; then echo "Timed out waiting for CI"; exit 1; fi
