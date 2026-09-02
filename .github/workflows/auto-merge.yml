@@ -18,10 +18,10 @@ jobs:
     steps:
       - name: Wait for CI to pass
         run: |
-          SHA="${{ github.event.pull_request.head.sha }}"
+          BRANCH="${{ github.event.pull_request.head.ref }}"
           STATUS="PENDING"
           for i in $(seq 1 60); do
-            RUN=$(gh run list --commit "$SHA" --workflow ci.yml --limit 1 \
+            RUN=$(gh run list --branch "$BRANCH" --workflow ci.yml --limit 1 \
               --json status,conclusion 2>/dev/null || echo "[]")
             RUN_STATUS=$(echo "$RUN" | jq -r '.[0].status // "queued"')
             RUN_CONCL=$(echo "$RUN"  | jq -r '.[0].conclusion // ""')
