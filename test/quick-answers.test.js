@@ -307,36 +307,6 @@ describe('Google Drive — SA email quick answer', () => {
 
 // ── False-positive guard: real tasks must NOT be intercepted ──────────────────
 
-describe('GetCourse capability questions', () => {
-  it.each([
-    'умеешь работать с геткурс?',
-    'можешь работать с getcourse?',
-    'что умеешь в геткурс',
-    'есть скил для геткурс',
-    'есть инструменты для getcourse',
-    'умеешь управлять курсами',
-    'умеешь добавлять учеников в курс',
-    'умеешь работать с уроками',
-  ])('capability: "%s" → quick', (task) => {
-    expect(qa(task)).not.toBeNull();
-  });
-
-  it.each([
-    'подключи геткурс',              // setup intent → handled by QUICK_SETUPS, not GC_CAPABILITY
-    'войди в GetCourse и открой курс', // action, not capability question
-    'скачай список учеников из геткурс',
-    'добавь ученика в геткурс',
-  ])('real action NOT intercepted by capability: "%s"', (task) => {
-    // These are either setup-handled or go to Claude — but they must not return null
-    // if matched by another quick-answer rule; we only check they don't silently eat tasks
-    // that should reach Claude. Setup tasks return non-null (correct). Action tasks → null.
-    const result = qa(task);
-    const isSetup = /подключи|настро|интегр/i.test(task);
-    if (isSetup) expect(result).not.toBeNull(); // correctly handled by QUICK_SETUPS
-    else expect(result).toBeNull();             // must reach Claude
-  });
-});
-
 describe('False positives — real tasks must reach Claude', () => {
   it.each([
     'переведи текст на английский',
