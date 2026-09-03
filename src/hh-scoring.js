@@ -40,6 +40,7 @@ function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
 }
 
 function parseLlmJson(content) {
+  if (!content) throw new Error('LLM returned empty content');
   content = content.trim();
   const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) content = fenceMatch[1].trim();
