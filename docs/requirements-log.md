@@ -8,6 +8,10 @@
 | ✅ реализовано | **Active vacancy context** (PR #146) | `hh_set_active_vacancy` сохраняет вакансию, `hh_batch_evaluate` читает из контекста без аргументов |
 | ✅ реализовано | **ATS Template Editor** (PR #152) | Визуальный веб-редактор для этапов подбора и ATS-конфига. 4 шаблона, сохранение в контекст. `/hh/ats-editor` |
 | ✅ реализовано | **HH Digest / Мониторинг** (PR #153) | `hh_funnel_stats` — быстрый снапшот воронки (без LLM). `cron_hh_digest(schedule)` с интервалами 15м/30м/1ч/2ч/3ч/6ч/день. Дайджест: непрочитанных, новых откликов, разбивка по этапам. |
+| ✅ реализовано | **ATS sensitivity tests** (PR #155) | 15 тестов: меняешь ATS config → меняется системный промпт, вердикт, вопросы кандидату. nock захватывает LLM payload. |
+| ✅ реализовано | **Manager field + фильтр по менеджеру** (PR #160, #161) | `hh_set_active_vacancy()` теперь использует `/employers/{id}/vacancies/active` — возвращает только вакансии текущего пользователя (где он менеджер) и включает имя менеджера. Системный промпт: форматировать как "Название — Менеджер (Город, N откликов)". |
+| ✅ реализовано | **HH connect — кнопка вместо редиректа** (PR #158) | Telegram preview пожирал токен → fix: `/connect/hh/start` показывает HTML-страницу с кнопкой, токен не трогает. `/connect/hh/authorize` — новый endpoint, потребляет токен и редиректит на hh.ru. |
+| ✅ реализовано | **recruiter-assistant.ru как AGENT_PUBLIC_URL** | Бот присылает `https://recruiter-assistant.ru/connect/hh?t=TOKEN` вместо sslip.io. Кнопка-страница загружена в Yandex Object Storage. GCP VM: `AGENT_PUBLIC_URL=https://recruiter-assistant.ru` в systemd. |
 
 ## Weeek CRM — flexi-consult (Миша)
 
