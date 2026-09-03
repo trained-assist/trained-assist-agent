@@ -146,6 +146,96 @@ Asks Claude Haiku which existing session a new message belongs to.
 { "sessionId": null, "confidence": "low" }
 ```
 
+## Infrastructure
+
+### VM Inventory
+
+| VM | IP | Domain | Purpose |
+|----|-----|--------|---------|
+| `gcp-main` | `136.65.7.197` | `recruiter-assistant.ru` | Main VM — HH recruiting, GDrive, GetCourse, company lookup |
+| `ru-vm` | `178.212.14.192` | `platform.recruiter-assistant.ru` | RU-IP VM — nalog.ru access, Playwright headless login |
+
+Both VMs run `assist-agent.service` on port 8080, reverse-proxied via nginx on 443.
+Identity visible in `/health` response: `vm` field (e.g. `"vm":"gcp-main"`) + `commit` (git SHA).
+
+### Secrets Architecture
+
+| Secret | Required | GCP Secret Manager | GCP `secrets.env` | RU `secrets.env` | Notes |
+|--------|----------|:------------------:|:-----------------:|:----------------:|-------|
+| `TELEGRAM_BOT_TOKEN` | ✅ | ✅ | — | ✅ | GCP reads from SM; RU reads from file |
+| `ANTHROPIC_API_KEY` | — | ✅ | — | ✅ | |
+| `AGENT_SECRET` | ✅ | ✅ | ✅ | ✅ | Also needed for deploy smoke tests |
+| `DEEPGRAM_API_KEY` | — | ✅ | — | ✅ | Voice transcription |
+| `BOT_SECRET` | — | ✅ | — | ✅ | Chrome extension token relay |
+| `INN_DADATA_TOKEN` | — | — | ✅ | ✅ | Injected directly into Claude env (bypasses secrets.js) |
+| `INN_DADATA_SECRET` | — | — | ✅ | ✅ | Same |
+| `INN_CHECKO_KEY` | — | — | ✅ | ✅ | Same |
+| `CF_API_TOKEN` | — | ✅ only | — | — | GCP-only via Secret Manager |
+| `HH_CLIENT_ID` | — | ✅ only | — | — | HH OAuth — GCP only |
+| `HH_CLIENT_SECRET` | — | ✅ only | — | — | HH OAuth — GCP only |
+| `GOOGLE_OAUTH_CLIENT_ID` | — | ✅ only | — | — | GDrive OAuth — GCP only |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | — | ✅ only | — | — | GDrive OAuth — GCP only |
+| `OPERATOR_CHAT_ID` | — | ✅ only | — | — | Operator notifications — GCP only |
+
+> **Single source of truth:** `infra/env-manifest.json`. Validated by `node scripts/check-env-sync.js` (runs in CI).
+
+### GitHub Actions Secrets Checklist
+
+Set in repo **Settings → Secrets and variables → Actions**:
+
+**Infrastructure (SSH access):**
+- [ ] `VM_HOST` — GCP VM IP (`136.65.7.197`)
+- [ ] `VM_USER` — SSH user (`vova`)
+- [ ] `VM_SSH_KEY` — Private SSH key for GCP VM
+- [ ] `VM_RU_HOST` — RU VM IP (`178.212.14.192`)
+- [ ] `VM_RU_USER` — SSH user (`vova`)
+- [ ] `VM_RU_PASSWORD` — SSH password for RU VM
+
+**App secrets (written to `secrets.env` during deploy):**
+- [ ] `AGENT_SECRET`
+- [ ] `TELEGRAM_BOT_TOKEN`
+- [ ] `ANTHROPIC_API_KEY`
+- [ ] `DEEPGRAM_API_KEY`
+- [ ] `BOT_SECRET`
+- [ ] `INN_DADATA_TOKEN`
+- [ ] `INN_DADATA_SECRET`
+- [ ] `INN_CHECKO_KEY`
+
+### Adding a new secret — checklist
+
+1. Add to `src/secrets.js` → `REQUIRED` or `OPTIONAL` array + `return` object
+2. Add to `infra/env-manifest.json` → `github_actions_secrets.app` with `written_to` and `gcp_sm`
+3. Add to **GCP Secret Manager**: `echo -n 'value' | gcloud secrets create NAME --data-file=- --project=alesa-personal-assistent`
+4. Add to **GitHub Actions Secrets** (Settings → Secrets → Actions)
+5. Add to `.github/workflows/ci.yml` → `printf` block for each VM in `written_to`
+6. Add to `.github/workflows/deploy-manual.yml` → same `printf` blocks
+7. Run `node scripts/check-env-sync.js` — must pass before commit
+8. If GCP-only (not in `written_to`): add to `gcp_secret_manager_only` in manifest instead of step 4–6
+
+### Deployment
+
+**Normal flow:** PR → CI → auto squash-merge → deploy to both VMs.
+
+**Emergency / manual deploy** (no PR needed):
+1. Merge your change to main first (or it's already there)
+2. GitHub → Actions → **Manual Deploy** → Run workflow → choose target (`gcp` / `ru` / `both`)
+3. Enter reason (optional, goes to deploy log)
+
+**After a failed deploy:**
+```bash
+# Check which VM is affected
+curl -s -H "Authorization: Bearer $AGENT_SECRET" https://recruiter-assistant.ru/agent/health
+curl -s -H "Authorization: Bearer $AGENT_SECRET" https://178-212-14-192.sslip.io/health
+
+# SSH into the VM and check logs
+sudo journalctl -u assist-agent --no-pager -n 50
+
+# Common causes:
+# - "Required secret missing: TELEGRAM_BOT_TOKEN" → secret not in GCP SM or secrets.env
+# - Port 8080 already in use → sudo fuser -k 8080/tcp && sudo systemctl restart assist-agent
+# - git reset --hard failed → git stash && git reset --hard origin/main
+```
+
 ## Setup
 
 ### 1. Initial VM setup
@@ -172,7 +262,9 @@ echo -n "your-value" | gcloud secrets create SECRET_NAME --data-file=-
 
 ### 3. GitHub Actions secrets
 
-Set in repo Settings → Secrets:
+See [Infrastructure → GitHub Actions Secrets Checklist](#github-actions-secrets-checklist) above for the full list.
+
+Legacy minimal set — sufficient only if you haven't added new secrets:
 
 | Secret | Description |
 |--------|-------------|

@@ -1,0 +1,108 @@
+{
+  "_doc": "Single source of truth for all secrets and env vars. Run 'node scripts/check-env-sync.js' to validate ci.yml matches this.",
+
+  "vms": {
+    "gcp": {
+      "vm_name": "gcp-main",
+      "ip": "136.65.7.197",
+      "sslip": "136-65-7-197.sslip.io",
+      "domain": "recruiter-assistant.ru",
+      "secrets_source": "gcp_secret_manager (falls back to secrets.env)",
+      "ssh_user": "vova",
+      "data_dir": "/home/vova/alesa-data",
+      "service": "assist-agent"
+    },
+    "ru": {
+      "vm_name": "ru-vm",
+      "ip": "178.212.14.192",
+      "sslip": "178-212-14-192.sslip.io",
+      "domain": "platform.recruiter-assistant.ru",
+      "secrets_source": "secrets.env (SECRETS_SOURCE=env)",
+      "ssh_user": "vova",
+      "data_dir": "/home/vova/alesa-data",
+      "service": "assist-agent"
+    }
+  },
+
+  "github_actions_secrets": {
+    "_doc": "All secrets that must exist in GitHub repo Settings → Secrets and variables → Actions",
+    "infra": [
+      { "name": "VM_HOST",          "description": "GCP VM IP (136.65.7.197)",                  "used_by": ["deploy-gcp"] },
+      { "name": "VM_USER",          "description": "GCP VM SSH user (vova)",                     "used_by": ["deploy-gcp"] },
+      { "name": "VM_SSH_KEY",       "description": "Private SSH key for GCP VM",                 "used_by": ["deploy-gcp"] },
+      { "name": "VM_RU_HOST",       "description": "RU VM IP (178.212.14.192)",                  "used_by": ["deploy-ru"] },
+      { "name": "VM_RU_USER",       "description": "RU VM SSH user (vova)",                      "used_by": ["deploy-ru"] },
+      { "name": "VM_RU_PASSWORD",   "description": "RU VM SSH password",                         "used_by": ["deploy-ru"] }
+    ],
+    "app": [
+      { "name": "TELEGRAM_BOT_TOKEN", "required": true,  "written_to": ["ru"],         "gcp_sm": true,  "description": "Telegram bot token (@BotFather)" },
+      { "name": "ANTHROPIC_API_KEY",  "required": false, "written_to": ["ru"],         "gcp_sm": true,  "description": "Anthropic Claude API key" },
+      { "name": "AGENT_SECRET",       "required": true,  "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Shared bearer secret between tg-bot and agent" },
+      { "name": "DEEPGRAM_API_KEY",   "required": false, "written_to": ["ru"],         "gcp_sm": true,  "description": "Deepgram voice transcription API key" },
+      { "name": "BOT_SECRET",         "required": false, "written_to": ["ru"],         "gcp_sm": true,  "description": "Chrome extension token relay shared secret" },
+      { "name": "INN_DADATA_TOKEN",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "DaData API token for company/INN lookup" },
+      { "name": "INN_DADATA_SECRET",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "DaData API secret for company/INN lookup" },
+      { "name": "INN_CHECKO_KEY",     "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Checko API key for company enrichment" }
+    ]
+  },
+
+  "gcp_secret_manager_only": {
+    "_doc": "Available on GCP VM only (via Secret Manager). NOT in GitHub Secrets, NOT on RU VM.",
+    "secrets": [
+      { "name": "CF_API_TOKEN",             "description": "Cloudflare API token" },
+      { "name": "OPERATOR_CHAT_ID",         "description": "Telegram chat ID for operator notifications" },
+      { "name": "GOOGLE_OAUTH_CLIENT_ID",   "description": "Google OAuth2 client ID (GDrive/GetCourse)" },
+      { "name": "GOOGLE_OAUTH_CLIENT_SECRET", "description": "Google OAuth2 client secret" },
+      { "name": "HH_CLIENT_ID",            "description": "HeadHunter OAuth2 app client ID" },
+      { "name": "HH_CLIENT_SECRET",        "description": "HeadHunter OAuth2 app client secret" }
+    ]
+  },
+
+  "systemd_env_vars": {
+    "_doc": "Static env vars baked into systemd unit files (not secrets). Update systemd/*.service files directly.",
+    "gcp": [
+      { "name": "NODE_ENV",        "value": "production" },
+      { "name": "PORT",            "value": "8080" },
+      { "name": "AGENT_DATA_DIR",  "value": "/home/vova/alesa-data" },
+      { "name": "AGENT_PUBLIC_URL","value": "https://recruiter-assistant.ru" },
+      { "name": "HH_PLATFORM_URL", "value": "https://platform.recruiter-assistant.ru" },
+      { "name": "VM_NAME",         "value": "gcp-main" }
+    ],
+    "ru": [
+      { "name": "NODE_ENV",           "value": "production" },
+      { "name": "PORT",               "value": "8080" },
+      { "name": "AGENT_DATA_DIR",     "value": "/home/vova/alesa-data" },
+      { "name": "AGENT_PUBLIC_URL",   "value": "https://178-212-14-192.sslip.io" },
+      { "name": "TELEGRAM_API_URL",   "value": "https://136-65-7-197.sslip.io/tg-proxy" },
+      { "name": "ANTHROPIC_BASE_URL", "value": "https://136-65-7-197.sslip.io/anthropic-proxy" },
+      { "name": "SECRETS_SOURCE",     "value": "env" },
+      { "name": "VM_NAME",            "value": "ru-vm" }
+    ]
+  },
+
+  "static_values_in_secrets_env": {
+    "_doc": "Values written to secrets.env during deploy but NOT from GitHub Secrets — they are static config values hardcoded in ci.yml.",
+    "ru": [
+      { "name": "AGENT_PUBLIC_URL", "value": "https://178-212-14-192.sslip.io", "description": "Public base URL for /connect/* links on RU VM" }
+    ]
+  },
+
+  "env_vars_bypassing_secrets_js": {
+    "_doc": "Written to secrets.env from GitHub Secrets and passed directly to Claude Code env in browser.js — they bypass src/secrets.js intentionally.",
+    "secrets": [
+      { "name": "INN_DADATA_TOKEN",  "description": "DaData API token for INN/company lookup (injected into Claude env)" },
+      { "name": "INN_DADATA_SECRET", "description": "DaData API secret (injected into Claude env)" },
+      { "name": "INN_CHECKO_KEY",    "description": "Checko API key for company enrichment (injected into Claude env)" }
+    ]
+  },
+
+  "checklist_add_new_secret": [
+    "1. Add to src/secrets.js — REQUIRED or OPTIONAL array + return object",
+    "2. Add to infra/env-manifest.json — github_actions_secrets.app with written_to and gcp_sm fields",
+    "3. Add to GCP Secret Manager: echo -n 'value' | gcloud secrets create SECRET_NAME --data-file=- --project=alesa-personal-assistent",
+    "4. Add to GitHub repo Secrets (Settings → Secrets and variables → Actions)",
+    "5. Add to .github/workflows/ci.yml printf block for each VM listed in written_to",
+    "6. Run: node scripts/check-env-sync.js — must pass before commit",
+    "7. If GCP-only (not in written_to): add to gcp_secret_manager_only section instead"
+  ]
+}
