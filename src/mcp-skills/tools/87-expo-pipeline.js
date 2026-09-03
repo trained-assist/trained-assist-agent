@@ -230,19 +230,22 @@ expo_id: the slug shown by expo_pipeline_status, or derive from expo URL with sl
         // Accept raw URL as expo_id
         const id = expo_id.startsWith('http') ? slugify(expo_id) : expo_id;
         const dir = expoDir(workDir, id);
-        const enrichedPath = path.join(dir, 'enriched.json');
+        // Support both filenames: enriched.json (new) and requisites_enrichment.json (legacy)
+        const enrichedPath = fs.existsSync(path.join(dir, 'enriched.json'))
+          ? path.join(dir, 'enriched.json')
+          : path.join(dir, 'requisites_enrichment.json');
 
         if (!fs.existsSync(enrichedPath)) {
           return {
-            error: `enriched.json not found at ${enrichedPath}`,
-            hint: 'Run inn_enrich_batch first, pointing out_dir to the expo pipeline directory.',
+            error: `enriched.json not found at ${path.join(dir, 'enriched.json')}`,
+            hint: 'Run inn_enrich_batch first with out_dir pointing to the expo pipeline directory.',
             expo_id: id,
           };
         }
 
         let enriched;
         try { enriched = JSON.parse(fs.readFileSync(enrichedPath, 'utf8')); }
-        catch (e) { return { error: `Failed to parse enriched.json: ${e.message}` }; }
+        catch (e) { return { error: `Failed to parse ${path.basename(enrichedPath)}: ${e.message}` }; }
 
         // Normalize: inn_enrich_batch outputs { companies: [...] } or plain array
         const companies = Array.isArray(enriched) ? enriched
