@@ -901,7 +901,7 @@ async function main() {
 
     // ── HH browser-facing endpoints (no AGENT_SECRET — authenticated by HH token file) ──
 
-    // GET /hh/review?username=X — on-demand candidate review page
+    // GET /hh/review?username=X&token=Y — on-demand candidate review page
     if (req.method === 'GET' && url.pathname === '/hh/review') {
       const username = url.searchParams.get('username') || '';
       const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -912,6 +912,14 @@ async function main() {
 <style>body{font-family:system-ui;padding:48px;text-align:center;background:#f1f5f9;color:#1e293b}h2{margin-bottom:12px}</style>
 </head><body><h2>${msg}</h2></body></html>`);
       };
+      // Token check: HMAC-SHA256(AGENT_SECRET, username).slice(0,16)
+      const agentSecret = process.env.AGENT_SECRET || '';
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        const expected = createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16);
+        const given = url.searchParams.get('token') || '';
+        if (given !== expected) return errPage('Ссылка недействительна. Запроси новую у бота.');
+      }
       if (!username || !fs.existsSync(tokenFile)) return errPage('HH не подключён. Скажи боту «подключи HH».');
       let tokenData;
       try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return errPage('Ошибка чтения токена.'); }
