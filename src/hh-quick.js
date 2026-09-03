@@ -147,20 +147,27 @@ function hhBase() {
   return (process.env.HH_PLATFORM_URL || process.env.AGENT_PUBLIC_URL || 'https://platform.recruiter-assistant.ru').replace(/\/$/, '');
 }
 
+// HMAC-SHA256(AGENT_SECRET, username).slice(0,16) — short, deterministic, not guessable.
+// Returns '' when AGENT_SECRET is not set (dev/test mode — no token check).
+function hhReviewToken(userId) {
+  const secret = process.env.AGENT_SECRET || '';
+  if (!secret) return '';
+  const { createHmac } = require('crypto');
+  return createHmac('sha256', secret).update(String(userId)).digest('hex').slice(0, 16);
+}
+
 // "открой ATS редактор" — no API call
 function hhAtsEditor(userId) {
-  return `🎯 Открой ATS-редактор в браузере:\n${hhBase()}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
+  const token = hhReviewToken(userId);
+  const tokenParam = token ? `&token=${token}` : '';
+  return `🎯 Candidate Funnel Editor:\n${hhBase()}/hh/ats-editor?username=${encodeURIComponent(userId)}${tokenParam}`;
 }
 
 // "покажи страницу ревью кандидатов" — no API call
 function hhReviewPage(userId) {
-  return `📋 Страница ревью кандидатов:\n${hhBase()}/hh/review?username=${encodeURIComponent(userId)}`;
-}
-
-// "покажи страницу ревью кандидатов" — no API call
-function hhReviewPage(userId) {
-  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-  return `📋 Страница ревью кандидатов:\n${base}/hh/review?username=${encodeURIComponent(userId)}`;
+  const token = hhReviewToken(userId);
+  const tokenParam = token ? `&token=${token}` : '';
+  return `📋 Страница ревью кандидатов:\n${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}`;
 }
 
 // Export cache invalidation for tests
