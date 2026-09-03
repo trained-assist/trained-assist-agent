@@ -143,6 +143,65 @@ function scheduleNalogExpiryChecks(secrets) {
   setInterval(check, CHECK_INTERVAL_MS);
 }
 
+// Background HH scoring: fetch negotiations + score unscored candidates for all users
+// with HH token + active vacancy + ATS config. Runs every 5 min so the review page
+// shows scores immediately without blocking on page open.
+const _hhBgRunning = new Set();
+
+async function runHhScoringForUser(username) {
+  if (_hhBgRunning.has(username)) return;
+  _hhBgRunning.add(username);
+  try {
+    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+    if (!fs.existsSync(tokenFile)) return;
+    let tokenData;
+    try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return; }
+    if (!tokenData?.access_token) return;
+
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const workDir = path.join(dataDir, 'sessions', String(username));
+    const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+    if (!fs.existsSync(vacancyCtxFile)) return;
+    let vacancy;
+    try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch { return; }
+    if (!vacancy?.id) return;
+
+    // Only score if ATS config exists (otherwise no criteria to score against)
+    const configFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+    if (!fs.existsSync(configFile)) return;
+
+    let negotiations = [];
+    let page = 0, totalPages = 1;
+    do {
+      const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=${page}`, tokenData.access_token);
+      negotiations = negotiations.concat(data.items || []);
+      totalPages = data.pages ?? 1;
+      page++;
+    } while (page < totalPages);
+
+    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4 });
+    if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
+  } catch (e) {
+    console.error(`[hh-bg] error for ${username}:`, e.message);
+  } finally {
+    _hhBgRunning.delete(username);
+  }
+}
+
+function scheduleHhBackgroundScoring() {
+  async function run() {
+    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    if (!fs.existsSync(hhTokensBase)) return;
+    for (const username of fs.readdirSync(hhTokensBase)) {
+      runHhScoringForUser(username).catch(() => {});
+      await new Promise(r => setTimeout(r, 1000)); // stagger users to avoid API burst
+    }
+  }
+  setTimeout(() => run().catch(() => {}), 3 * 60 * 1000); // first run 3 min after start
+  setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
+}
+
 async function main() {
   const secrets = await loadSecrets();
 
@@ -944,19 +1003,14 @@ async function main() {
         } while (page < totalPages);
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
-      // Auto-score unscored candidates if ATS config exists (non-blocking for first load,
-      // but we await it so the page shows scores on first open)
-      try {
-        const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 8 });
-        if (scored > 0) console.log(`[hh/review] auto-scored ${scored} candidates for ${username}`);
-      } catch (e) {
-        console.error('[hh/review] auto-score error:', e.message);
-      }
-
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
       const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(html);
+      res.end(html);
+
+      // Score any unscored candidates in the background after page is already served
+      runHhScoringForUser(username).catch(e => console.error('[hh/review] bg-score error:', e.message));
+      return;
     }
 
     // GET /hh/ats-editor?username=X&token=Y — serve the ATS Template Editor HTML page
@@ -1202,6 +1256,8 @@ async function main() {
       const existingStyle = fs.existsSync(styleFile3) ? fs.readFileSync(styleFile3, 'utf8').trim() : '';
       const callbackBase3 = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
       const hmacToken3 = agentSecret ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16) : '';
+      const defaultStyle = '- Тон: профессиональный, дружелюбный, без официоза. Обращение на «вы».\n- Приветствие: «Добрый день, [Имя]!» или «Здравствуйте, [Имя]!»\n- Структура: приветствие → что понравилось в резюме → описание роли → 1-2 конкретных вопроса → призыв ответить\n- Всегда задаю конкретные вопросы по опыту из требований вакансии, не общие\n- Не использую штампы: «рассмотрели вашу кандидатуру», «вакансия открылась», «мы ищем»\n- Длина: 4-6 предложений\n- Подпись: имя рекрутера';
+      const rulesValue = (existingStyle || defaultStyle).replace(/`/g, '\\`');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html><head><meta charset="utf-8">
 <title>Стиль общения — ${username}</title>
@@ -1210,57 +1266,86 @@ async function main() {
 *{box-sizing:border-box}
 body{font-family:system-ui,sans-serif;margin:0;padding:24px;background:#f8fafc;color:#1e293b;max-width:720px;margin:0 auto}
 h1{font-size:1.4rem;margin-bottom:4px}
-p.sub{color:#64748b;margin:0 0 20px;font-size:.9rem}
-textarea{width:100%;height:340px;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font-size:.9rem;line-height:1.5;resize:vertical;background:#fff;color:#1e293b}
+p.sub{color:#64748b;margin:0 0 16px;font-size:.9rem}
+h2{font-size:1rem;margin:24px 0 6px;color:#1e293b}
+textarea{width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font-size:.9rem;line-height:1.5;resize:vertical;background:#fff;color:#1e293b}
 textarea::placeholder{color:#94a3b8}
-.hint{color:#64748b;font-size:.82rem;margin:8px 0 16px}
-button{background:#2563eb;color:#fff;border:none;padding:12px 28px;border-radius:8px;font-size:1rem;cursor:pointer;font-weight:600}
-button:hover{background:#1d4ed8}
-button:disabled{background:#94a3b8;cursor:not-allowed}
-.existing{background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:12px;margin-bottom:20px;font-size:.85rem;white-space:pre-wrap;max-height:180px;overflow-y:auto;color:#0369a1}
-.existing-label{font-size:.8rem;color:#0284c7;font-weight:600;margin-bottom:6px}
-#status{margin-top:16px;padding:12px;border-radius:8px;font-size:.9rem;display:none}
-#status.ok{background:#dcfce7;color:#166534;display:block}
-#status.err{background:#fee2e2;color:#991b1b;display:block}
-#status.loading{background:#fef9c3;color:#713f12;display:block}
+.hint{color:#64748b;font-size:.82rem;margin:6px 0 12px}
+button{border:none;padding:10px 24px;border-radius:8px;font-size:.95rem;cursor:pointer;font-weight:600}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1d4ed8}
+.btn-secondary{background:#e2e8f0;color:#334155}
+.btn-secondary:hover{background:#cbd5e1}
+button:disabled{opacity:.5;cursor:not-allowed}
+.sep{border:none;border-top:1px solid #e2e8f0;margin:28px 0}
+.status{margin-top:12px;padding:10px 14px;border-radius:8px;font-size:.9rem;display:none}
+.status.ok{background:#dcfce7;color:#166534;display:block}
+.status.err{background:#fee2e2;color:#991b1b;display:block}
+.status.loading{background:#fef9c3;color:#713f12;display:block}
 </style>
 </head><body>
 <h1>✍️ Стиль общения с кандидатами</h1>
-<p class="sub">Вставь 3–10 примеров своих сообщений кандидатам. Нейросеть извлечёт правила стиля и сохранит их — они будут применяться при генерации сообщений.</p>
-${existingStyle ? '<div class="existing-label">Текущий сохранённый стиль:</div><div class="existing">' + existingStyle.replace(/</g, '&lt;') + '</div>' : ''}
-<textarea id="examples" placeholder="Привет! Меня зовут Анна, я рекрутер в компании X...
+<p class="sub">Правила применяются при генерации сообщений. Отредактируй напрямую или загрузи из примеров диалогов.</p>
 
-Добрый день! Посмотрела ваше резюме — интересный опыт в...
+<h2>Правила стиля</h2>
+<textarea id="rules" rows="10" placeholder="- Тон: ...\n- Приветствие: ...\n- Структура: ...">${rulesValue}</textarea>
+<div class="hint">Можно писать в свободной форме — список правил, описание тона, любые инструкции.</div>
+<button class="btn-primary" id="btnSave" onclick="saveRules()">Сохранить правила</button>
+<div class="status" id="statusSave"></div>
 
-Здравствуйте! Нашла ваш профиль и хотела бы уточнить..."></textarea>
-<div class="hint">Примеры будут использованы только для извлечения стиля — сами тексты не сохраняются.</div>
-<button id="btn" onclick="save()">Обновить стиль</button>
-<div id="status"></div>
+<hr class="sep">
+
+<h2>Или загрузить из примеров / диалогов</h2>
+<p class="sub" style="margin-bottom:10px">Можно кидать прямо диалоги целиком — поймём где вы, где кандидат. AI извлечёт правила стиля и заполнит поле выше.</p>
+<textarea id="examples" rows="8" placeholder="Рекрутер: Добрый день, Иван! Посмотрела ваше резюме...
+Кандидат: Здравствуйте! Да, интересно узнать подробности.
+Рекрутер: Отлично! Расскажите, есть ли у вас опыт..."></textarea>
+<div class="hint">Примеры используются только для извлечения стиля и не сохраняются.</div>
+<button class="btn-secondary" id="btnExtract" onclick="extractStyle()">Извлечь стиль из примеров</button>
+<div class="status" id="statusExtract"></div>
+
 <script>
-async function save() {
-  const text = document.getElementById('examples').value.trim();
-  if (!text || text.length < 50) { showStatus('err', 'Вставь хотя бы пару примеров сообщений (мин. 50 символов).'); return; }
-  document.getElementById('btn').disabled = true;
-  showStatus('loading', 'Анализирую примеры... это займёт 5–15 секунд...');
+async function saveRules() {
+  const text = document.getElementById('rules').value.trim();
+  if (!text || text.length < 10) { show('statusSave', 'err', 'Правила не могут быть пустыми.'); return; }
+  document.getElementById('btnSave').disabled = true;
+  show('statusSave', 'loading', 'Сохраняю...');
   try {
     const r = await fetch('${callbackBase3}/hh/update-style', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', examples: text}),
+      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', examples: text, direct: true}),
+    });
+    const d = await r.json();
+    if (d.ok) show('statusSave', 'ok', '✅ Правила сохранены! Применятся при следующей генерации сообщений.');
+    else show('statusSave', 'err', 'Ошибка: ' + (d.error || 'неизвестная'));
+  } catch(e) { show('statusSave', 'err', 'Сетевая ошибка: ' + e.message); }
+  document.getElementById('btnSave').disabled = false;
+}
+async function extractStyle() {
+  const text = document.getElementById('examples').value.trim();
+  if (!text || text.length < 50) { show('statusExtract', 'err', 'Вставь хотя бы пару примеров (мин. 50 символов).'); return; }
+  document.getElementById('btnExtract').disabled = true;
+  show('statusExtract', 'loading', 'Анализирую примеры... 5–15 секунд...');
+  try {
+    const r = await fetch('${callbackBase3}/hh/update-style', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', examples: text, direct: false, save: false}),
     });
     const d = await r.json();
     if (d.ok) {
-      showStatus('ok', '✅ Стиль сохранён! При следующей генерации сообщений он будет применяться автоматически.');
-      document.getElementById('btn').textContent = 'Обновить ещё раз';
+      document.getElementById('rules').value = d.style;
+      show('statusExtract', 'ok', '✅ Стиль извлечён — проверь поле «Правила стиля» выше и нажми «Сохранить».');
     } else {
-      showStatus('err', 'Ошибка: ' + (d.error || 'неизвестная'));
+      show('statusExtract', 'err', 'Ошибка: ' + (d.error || 'неизвестная'));
     }
-  } catch(e) { showStatus('err', 'Сетевая ошибка: ' + e.message); }
-  document.getElementById('btn').disabled = false;
+  } catch(e) { show('statusExtract', 'err', 'Сетевая ошибка: ' + e.message); }
+  document.getElementById('btnExtract').disabled = false;
 }
-function showStatus(type, msg) {
-  const s = document.getElementById('status');
-  s.className = type; s.textContent = msg;
+function show(id, type, msg) {
+  const s = document.getElementById(id);
+  s.className = 'status ' + type; s.textContent = msg;
 }
 </script>
 </body></html>`);
@@ -1270,9 +1355,9 @@ function showStatus(type, msg) {
     if (req.method === 'POST' && url.pathname === '/hh/update-style') {
       res.setHeader('Access-Control-Allow-Origin', '*');
       const body4 = JSON.parse(await readBody(req));
-      const { username, token: givenToken, examples } = body4 || {};
+      const { username, token: givenToken, examples, direct = false, save: doSave = true } = body4 || {};
       if (!username || !examples || typeof examples !== 'string') return json(res, 400, { error: 'missing fields' });
-      if (examples.trim().length < 50) return json(res, 400, { error: 'examples too short' });
+      if (!direct && examples.trim().length < 50) return json(res, 400, { error: 'examples too short' });
       const agentSecret4 = process.env.AGENT_SECRET || '';
       if (agentSecret4) {
         const { createHmac } = require('crypto');
@@ -1280,12 +1365,21 @@ function showStatus(type, msg) {
         if (givenToken !== expected4) return json(res, 403, { error: 'invalid token' });
       }
       const hhTokensBase4 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+
+      // direct mode: save as-is without AI
+      if (direct) {
+        fs.mkdirSync(path.join(hhTokensBase4, String(username)), { recursive: true });
+        fs.writeFileSync(path.join(hhTokensBase4, String(username), 'hh-message-style'), examples.trim());
+        console.log('[hh/update-style] direct save for', username, 'len=', examples.length);
+        return json(res, 200, { ok: true, style: examples.trim() });
+      }
+
       const orKeyFile4 = path.join(hhTokensBase4, String(username), 'openrouter');
       const apiKey4 = fs.existsSync(orKeyFile4) ? fs.readFileSync(orKeyFile4, 'utf8').trim() : process.env.OPENROUTER_API_KEY;
       if (!apiKey4) return json(res, 503, { error: 'OpenRouter key not configured' });
 
-      const systemPrompt4 = 'Ты — аналитик коммуникаций. Проанализируй примеры сообщений рекрутера кандидатам и составь краткое описание стиля общения. Это описание будет использоваться как инструкция для другой нейросети при генерации новых сообщений.\n\nФормат ответа — структурированный текст на русском языке:\n- Тон и манера (формальность, теплота, дистанция)\n- Характерные обороты и приветствия\n- Структура типичного сообщения\n- Что обычно уточняет или спрашивает\n- Что избегает\n- Длина сообщений\n\nБудь конкретным — используй реальные фразы из примеров.';
-      const userMsg4 = 'Примеры сообщений рекрутера:\n\n' + examples.trim().slice(0, 4000);
+      const systemPrompt4 = 'Ты — аналитик коммуникаций. Тебе могут прислать отдельные сообщения рекрутера ИЛИ полные диалоги между рекрутером и кандидатом. Если это диалог — проанализируй только сообщения рекрутера, проигнорируй ответы кандидата.\n\nСоставь краткое описание стиля общения рекрутера. Это описание будет использоваться как инструкция для нейросети при генерации новых сообщений.\n\nФормат — структурированный список на русском языке (через дефис):\n- Тон и манера (формальность, теплота)\n- Характерные обороты и приветствия (с реальными примерами из текста)\n- Структура типичного сообщения\n- Что обычно уточняет или спрашивает\n- Чего избегает\n- Длина сообщений\n\nБудь конкретным — цитируй реальные фразы из примеров.';
+      const userMsg4 = 'Примеры (могут быть диалоги или отдельные сообщения рекрутера):\n\n' + examples.trim().slice(0, 4000);
 
       try {
         const style = await new Promise((resolve, reject) => {
@@ -1316,9 +1410,11 @@ function showStatus(type, msg) {
           hreq4.end();
         });
 
-        fs.mkdirSync(path.join(hhTokensBase4, String(username)), { recursive: true });
-        fs.writeFileSync(path.join(hhTokensBase4, String(username), 'hh-message-style'), style.trim());
-        console.log('[hh/update-style] saved style for', username, 'len=', style.length);
+        if (doSave !== false) {
+          fs.mkdirSync(path.join(hhTokensBase4, String(username)), { recursive: true });
+          fs.writeFileSync(path.join(hhTokensBase4, String(username), 'hh-message-style'), style.trim());
+          console.log('[hh/update-style] saved style for', username, 'len=', style.length);
+        }
         return json(res, 200, { ok: true, style });
       } catch (e) {
         console.error('[hh/update-style] error:', e.message);
@@ -1766,6 +1862,7 @@ function showStatus(type, msg) {
   setInterval(() => pollDriveChanges(driveOpts).catch(() => {}), 2 * 60 * 1000);
 
   scheduleNalogExpiryChecks(secrets);
+  scheduleHhBackgroundScoring();
 
   const shutdown = () => {
     server.close(() => process.exit(0));
@@ -2083,13 +2180,13 @@ const HH_SECRET = '${esc(agentSecret)}';
 const done = new Set();
 
 const CARDS_HTML = ${JSON.stringify(cardsHtmlArray)};
-const BATCH_SIZE = 20;
+const FIRST_BATCH = 30;
+const LAZY_BATCH = 50;
 let rendered = 0;
-let autoGenQueued = false;
 
-function renderBatch() {
+function renderBatch(count) {
   const container = document.getElementById('cards-container');
-  const end = Math.min(rendered + BATCH_SIZE, CARDS_HTML.length);
+  const end = Math.min(rendered + (count || LAZY_BATCH), CARDS_HTML.length);
   const frag = document.createDocumentFragment();
   for (let j = rendered; j < end; j++) {
     const wrapper = document.createElement('div');
@@ -2104,10 +2201,10 @@ function renderBatch() {
 }
 
 const lazyObserver = new IntersectionObserver(entries => {
-  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) renderBatch();
-}, { rootMargin: '300px' });
+  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) renderBatch(LAZY_BATCH);
+}, { rootMargin: '1500px' });
 lazyObserver.observe(document.getElementById('sentinel'));
-renderBatch();
+renderBatch(FIRST_BATCH);
 
 function showToast(msg, isError) {
   const t = document.createElement('div');
