@@ -118,7 +118,7 @@ async function hhPut(apiPath, token) {
 
 // ── OpenRouter LLM ─────────────────────────────────────────────────────────
 
-const FAST_MODEL = 'anthropic/claude-haiku-4-5-20251001';
+const FAST_MODEL = 'deepseek/deepseek-v4-flash-0731';
 const SMART_MODEL = 'deepseek/deepseek-chat'; // DeepSeek V3 — for ATS config extraction
 
 function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
