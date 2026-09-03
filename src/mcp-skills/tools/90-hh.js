@@ -28,22 +28,19 @@ function writeContext(skill, key, value) {
 
 // ── Token storage ──────────────────────────────────────────────────────────
 
+const { readHhToken: _readHhTokenUtil, hhTokenPath } = require('../../hh-utils');
+
 function tokenBase() {
   return process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-}
-
-function hhTokenPath(userId) {
-  return path.join(tokenBase(), String(userId || USER_ID), 'hh');
 }
 
 function orKeyPath(userId) {
   return path.join(tokenBase(), String(userId || USER_ID), 'openrouter');
 }
 
+// Wraps hh-utils readHhToken, defaulting to USER_ID when no arg passed
 function readHhToken(userId) {
-  const file = hhTokenPath(userId);
-  if (!fs.existsSync(file)) return null;
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  return _readHhTokenUtil(userId || USER_ID);
 }
 
 function readOrKey(userId) {
@@ -623,18 +620,15 @@ module.exports = {
         let unreadMessages = 0;
 
         try {
-          // Count candidates per stage
-          for (const st of STATES) {
-            try {
-              const data = await hhGet(
-                `/negotiations/${st}?vacancy_id=${resolvedVacancyId}&per_page=1&page=0`,
-                token,
-              );
-              counts[st] = data.found || 0;
-            } catch {
-              counts[st] = 0;
-            }
-          }
+          // Count candidates per stage — parallel for speed
+          const stageResults = await Promise.all(
+            STATES.map(st =>
+              hhGet(`/negotiations/${st}?vacancy_id=${resolvedVacancyId}&per_page=1&page=0`, token)
+                .then(d => [st, d.found || 0])
+                .catch(() => [st, 0]),
+            ),
+          );
+          for (const [st, n] of stageResults) counts[st] = n;
 
           // Count unread applicant messages (with_applicant_new state)
           try {

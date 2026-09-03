@@ -351,3 +351,92 @@ describe('False positives — real tasks must reach Claude', () => {
     expect(qa(task)).toBeNull();
   });
 });
+
+// ── HH quick-answer intent regexes ───────────────────────────────────────────
+// These verify that the right phrases trigger (or don't trigger) each HH async handler.
+// getQuickAnswer() returns null for all of them — the async dispatch lives in runQuickAnswer().
+// We test the raw intent regexes exported for this purpose.
+
+describe('HH intents — vacancies', () => {
+  const { HH_MY_VACANCIES_INTENT } = require('../src/runner.js')._intents;
+
+  it.each([
+    'мои вакансии',
+    'список вакансий',
+    'какие вакансии у меня',
+    'с чем работать',
+    'покажи мои вакансии',
+    'дай список вакансий',
+    'мои активные вакансии',
+  ])('matches: "%s"', (t) => expect(HH_MY_VACANCIES_INTENT.test(t)).toBe(true));
+
+  it.each([
+    'сколько откликов',
+    'кто откликнулся',
+    'открой ats редактор',
+    'напиши вакансию для менеджера',
+    'обнови описание вакансии',
+  ])('does NOT match: "%s"', (t) => expect(HH_MY_VACANCIES_INTENT.test(t)).toBe(false));
+});
+
+describe('HH intents — funnel stats', () => {
+  const { HH_FUNNEL_INTENT } = require('../src/runner.js')._intents;
+
+  it.each([
+    'сколько откликов',
+    'статистика воронки',
+    'что новенького',
+    'воронка кандидатов',
+    'статистика по вакансии',
+    'кандидатов по вакансии сейчас',
+  ])('matches: "%s"', (t) => expect(HH_FUNNEL_INTENT.test(t)).toBe(true));
+
+  it.each([
+    'мои вакансии',
+    'кто откликнулся',
+    'открой ats',
+    'напиши отклик кандидату',
+  ])('does NOT match: "%s"', (t) => expect(HH_FUNNEL_INTENT.test(t)).toBe(false));
+});
+
+describe('HH intents — new responses', () => {
+  const { HH_RESPONSES_INTENT } = require('../src/runner.js')._intents;
+
+  it.each([
+    'новые отклики',
+    'кто откликнулся',
+    'покажи кандидатов',
+    'новых кандидатов',
+    'список откликов',
+    'пришли отклики',
+    'новые кандидаты',
+  ])('matches: "%s"', (t) => expect(HH_RESPONSES_INTENT.test(t)).toBe(true));
+
+  it.each([
+    'мои вакансии',
+    'статистика воронки',
+    'открой ats',
+    'оцени кандидата Иванова',
+  ])('does NOT match: "%s"', (t) => expect(HH_RESPONSES_INTENT.test(t)).toBe(false));
+});
+
+describe('HH intents — ATS editor', () => {
+  const { HH_ATS_EDITOR_INTENT } = require('../src/runner.js')._intents;
+
+  it.each([
+    'открой ats редактор',
+    'открой редактор',
+    'ats editor открой',
+    'ats редактор',
+    'редактор ats настрой',
+    'открой конфигуратор',
+  ])('matches: "%s"', (t) => expect(HH_ATS_EDITOR_INTENT.test(t)).toBe(true));
+
+  it.each([
+    'мои вакансии',
+    'статистика воронки',
+    'новые отклики',
+    'настрой напоминание',
+    'открой файл',
+  ])('does NOT match: "%s"', (t) => expect(HH_ATS_EDITOR_INTENT.test(t)).toBe(false));
+});
