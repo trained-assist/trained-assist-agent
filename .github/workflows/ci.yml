@@ -51,7 +51,8 @@ jobs:
             cd /home/vova/trained-assist-agent
             git fetch origin main
             git reset --hard origin/main
-            printf 'INN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\n' \
+            printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\n' \
+              '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
               '${{ secrets.INN_DADATA_SECRET }}' \
               '${{ secrets.INN_CHECKO_KEY }}' \
