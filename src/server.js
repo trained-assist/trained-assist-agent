@@ -5,7 +5,7 @@ const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
-const { runTask, generateConnectLink } = require('./runner');
+const { runTask, generateConnectLink, getQuickAnswer } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions } = require('./session-store');
@@ -920,7 +920,35 @@ async function main() {
       if (fs.existsSync(tokensDir)) {
         capabilities = fs.readdirSync(tokensDir).filter(f => !SKIP.has(f) && !f.startsWith('.'));
       }
-      return json(res, 200, { capabilities });
+      // skills[] — MCP tool categories available on this agent
+      const SKILL_NAMES = {
+        '10-nalog.js': 'nalog', '20-tilda.js': 'tilda', '21-browser-session.js': 'browser',
+        '30-weeek.js': 'weeek', '40-company.js': 'company', '50-gdrive.js': 'gdrive',
+        '60-github.js': 'github', '70-inn-enrichment.js': 'inn', '80-getcourse.js': 'getcourse',
+        '85-expo.js': 'expo', '86-expo-flexi.js': 'expo-flexi', '90-hh.js': 'hh',
+        '92-flexi-sales.js': 'flexi-sales',
+      };
+      const toolsDir = path.join(__dirname, 'mcp-skills', 'tools');
+      const skills = fs.existsSync(toolsDir)
+        ? fs.readdirSync(toolsDir).map(f => SKILL_NAMES[f]).filter(Boolean)
+        : [];
+      const upsell_text = process.env.AGENT_UPSELL_TEXT ||
+        'За HH-рекрутингом, налогами, задачами Weeek и другим — обратитесь к @super_personal_assistant_bot';
+      return json(res, 200, { capabilities, skills, upsell_text });
+    }
+
+    // POST /quick — quick deterministic answer without Claude Code (<200ms)
+    if (req.method === 'POST' && url.pathname === '/quick') {
+      const body = await readBody(req);
+      let payload;
+      try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
+      const { userId, query } = payload;
+      if (!userId || !query) return json(res, 400, { error: 'missing fields' });
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
+      const workDir = path.join(BASE_USERS_DIR, String(userId));
+      const start = Date.now();
+      const answer = getQuickAnswer(String(query), String(userId), workDir) || null;
+      return json(res, 200, { answer, ms: Date.now() - start });
     }
 
     // GET /skills — list all available MCP skills (for bot /skills command)
