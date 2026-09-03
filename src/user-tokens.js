@@ -3,7 +3,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const TOKENS_ROOT = path.join(os.homedir(), 'agent-tokens');
+const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'agent-tokens');
 const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
 const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
 

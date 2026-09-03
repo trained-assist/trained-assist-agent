@@ -85,14 +85,20 @@ let runTask;
 let sessionStore;
 let origTgUrl;
 
+// Isolated tokens root — prevents loadUserTokens from scanning real ~/agent-tokens/
+// and migrating real user data into the test run.
+let testTokensRoot;
+
 beforeAll(async () => {
   await startTgServer();
   buildFakeClaudeBinary();
+  testTokensRoot = mkdtempSync(join(tmpdir(), 'runner-e2e-tokens-'));
 
   // Patch env BEFORE loading runner.js (runner reads TG_API at module level)
   origTgUrl = process.env.TELEGRAM_API_URL;
   process.env.TELEGRAM_API_URL = `http://127.0.0.1:${tgPort}`;
   process.env.CLAUDE_BIN = join(fakeBinDir, 'claude'); // explicit path, no PATH manipulation
+  process.env.AGENT_TOKENS_ROOT = testTokensRoot;     // isolate from real ~/agent-tokens/
 
   const mod = require('../src/runner.js');
   runTask = mod.runTask;
@@ -102,6 +108,8 @@ beforeAll(async () => {
 afterAll(async () => {
   process.env.TELEGRAM_API_URL = origTgUrl;
   delete process.env.CLAUDE_BIN;
+  delete process.env.AGENT_TOKENS_ROOT;
+  rmSync(testTokensRoot, { recursive: true, force: true });
   await stopTgServer();
   rmSync(fakeBinDir, { recursive: true, force: true });
 });
@@ -122,8 +130,14 @@ afterEach(() => {
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
+// Use a unique username per test so listConnectedServices() never picks up real
+// tokens from ~/agent-tokens/testuser/ on the developer's machine.
+// A random suffix ensures no accidental collision with real profiles.
+let testUsername;
+beforeEach(() => { testUsername = `testuser-${Math.random().toString(36).slice(2, 8)}`; });
+
 function makeUser(userId = 111222333) {
-  return { id: userId, name: 'Test', username: 'testuser', workDir };
+  return { id: userId, name: 'Test', username: testUsername, workDir };
 }
 
 async function chat(task, { userId = 111222333, sessionId = null, claudeReply = null } = {}) {
