@@ -8,7 +8,7 @@ const { loadSecrets } = require('./secrets');
 const { runTask, generateConnectLink } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions } = require('./session-store');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
 const { nalogFormHtml } = require('./connect-forms/nalog');
@@ -1055,6 +1055,21 @@ async function main() {
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '10', 10), 50);
       const workDir = path.join(BASE_USERS_DIR, username);
       return json(res, 200, { sessions: listSessions(workDir, limit) });
+    }
+
+    // POST /sessions/archive — remove sessions from the index
+    if (req.method === 'POST' && url.pathname === '/sessions/archive') {
+      const body = await readBody(req);
+      let payload;
+      try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
+      const { username, sessionIds } = payload;
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+      if (!Array.isArray(sessionIds) || sessionIds.length === 0)
+        return json(res, 400, { error: 'sessionIds must be a non-empty array' });
+      const workDir = path.join(BASE_USERS_DIR, username);
+      const archived = archiveSessions(workDir, sessionIds);
+      return json(res, 200, { archived });
     }
 
     // GET /sessions/:id?username=xxx — get full session with messages

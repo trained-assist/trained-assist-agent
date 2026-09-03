@@ -156,4 +156,15 @@ function setCurrentSessionId(workDir, id) {
   }
 }
 
-module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId };
+/** Archive (remove) sessions by id; returns count actually removed */
+function archiveSessions(workDir, sessionIds) {
+  if (!Array.isArray(sessionIds) || sessionIds.length === 0) return 0;
+  const idSet = new Set(sessionIds);
+  const sessions = loadIndex(workDir);
+  const remaining = sessions.filter(s => !idSet.has(s.id));
+  const archived = sessions.length - remaining.length;
+  if (archived > 0) saveIndex(workDir, remaining);
+  return archived;
+}
+
+module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId, archiveSessions };
