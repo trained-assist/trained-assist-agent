@@ -890,13 +890,103 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
       });
       return res.end();
+    }
+
+    // ── HH browser-facing endpoints (no AGENT_SECRET — authenticated by HH token file) ──
+
+    // GET /hh/review?username=X — on-demand candidate review page
+    if (req.method === 'GET' && url.pathname === '/hh/review') {
+      const username = url.searchParams.get('username') || '';
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+      const errPage = (msg) => {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(`<!doctype html><html><head><meta charset="utf-8"><title>HH Ревью</title>
+<style>body{font-family:system-ui;padding:48px;text-align:center;background:#f1f5f9;color:#1e293b}h2{margin-bottom:12px}</style>
+</head><body><h2>${msg}</h2></body></html>`);
+      };
+      if (!username || !fs.existsSync(tokenFile)) return errPage('HH не подключён. Скажи боту «подключи HH».');
+      let tokenData;
+      try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return errPage('Ошибка чтения токена.'); }
+
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const workDir = path.join(dataDir, 'sessions', username);
+      const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+      let vacancy = null;
+      try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
+      if (!vacancy?.id) return errPage('Вакансия не выбрана. Скажи боту «мои вакансии» и выбери вакансию.');
+
+      let negotiations = [];
+      try {
+        const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=0`, tokenData.access_token);
+        negotiations = data.items || [];
+      } catch (e) { console.error('[hh/review] fetch error:', e.message); }
+
+      const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(html);
+    }
+
+    // POST /hh/send — send a message to a candidate (called from review page)
+    if (req.method === 'POST' && url.pathname === '/hh/send') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username, negotiation_id, message } = body || {};
+      if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
+
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+      if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
+      const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
+
+      try {
+        await hhApiPost(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
+        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+        const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
+        fs.mkdirSync(histDir, { recursive: true });
+        const histFile = path.join(histDir, `${negotiation_id}.json`);
+        const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
+        history.messages = history.messages || [];
+        history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString() });
+        fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
+        console.log(`[hh/send] user=${username} neg=${negotiation_id} len=${message.length}`);
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        console.error('[hh/send] error:', e.message);
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /hh/reject — bulk reject candidates (called from review page)
+    if (req.method === 'POST' && url.pathname === '/hh/reject') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username, negotiation_ids } = body || {};
+      if (!username || !Array.isArray(negotiation_ids) || negotiation_ids.length === 0) {
+        return json(res, 400, { error: 'missing fields' });
+      }
+      const hhTokensBase2 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile2 = path.join(hhTokensBase2, String(username), 'hh');
+      if (!fs.existsSync(tokenFile2)) return json(res, 403, { error: 'HH not connected for this user' });
+      const tokenData2 = JSON.parse(fs.readFileSync(tokenFile2, 'utf8'));
+      const results = [];
+      for (const negId of negotiation_ids) {
+        try {
+          await hhApiPut(`/negotiations/discard_vacancy_closed/${negId}`, tokenData2.access_token);
+          results.push({ negotiation_id: negId, ok: true });
+        } catch (e) { results.push({ negotiation_id: negId, ok: false, error: e.message }); }
+      }
+      const failed = results.filter(r => !r.ok).length;
+      console.log(`[hh/reject] user=${username} total=${negotiation_ids.length} failed=${failed}`);
+      return json(res, 200, { ok: true, results });
     }
 
     // Auth: all endpoints require Bearer token
@@ -1244,71 +1334,6 @@ async function main() {
       }
     }
 
-    // ── HH Action Endpoints — called by the review page HTML ─────────────────
-
-    // POST /hh/send — send a message to a candidate (called from review page)
-    if (req.method === 'POST' && url.pathname === '/hh/send') {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      const body = JSON.parse(await readBody(req));
-      const { username, negotiation_id, message } = body || {};
-      if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
-
-      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-      const tokenFile = path.join(hhTokensBase, String(username), 'hh');
-      if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
-      const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
-
-      try {
-        await hhApiPost(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
-
-        // Save to candidate history (same path as 90-hh.js)
-        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-        const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
-        fs.mkdirSync(histDir, { recursive: true });
-        const histFile = path.join(histDir, `${negotiation_id}.json`);
-        const history = fs.existsSync(histFile)
-          ? JSON.parse(fs.readFileSync(histFile, 'utf8'))
-          : { messages: [] };
-        history.messages = history.messages || [];
-        history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString() });
-        fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
-
-        console.log(`[hh/send] user=${username} neg=${negotiation_id} len=${message.length}`);
-        return json(res, 200, { ok: true });
-      } catch (e) {
-        console.error('[hh/send] error:', e.message);
-        return json(res, 500, { error: e.message });
-      }
-    }
-
-    // POST /hh/reject — bulk reject candidates (called from review page)
-    if (req.method === 'POST' && url.pathname === '/hh/reject') {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      const body = JSON.parse(await readBody(req));
-      const { username, negotiation_ids } = body || {};
-      if (!username || !Array.isArray(negotiation_ids) || negotiation_ids.length === 0) {
-        return json(res, 400, { error: 'missing fields' });
-      }
-
-      const hhTokensBase2 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-      const tokenFile = path.join(hhTokensBase2, String(username), 'hh');
-      if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
-      const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
-
-      const results = [];
-      for (const negId of negotiation_ids) {
-        try {
-          await hhApiPut(`/negotiations/discard_vacancy_closed/${negId}`, tokenData.access_token);
-          results.push({ negotiation_id: negId, ok: true });
-        } catch (e) {
-          results.push({ negotiation_id: negId, ok: false, error: e.message });
-        }
-      }
-      const failed = results.filter(r => !r.ok).length;
-      console.log(`[hh/reject] user=${username} total=${negotiation_ids.length} failed=${failed}`);
-      return json(res, 200, { ok: true, results });
-    }
-
     // ── ATS Template Editor ────────────────────────────────────────────────────
 
     // GET /hh/ats-editor?username=X — serve the ATS Template Editor HTML page
@@ -1430,6 +1455,92 @@ function readBody(req, maxBytes = 1_048_576) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });
+}
+
+// ── HH review page ────────────────────────────────────────────────────────────
+
+function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase) {
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const now = Date.now();
+
+  const cards = negotiations.map((neg, i) => {
+    const r = neg.resume || {};
+    const name = [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат';
+    const title = r.title || '';
+    const city = r.area?.name || '';
+    const expMonths = r.total_experience?.months || 0;
+    const expStr = expMonths >= 12 ? `${Math.floor(expMonths / 12)} лет` : expMonths ? `${expMonths} мес.` : '';
+    const daysAgo = neg.updated_at ? Math.floor((now - new Date(neg.updated_at).getTime()) / 86400000) : null;
+    const meta = [city, expStr, daysAgo != null ? `${daysAgo}д. назад` : ''].filter(Boolean).join(' · ');
+
+    return `<div class="card" id="card-${i}" data-neg="${esc(neg.id)}">
+  <div class="card-header">
+    <input type="checkbox" class="rej-cb" data-idx="${i}" onchange="onCheck()">
+    <div class="card-info">
+      <span class="cname">${esc(name)}</span>
+      ${meta ? `<span class="meta">${esc(meta)}</span>` : ''}
+    </div>
+  </div>
+  ${title ? `<p class="jobtitle">${esc(title)}</p>` : ''}
+  <div class="msg-wrap">
+    <textarea class="msg" id="msg-${i}" rows="3" placeholder="Введите сообщение..."></textarea>
+    <div class="btns">
+      <button class="btn send" onclick="sendOne(${i},'${esc(neg.id)}')">✓ Отправить</button>
+      <button class="btn skip" onclick="skipOne(${i})">Пропустить</button>
+    </div>
+  </div>
+</div>`;
+  }).join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Отклики: ${esc(vacancyTitle)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:20px 20px 90px}
+h1{font-size:20px;font-weight:700;margin-bottom:4px}
+.sub{color:#64748b;font-size:13px;margin-bottom:18px}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.08);transition:opacity .3s}
+.card.done,.card.skipped{opacity:.35;pointer-events:none}
+.card-header{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}
+.rej-cb{width:18px;height:18px;margin-top:3px;flex-shrink:0;accent-color:#dc2626;cursor:pointer}
+.card-info{display:flex;flex-direction:column;gap:2px}
+.cname{font-size:16px;font-weight:600}
+.meta{font-size:12px;color:#94a3b8}
+.jobtitle{font-size:13px;color:#475569;margin-bottom:10px}
+.msg-wrap{border-top:1px solid #e2e8f0;padding-top:10px;margin-top:8px}
+.msg{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:9px;font-size:14px;line-height:1.5;font-family:inherit;resize:vertical}
+.msg:focus{outline:none;border-color:#6366f1}
+.btns{display:flex;gap:8px;margin-top:8px}
+.btn{padding:7px 16px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
+.send{background:#16a34a;color:#fff}
+.skip{background:#e2e8f0;color:#475569}
+.footer{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e2e8f0;padding:10px 20px;display:flex;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,.08)}
+.counter{flex:1;font-size:13px;color:#475569}
+.rej-all{background:#dc2626;color:#fff;padding:8px 20px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
+.rej-all:disabled{opacity:.4;cursor:not-allowed}
+.toast{position:fixed;top:16px;right:16px;padding:9px 16px;border-radius:8px;background:#16a34a;color:#fff;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+.toast-err{background:#dc2626}
+</style>
+</head><body>
+<h1>Отклики: ${esc(vacancyTitle)}</h1>
+<p class="sub">${negotiations.length} кандидатов · <a href="?username=${esc(username)}" style="color:#6366f1">обновить</a></p>
+${cards || '<p style="color:#94a3b8;padding:24px;text-align:center">Новых откликов нет.</p>'}
+<div class="footer">
+  <span class="counter">Выбрано: <strong id="rc">0</strong></span>
+  <button class="rej-all" id="raBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
+</div>
+<script>
+const BASE='${callbackBase}',USER='${esc(username)}';
+function toast(msg,err){const t=document.createElement('div');t.className='toast'+(err?' toast-err':'');t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),3000);}
+function onCheck(){const n=document.querySelectorAll('.rej-cb:checked').length;document.getElementById('rc').textContent=n;const b=document.getElementById('raBtn');b.textContent='Отказать ('+n+')';b.disabled=n===0;}
+async function hhPost(path,data){const r=await fetch(BASE+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:USER,...data})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||r.statusText);return d;}
+async function sendOne(i,negId){const msg=document.getElementById('msg-'+i)?.value?.trim();if(!msg){toast('Введите сообщение',true);return;}try{await hhPost('/hh/send',{negotiation_id:negId,message:msg});document.getElementById('card-'+i)?.classList.add('done');toast('Отправлено!');}catch(e){toast('Ошибка: '+e.message,true);}}
+function skipOne(i){document.getElementById('card-'+i)?.classList.add('skipped');}
+async function rejectAll(){const cbs=[...document.querySelectorAll('.rej-cb:checked')];if(!cbs.length)return;const ids=cbs.map(cb=>document.getElementById('card-'+cb.dataset.idx)?.dataset.neg).filter(Boolean);try{await hhPost('/hh/reject',{negotiation_ids:ids});cbs.forEach(cb=>document.getElementById('card-'+cb.dataset.idx)?.classList.add('done'));toast('Отказано: '+ids.length);onCheck();}catch(e){toast('Ошибка: '+e.message,true);}}
+</script>
+</body></html>`;
 }
 
 // ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────

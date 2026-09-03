@@ -259,13 +259,14 @@ describe('POST /hh/send', () => {
     expect(r.status).toBe(403);
   });
 
-  it('wrong bearer token → 401', async () => {
+  it('no AGENT_SECRET required — wrong bearer still succeeds for valid user', async () => {
+    // /hh/send is public (no AGENT_SECRET check); auth is via HH token file only
     const r = await post(
       `http://127.0.0.1:${serverPort}/hh/send`,
       { username: TEST_UID, negotiation_id: 'neg-001', message: 'hi' },
       { Authorization: 'Bearer wrong-secret' },
     );
-    expect(r.status).toBe(401);
+    expect(r.status).toBe(200);
   });
 });
 

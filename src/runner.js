@@ -16,7 +16,7 @@ const {
   SERVICE_DISPLAY,
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
-const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor } = require('./hh-quick');
+const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage } = require('./hh-quick');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -49,6 +49,7 @@ const HH_MY_VACANCIES_INTENT = /мои.{0,10}вакансии|список.{0,10
 const HH_FUNNEL_INTENT      = /сколько откликов|статистика воронки|что новенького|воронка кандидатов|статистика.{0,15}вакансии|кандидатов по.{0,15}вакансии|обновление.{0,15}вакансии/i;
 const HH_RESPONSES_INTENT   = /новые отклики|кто откликнулся|покажи.{0,10}кандидатов|новых кандидатов|список откликов|пришли отклики|новые кандидаты/i;
 const HH_ATS_EDITOR_INTENT  = /открой.{0,10}(?:ats|редактор|конфигуратор)|ats.{0,10}(?:редактор|editor|открой|настрой)|редактор.{0,10}ats/i;
+const HH_REVIEW_PAGE_INTENT = /страниц.{0,20}ревью|ревью.{0,20}кандидат|страниц.{0,20}кандидат|открой.{0,15}кандидат|ссылк.{0,20}кандидат|покажи.{0,15}ссылк|хочу.{0,20}посмотреть.{0,20}откликнувш/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -351,6 +352,7 @@ async function runQuickAnswer(task, userId, workDir) {
       if (r) return r;
     }
     if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
+    if (HH_REVIEW_PAGE_INTENT.test(task)) return hhReviewPage(userId);
   }
 
   return null;
@@ -862,5 +864,5 @@ async function tgEdit(token, chatId, messageId, text) {
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink,
   // Exported for intent-coverage tests only
-  _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT },
+  _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };
