@@ -119,9 +119,14 @@ module.exports = {
     inn_enrich_batch: {
       description: `Enrich a list of Russian companies with INN, OGRN, director, revenue, and profit.
 Sources (in priority order): BFO ФНС (free), company websites, DaData, ЕГРЮЛ, Checko.
-Input: EITHER a path to exhibitors.json OR inline companies array — no file prep needed for small lists.
-Output: writes requisites_enrichment.json and requisites_report.json to out_dir (or input file dir).
-Estimated time: 10–15 min for 300 companies. Timeout is 15 min — do not cancel early.
+Input: EITHER a path to exhibitors.json OR inline companies array.
+Output: writes enriched.json (and requisites_enrichment.json alias) + requisites_report.json to out_dir.
+
+BATCH MODE (default): processes batch_size companies at a time, saves after each batch.
+Safe to run multiple times — already-enriched companies are skipped (resume=true by default).
+For 300 companies run in batches of 20: call repeatedly, each call takes ~2 min, saves progress.
+
+Progress is always written to disk after each batch — a timeout never loses more than one batch.
 
 NOTE: Works well for Russian legal entity names. Brand names (Latin, foreign) → poor match rate.`,
       inputSchema: {
@@ -134,15 +139,23 @@ NOTE: Works well for Russian legal entity names. Brand names (Latin, foreign) �
           companies: {
             type: 'array',
             items: { type: 'object' },
-            description: 'Inline array of {id, name, city?, website?} — skip file prep for ≤500 companies.',
+            description: 'Inline array of {id, name, city?, website?}.',
           },
           out_dir: {
             type: 'string',
             description: 'Directory for output files (default: input file dir, or cwd for inline companies).',
           },
+          batch_size: {
+            type: 'number',
+            description: 'Companies per batch before saving checkpoint (default: 20, min: 1, max: 50).',
+          },
+          resume: {
+            type: 'boolean',
+            description: 'Skip already-enriched companies from a previous run (default: true). Set false to re-enrich all.',
+          },
           workers: {
             type: 'number',
-            description: 'Parallel workers (default: 8, max: 16)',
+            description: 'Parallel workers within a batch (default: 5, max: 10)',
           },
           sources: {
             type: 'array',
@@ -151,7 +164,7 @@ NOTE: Works well for Russian legal entity names. Brand names (Latin, foreign) �
           },
         },
       },
-      handler: async ({ file, companies, out_dir, workers = 8, sources }, ctx) => {
+      handler: async ({ file, companies, out_dir, batch_size = 20, resume = true, workers = 5, sources }, ctx) => {
         let exhibitors;
         let outDir;
 
@@ -173,46 +186,117 @@ NOTE: Works well for Russian legal entity names. Brand names (Latin, foreign) �
         }
 
         if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+
+        const enrichedPath = path.join(outDir, 'enriched.json');
+        const enrichedAliasPath = path.join(outDir, 'requisites_enrichment.json');
+        const reportPath = path.join(outDir, 'requisites_report.json');
+
+        // Load existing results for resume
+        let alreadyDone = {};
+        if (resume) {
+          for (const p of [enrichedPath, enrichedAliasPath]) {
+            if (fs.existsSync(p)) {
+              try {
+                const saved = JSON.parse(fs.readFileSync(p, 'utf8'));
+                const arr = Array.isArray(saved) ? saved : (saved.companies || []);
+                for (const c of arr) {
+                  const key = String(c.id ?? c.name ?? '').toLowerCase();
+                  if (key) alreadyDone[key] = c;
+                }
+              } catch {}
+              break;
+            }
+          }
+        }
+
+        const remaining = exhibitors.filter(c => {
+          const key = String(c.id ?? c.name ?? '').toLowerCase();
+          return !alreadyDone[key];
+        });
+
+        const skipped = exhibitors.length - remaining.length;
+        if (remaining.length === 0) {
+          const all = Object.values(alreadyDone);
+          return {
+            ok: true,
+            total: exhibitors.length,
+            done: all.length,
+            remaining: 0,
+            skipped,
+            message: `Все ${all.length} компаний уже обогащены. Запусти expo_pipeline_qualify для фильтрации.`,
+            enrichedPath,
+          };
+        }
+
         const cfg = readConfig(ctx?.userId);
         const cacheDir = path.join(outDir, '.inn-cache');
-
         const config = {
           dadataToken: cfg.dadataToken || null,
           dadataSecret: cfg.dadataSecret || null,
           checkoKey: cfg.checkoKey || null,
           cacheDir,
-          workers: Math.min(workers, 16),
+          workers: Math.min(workers, 10),
         };
 
-        const log = [];
+        const batchSz = Math.max(1, Math.min(batch_size, 50));
+        const batch = remaining.slice(0, batchSz);
         const started = Date.now();
-        const enrichedPath = path.join(outDir, 'requisites_enrichment.json');
-        const reportPath   = path.join(outDir, 'requisites_report.json');
-        const partial = [];
+        const log = [];
 
-        const { enriched, report } = await enrich(exhibitors, config, ({ done, total, company, result }) => {
-          partial.push(result ? { ...company, ...result } : company);
-          if (result?.inn) {
-            log.push(`✓ ${company.name} → ${result.inn} [${result.requisites_confidence}]`);
-          } else if (done % 20 === 0) {
-            log.push(`… ${done}/${total} done`);
-            // Save intermediate results every 20 companies so a timeout doesn't lose all work
-            try { fs.writeFileSync(enrichedPath, JSON.stringify(partial, null, 2), 'utf8'); } catch {}
-          }
+        const { enriched: batchResults } = await enrich(batch, config, ({ done, total, company, result }) => {
+          if (result?.inn) log.push(`✓ ${company.name} → ${result.inn}`);
+          else log.push(`✗ ${company.name}`);
         });
 
-        // write final outputs
-        fs.writeFileSync(enrichedPath, JSON.stringify(enriched, null, 2), 'utf8');
-        fs.writeFileSync(reportPath,   JSON.stringify(report, null, 2), 'utf8');
+        // Merge batch results into alreadyDone map
+        for (const c of batchResults) {
+          const key = String(c.id ?? c.name ?? '').toLowerCase();
+          if (key) alreadyDone[key] = c;
+        }
 
+        // Also add back any original company that wasn't enriched (keep raw data)
+        for (const orig of exhibitors) {
+          const key = String(orig.id ?? orig.name ?? '').toLowerCase();
+          if (!alreadyDone[key]) alreadyDone[key] = orig;
+        }
+
+        const allResults = Object.values(alreadyDone);
         const elapsed = Math.round((Date.now() - started) / 1000);
+
+        // Save checkpoint — both filenames for compatibility
+        const json = JSON.stringify(allResults, null, 2);
+        fs.writeFileSync(enrichedPath, json, 'utf8');
+        fs.writeFileSync(enrichedAliasPath, json, 'utf8');
+
+        // Save simple report
+        const withInn = allResults.filter(c => c.inn);
+        const report = {
+          total: exhibitors.length,
+          enriched: allResults.length,
+          with_inn: withInn.length,
+          without_inn: allResults.length - withInn.length,
+          generated_at: new Date().toISOString(),
+        };
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
+
+        const totalDone = allResults.length;
+        const stillRemaining = exhibitors.length - totalDone;
 
         return {
           ok: true,
+          batch_processed: batch.length,
           elapsed_sec: elapsed,
-          output: { enrichedPath, reportPath },
-          report,
+          total: exhibitors.length,
+          done: totalDone,
+          remaining: stillRemaining,
+          skipped,
+          progress_pct: Math.round(totalDone / exhibitors.length * 100),
+          with_inn: withInn.length,
+          enrichedPath,
           log: log.slice(-30),
+          next_step: stillRemaining > 0
+            ? `Ещё ${stillRemaining} компаний. Вызови inn_enrich_batch снова с теми же параметрами — продолжит с места остановки.`
+            : `Все компании обогащены. Запусти expo_pipeline_qualify для фильтрации.`,
         };
       },
     },
