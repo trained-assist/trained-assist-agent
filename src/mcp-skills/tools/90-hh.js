@@ -929,7 +929,14 @@ module.exports = {
           enriched.push({ ...c, draft_message: draft });
         }
 
-        const html = generateReviewHtml(enriched, vacancy_name);
+        const callbackBase = process.env.AGENT_PUBLIC_URL
+          ? process.env.AGENT_PUBLIC_URL.replace(/\/$/, '')
+          : 'http://localhost:3001';
+        const html = generateReviewHtml(enriched, vacancy_name, {
+          callbackBase,
+          username: USER_ID,
+          agentSecret: process.env.AGENT_SECRET || '',
+        });
         const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
         const filePath = output_path || path.join(dataDir, `hh-review-${Date.now()}.html`);
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -1172,7 +1179,8 @@ function saveCandidateHistory(userId, negotiationId, data) {
 
 // ── Review page HTML ────────────────────────────────────────────────────────
 
-function generateReviewHtml(candidates, vacancyName) {
+function generateReviewHtml(candidates, vacancyName, opts = {}) {
+  const { callbackBase = '', username = '', agentSecret = '' } = opts;
   const verdictOrder = { 'ПРОПУСТИТЬ': 0, 'УТОЧНИТЬ': 1, 'ОТКЛОНИТЬ': 2 };
   const sorted = [...candidates].sort((a, b) => (verdictOrder[a.verdict] ?? 3) - (verdictOrder[b.verdict] ?? 3));
 
@@ -1313,10 +1321,20 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn-send-all{background:#4f46e5;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
 .btn-send-all:disabled{opacity:.4;cursor:not-allowed}
 .btn-send-all:not(:disabled):hover{opacity:.85}
+.btn-reject-all{background:#dc2626;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn-reject-all:disabled{opacity:.4;cursor:not-allowed}
+.btn-reject-all:not(:disabled):hover{opacity:.85}
+.reject-cb{width:18px;height:18px;margin-top:2px;cursor:pointer;accent-color:#dc2626;flex-shrink:0}
+.toast{position:fixed;top:20px;right:20px;padding:10px 18px;border-radius:8px;background:#16a34a;color:#fff;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:fadein .2s}
+.toast-err{background:#dc2626}
+@keyframes fadein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.conn-badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;margin-left:8px}
+.conn-ok{background:#dcfce7;color:#15803d}
+.conn-off{background:#fee2e2;color:#b91c1c}
 </style>
 </head>
 <body>
-<h1>Кандидаты: ${escHtml(vacancyName)}</h1>
+<h1>Кандидаты: ${escHtml(vacancyName)}${callbackBase ? '<span class="conn-badge conn-ok">● Live</span>' : '<span class="conn-badge conn-off">○ Offline</span>'}</h1>
 <p class="subtitle">${sorted.length} откликов · ${actionable} требуют сообщения</p>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
@@ -1335,11 +1353,39 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 </div>
 ${cards}
 <div class="footer">
-  <div class="counter">Выбрано: <strong id="selCount">0</strong> / <strong>${actionable}</strong> · Отправлено: <strong id="sentCount">0</strong></div>
-  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить выбранных (0)</button>
+  <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
+  <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
+  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить (0)</button>
 </div>
 <script>
+const CALLBACK_BASE = '${callbackBase}';
+const HH_USER = '${username}';
+const HH_SECRET = '${agentSecret}';
+
 const done = new Set();
+
+function showToast(msg, isError = false) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (isError ? ' toast-err' : '');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+async function hhAction(endpoint, payload) {
+  if (!CALLBACK_BASE) {
+    console.log('[HH-OFFLINE]', endpoint, payload);
+    return { ok: true };
+  }
+  const r = await fetch(CALLBACK_BASE + endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
+    body: JSON.stringify({ username: HH_USER, ...payload }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
 
 function onCheck() {
   const ns = document.querySelectorAll('.card-cb:checked').length;
@@ -1387,10 +1433,19 @@ function markDone(i) {
   document.getElementById('sentCount').textContent = done.size;
 }
 
-function sendOne(i, negId) {
-  const msg = document.getElementById('msg-'+i)?.value || '';
-  markDone(i); onCheck();
-  console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
+async function sendOne(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
+  if (!msg) { showToast('Сообщение пустое', true); return; }
+  const btn = event?.currentTarget;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Отправляю...'; }
+  try {
+    await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+    markDone(i); onCheck();
+    showToast('✅ Отправлено!');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '✓ Отправить'; }
+  }
 }
 
 function skipOne(i) {
@@ -1401,25 +1456,46 @@ function skipOne(i) {
   onCheck();
 }
 
-function sendAll() {
-  document.querySelectorAll('.card-cb:checked').forEach(cb => {
+async function sendAll() {
+  const cbs = [...document.querySelectorAll('.card-cb:checked')];
+  const sb = document.getElementById('sendAllBtn');
+  sb.disabled = true; sb.textContent = '⏳ Отправляю...';
+  let ok = 0;
+  for (const cb of cbs) {
     const i = parseInt(cb.dataset.idx);
     const negId = document.getElementById('card-'+i)?.dataset.neg || '';
-    const msg = document.getElementById('msg-'+i)?.value || '';
-    markDone(i);
-    console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
-  });
+    const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
+    if (!msg) continue;
+    try {
+      await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+      markDone(i); ok++;
+    } catch(e) {
+      showToast('❌ ' + e.message, true);
+    }
+  }
   onCheck();
+  if (ok > 0) showToast('✅ Отправлено ' + ok + ' сообщений');
 }
 
-function rejectAll() {
-  document.querySelectorAll('.reject-cb:checked').forEach(cb => {
+async function rejectAll() {
+  const cbs = [...document.querySelectorAll('.reject-cb:checked')];
+  const negIds = cbs.map(cb => {
     const i = parseInt(cb.dataset.idx);
-    const negId = document.getElementById('card-'+i)?.dataset.neg || '';
-    markDone(i);
-    console.log('[HH-REJECT]', JSON.stringify({ negotiation_id: negId }));
-  });
-  onCheck();
+    return document.getElementById('card-'+i)?.dataset.neg || '';
+  }).filter(Boolean);
+  if (!negIds.length) return;
+  const rb = document.getElementById('rejectAllBtn');
+  rb.disabled = true; rb.textContent = '⏳ Отклоняю...';
+  try {
+    const res = await hhAction('/hh/reject', { negotiation_ids: negIds });
+    cbs.forEach(cb => markDone(parseInt(cb.dataset.idx)));
+    onCheck();
+    const failed = (res.results || []).filter(r => !r.ok).length;
+    showToast(failed ? '⚠️ ' + failed + ' ошибок из ' + negIds.length : '✅ Отклонено ' + negIds.length + ' кандидатов');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    onCheck();
+  }
 }
 
 onCheck();
