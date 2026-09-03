@@ -145,7 +145,7 @@ function atsEditorHtml(currentConfig, currentStages, opts = {}) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ATS Template Editor</title>
+<title>Candidate Funnel Editor</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f1117;color:#e8e9ed;min-height:100vh}
@@ -243,7 +243,7 @@ pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radi
 <body>
 
 <header>
-  <span class="logo">ATS Template Editor</span>
+  <span class="logo">Candidate Funnel</span>
   ${isLive ? '<span class="badge live">● Live</span>' : '<span class="badge offline">○ Offline</span>'}
   <div class="spacer"></div>
   <label for="tplSelect" style="font-size:12px;color:var(--muted);margin-right:4px">Шаблон:</label>
@@ -260,9 +260,9 @@ pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radi
   &nbsp;
   <button class="btn btn-secondary btn-sm" id="exportBtn">↓ JSON</button>
   &nbsp;
-  <button class="btn btn-primary" id="saveBtn" ${isLive ? '' : 'disabled title="Сохранение недоступно в offline-режиме"'}>Сохранить в контекст</button>
+  <button class="btn btn-primary" id="saveBtn" ${isLive ? '' : 'disabled title="Сохранение недоступно в offline-режиме"'}>Save Funnel</button>
   &nbsp;
-  <button class="btn btn-danger" id="resetAtsBtn" ${isLive ? '' : 'disabled title="Недоступно в offline-режиме"'} title="Сбросить ats_result у всех кандидатов — они будут переоценены при следующем batch review">↺ Пересмотреть кандидатов</button>
+  <button class="btn btn-danger" id="resetAtsBtn" ${isLive ? '' : 'disabled title="Недоступно в offline-режиме"'} title="Re-run Funnel: сбросить оценки всех кандидатов и переоценить с текущим конфигом">↺ Re-run Funnel</button>
 </header>
 
 <main>
@@ -673,7 +673,7 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
 
 document.getElementById('resetAtsBtn').addEventListener('click', async () => {
   if (!CALLBACK_BASE) return;
-  if (!confirm('Сбросить ats_result у всех кандидатов? Они будут переоценены с текущим конфигом при следующем hh_batch_review.')) return;
+  if (!confirm('Re-run Funnel: сбросить оценки всех кандидатов? Они будут переоценены с текущим конфигом при следующем запуске.')) return;
   const btn = document.getElementById('resetAtsBtn');
   btn.disabled = true;
   btn.textContent = 'Сбрасываю...';
@@ -685,7 +685,7 @@ document.getElementById('resetAtsBtn').addEventListener('click', async () => {
     });
     const data = await r.json();
     if (r.ok && data.ok) {
-      toast(\`Сброшено: \${data.reset} кандидатов. Запусти hh_batch_review для переоценки.\`, 'success');
+      toast(\`Funnel re-run: \${data.reset} кандидатов сброшено. Запускай hh_batch_review.\`, 'success');
     } else {
       toast('Ошибка: ' + (data.error || r.status), 'error');
     }
@@ -693,7 +693,7 @@ document.getElementById('resetAtsBtn').addEventListener('click', async () => {
     toast('Ошибка сети: ' + e.message, 'error');
   } finally {
     btn.disabled = false;
-    btn.textContent = '↺ Пересмотреть кандидатов';
+    btn.textContent = '↺ Re-run Funnel';
   }
 });
 

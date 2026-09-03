@@ -149,7 +149,7 @@ function hhBase() {
 
 // "открой ATS редактор" — no API call
 function hhAtsEditor(userId) {
-  return `🎯 Открой ATS-редактор в браузере:\n${hhBase()}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
+  return `🎯 Candidate Funnel Editor:\n${hhBase()}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
 }
 
 // "покажи страницу ревью кандидатов" — no API call
