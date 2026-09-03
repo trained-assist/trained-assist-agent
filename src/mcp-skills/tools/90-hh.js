@@ -1136,8 +1136,8 @@ function generateReviewHtml(candidates, vacancyName) {
              <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
            </div>
          </div>`
-      : isReject
-        ? `<div class="reject-note">Отказать через bulk_reject (без сообщения)</div>`
+      : c.verdict === 'ОТКЛОНИТЬ'
+        ? `<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>`
         : '';
 
     return `<div class="card" id="card-${i}" data-score="${(c.score || 0).toFixed(1)}" data-neg="${escHtml(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
@@ -1224,10 +1224,6 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn-send-all{background:#4f46e5;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
 .btn-send-all:disabled{opacity:.4;cursor:not-allowed}
 .btn-send-all:not(:disabled):hover{opacity:.85}
-.btn-reject-all{background:#dc2626;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
-.btn-reject-all:disabled{opacity:.4;cursor:not-allowed}
-.btn-reject-all:not(:disabled):hover{opacity:.85}
-.reject-cb{accent-color:#dc2626}
 </style>
 </head>
 <body>
@@ -1250,9 +1246,8 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 </div>
 ${cards}
 <div class="footer">
-  <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
-  <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
-  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить (0)</button>
+  <div class="counter">Выбрано: <strong id="selCount">0</strong> / <strong>${actionable}</strong> · Отправлено: <strong id="sentCount">0</strong></div>
+  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить выбранных (0)</button>
 </div>
 <script>
 const done = new Set();
