@@ -1234,17 +1234,17 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 <h1>Кандидаты: ${escHtml(vacancyName)}</h1>
 <p class="subtitle">${sorted.length} откликов · ${actionable} требуют сообщения</p>
 <div class="toolbar">
-  <span class="toolbar-label">Выбрать от балла:</span>
-  <button class="tb-btn score-btn" data-min="10" onclick="selectByScore(10)">10+</button>
-  <button class="tb-btn score-btn" data-min="9" onclick="selectByScore(9)">9+</button>
-  <button class="tb-btn score-btn" data-min="8" onclick="selectByScore(8)">8+</button>
-  <button class="tb-btn score-btn" data-min="7" onclick="selectByScore(7)">7+</button>
-  <button class="tb-btn score-btn" data-min="6" onclick="selectByScore(6)">6+</button>
-  <button class="tb-btn score-btn" data-min="5" onclick="selectByScore(5)">5+</button>
-  <button class="tb-btn score-btn" data-min="4" onclick="selectByScore(4)">4+</button>
-  <button class="tb-btn score-btn" data-min="3" onclick="selectByScore(3)">3+</button>
-  <button class="tb-btn score-btn" data-min="2" onclick="selectByScore(2)">2+</button>
-  <button class="tb-btn score-btn" data-min="1" onclick="selectByScore(1)">1+</button>
+  <span class="toolbar-label">Балл:</span>
+  <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
+  <button class="tb-btn score-btn" data-bucket="9" onclick="toggleBucket(9)">9</button>
+  <button class="tb-btn score-btn" data-bucket="8" onclick="toggleBucket(8)">8</button>
+  <button class="tb-btn score-btn" data-bucket="7" onclick="toggleBucket(7)">7</button>
+  <button class="tb-btn score-btn" data-bucket="6" onclick="toggleBucket(6)">6</button>
+  <button class="tb-btn score-btn" data-bucket="5" onclick="toggleBucket(5)">5</button>
+  <button class="tb-btn score-btn" data-bucket="4" onclick="toggleBucket(4)">4</button>
+  <button class="tb-btn score-btn" data-bucket="3" onclick="toggleBucket(3)">3</button>
+  <button class="tb-btn score-btn" data-bucket="2" onclick="toggleBucket(2)">2</button>
+  <button class="tb-btn score-btn" data-bucket="1" onclick="toggleBucket(1)">1</button>
   <div class="tb-sep"></div>
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
@@ -1268,15 +1268,20 @@ function onCheck() {
   rb.textContent = 'Отказать (' + nr + ')'; rb.disabled = nr === 0;
 }
 
-function selectByScore(min) {
-  document.querySelectorAll('.score-btn').forEach(b =>
-    b.classList.toggle('active', parseInt(b.dataset.min) === min)
-  );
+const activeBuckets = new Set();
+
+function toggleBucket(n) {
+  const btn = document.querySelector('.score-btn[data-bucket="'+n+'"]');
+  if (activeBuckets.has(n)) { activeBuckets.delete(n); btn.classList.remove('active'); }
+  else { activeBuckets.add(n); btn.classList.add('active'); }
+  recomputeByBuckets();
+}
+
+function recomputeByBuckets() {
   document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
     if (done.has(parseInt(cb.dataset.idx))) return;
-    const score = parseFloat(cb.dataset.score || 0);
-    const isReject = cb.classList.contains('reject-cb');
-    cb.checked = isReject ? score < min : score >= min;
+    const bucket = Math.floor(parseFloat(cb.dataset.score || 0));
+    cb.checked = activeBuckets.has(bucket);
   });
   onCheck();
 }
@@ -1285,6 +1290,7 @@ function selectAll(checked) {
   document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
     if (!done.has(parseInt(cb.dataset.idx))) cb.checked = checked;
   });
+  activeBuckets.clear();
   document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('active'));
   onCheck();
 }
