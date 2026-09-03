@@ -185,3 +185,24 @@ When user asks to research or build a catalog for a new exhibition:
 - Write back: `text[:bracket_start] + json.dumps(ex) + ';' + text[end_idx+2:]`
 - Verify: must be `];` not `]];` at end of EX
 - Always commit before running: `git checkout -b feature/SLUG && git commit`
+
+## Flexi Sales — notes + deals at exhibitions
+
+**Setup:** call `flexi_set_exhibition(event_key)` once. event_key = e.g. `rosupack2026`, `cpmautumn2026`, `textilesalon2026`. Saved in context — persists across sessions.
+
+**Adding a note:**
+1. `flexi_add_note(company_name, note_text, stand?)` — saves to D1 (same backend as the floorplan site)
+2. company_id = stand number (A12, 14B08) is the stable key. If no stand — generated from name.
+3. Notes are immediately visible on the {eventKey}-floorplans-2026.pages.dev catalog site.
+
+**Checking what's done:**
+- `flexi_get_notes(company_id, company_name?)` — read notes for one company
+- `flexi_get_notes_bulk(company_ids[])` — bulk status for multiple stands
+
+**Reject / unreject:**
+- `flexi_reject_company(company_name, stand?)` — marks as rejected on the site
+- `flexi_unreject_company(company_name, stand?)` — undo
+
+**Creating a Weeek deal:** use `weeek_create_deal` from 30-weeek.js. flexi_* only manages notes/status.
+
+**company_id strategy:** prefer stand number (B12, 14A08) as it's most stable. If no stand known — use sanitized company name. One company = one consistent id across all calls.
