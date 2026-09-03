@@ -56,7 +56,7 @@ function weeekFormHtml(token, savedToken, savedLogin) {
   <div class="level-box">
     <div class="level-title">API токен <span class="level-badge l1">L1</span></div>
     <div class="level-desc">Создание сделок, контактов, задач через публичный API. Токен постоянный.<br>Weeek → Settings → Integrations → API → Generate token</div>
-    <input id="tok" class="mono" type="password" placeholder="weeek_xxxxxxxxxxxxxxxx" autocomplete="off" spellcheck="false">
+    <input id="tok" class="mono" type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" spellcheck="false">
   </div>
 
   <div class="level-box l2-box">
