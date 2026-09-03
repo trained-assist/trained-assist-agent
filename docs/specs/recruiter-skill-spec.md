@@ -1,18 +1,22 @@
-# Recruiter (candidate-routing) — Skill Spec
+# Recruiter Assistant — Skill Spec
 
-> Составлено после изучения: `recruiting-tools/recruiter-mcp`, `recruiting-tools/recruiting-agent`,
-> `recruiting-tools/candidate-routing`. Команда заполняет раздел 11.
+> Составлено после изучения: `/Users/vova/Code/recruiter-assistant` (локальный репо).
+> Архитектура: статический сайт на Yandex Object Storage + HH OAuth через Yandex Cloud Function.
+> Команда заполняет раздел 11.
 
 ---
 
 ## 1. Назначение
 
-Скил даёт доступ к полному рекрутинговому пайплайну Skillset прямо из Telegram-бота:
-просмотр вакансий и кандидатов, управление статусами, отправка сообщений, просмотр скрининга,
-аналитика по воронке. Аутентификация — Bearer токен к `recruiter-assistant.com` API.
+Скил автоматизирует рекрутинговый пайплайн поверх HH.ru: загружает конфигурацию пайплайна из
+`recruiter-assistant.ru` (JSON-экспорт), управляет статусами кандидатов в контекст-сторе,
+отправляет периодические дайджесты (новые отклики, статусы, сообщения ждущие ревью).
 
-Существующий `90-hh.js` работает напрямую с hh.ru. Этот скил — обёртка над `candidate-routing`
-(backend с базой кандидатов, AI-скринингом, историей диалогов).
+**Архитектурный принцип:** `recruiter-assistant.ru` — UI для настройки пайплайна (работает через
+localStorage в браузере, нет backend API). Агентский скил — его companion: берёт конфиг пайплайна
+через JSON-экспорт сайта и исполняет автоматизацию через hh.ru API.
+
+HH OAuth уже реализован в `90-hh.js`. Этот скил (`91-recruiter.js`) строится поверх него.
 
 ---
 
@@ -20,44 +24,47 @@
 
 | Компонент | Репо / URL | Назначение |
 |-----------|-----------|------------|
-| API backend | `recruiting-tools/candidate-routing` | GCP Cloud Run, Neon PostgreSQL |
-| MCP (TypeScript) | `recruiting-tools/recruiter-mcp` | Эталонная реализация на TypeScript — прочитать перед кодингом |
-| Chat UI | `recruiting-tools/recruiting-agent` | Web-приложение поверх MCP |
-| Prod URL | `https://recruiter-assistant.com` | Единственный production endpoint |
-| DB | Neon PostgreSQL | `ep-withered-mud-aggiim6s.c-2.eu-central-1.aws.neon.tech` |
+| UI (статика) | `/Users/vova/Code/recruiter-assistant/platform/platform.html` | Pipeline editor + Inbox + Kanban. localStorage, нет API |
+| HH OAuth relay | `platform/hh-callback-fn/index.js` | Yandex Cloud Function → перенаправляет на `136-65-7-197.sslip.io/hh-callback` |
+| Hosting | Yandex Object Storage | `recruiter-assistant.ru` — статический сайт |
+| HH Client ID | `THFMPVJIDL4MHTM5EE4AFS96MTUDOFOF9UURDFI539OOJF8VCCLKJLENSOI0PCEJ` | OAuth2 client для hh.ru |
+| HH Redirect URI | `https://recruiter-assistant.ru/hh-callback` | Registered redirect (идёт через Yandex CF → GCP agent) |
 
-> **Важно:** Cloudflare Worker в архиве — не трогать. Весь трафик → Cloud Run.
+> **Важно:** нет backend. Нет Postgres, нет Cloud Run, нет REST API recruiter-assistant.ru.
+> Вся история кандидатов и конфиг пайплайна хранится в localStorage браузера.
+> Агент хранит свой стейт в context store.
 
 ---
 
 ## 3. Authentication
 
-| Параметр | Тип | Источник |
-|----------|-----|----------|
-| `CANDIDATE_ROUTER_API_TOKEN` | Bearer secret | Пользователь получает от admin, вводит через `/settoken recruiter <token>` |
-| `BASE_URL` | `https://recruiter-assistant.com` | Хардкодится в скиле |
-
-**Токен хранится:** `~/agent-tokens/{userId}/recruiter` (plain text)
+Скил **не имеет собственной аутентификации** — он использует HH-токен из `90-hh.js`.
 
 ```js
-isReady: () => !!readToken(USER_ID),
-setupTools: ['recruiter_status', 'recruiter_connect'],
+isReady: () => hh_token_exists(USER_ID),  // переиспользует логику 90-hh.js
+setupTools: ['recruiter_status', 'recruiter_import_pipeline'],
 ```
 
-**`recruiter_status()`** → `{ connected: bool, user?: string, jobs_count?: number }`  
-**`recruiter_connect(token)`** → сохраняет токен, проверяет через `GET /api/jobs`
+**`recruiter_status()`** — проверяет:
+1. HH токен подключён (via `90-hh.js` hh_status)
+2. Пайплайн загружен (context_get('recruiter', 'pipeline'))
+3. Активная вакансия выбрана (context_get('recruiter', 'active_vacancy'))
+
+**`recruiter_import_pipeline(json_string)`** — принимает JSON-экспорт с сайта,
+сохраняет в context store. Этот tool видим всегда (setup tool).
+
+**Как подключить HH:** через существующий `hh_connect` из `90-hh.js`. Recruiter-скил не дублирует.
 
 ---
 
 ## 4. Внешние зависимости
 
-| Зависимость | Тип | Нужна ли настройка |
-|-------------|-----|-------------------|
-| `recruiter-assistant.com` | REST API | Bearer token (юзер вводит) |
-| Neon PostgreSQL | DB | нет (backend сам) |
-| GCP Cloud Run | Infra | нет (деплой через `gcp/deploy.sh`) |
-| OpenAI / Gemini | LLM | нет (backend сам) |
-| HH.ru OAuth | OAuth2 | отдельно через существующий `90-hh.js` |
+| Зависимость | Тип | Нужна ли настройка юзером |
+|-------------|-----|--------------------------|
+| `90-hh.js` | MCP skill (этот же агент) | Да — HH OAuth через hh_connect |
+| hh.ru API | REST API (через 90-hh.js) | нет (уже через 90-hh.js) |
+| Yandex Cloud Function (hh-callback-fn) | Relay | нет (уже задеплоен) |
+| recruiter-assistant.ru | Статический сайт | нет API — только JSON-экспорт |
 
 ---
 
@@ -65,62 +72,101 @@ setupTools: ['recruiter_status', 'recruiter_connect'],
 
 | Ключ | Значение | Когда пишется | Когда читается |
 |------|----------|--------------|----------------|
-| `active_job` | `{id, title, location}` | После выбора вакансии | Начало сессии, перед работой с кандидатами |
+| `pipeline` | `{version, name, steps: [{name, action, condition, prompt}]}` | После `recruiter_import_pipeline` | При работе с кандидатами |
+| `active_vacancy` | `{id, name, hh_vacancy_id?}` | После `recruiter_set_vacancy` | Начало сессии, дайджест |
+| `candidates` | `{[hh_negotiation_id]: {step_idx, status, last_action_at, notes[]}}` | После перевода кандидата | При показе Kanban |
 
-Пример в начале сессии:
-```js
-const ctx = await context_get('recruiter', 'active_job');
-if (!ctx.found) {
-  // попросить выбрать вакансию через recruiter_list_jobs
+**Pipeline JSON формат** (экспорт с сайта):
+```json
+{
+  "version": 1,
+  "name": "Универсальный pipeline",
+  "steps": [
+    {
+      "name": "Проверка резюме (ATS)",
+      "action": "llm_evaluate",
+      "condition": "score >= 6",
+      "prompt": "Ты опытный рекрутер. Оцени резюме кандидата..."
+    }
+  ]
 }
 ```
+
+**Actions** (из сайта): `llm_evaluate`, `send_message`, `wait_reply`, `schedule_call`,
+`notify_human`, `auto_reject`, `manual_review`.
 
 ---
 
 ## 6. Каталог инструментов
 
-Эталон — TypeScript файлы в `recruiting-tools/recruiter-mcp/src/tools/`. Реализовать подмножество:
-
 ### Setup tools (всегда видны)
 
 ```
-recruiter_status() → { connected, api_url, jobs_count? }
-recruiter_connect(token) → { ok, message }
+recruiter_status() → { hh_connected, pipeline_loaded, active_vacancy?, step_count? }
+
+recruiter_import_pipeline(json_string: string)
+  → { ok, pipeline_name, steps_count }
+  // Принимает JSON из кнопки "Экспорт" на recruiter-assistant.ru
 ```
 
-### Вакансии
+### Core tools (только когда HH подключён)
+
+#### Вакансии
 
 ```
-recruiter_list_jobs(filters?: {status?, search?}) → { jobs: [{id, title, location, candidates_count, status}] }
-recruiter_get_job(job_id) → { ...full job with description, requirements, stats }
+recruiter_set_vacancy(vacancy_id: string, name?: string) → { ok, saved }
+  // Выбирает активную вакансию для работы
+
+recruiter_list_vacancies() → { vacancies: [{id, name, open_count}] }
+  // Через hh_list_vacancies из 90-hh.js
 ```
 
-### Кандидаты
+#### Кандидаты
 
 ```
-recruiter_list_candidates(job_id, filters?: {status?, limit?}) → { candidates: [{id, name, status, score, applied_at}] }
-recruiter_get_candidate(candidate_id) → { ...full candidate with messages, facts, resume_url, score }
-recruiter_get_candidate_dialog(candidate_id) → { conversation, transcript, resume, facts }
-recruiter_get_candidate_status(candidate_id) → { status, available_actions, score }
+recruiter_list_candidates(filters?: {step_idx?, status?, limit?})
+  → { candidates: [{negotiation_id, name, step_idx, step_name, status, last_action_at}] }
+  // Объединяет HH откликов + локальный стейт из context store
+
+recruiter_kanban()
+  → { columns: [{step_name, action, candidates: [...]}] }
+  // Kanban-вид: все кандидаты по шагам текущего пайплайна
 ```
 
-### Действия над кандидатом
+#### Работа с кандидатом
 
 ```
-recruiter_advance_candidate(candidate_id, action, comment?) → { ok, new_status }
-  // action: 'reject' | 'send-interview' | 'approve' | 'hire'
-  // ВСЕГДА показывать юзеру что будет сделано, ждать подтверждения
+recruiter_get_candidate(negotiation_id: string)
+  → { name, resume_url, hh_link, current_step, history: [...], hh_messages: [...] }
 
-recruiter_send_message(candidate_id, message) → { ok, sent_at }
-  // ВСЕГДА показывать текст сообщения юзеру перед отправкой
+recruiter_advance_candidate(negotiation_id, reason?: string) → { ok, new_step_name }
+  // Переводит на следующий шаг пайплайна
+  // ВСЕГДА показывать юзеру что произойдёт, ждать подтверждения
 
-recruiter_add_note(candidate_id, note) → { ok }
+recruiter_reject_candidate(negotiation_id, reason?: string) → { ok }
+  // Убирает из pipeline. НЕОБРАТИМО — предупреждать.
+
+recruiter_add_note(negotiation_id, note: string) → { ok }
+  // Добавляет заметку к кандидату в context store
 ```
 
-### Аналитика
+#### Сообщения (делегирует в 90-hh.js)
 
 ```
-recruiter_analytics(job_id?, period?: 'week'|'month') → { funnel, by_status, conversion_rates }
+recruiter_send_message(negotiation_id, message: string) → { ok, sent_at }
+  // ВСЕГДА показывать текст юзеру перед отправкой
+  // Можно подставить шаблон из текущего шага pipeline
+
+recruiter_get_pipeline_message(negotiation_id)
+  → { template, variables: {name, vacancy, ...} }
+  // Возвращает шаблон сообщения для текущего шага кандидата
+```
+
+#### Аналитика
+
+```
+recruiter_stats(period?: 'today'|'week'|'month')
+  → { new_total, by_step: [{step_name, count}], messages_pending: number, rejected: number }
 ```
 
 ---
@@ -128,25 +174,45 @@ recruiter_analytics(job_id?, period?: 'week'|'month') → { funnel, by_status, c
 ## 7. System prompt
 
 ```markdown
-## Recruiter (candidate-routing) — workflow notes
+## Recruiter Assistant — workflow notes
 
-**Setup:** recruiter_connect(token) — токен получить у admin или через Panel.
+**Setup:**
+1. HH.ru — подключить через hh_connect (из 90-hh.js)
+2. Pipeline — импортировать JSON с recruiter-assistant.ru → recruiter_import_pipeline
+3. Вакансия — recruiter_set_vacancy
 
 **Start of session:**
-1. context_get('recruiter', 'active_job') — проверить активную вакансию
-2. Если нет — recruiter_list_jobs → выбрать с юзером → context_set
+1. recruiter_status() — проверить готовность
+2. context_get('recruiter', 'active_vacancy') — проверить выбранную вакансию
+3. context_get('recruiter', 'pipeline') — проверить загруженный пайплайн
+4. Если чего-то нет — помочь настроить
 
-**Candidate pipeline:**
-1. recruiter_list_candidates(job_id) → выбрать кандидата
-2. recruiter_get_candidate_status → посмотреть available_actions
-3. recruiter_advance_candidate → ПОКАЗАТЬ юзеру что будет, ЖДАТЬ ОК
+**Kanban workflow:**
+1. recruiter_kanban() → обзор всех кандидатов по шагам
+2. recruiter_get_candidate(id) → детали по конкретному
+3. recruiter_advance_candidate → ПОКАЗАТЬ что произойдёт → ждать ОК
+
+**Сообщения:**
+1. recruiter_get_pipeline_message(id) → получить шаблон текущего шага
+2. Показать черновик юзеру → дождаться OK → recruiter_send_message
+3. НИКОГДА не отправлять без явного подтверждения
 
 **Safety rules:**
-- НИКОГДА не отправлять сообщение кандидату без явного OK от юзера
-- НИКОГДА не выполнять advance_candidate без подтверждения
-- Отказ (reject) — необратим, предупреждать об этом
+- НИКОГДА не отправлять сообщение кандидату без OK юзера
+- recruiter_reject_candidate — необратим, предупреждать явно
+- recruiter_advance_candidate — показывать step_name → step_name перед выполнением
 
-**Timing:** recruiter_get_candidate с диалогом — может быть медленным (>3s) при большой истории.
+**Pipeline actions mapping:**
+- llm_evaluate → запустить hh_evaluate_candidate из 90-hh.js
+- send_message → recruiter_send_message с шаблоном шага
+- wait_reply → проверить hh_list_responses на ответы
+- schedule_call → сформировать ссылку/предложение о звонке
+- notify_human → показать уведомление рекрутеру
+- auto_reject → recruiter_reject_candidate (требует подтверждения несмотря на "auto")
+- manual_review → показать кандидата, ждать решения рекрутера
+
+**recruiter-assistant.ru** — это UI для настройки пайплайна в браузере.
+Агент работает параллельно — импортирует конфиг и автоматизирует исполнение.
 ```
 
 ---
@@ -155,25 +221,27 @@ recruiter_analytics(job_id?, period?: 'week'|'month') → { funnel, by_status, c
 
 | Job | Расписание | Что делает |
 |-----|-----------|-----------|
-| `recruiter-digest` | `0 9 * * 1-5` | Дайджест новых кандидатов за сутки по активной вакансии |
+| `recruiter-digest` | `*/30 * * * *` или по выбору юзера | Дайджест новых откликов + статусы |
 
-Шаблон:
+Шаблон задачи для `cron_create`:
 ```
 SCHEDULED: дайджест рекрутинга.
-1. context_get('recruiter', 'active_job') → если нет → «⏸ Recruiter: нет активной вакансии» и стоп
-2. recruiter_list_candidates(job_id, {status: 'new', limit: 50})
-3. Подсчёт по статусам за последние 24ч
-4. Дайджест: «📊 {job.title} | Новых: N | На интервью: M | Офферов: K»
+1. context_get('recruiter', 'active_vacancy') → если нет → стоп
+2. context_get('recruiter', 'pipeline') → если нет → стоп
+3. recruiter_stats('today') → собрать данные
+4. Дайджест: «📊 {vacancy} | Новых: N | На шаге [X]: M | Сообщений ждёт: K | Отказ: L»
 ```
+
+Юзер выбирает интервал: каждые 30 мин, каждый час, раз в день (9:00).
 
 ---
 
 ## 9. Изоляция данных
 
-- Токен per-user: `~/agent-tokens/{userId}/recruiter`
-- API использует токен конкретного юзера — backend сам изолирует данные
-- `context_get/set('recruiter', ...)` изолировано по workDir
-- Один пользователь = один рекрутер в системе (нет shared токенов)
+- HH токен per-user (из `90-hh.js`): `~/agent-tokens/{userId}/hh`
+- Context store per-user (`process.cwd()` = workDir пользователя)
+- Pipeline и кандидаты хранятся в context store — отдельно для каждого пользователя
+- Один пользователь может вести несколько вакансий (`active_vacancy` = текущая рабочая)
 
 ---
 
@@ -185,43 +253,46 @@ SCHEDULED: дайджест рекрутинга.
 
 ---
 
-## 11. Нюансы — [ЗАПОЛНЯЕТ КОМАНДА recruiting-tools]
+## 11. Нюансы — [ЗАПОЛНЯЕТ КОМАНДА / РЕКРУТЕР]
 
-> Прошу команду ответить на эти вопросы:
+> Прошу ответить на эти вопросы:
 
-**API:**
-- Какие endpoints самые важные для ежедневной работы рекрутера?
-- Какой rate limit на `recruiter-assistant.com`? Нужен throttling?
-- Есть ли pagination? Как работает (cursor или offset)?
+**Pipeline и вакансии:**
+- Как выглядит export-JSON с recruiter-assistant.ru? (кнопка «Экспорт» → формат)
+- Как рекрутер хочет вести несколько вакансий — один пайплайн на все или свой per-vacancy?
+- Какие pipeline actions используются на практике (из 7 доступных)?
 
-**Безопасность:**
-- Какие действия необратимы (reject, delete)? Список?
-- Нужна ли двойная проверка перед отправкой сообщения?
-- Есть ли роли (recruiter / admin) — как они влияют на available tools?
+**HH.ru интеграция:**
+- Что значит «сообщения ждут ревью» в дайджесте — не прочитанные откликнувшимися? или не отправленные рекрутером?
+- Нужна ли автоматическая LLM-оценка новых откликов (через `hh_evaluate_candidate`) или только ручная?
+- Какие HH-статусы соответствуют каким шагам пайплайна?
 
-**Производительность:**
-- Какие запросы медленные (>5s)?
-- Есть ли тяжёлые endpoints которые лучше не вызывать часто?
+**Дайджест:**
+- Какой интервал дайджеста используется на практике?
+- Что именно должно быть в дайджесте — просто цифры или список кандидатов с именами?
 
-**Известные проблемы:**
-- Какие ошибки чаще всего встречаются на проде?
-- Есть ли краевые случаи в API которые не очевидны из документации?
+**Сообщения:**
+- Есть ли переменные в шаблонах кроме тех что на сайте (`{{name}}`, `{{vacancy}}`, `{{score}}`, `{{hh_link}}`, `{{days_waited}}`, `{{calendly_link}}`)?
+- Calendly — это реальная интеграция или просто текстовая ссылка?
 
 ---
 
 ## 12. Чеклист реализации
 
-- [ ] `isReady()` = `!!readToken(USER_ID)`
-- [ ] `setupTools: ['recruiter_status', 'recruiter_connect']`
-- [ ] Токен: `~/agent-tokens/{userId}/recruiter` с `mode: 0o600`
+- [ ] `isReady()` = HH-токен существует (переиспользует логику `90-hh.js`)
+- [ ] `setupTools: ['recruiter_status', 'recruiter_import_pipeline']`
+- [ ] Нет дублирования HH-инструментов из `90-hh.js`
+- [ ] Pipeline JSON парсится и сохраняется через `context_set('recruiter', 'pipeline', ...)`
+- [ ] `recruiter_advance_candidate` требует подтверждения (зафиксировано в system prompt)
+- [ ] `recruiter_reject_candidate` показывает предупреждение до выполнения
+- [ ] `recruiter_send_message` показывает текст до отправки
+- [ ] Cron дайджест работает без юзера в петле
 - [ ] Запись в `SKILLS[]` в `00-meta.js`
 - [ ] Operational notes в `agent-system-prompt.txt`
-- [ ] `context_set('recruiter', 'active_job', ...)` при выборе вакансии
-- [ ] Все деструктивные действия требуют явного подтверждения в system prompt
-- [ ] Тест без токена → только 2 setup tools
-- [ ] Тест с токеном → все tools видны
+- [ ] Тест без HH токена → только 2 setup tools
+- [ ] Тест с HH токеном → все tools видны
 - [ ] `npm run check` проходит
 
 ---
 
-*Spec составлен: 2026-09-03. Изучены: recruiting-tools/recruiter-mcp (src/tools/\*.ts), recruiting-tools/candidate-routing (README.md, API.md)*
+*Spec составлен: 2026-09-03. Изучены: `/Users/vova/Code/recruiter-assistant/platform/platform.html` (1335 строк — UI код, pipeline editor, actions, JSON-формат экспорта), `platform/hh-callback-fn/index.js` (Yandex CF relay), `README.md` (Yandex Cloud инфра, HH OAuth client).*
