@@ -224,6 +224,7 @@ module.exports = {
         properties: {
           status_id: { type: 'string', description: 'Status/stage ID to create deal in' },
           title: { type: 'string', description: 'Deal title/name' },
+          description: { type: 'string', description: 'Deal notes/description (plain text or HTML)' },
           amount: { type: 'number', description: 'Deal amount/price' },
           contact_id: { type: 'string', description: 'Contact ID to link (optional)' },
           custom_fields: { type: 'object', description: 'Custom field values as key-value pairs' },
@@ -231,10 +232,11 @@ module.exports = {
         },
         required: ['status_id', 'title'],
       },
-      handler: async ({ status_id, title, amount, contact_id, custom_fields, user_id }) => {
+      handler: async ({ status_id, title, description, amount, contact_id, custom_fields, user_id }) => {
         const uid = user_id || USER_ID;
         const body = {
           title,
+          ...(description !== undefined && { description }),
           ...(amount !== undefined && { price: amount }),
           ...(contact_id && { contactId: contact_id }),
           ...(custom_fields && { customFields: custom_fields }),
@@ -377,6 +379,27 @@ module.exports = {
         if (custom_fields !== undefined) body.customFields = custom_fields;
         const data = await weeekCall(`/crm/contacts/${encodeURIComponent(contact_id)}`, { method: 'PATCH', body }, uid);
         return data.contact ?? data;
+      },
+    },
+
+    weeek_add_task: {
+      description: 'Add a task/action item to a deal. Use when user mentions a date ("на вторник", "завтра") or specific action to remember.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          deal_id: { type: 'string', description: 'Deal ID to add task to' },
+          title: { type: 'string', description: 'Task title (e.g. "Позвонить", "Встреча", "Отправить КП")' },
+          due_date: { type: 'string', description: 'Due date in YYYY-MM-DD format (compute from relative: "завтра", "на вторник", etc.)' },
+          user_id: { type: 'string' },
+        },
+        required: ['deal_id', 'title'],
+      },
+      handler: async ({ deal_id, title, due_date, user_id }) => {
+        const uid = user_id || USER_ID;
+        const body = { title };
+        if (due_date) body.dueDate = due_date;
+        const data = await weeekCall(`/crm/deals/${encodeURIComponent(deal_id)}/tasks`, { method: 'POST', body }, uid);
+        return data.task ?? data;
       },
     },
 
