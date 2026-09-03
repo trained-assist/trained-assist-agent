@@ -303,3 +303,134 @@ describe('hh_bulk_reject', () => {
     expect(r.total).toBe(0);
   });
 });
+
+// ── Activity filter (days_since_activity) ────────────────────────────────────
+
+describe('hh_list_responses — activity filter', () => {
+  it('includes days_since_activity on all items', async () => {
+    const r = await tools().hh_list_responses.handler({ vacancy_id: 'vac-001', state: 'response' });
+    for (const item of r.items) {
+      expect(typeof item.days_since_activity).toBe('number');
+    }
+  });
+
+  it('neg-002 has >14 days since activity (stale)', async () => {
+    const r = await tools().hh_list_responses.handler({ vacancy_id: 'vac-001', state: 'response' });
+    const neg002 = r.items.find(i => i.id === 'neg-002');
+    expect(neg002).toBeTruthy();
+    expect(neg002.days_since_activity).toBeGreaterThan(14);
+  });
+
+  it('neg-001 and neg-003 are recent (<14 days)', async () => {
+    const r = await tools().hh_list_responses.handler({ vacancy_id: 'vac-001', state: 'response' });
+    const neg001 = r.items.find(i => i.id === 'neg-001');
+    const neg003 = r.items.find(i => i.id === 'neg-003');
+    expect(neg001.days_since_activity).toBeLessThan(14);
+    expect(neg003.days_since_activity).toBeLessThan(14);
+  });
+});
+
+// ── hh_get_messages ─────────────────────────────────────────────────────────
+
+describe('hh_get_messages', () => {
+  it('returns seed messages for neg-001', async () => {
+    const r = await tools().hh_get_messages.handler({ negotiation_id: 'neg-001' });
+    expect(r.negotiation_id).toBe('neg-001');
+    expect(r.total).toBeGreaterThan(0);
+    expect(r.messages[0]).toHaveProperty('text');
+    expect(r.messages[0]).toHaveProperty('author_type');
+  });
+
+  it('returns empty messages for neg-003 (no seed)', async () => {
+    const r = await tools().hh_get_messages.handler({ negotiation_id: 'neg-003' });
+    expect(r.total).toBe(0);
+    expect(r.messages).toEqual([]);
+  });
+});
+
+// ── hh_send_message — history persistence ────────────────────────────────────
+
+describe('hh_send_message — history persistence', () => {
+  it('saves sent message to candidate history', async () => {
+    const { readFileSync, existsSync } = await import('fs');
+    const { join: pathJoin } = await import('path');
+
+    const msg = 'Тест истории кандидата';
+    await tools().hh_send_message.handler({ negotiation_id: 'neg-003', message: msg });
+
+    const dataDir = process.env.AGENT_DATA_DIR || pathJoin(process.env.HOME, 'agent-data');
+    const histPath = pathJoin(dataDir, 'hh', TEST_UID, 'candidates', 'neg-003.json');
+    expect(existsSync(histPath)).toBe(true);
+
+    const history = JSON.parse(readFileSync(histPath, 'utf8'));
+    expect(history.messages).toHaveLength(1);
+    expect(history.messages[0].role).toBe('employer');
+    expect(history.messages[0].text).toBe(msg);
+  });
+});
+
+// ── hh_batch_evaluate ────────────────────────────────────────────────────────
+
+describe('hh_batch_evaluate', () => {
+  it('skips neg-002 (stale >14 days), evaluates neg-001 and neg-003', async () => {
+    // Two LLM calls for the two active candidates
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true, location_ok: true, salary_ok: true },
+      criteria: [
+        { name: 'Node.js', score: 3, evidence: '5 лет' },
+        { name: 'PostgreSQL', score: 2, evidence: 'PostgreSQL' },
+        { name: 'Docker', score: 2, evidence: 'Docker' },
+      ],
+      reasoning: 'Сильный кандидат.',
+    }));
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true, location_ok: true, salary_ok: true },
+      criteria: [
+        { name: 'Node.js', score: 1, evidence: 'Go, не Node' },
+        { name: 'PostgreSQL', score: 2, evidence: 'PostgreSQL' },
+        { name: 'Docker', score: 2, evidence: 'Docker/k8s' },
+      ],
+      reasoning: 'Частичное совпадение.',
+    }));
+
+    const r = await tools().hh_batch_evaluate.handler({ vacancy_id: 'vac-001', ats_config: ATS });
+
+    expect(r.evaluated).toBe(2);
+    expect(r.skipped).toBe(1);
+    expect(r.skipped_list[0].id).toBe('neg-002');
+    expect(r.skipped_list[0].reason).toMatch(/неактивен/);
+
+    const ids = r.results.map(c => c.negotiation_id);
+    expect(ids).toContain('neg-001');
+    expect(ids).toContain('neg-003');
+    expect(ids).not.toContain('neg-002');
+
+    // Results sorted by score desc
+    expect(r.results[0].score).toBeGreaterThanOrEqual(r.results[1].score);
+  });
+
+  it('respects max_days_inactive=3 → skips neg-002 AND neg-003', async () => {
+    // Only one LLM call for neg-001 (2 days old)
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true, location_ok: true, salary_ok: true },
+      criteria: [
+        { name: 'Node.js', score: 3, evidence: '5 лет' },
+        { name: 'PostgreSQL', score: 2, evidence: 'PostgreSQL' },
+        { name: 'Docker', score: 2, evidence: 'Docker' },
+      ],
+      reasoning: 'Сильный.',
+    }));
+
+    const r = await tools().hh_batch_evaluate.handler({
+      vacancy_id: 'vac-001',
+      ats_config: ATS,
+      max_days_inactive: 3,
+    });
+
+    expect(r.evaluated).toBe(1);
+    expect(r.skipped).toBe(2);
+  });
+});
