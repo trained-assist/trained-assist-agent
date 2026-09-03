@@ -1015,7 +1015,7 @@ async function main() {
       try {
         const message = await new Promise((resolve, reject) => {
           const reqBody = JSON.stringify({
-            model: 'anthropic/claude-haiku-4-5-20251001',
+            model: 'deepseek/deepseek-v4-flash-0731',
             messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMsg }],
             temperature: 0.7,
             max_tokens: 800,
