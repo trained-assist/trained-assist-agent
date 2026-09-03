@@ -1120,9 +1120,12 @@ function generateReviewHtml(candidates, vacancyName) {
       : '';
 
     const isActionable = c.verdict !== 'ОТКЛОНИТЬ' && !!c.draft_message;
+    const isReject = c.verdict === 'ОТКЛОНИТЬ';
     const checkboxHtml = isActionable
       ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" checked onchange="onCheck()">`
-      : '';
+      : isReject
+        ? `<input type="checkbox" class="reject-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()">`
+        : '';
 
     const msgSection = isActionable
       ? `<div class="msg-section">
@@ -1133,8 +1136,8 @@ function generateReviewHtml(candidates, vacancyName) {
              <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
            </div>
          </div>`
-      : c.verdict === 'ОТКЛОНИТЬ'
-        ? `<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>`
+      : isReject
+        ? `<div class="reject-note">Отказать через bulk_reject (без сообщения)</div>`
         : '';
 
     return `<div class="card" id="card-${i}" data-score="${(c.score || 0).toFixed(1)}" data-neg="${escHtml(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
@@ -1221,69 +1224,87 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn-send-all{background:#4f46e5;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
 .btn-send-all:disabled{opacity:.4;cursor:not-allowed}
 .btn-send-all:not(:disabled):hover{opacity:.85}
+.btn-reject-all{background:#dc2626;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn-reject-all:disabled{opacity:.4;cursor:not-allowed}
+.btn-reject-all:not(:disabled):hover{opacity:.85}
+.reject-cb{accent-color:#dc2626}
 </style>
 </head>
 <body>
 <h1>Кандидаты: ${escHtml(vacancyName)}</h1>
 <p class="subtitle">${sorted.length} откликов · ${actionable} требуют сообщения</p>
 <div class="toolbar">
-  <span class="toolbar-label">Выбрать:</span>
-  <button class="tb-btn active" id="filter-all" onclick="filterScore(0)">Все</button>
-  <button class="tb-btn" id="filter-8" onclick="filterScore(8)">8.0+</button>
-  <button class="tb-btn" id="filter-6" onclick="filterScore(6)">6.0+</button>
+  <span class="toolbar-label">Выбрать от балла:</span>
+  <button class="tb-btn score-btn" data-min="10" onclick="selectByScore(10)">10+</button>
+  <button class="tb-btn score-btn" data-min="9" onclick="selectByScore(9)">9+</button>
+  <button class="tb-btn score-btn" data-min="8" onclick="selectByScore(8)">8+</button>
+  <button class="tb-btn score-btn" data-min="7" onclick="selectByScore(7)">7+</button>
+  <button class="tb-btn score-btn" data-min="6" onclick="selectByScore(6)">6+</button>
+  <button class="tb-btn score-btn" data-min="5" onclick="selectByScore(5)">5+</button>
+  <button class="tb-btn score-btn" data-min="4" onclick="selectByScore(4)">4+</button>
+  <button class="tb-btn score-btn" data-min="3" onclick="selectByScore(3)">3+</button>
+  <button class="tb-btn score-btn" data-min="2" onclick="selectByScore(2)">2+</button>
+  <button class="tb-btn score-btn" data-min="1" onclick="selectByScore(1)">1+</button>
   <div class="tb-sep"></div>
-  <button class="tb-btn" onclick="selectFiltered(true)">✓ Выбрать все</button>
-  <button class="tb-btn" onclick="selectFiltered(false)">✗ Снять все</button>
+  <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
 ${cards}
 <div class="footer">
-  <div class="counter">Выбрано: <strong id="selCount">0</strong> / <strong>${actionable}</strong> · Отправлено: <strong id="sentCount">0</strong></div>
-  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить выбранных (0)</button>
+  <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
+  <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
+  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить (0)</button>
 </div>
 <script>
-const sent = new Set();
-const skipped = new Set();
-let minScore = 0;
+const done = new Set();
 
 function onCheck() {
-  const checks = document.querySelectorAll('.card-cb:checked');
-  const n = checks.length;
-  document.getElementById('selCount').textContent = n;
-  const btn = document.getElementById('sendAllBtn');
-  btn.textContent = 'Отправить выбранных (' + n + ')';
-  btn.disabled = n === 0;
+  const ns = document.querySelectorAll('.card-cb:checked').length;
+  const nr = document.querySelectorAll('.reject-cb:checked').length;
+  document.getElementById('selCount').textContent = ns;
+  document.getElementById('rejCount').textContent = nr;
+  const sb = document.getElementById('sendAllBtn');
+  sb.textContent = 'Отправить (' + ns + ')'; sb.disabled = ns === 0;
+  const rb = document.getElementById('rejectAllBtn');
+  rb.textContent = 'Отказать (' + nr + ')'; rb.disabled = nr === 0;
 }
 
-function filterScore(min) {
-  minScore = min;
-  document.querySelectorAll('[id^=filter-]').forEach(b => b.classList.remove('active'));
-  document.getElementById('filter-' + (min || 'all')).classList.add('active');
-  selectFiltered(true);
-}
-
-function selectFiltered(checked) {
-  document.querySelectorAll('.card-cb').forEach(cb => {
+function selectByScore(min) {
+  document.querySelectorAll('.score-btn').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.min) === min)
+  );
+  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+    if (done.has(parseInt(cb.dataset.idx))) return;
     const score = parseFloat(cb.dataset.score || 0);
-    if (!sent.has(parseInt(cb.dataset.idx)) && !skipped.has(parseInt(cb.dataset.idx))) {
-      cb.checked = checked && score >= minScore;
-    }
+    const isReject = cb.classList.contains('reject-cb');
+    cb.checked = isReject ? score < min : score >= min;
   });
   onCheck();
 }
 
-function sendOne(i, negId) {
-  const msg = document.getElementById('msg-'+i)?.value || '';
-  sent.add(i);
+function selectAll(checked) {
+  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+    if (!done.has(parseInt(cb.dataset.idx))) cb.checked = checked;
+  });
+  document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('active'));
+  onCheck();
+}
+
+function markDone(i) {
+  done.add(i);
   document.getElementById('card-'+i).classList.add('done');
   const cb = document.getElementById('cb-'+i);
   if (cb) { cb.checked = false; cb.disabled = true; }
-  document.getElementById('sentCount').textContent = sent.size;
-  onCheck();
+  document.getElementById('sentCount').textContent = done.size;
+}
+
+function sendOne(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value || '';
+  markDone(i); onCheck();
   console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
 }
 
 function skipOne(i) {
-  skipped.add(i);
+  done.add(i);
   document.getElementById('card-'+i).classList.add('skipped');
   const cb = document.getElementById('cb-'+i);
   if (cb) { cb.checked = false; cb.disabled = true; }
@@ -1293,19 +1314,24 @@ function skipOne(i) {
 function sendAll() {
   document.querySelectorAll('.card-cb:checked').forEach(cb => {
     const i = parseInt(cb.dataset.idx);
-    const card = document.getElementById('card-'+i);
-    const negId = card?.dataset.neg || '';
+    const negId = document.getElementById('card-'+i)?.dataset.neg || '';
     const msg = document.getElementById('msg-'+i)?.value || '';
-    sent.add(i);
-    card.classList.add('done');
-    cb.checked = false; cb.disabled = true;
+    markDone(i);
     console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
   });
-  document.getElementById('sentCount').textContent = sent.size;
   onCheck();
 }
 
-// init count
+function rejectAll() {
+  document.querySelectorAll('.reject-cb:checked').forEach(cb => {
+    const i = parseInt(cb.dataset.idx);
+    const negId = document.getElementById('card-'+i)?.dataset.neg || '';
+    markDone(i);
+    console.log('[HH-REJECT]', JSON.stringify({ negotiation_id: negId }));
+  });
+  onCheck();
+}
+
 onCheck();
 </script>
 </body>
