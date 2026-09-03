@@ -143,6 +143,25 @@ function scheduleNalogExpiryChecks(secrets) {
   setInterval(check, CHECK_INTERVAL_MS);
 }
 
+// Fetch negotiations across all active stages for a vacancy (parallel per-state requests).
+// Excludes 'discard' (rejected) and 'hired' (done) — only actionable/in-progress candidates.
+const HH_REVIEW_STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer'];
+
+async function fetchAllHhNegotiations(vacancyId, accessToken) {
+  const results = await Promise.all(HH_REVIEW_STATES.map(async state => {
+    let items = [];
+    let page = 0, totalPages = 1;
+    do {
+      const data = await hhApiRequest('GET', `/negotiations/${state}?vacancy_id=${vacancyId}&per_page=50&page=${page}`, accessToken);
+      items = items.concat(data.items || []);
+      totalPages = data.pages ?? 1;
+      page++;
+    } while (page < totalPages);
+    return items;
+  }));
+  return results.flat();
+}
+
 // Background HH scoring: fetch negotiations + score unscored candidates for all users
 // with HH token + active vacancy + ATS config. Runs every 5 min so the review page
 // shows scores immediately without blocking on page open.
@@ -171,14 +190,7 @@ async function runHhScoringForUser(username) {
     const configFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
     if (!fs.existsSync(configFile)) return;
 
-    let negotiations = [];
-    let page = 0, totalPages = 1;
-    do {
-      const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=${page}`, tokenData.access_token);
-      negotiations = negotiations.concat(data.items || []);
-      totalPages = data.pages ?? 1;
-      page++;
-    } while (page < totalPages);
+    const negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
 
     const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4 });
     if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
@@ -993,14 +1005,7 @@ async function main() {
 
       let negotiations = [];
       try {
-        let page = 0;
-        let totalPages = 1;
-        do {
-          const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=${page}`, tokenData.access_token);
-          negotiations = negotiations.concat(data.items || []);
-          totalPages = data.pages ?? 1;
-          page++;
-        } while (page < totalPages);
+        negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
