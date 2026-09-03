@@ -245,7 +245,7 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
 
   const unscored = negotiations.filter(neg => {
     const history = readCandidateHistory(username, neg.id);
-    return !history.ats_result;
+    return history.ats_result?.score == null;
   });
 
   if (!unscored.length) return 0;
