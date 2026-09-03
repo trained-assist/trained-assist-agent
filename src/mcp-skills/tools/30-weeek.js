@@ -305,7 +305,15 @@ module.exports = {
         const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
         if (query) params.set('query', query);
         const data = await weeekCall(`/crm/contacts?${params}`, {}, uid);
-        return { contacts: data.contacts ?? [], hasMore: data.hasMoreContacts === true };
+        const contacts = (data.contacts ?? []).map(c => ({
+          id: c.id,
+          name: [c.firstName, c.lastName].filter(Boolean).join(' '),
+          phone: c.phones?.[0]?.phone ?? null,
+          email: c.emails?.[0]?.email ?? null,
+          company: c.company ?? null,
+          createdAt: c.createdAt,
+        }));
+        return { contacts, hasMore: data.hasMoreContacts === true };
       },
     },
 
@@ -327,30 +335,40 @@ module.exports = {
     },
 
     weeek_create_contact: {
-      description: 'Create a new CRM contact.',
+      description: 'Create a new CRM contact. API uses firstName/lastName split and phones/emails as string arrays.',
       inputSchema: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: 'Contact name' },
-          phone: { type: 'string' },
-          email: { type: 'string' },
-          company: { type: 'string' },
-          custom_fields: { type: 'object' },
+          name: { type: 'string', description: 'Full contact name (will be split into firstName/lastName)' },
+          phone: { type: 'string', description: 'Phone number (e.g. "+79001234567")' },
+          email: { type: 'string', description: 'Email address' },
+          company: { type: 'string', description: 'Company/organization name' },
           user_id: { type: 'string' },
         },
         required: ['name'],
       },
-      handler: async ({ name, phone, email, company, custom_fields, user_id }) => {
+      handler: async ({ name, phone, email, company, user_id }) => {
         const uid = user_id || USER_ID;
+        // Weeek API requires firstName (required) and optional lastName
+        const parts = String(name).trim().split(/\s+/);
+        const firstName = parts[0];
+        const lastName = parts.slice(1).join(' ') || undefined;
         const body = {
-          name,
-          ...(phone && { phone }),
-          ...(email && { email }),
+          firstName,
+          ...(lastName && { lastName }),
+          ...(phone && { phones: [String(phone)] }),
+          ...(email && { emails: [String(email)] }),
           ...(company && { company }),
-          ...(custom_fields && { customFields: custom_fields }),
         };
         const data = await weeekCall('/crm/contacts', { method: 'POST', body }, uid);
-        return data.contact ?? data;
+        const c = data.contact ?? data;
+        // Normalize returned contact for easier reading
+        if (c && c.firstName) {
+          c.name = [c.firstName, c.lastName].filter(Boolean).join(' ');
+          c.phone = c.phones?.[0]?.phone ?? null;
+          c.email = c.emails?.[0]?.email ?? null;
+        }
+        return c;
       },
     },
 
@@ -360,23 +378,25 @@ module.exports = {
         type: 'object',
         properties: {
           contact_id: { type: 'string' },
-          name: { type: 'string' },
+          name: { type: 'string', description: 'Full name (split into firstName/lastName)' },
           phone: { type: 'string' },
           email: { type: 'string' },
           company: { type: 'string' },
-          custom_fields: { type: 'object' },
           user_id: { type: 'string' },
         },
         required: ['contact_id'],
       },
-      handler: async ({ contact_id, name, phone, email, company, custom_fields, user_id }) => {
+      handler: async ({ contact_id, name, phone, email, company, user_id }) => {
         const uid = user_id || USER_ID;
         const body = {};
-        if (name !== undefined) body.name = name;
-        if (phone !== undefined) body.phone = phone;
-        if (email !== undefined) body.email = email;
+        if (name !== undefined) {
+          const parts = String(name).trim().split(/\s+/);
+          body.firstName = parts[0];
+          if (parts.length > 1) body.lastName = parts.slice(1).join(' ');
+        }
+        if (phone !== undefined) body.phones = [String(phone)];
+        if (email !== undefined) body.emails = [String(email)];
         if (company !== undefined) body.company = company;
-        if (custom_fields !== undefined) body.customFields = custom_fields;
         const data = await weeekCall(`/crm/contacts/${encodeURIComponent(contact_id)}`, { method: 'PATCH', body }, uid);
         return data.contact ?? data;
       },
