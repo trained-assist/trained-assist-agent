@@ -1120,11 +1120,8 @@ function generateReviewHtml(candidates, vacancyName) {
       : '';
 
     const isActionable = c.verdict !== 'ОТКЛОНИТЬ' && !!c.draft_message;
-    const isReject = c.verdict === 'ОТКЛОНИТЬ';
-    const cbType = isReject ? 'reject-cb' : 'card-cb';
-    const cbChecked = isReject ? '' : 'checked';
-    const checkboxHtml = (isActionable || isReject)
-      ? `<input type="checkbox" class="${cbType}" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" data-type="${isReject ? 'reject' : 'send'}" ${cbChecked} onchange="onCheck()">`
+    const checkboxHtml = isActionable
+      ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" checked onchange="onCheck()">`
       : '';
 
     const msgSection = isActionable
@@ -1136,8 +1133,8 @@ function generateReviewHtml(candidates, vacancyName) {
              <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
            </div>
          </div>`
-      : isReject
-        ? `<div class="reject-note">Отказать через bulk_reject (без сообщения)</div>`
+      : c.verdict === 'ОТКЛОНИТЬ'
+        ? `<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>`
         : '';
 
     return `<div class="card" id="card-${i}" data-score="${(c.score || 0).toFixed(1)}" data-neg="${escHtml(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
@@ -1224,31 +1221,24 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn-send-all{background:#4f46e5;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
 .btn-send-all:disabled{opacity:.4;cursor:not-allowed}
 .btn-send-all:not(:disabled):hover{opacity:.85}
-.btn-reject-all{background:#dc2626;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
-.btn-reject-all:disabled{opacity:.4;cursor:not-allowed}
-.btn-reject-all:not(:disabled):hover{opacity:.85}
-.reject-cb{accent-color:#dc2626}
 </style>
 </head>
 <body>
 <h1>Кандидаты: ${escHtml(vacancyName)}</h1>
 <p class="subtitle">${sorted.length} откликов · ${actionable} требуют сообщения</p>
 <div class="toolbar">
-  <span class="toolbar-label">Выбрать для отправки:</span>
-  <button class="tb-btn active" id="filter-all" onclick="filterScore(0,'send')">Все</button>
-  <button class="tb-btn" id="filter-8" onclick="filterScore(8,'send')">8.0+</button>
-  <button class="tb-btn" id="filter-6" onclick="filterScore(6,'send')">6.0+</button>
+  <span class="toolbar-label">Выбрать:</span>
+  <button class="tb-btn active" id="filter-all" onclick="filterScore(0)">Все</button>
+  <button class="tb-btn" id="filter-8" onclick="filterScore(8)">8.0+</button>
+  <button class="tb-btn" id="filter-6" onclick="filterScore(6)">6.0+</button>
   <div class="tb-sep"></div>
-  <button class="tb-btn" id="filter-weak" onclick="filterScore(0,'reject')" style="color:#dc2626;border-color:#fca5a5">Слабые (отказ)</button>
-  <div class="tb-sep"></div>
-  <button class="tb-btn" onclick="selectAll(true)">✓ Все</button>
-  <button class="tb-btn" onclick="selectAll(false)">✗ Снять</button>
+  <button class="tb-btn" onclick="selectFiltered(true)">✓ Выбрать все</button>
+  <button class="tb-btn" onclick="selectFiltered(false)">✗ Снять все</button>
 </div>
 ${cards}
 <div class="footer">
-  <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
-  <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
-  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить (0)</button>
+  <div class="counter">Выбрано: <strong id="selCount">0</strong> / <strong>${actionable}</strong> · Отправлено: <strong id="sentCount">0</strong></div>
+  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить выбранных (0)</button>
 </div>
 <script>
 const sent = new Set();
