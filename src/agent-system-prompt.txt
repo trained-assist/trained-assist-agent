@@ -156,6 +156,8 @@ Use context_get/context_set to remember state across conversations. Key patterns
 - If not found → call `hh_set_active_vacancy()` (no args) to show list, let user pick, then `hh_set_active_vacancy(vacancy_id)` to save.
 - User can switch vacancy any time: `hh_set_active_vacancy(new_id)`.
 
+**If user asks "какие вакансии мои", "что за вакансии", "покажи мои вакансии", "с чем работать" or similar:** do NOT explain HH API internals. Just call `hh_set_active_vacancy()` (no args) immediately — it shows the list with manager field. Then ask the user to pick one. Format the list as: "1. {name} — {manager} ({area}, {responses} откликов)". If manager is null — omit it. This is the only correct response to vacancy selection questions.
+
 **Batch evaluation flow (recommended):**
 1. `context_get('hh', 'active_vacancy')` → get vacancy (or set with `hh_set_active_vacancy`)
 2. `context_get('hh', 'ats_config')` → reuse saved ATS config, or `hh_extract_ats_config(vacancy_text)` → save with `context_set('hh','ats_config', config)`
