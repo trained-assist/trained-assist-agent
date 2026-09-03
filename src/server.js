@@ -933,8 +933,8 @@ async function main() {
 
       let negotiations = [];
       try {
-        const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=0`, tokenData.access_token);
-        negotiations = data.items || [];
+        const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=100&page=0&order_by=updated_at`, tokenData.access_token);
+        negotiations = (data.items || []).sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
@@ -1640,7 +1640,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
              </div>
            </div>`;
 
-    return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
+    return `<div class="card${i >= 20 ? ' hidden-page' : ''}" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" data-name="${esc(c.name.toLowerCase())}" style="background:${bg};border-left:4px solid ${col}">
   <div class="card-header">
     <div class="card-header-left">
       ${checkboxHtml}
@@ -1731,11 +1731,23 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .toast{position:fixed;top:20px;right:20px;padding:10px 18px;border-radius:8px;background:#16a34a;color:#fff;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:fadein .2s}
 .toast-err{background:#dc2626}
 @keyframes fadein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.search-wrap{margin-bottom:12px}
+.search-input{width:100%;max-width:360px;padding:8px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;font-family:inherit;outline:none}
+.search-input:focus{border-color:#6366f1}
+.card.hidden-page{display:none}
+.card.hidden-search{display:none}
+.load-more-wrap{text-align:center;margin:8px 0 16px}
+.btn-load-more{padding:9px 28px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;background:#fff;color:#475569;transition:background .15s}
+.btn-load-more:hover{background:#f1f5f9}
+.page-info{font-size:13px;color:#94a3b8;margin-top:6px}
 </style>
 </head>
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
 <p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}" style="color:#6366f1">обновить</a></p>
+<div class="search-wrap">
+  <input id="searchInput" class="search-input" type="search" placeholder="Поиск по ФИО…" oninput="filterCards()">
+</div>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
   <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
@@ -1752,6 +1764,10 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
 ${cards || '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>'}
+<div class="load-more-wrap" id="loadMoreWrap" ${sorted.length <= 20 ? 'style="display:none"' : ''}>
+  <button class="btn-load-more" onclick="loadMore()">Показать ещё 20</button>
+  <div class="page-info" id="pageInfo">Показано 20 из ${sorted.length}</div>
+</div>
 <div class="footer">
   <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
   <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
@@ -1791,6 +1807,33 @@ function onCheck() {
   sb.textContent = 'Отправить (' + ns + ')'; sb.disabled = ns === 0;
   const rb = document.getElementById('rejectAllBtn');
   rb.textContent = 'Отказать (' + nr + ')'; rb.disabled = nr === 0;
+}
+
+let shownCount = Math.min(20, ${sorted.length});
+const totalCount = ${sorted.length};
+
+function loadMore() {
+  const cards = document.querySelectorAll('.card.hidden-page');
+  let shown = 0;
+  for (const c of cards) {
+    if (shown >= 20) break;
+    c.classList.remove('hidden-page');
+    shown++;
+    shownCount++;
+  }
+  const remaining = document.querySelectorAll('.card.hidden-page').length;
+  document.getElementById('pageInfo').textContent = 'Показано ' + shownCount + ' из ' + totalCount;
+  if (remaining === 0) document.getElementById('loadMoreWrap').style.display = 'none';
+}
+
+function filterCards() {
+  const q = (document.getElementById('searchInput').value || '').toLowerCase().trim();
+  document.querySelectorAll('.card').forEach(card => {
+    if (!q) { card.classList.remove('hidden-search'); return; }
+    const name = card.dataset.name || '';
+    if (name.includes(q)) card.classList.remove('hidden-search');
+    else card.classList.add('hidden-search');
+  });
 }
 
 const activeBuckets = new Set();
