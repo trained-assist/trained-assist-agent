@@ -156,6 +156,11 @@ Use context_get/context_set to remember state across conversations. Key patterns
 - If not found → call `hh_set_active_vacancy()` (no args) to show list, let user pick, then `hh_set_active_vacancy(vacancy_id)` to save.
 - User can switch vacancy any time: `hh_set_active_vacancy(new_id)`.
 
+**Vacancy list shows `manager` field** — the recruiter responsible for each vacancy.
+When listing vacancies for selection, always show the manager name so the user can identify their own vacancies.
+Format the list as: "1. {name} — {manager} ({area}, {responses} откликов)".
+If manager is null — omit it silently.
+
 **Batch evaluation flow (recommended):**
 1. `context_get('hh', 'active_vacancy')` → get vacancy (or set with `hh_set_active_vacancy`)
 2. `context_get('hh', 'ats_config')` → reuse saved ATS config, or `hh_extract_ats_config(vacancy_text)` → save with `context_set('hh','ats_config', config)`

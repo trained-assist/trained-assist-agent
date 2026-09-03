@@ -467,11 +467,12 @@ module.exports = {
               id: v.id,
               name: v.name,
               area: v.area?.name,
+              manager: v.manager?.full_name || v.manager?.id || null,
               responses: v.counters?.responses,
               published_at: v.published_at?.slice(0, 10),
             }));
             return {
-              message: 'Выбери вакансию и вызови hh_set_active_vacancy с её id',
+              message: 'Выбери вакансию и вызови hh_set_active_vacancy с её id. Поле manager — ответственный рекрутер.',
               vacancies: items,
             };
           } catch (e) { return { error: e.message }; }
@@ -515,6 +516,7 @@ module.exports = {
             id: v.id,
             name: v.name,
             area: v.area?.name,
+            manager: v.manager?.full_name || v.manager?.id || null,
             salary: v.salary ? `${v.salary.from || ''}–${v.salary.to || ''} ${v.salary.currency}` : null,
             responses: v.counters?.responses,
             published_at: v.published_at?.slice(0, 10),

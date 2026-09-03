@@ -455,7 +455,7 @@ describe('hh_set_active_vacancy', () => {
     rmSync(ctxDir, { recursive: true, force: true });
   });
 
-  it('no args → lists active vacancies from HH', async () => {
+  it('no args → lists active vacancies from HH with manager field', async () => {
     const r = await tools().hh_set_active_vacancy.handler({});
     expect(r.vacancies).toBeDefined();
     expect(Array.isArray(r.vacancies)).toBe(true);
@@ -463,6 +463,10 @@ describe('hh_set_active_vacancy', () => {
     const vac = r.vacancies.find(v => v.id === 'vac-001');
     expect(vac).toBeTruthy();
     expect(vac.name).toContain('Backend Developer');
+    // manager field must be present so recruiter can identify their own vacancies
+    expect(vac.manager).toBe('Анна Рекрутер');
+    const vac2 = r.vacancies.find(v => v.id === 'vac-002');
+    expect(vac2.manager).toBe('Иван Менеджер');
   });
 
   it('with vacancy_id → fetches title, saves to context', async () => {
