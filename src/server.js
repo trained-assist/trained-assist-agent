@@ -143,6 +143,65 @@ function scheduleNalogExpiryChecks(secrets) {
   setInterval(check, CHECK_INTERVAL_MS);
 }
 
+// Background HH scoring: fetch negotiations + score unscored candidates for all users
+// with HH token + active vacancy + ATS config. Runs every 5 min so the review page
+// shows scores immediately without blocking on page open.
+const _hhBgRunning = new Set();
+
+async function runHhScoringForUser(username) {
+  if (_hhBgRunning.has(username)) return;
+  _hhBgRunning.add(username);
+  try {
+    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+    if (!fs.existsSync(tokenFile)) return;
+    let tokenData;
+    try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return; }
+    if (!tokenData?.access_token) return;
+
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const workDir = path.join(dataDir, 'sessions', String(username));
+    const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+    if (!fs.existsSync(vacancyCtxFile)) return;
+    let vacancy;
+    try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch { return; }
+    if (!vacancy?.id) return;
+
+    // Only score if ATS config exists (otherwise no criteria to score against)
+    const configFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+    if (!fs.existsSync(configFile)) return;
+
+    let negotiations = [];
+    let page = 0, totalPages = 1;
+    do {
+      const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=${page}`, tokenData.access_token);
+      negotiations = negotiations.concat(data.items || []);
+      totalPages = data.pages ?? 1;
+      page++;
+    } while (page < totalPages);
+
+    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4 });
+    if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
+  } catch (e) {
+    console.error(`[hh-bg] error for ${username}:`, e.message);
+  } finally {
+    _hhBgRunning.delete(username);
+  }
+}
+
+function scheduleHhBackgroundScoring() {
+  async function run() {
+    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    if (!fs.existsSync(hhTokensBase)) return;
+    for (const username of fs.readdirSync(hhTokensBase)) {
+      runHhScoringForUser(username).catch(() => {});
+      await new Promise(r => setTimeout(r, 1000)); // stagger users to avoid API burst
+    }
+  }
+  setTimeout(() => run().catch(() => {}), 3 * 60 * 1000); // first run 3 min after start
+  setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
+}
+
 async function main() {
   const secrets = await loadSecrets();
 
@@ -944,19 +1003,14 @@ async function main() {
         } while (page < totalPages);
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
-      // Auto-score unscored candidates if ATS config exists (non-blocking for first load,
-      // but we await it so the page shows scores on first open)
-      try {
-        const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 8 });
-        if (scored > 0) console.log(`[hh/review] auto-scored ${scored} candidates for ${username}`);
-      } catch (e) {
-        console.error('[hh/review] auto-score error:', e.message);
-      }
-
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
       const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(html);
+      res.end(html);
+
+      // Score any unscored candidates in the background after page is already served
+      runHhScoringForUser(username).catch(e => console.error('[hh/review] bg-score error:', e.message));
+      return;
     }
 
     // GET /hh/ats-editor?username=X&token=Y — serve the ATS Template Editor HTML page
@@ -1766,6 +1820,7 @@ function showStatus(type, msg) {
   setInterval(() => pollDriveChanges(driveOpts).catch(() => {}), 2 * 60 * 1000);
 
   scheduleNalogExpiryChecks(secrets);
+  scheduleHhBackgroundScoring();
 
   const shutdown = () => {
     server.close(() => process.exit(0));
