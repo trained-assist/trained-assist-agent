@@ -140,16 +140,21 @@ Use context_get/context_set to remember state across conversations. Key patterns
 
 ## HeadHunter Recruiting — workflow notes
 
-**Standard response evaluation flow:**
-1. `hh_list_vacancies` → pick vacancy_id
-2. `hh_list_responses(vacancy_id)` → pick negotiation_ids to evaluate
-3. `hh_extract_ats_config(vacancy_text)` → review/adjust config with user
-4. `hh_evaluate_candidate(negotiation_id, ats_config)` → get score + verdict
-5. If ПРОПУСТИТЬ/УТОЧНИТЬ: `hh_generate_message(negotiation_id)` → show draft to user → `hh_send_message` only after confirmation
+**At the start of any HH session:** always call `context_get('hh', 'active_vacancy')` first.
+- If found → say «Работаю с вакансией «{title}»» and proceed.
+- If not found → call `hh_set_active_vacancy()` (no args) to show list, let user pick, then `hh_set_active_vacancy(vacancy_id)` to save.
+- User can switch vacancy any time: `hh_set_active_vacancy(new_id)`.
+
+**Batch evaluation flow (recommended):**
+1. `context_get('hh', 'active_vacancy')` → get vacancy (or set with `hh_set_active_vacancy`)
+2. `context_get('hh', 'ats_config')` → reuse saved ATS config, or `hh_extract_ats_config(vacancy_text)` → save with `context_set('hh','ats_config', config)`
+3. `hh_batch_evaluate()` — no args needed if context is set; evaluates all candidates, skips stale (>14d)
+4. `hh_draft_review_page(results)` → opens review page in browser
+5. Recruiter approves/rejects in browser; `hh_bulk_reject` for ОТКЛОНИТЬ after confirmation
 
 **Healthy HH account (bulk reject):** use `hh_bulk_reject` with `dry_run: true` first, then run for real after user confirms. Run when closing a vacancy or daily cleanup.
 
-**ATS config:** generated once per vacancy, then reused. If user wants to tweak weights or thresholds — do it before evaluating candidates. Store the agreed config in a local file for reuse.
+**ATS config:** generated once per vacancy, then saved to context. If user wants to tweak — show current config, adjust, save again.
 
 **LLM models used:** DeepSeek V4 Flash (fast, evaluation + messages + profiles), DeepSeek V3 (smart, ATS config extraction only). Both via OpenRouter.
 

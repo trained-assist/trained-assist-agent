@@ -8,6 +8,24 @@ const https = require('https');
 
 const USER_ID = process.env.USER_ID || '';
 
+// ── Context store (mirrors 03-context.js logic) ────────────────────────────
+
+function contextPath(skill, key) {
+  return path.join(process.cwd(), 'contexts', skill, `${key}.json`);
+}
+
+function readContext(skill, key) {
+  const file = contextPath(skill, key);
+  if (!fs.existsSync(file)) return null;
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+function writeContext(skill, key, value) {
+  const file = contextPath(skill, key);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ value, updated_at: new Date().toISOString() }, null, 2));
+}
+
 // ── Token storage ──────────────────────────────────────────────────────────
 
 function tokenBase() {
@@ -426,6 +444,52 @@ module.exports = {
 
     // ── Vacancies ───────────────────────────────────────────────────────────
 
+    hh_set_active_vacancy: {
+      description:
+        'Set the active vacancy for this HH session. Saves to persistent context so hh_batch_evaluate ' +
+        'and cron jobs use it automatically. If vacancy_id is omitted — lists available vacancies for the user to pick from.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          vacancy_id: { type: 'string', description: 'Vacancy ID to set as active. Omit to list all vacancies.' },
+        },
+      },
+      handler: async ({ vacancy_id } = {}) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+
+        if (!vacancy_id) {
+          const employerId = token.employer_id;
+          if (!employerId) return { error: 'employer_id не задан.' };
+          try {
+            const data = await hhGet(`/vacancies?employer_id=${employerId}&status=active&per_page=50`, token);
+            const items = (data.items || []).map(v => ({
+              id: v.id,
+              name: v.name,
+              area: v.area?.name,
+              responses: v.counters?.responses,
+              published_at: v.published_at?.slice(0, 10),
+            }));
+            return {
+              message: 'Выбери вакансию и вызови hh_set_active_vacancy с её id',
+              vacancies: items,
+            };
+          } catch (e) { return { error: e.message }; }
+        }
+
+        // Fetch vacancy name to store human-readable label
+        let title = vacancy_id;
+        try {
+          const v = await hhGet(`/vacancies/${vacancy_id}`, token);
+          title = v.name || vacancy_id;
+        } catch { /* best-effort */ }
+
+        const value = { id: vacancy_id, title, set_at: new Date().toISOString() };
+        writeContext('hh', 'active_vacancy', value);
+        return { ok: true, active_vacancy: value, message: `Активная вакансия: «${title}» (${vacancy_id})` };
+      },
+    },
+
     hh_list_vacancies: {
       description: 'List open vacancies for the connected employer on hh.ru.',
       inputSchema: {
@@ -710,27 +774,50 @@ module.exports = {
     },
 
     hh_batch_evaluate: {
-      description: 'Batch evaluate all candidates on a vacancy: fetch responses, skip inactive (>max_days_inactive), evaluate each with ATS scoring. Returns sorted results ready for hh_draft_review_page.',
+      description:
+        'Batch evaluate all candidates on a vacancy: fetch responses, skip inactive (>max_days_inactive), ' +
+        'evaluate each with ATS scoring. Returns sorted results ready for hh_draft_review_page. ' +
+        'If vacancy_id is omitted — reads from context (set with hh_set_active_vacancy).',
       inputSchema: {
         type: 'object',
         properties: {
-          vacancy_id: { type: 'string', description: 'Vacancy ID from hh_list_vacancies' },
+          vacancy_id: {
+            type: 'string',
+            description: 'Vacancy ID. Omit to use the active vacancy from context (hh_set_active_vacancy).',
+          },
           ats_config: {
             type: 'object',
-            description: 'ATS config from hh_extract_ats_config',
+            description: 'ATS config from hh_extract_ats_config. Omit to use saved config from context.',
           },
           max_days_inactive: {
             type: 'number',
             description: 'Skip candidates with no activity for this many days (default: 14)',
           },
         },
-        required: ['vacancy_id', 'ats_config'],
       },
       handler: async ({ vacancy_id, ats_config, max_days_inactive = 14 } = {}) => {
         const token = readHhToken(USER_ID);
         if (!token) return { error: 'HH не подключён.' };
         const apiKey = readOrKey(USER_ID);
         if (!apiKey) return { error: 'OpenRouter API key не найден.' };
+
+        // Resolve vacancy_id from context if not provided
+        if (!vacancy_id) {
+          const ctx = readContext('hh', 'active_vacancy');
+          if (!ctx?.value?.id) {
+            return { error: 'Вакансия не задана. Используй hh_set_active_vacancy чтобы выбрать вакансию.' };
+          }
+          vacancy_id = ctx.value.id;
+        }
+
+        // Resolve ats_config from context if not provided
+        if (!ats_config) {
+          const ctx = readContext('hh', 'ats_config');
+          if (!ctx?.value) {
+            return { error: 'ATS конфиг не задан. Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config",...).' };
+          }
+          ats_config = ctx.value;
+        }
 
         try {
           const data = await hhGet(
@@ -785,8 +872,10 @@ module.exports = {
 
           results.sort((a, b) => (b.score || 0) - (a.score || 0));
 
+          const vacCtx = readContext('hh', 'active_vacancy');
           return {
             vacancy_id,
+            vacancy_title: vacCtx?.value?.title || vacancy_id,
             evaluated: results.length,
             skipped: skipped.length,
             skipped_list: skipped,
