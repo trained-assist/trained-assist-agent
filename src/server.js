@@ -890,7 +890,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -969,6 +969,85 @@ async function main() {
         return json(res, 200, { ok: true });
       } catch (e) {
         console.error('[hh/send] error:', e.message);
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /hh/generate-message — generate draft for one candidate (called from review page)
+    if (req.method === 'POST' && url.pathname === '/hh/generate-message') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username, negotiation_id, resume_text, candidate_name, already_sent } = body || {};
+      if (!username || !negotiation_id) return json(res, 400, { error: 'missing fields' });
+
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const orKeyFile = path.join(hhTokensBase, String(username), 'openrouter');
+      const apiKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : process.env.OPENROUTER_API_KEY;
+      if (!apiKey) return json(res, 503, { error: 'OpenRouter key not configured' });
+
+      const styleFile = path.join(hhTokensBase, String(username), 'hh-message-style');
+      const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
+
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const candDir = path.join(dataDir, 'hh', String(username), 'candidates');
+      const histFile = path.join(candDir, `${negotiation_id}.json`);
+      const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
+      const msgs = history.messages || [];
+      const hasPriorContact = msgs.some(m => m.role === 'employer');
+      const msgType = already_sent || hasPriorContact ? 'followup' : 'initial';
+
+      const baseSystem = `Ты — рекрутер в технической компании.
+Пиши первое сообщение кандидату на HeadHunter. Тон: профессиональный, уважительный, конкретный.
+Структура: 1) Приветствие с именем 2) 1-2 предложения что в резюме зацепило 3) Короткое описание роли 4) Конкретный вопрос для квалификации (самый важный пробел) 5) Призыв к действию.
+Длина: 4-6 предложений. Не используй шаблонные фразы. Пиши от первого лица.`;
+      const followupSystem = `Ты — рекрутер. Напиши короткий follow-up кандидату, который не ответил на первое сообщение.
+Тон: лёгкий, без давления. Упомяни, что писал ранее. 2-3 предложения максимум.`;
+
+      const systemPrompt = commStyle
+        ? `${msgType === 'followup' ? followupSystem : baseSystem}\n\n## Стиль общения рекрутера\n${commStyle}`
+        : (msgType === 'followup' ? followupSystem : baseSystem);
+
+      const firstName = (candidate_name || 'Кандидат').split(' ')[0];
+      const userMsg = msgType === 'followup'
+        ? `Кандидат ${firstName} не ответил. Напиши follow-up.`
+        : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resume_text || '(не указано)'}`;
+
+      try {
+        const message = await new Promise((resolve, reject) => {
+          const reqBody = JSON.stringify({
+            model: 'anthropic/claude-haiku-4-5-20251001',
+            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMsg }],
+            temperature: 0.7,
+            max_tokens: 800,
+          });
+          const hreq = require('https').request({
+            hostname: 'openrouter.ai',
+            path: '/api/v1/chat/completions',
+            method: 'POST',
+            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(reqBody) },
+          }, (hres) => {
+            let data = '';
+            hres.on('data', c => (data += c));
+            hres.on('end', () => {
+              try {
+                const p = JSON.parse(data);
+                if (p.error) reject(new Error(p.error.message || JSON.stringify(p.error)));
+                else resolve(p.choices[0].message.content);
+              } catch (e) { reject(e); }
+            });
+          });
+          hreq.on('error', reject);
+          hreq.write(reqBody);
+          hreq.end();
+        });
+
+        if (!history.ats_result) history.ats_result = {};
+        history.ats_result.draft_message = message;
+        fs.mkdirSync(candDir, { recursive: true });
+        fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
+        return json(res, 200, { ok: true, message });
+      } catch (e) {
+        console.error('[hh/generate-message] error:', e.message);
         return json(res, 500, { error: e.message });
       }
     }
@@ -1620,25 +1699,21 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       ? `<a href="${esc(c.alternate_url)}" target="_blank" rel="noopener" class="resume-link">${esc(c.name)}</a>`
       : esc(c.name);
 
-    const msgSection = (isActionable && c.draft_message)
-      ? `<div class="msg-section">
-           <label class="msg-label">Черновик сообщения</label>
-           <textarea class="msg-area" id="msg-${i}" rows="5">${esc(c.draft_message)}</textarea>
+    const hasDraft = !!c.draft_message;
+    const msgLabel = c.already_sent ? 'Follow-up (уже писали)' : hasDraft ? 'Черновик сообщения' : 'Сообщение';
+    const msgSection = isReject
+      ? '<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>'
+      : `<div class="msg-section">
+           <div class="msg-label-row">
+             <label class="msg-label">${msgLabel}</label>
+             <button class="btn btn-gen" id="gen-${i}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
+           </div>
+           <textarea class="msg-area" id="msg-${i}" rows="5">${hasDraft ? esc(c.draft_message) : ''}</textarea>
            <div class="btns">
              <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
              <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
            </div>
-         </div>`
-      : isReject
-        ? '<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>'
-        : `<div class="msg-section">
-             <label class="msg-label">Сообщение</label>
-             <textarea class="msg-area" id="msg-${i}" rows="3" placeholder="Введите сообщение..."></textarea>
-             <div class="btns">
-               <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
-               <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
-             </div>
-           </div>`;
+         </div>`;
 
     return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
   <div class="card-header">
@@ -1699,7 +1774,11 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .tag-ok{background:#dcfce7;color:#15803d}
 .tag-gap{background:#fee2e2;color:#b91c1c}
 .msg-section{border-top:1px solid #e2e8f0;padding-top:12px;margin-top:8px}
-.msg-label{display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em}
+.msg-label-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.msg-label{font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.04em}
+.btn-gen{font-size:11px;padding:3px 8px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;color:#475569;font-weight:500}
+.btn-gen:hover:not(:disabled){background:#e2e8f0}
+.btn-gen:disabled{opacity:.5;cursor:not-allowed}
 .msg-area{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:14px;line-height:1.5;font-family:inherit;resize:vertical;min-height:80px}
 .msg-area:focus{outline:none;border-color:#6366f1}
 .btns{display:flex;gap:8px;margin-top:8px}
@@ -1823,6 +1902,48 @@ function markDone(i) {
   document.getElementById('sentCount').textContent = done.size;
 }
 
+async function generateOne(i, negId, candidateName, alreadySent) {
+  const btn = document.getElementById('gen-'+i);
+  const ta = document.getElementById('msg-'+i);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+  try {
+    const resumeEl = document.querySelector('#card-'+i+' pre.resume-text');
+    const resumeText = resumeEl?.textContent || '';
+    const data = await hhAction('/hh/generate-message', {
+      negotiation_id: negId,
+      candidate_name: candidateName,
+      resume_text: resumeText,
+      already_sent: alreadySent,
+    });
+    if (ta) ta.value = data.message || '';
+    if (btn) { btn.disabled = false; btn.textContent = '✦ Перегенерировать'; }
+    showToast('✅ Черновик готов');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать'; }
+  }
+}
+
+async function generateAll() {
+  const allGenBtns = [...document.querySelectorAll('[id^="gen-"]')];
+  const emptyCards = allGenBtns.filter(btn => {
+    const i = btn.id.replace('gen-', '');
+    const ta = document.getElementById('msg-'+i);
+    return ta && !ta.value.trim();
+  });
+  if (emptyCards.length === 0) { showToast('Все черновики уже заполнены'); return; }
+  const gab = document.getElementById('genAllBtn');
+  if (gab) { gab.disabled = true; gab.textContent = '⏳ Генерирую...'; }
+  let ok = 0;
+  for (const btn of emptyCards) {
+    btn.click();
+    await new Promise(r => setTimeout(r, 300));
+    ok++;
+  }
+  if (gab) { gab.disabled = false; gab.textContent = '✦ Сгенерировать черновики'; }
+  showToast('✅ Запущена генерация для ' + ok + ' кандидатов');
+}
+
 async function sendOne(i, negId) {
   const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
   if (!msg) { showToast('Сообщение пустое', true); return; }
@@ -1881,6 +2002,21 @@ async function rejectAll() {
 }
 
 onCheck();
+
+// Auto-generate drafts for candidates with empty textarea on page load
+(async function autoGenerate() {
+  const allGenBtns = [...document.querySelectorAll('[id^="gen-"]')];
+  const emptyCards = allGenBtns.filter(btn => {
+    const i = btn.id.replace('gen-', '');
+    const ta = document.getElementById('msg-'+i);
+    return ta && !ta.value.trim();
+  });
+  if (emptyCards.length === 0) return;
+  for (const btn of emptyCards) {
+    btn.click();
+    await new Promise(r => setTimeout(r, 400));
+  }
+})();
 </script>
 </body>
 </html>`;
