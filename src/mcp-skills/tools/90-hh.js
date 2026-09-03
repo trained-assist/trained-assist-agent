@@ -1076,6 +1076,22 @@ module.exports = {
       },
     },
 
+    // ── ATS Template Editor ──────────────────────────────────────────────────
+
+    hh_open_ats_editor: {
+      description: 'Open the ATS Template Editor — a visual web page for designing the recruiting pipeline stages and ATS scoring config. Saves to context on click. Returns the URL to open in a browser.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const agentBase = (process.env.AGENT_PUBLIC_URL || 'http://localhost:3001').replace(/\/$/, '');
+        const url = `${agentBase}/hh/ats-editor?username=${encodeURIComponent(USER_ID)}`;
+        return {
+          ok: true,
+          url,
+          note: `Открой ссылку в браузере: ${url}`,
+        };
+      },
+    },
+
     // ── Candidate profile ────────────────────────────────────────────────────
 
     hh_candidate_profile: {
