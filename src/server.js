@@ -891,7 +891,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1173,6 +1173,151 @@ async function main() {
       const failed = results.filter(r => !r.ok).length;
       console.log(`[hh/reject] user=${username} total=${negotiation_ids.length} failed=${failed}`);
       return json(res, 200, { ok: true, results });
+    }
+
+    // GET /hh/style?username=X&token=Y — style update page
+    if (req.method === 'GET' && url.pathname === '/hh/style') {
+      const username = url.searchParams.get('username') || '';
+      const agentSecret = process.env.AGENT_SECRET || '';
+      const errStylePage = (msg) => {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Стиль общения</title>
+<style>body{font-family:system-ui;padding:48px;text-align:center;background:#f8fafc;color:#1e293b}</style>
+</head><body><h2>${msg}</h2></body></html>`);
+      };
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        const expected = createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16);
+        if ((url.searchParams.get('token') || '') !== expected) return errStylePage('Ссылка недействительна. Запроси новую у бота.');
+      }
+      if (!username) return errStylePage('Не указан пользователь.');
+      const hhTokensBase3 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const styleFile3 = path.join(hhTokensBase3, String(username), 'hh-message-style');
+      const existingStyle = fs.existsSync(styleFile3) ? fs.readFileSync(styleFile3, 'utf8').trim() : '';
+      const callbackBase3 = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      const hmacToken3 = agentSecret ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16) : '';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(`<!doctype html><html><head><meta charset="utf-8">
+<title>Стиль общения — ${username}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;margin:0;padding:24px;background:#f8fafc;color:#1e293b;max-width:720px;margin:0 auto}
+h1{font-size:1.4rem;margin-bottom:4px}
+p.sub{color:#64748b;margin:0 0 20px;font-size:.9rem}
+textarea{width:100%;height:340px;padding:12px;border:1px solid #cbd5e1;border-radius:8px;font-size:.9rem;line-height:1.5;resize:vertical;background:#fff;color:#1e293b}
+textarea::placeholder{color:#94a3b8}
+.hint{color:#64748b;font-size:.82rem;margin:8px 0 16px}
+button{background:#2563eb;color:#fff;border:none;padding:12px 28px;border-radius:8px;font-size:1rem;cursor:pointer;font-weight:600}
+button:hover{background:#1d4ed8}
+button:disabled{background:#94a3b8;cursor:not-allowed}
+.existing{background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:12px;margin-bottom:20px;font-size:.85rem;white-space:pre-wrap;max-height:180px;overflow-y:auto;color:#0369a1}
+.existing-label{font-size:.8rem;color:#0284c7;font-weight:600;margin-bottom:6px}
+#status{margin-top:16px;padding:12px;border-radius:8px;font-size:.9rem;display:none}
+#status.ok{background:#dcfce7;color:#166534;display:block}
+#status.err{background:#fee2e2;color:#991b1b;display:block}
+#status.loading{background:#fef9c3;color:#713f12;display:block}
+</style>
+</head><body>
+<h1>✍️ Стиль общения с кандидатами</h1>
+<p class="sub">Вставь 3–10 примеров своих сообщений кандидатам. Нейросеть извлечёт правила стиля и сохранит их — они будут применяться при генерации сообщений.</p>
+${existingStyle ? '<div class="existing-label">Текущий сохранённый стиль:</div><div class="existing">' + existingStyle.replace(/</g, '&lt;') + '</div>' : ''}
+<textarea id="examples" placeholder="Привет! Меня зовут Анна, я рекрутер в компании X...
+
+Добрый день! Посмотрела ваше резюме — интересный опыт в...
+
+Здравствуйте! Нашла ваш профиль и хотела бы уточнить..."></textarea>
+<div class="hint">Примеры будут использованы только для извлечения стиля — сами тексты не сохраняются.</div>
+<button id="btn" onclick="save()">Обновить стиль</button>
+<div id="status"></div>
+<script>
+async function save() {
+  const text = document.getElementById('examples').value.trim();
+  if (!text || text.length < 50) { showStatus('err', 'Вставь хотя бы пару примеров сообщений (мин. 50 символов).'); return; }
+  document.getElementById('btn').disabled = true;
+  showStatus('loading', 'Анализирую примеры... это займёт 5–15 секунд...');
+  try {
+    const r = await fetch('${callbackBase3}/hh/update-style', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', examples: text}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      showStatus('ok', '✅ Стиль сохранён! При следующей генерации сообщений он будет применяться автоматически.');
+      document.getElementById('btn').textContent = 'Обновить ещё раз';
+    } else {
+      showStatus('err', 'Ошибка: ' + (d.error || 'неизвестная'));
+    }
+  } catch(e) { showStatus('err', 'Сетевая ошибка: ' + e.message); }
+  document.getElementById('btn').disabled = false;
+}
+function showStatus(type, msg) {
+  const s = document.getElementById('status');
+  s.className = type; s.textContent = msg;
+}
+</script>
+</body></html>`);
+    }
+
+    // POST /hh/update-style — extract style from examples and save
+    if (req.method === 'POST' && url.pathname === '/hh/update-style') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body4 = JSON.parse(await readBody(req));
+      const { username, token: givenToken, examples } = body4 || {};
+      if (!username || !examples || typeof examples !== 'string') return json(res, 400, { error: 'missing fields' });
+      if (examples.trim().length < 50) return json(res, 400, { error: 'examples too short' });
+      const agentSecret4 = process.env.AGENT_SECRET || '';
+      if (agentSecret4) {
+        const { createHmac } = require('crypto');
+        const expected4 = createHmac('sha256', agentSecret4).update(String(username)).digest('hex').slice(0, 16);
+        if (givenToken !== expected4) return json(res, 403, { error: 'invalid token' });
+      }
+      const hhTokensBase4 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const orKeyFile4 = path.join(hhTokensBase4, String(username), 'openrouter');
+      const apiKey4 = fs.existsSync(orKeyFile4) ? fs.readFileSync(orKeyFile4, 'utf8').trim() : process.env.OPENROUTER_API_KEY;
+      if (!apiKey4) return json(res, 503, { error: 'OpenRouter key not configured' });
+
+      const systemPrompt4 = 'Ты — аналитик коммуникаций. Проанализируй примеры сообщений рекрутера кандидатам и составь краткое описание стиля общения. Это описание будет использоваться как инструкция для другой нейросети при генерации новых сообщений.\n\nФормат ответа — структурированный текст на русском языке:\n- Тон и манера (формальность, теплота, дистанция)\n- Характерные обороты и приветствия\n- Структура типичного сообщения\n- Что обычно уточняет или спрашивает\n- Что избегает\n- Длина сообщений\n\nБудь конкретным — используй реальные фразы из примеров.';
+      const userMsg4 = 'Примеры сообщений рекрутера:\n\n' + examples.trim().slice(0, 4000);
+
+      try {
+        const style = await new Promise((resolve, reject) => {
+          const reqBody4 = JSON.stringify({
+            model: 'deepseek/deepseek-v4-flash-0731',
+            messages: [{ role: 'system', content: systemPrompt4 }, { role: 'user', content: userMsg4 }],
+            temperature: 0.3,
+            max_tokens: 600,
+          });
+          const hreq4 = require('https').request({
+            hostname: 'openrouter.ai',
+            path: '/api/v1/chat/completions',
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + apiKey4, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(reqBody4) },
+          }, (hres4) => {
+            const chunks4 = [];
+            hres4.on('data', c => chunks4.push(c));
+            hres4.on('end', () => {
+              try {
+                const p = JSON.parse(Buffer.concat(chunks4).toString('utf8'));
+                if (p.error) reject(new Error(p.error.message || JSON.stringify(p.error)));
+                else resolve(p.choices[0].message.content);
+              } catch (e) { reject(e); }
+            });
+          });
+          hreq4.on('error', reject);
+          hreq4.write(reqBody4);
+          hreq4.end();
+        });
+
+        fs.mkdirSync(path.join(hhTokensBase4, String(username)), { recursive: true });
+        fs.writeFileSync(path.join(hhTokensBase4, String(username), 'hh-message-style'), style.trim());
+        console.log('[hh/update-style] saved style for', username, 'len=', style.length);
+        return json(res, 200, { ok: true, style });
+      } catch (e) {
+        console.error('[hh/update-style] error:', e.message);
+        return json(res, 500, { error: 'generation failed: ' + e.message });
+      }
     }
 
     // Auth: all endpoints require Bearer token

@@ -187,7 +187,14 @@ function hhWherePrompt(userId) {
   ].join('\n');
 }
 
+// "обнови стиль общения" — link to style update page
+function hhStylePage(userId) {
+  const token = hhReviewToken(userId);
+  const tokenParam = token ? `&token=${token}` : '';
+  return `✍️ Страница обновления стиля общения:\n${hhBase()}/hh/style?username=${encodeURIComponent(userId)}${tokenParam}\n\nОткрой ссылку и вставь примеры своих сообщений кандидатам — извлеку правила стиля и сохраню.`;
+}
+
 // Export cache invalidation for tests
 function _clearCache() { _cache.clear(); }
 
-module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, _clearCache };
+module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhStylePage, _clearCache };
