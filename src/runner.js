@@ -45,10 +45,15 @@ const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие)
 // "можешь читать гугл шит", "умеешь работать с гугл таблицами"
 const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
+// Narrow — used when no apiKey (tests, fallback). Must be precise to avoid false positives.
 const HH_MY_VACANCIES_INTENT = /мои.{0,10}вакансии|список.{0,10}вакансий|какие.{0,10}вакансии|с чем работать|покажи.{0,15}вакансии|дай.{0,15}вакансии|мои.{0,10}активные/i;
 const HH_FUNNEL_INTENT      = /сколько откликов|статистика воронки|что новенького|воронка кандидатов|статистика.{0,15}вакансии|кандидатов по.{0,15}вакансии|обновление.{0,15}вакансии/i;
 const HH_RESPONSES_INTENT   = /новые отклики|кто откликнулся|покажи.{0,10}кандидатов|новых кандидатов|список откликов|пришли отклики|новые кандидаты/i;
 const HH_ATS_EDITOR_INTENT  = /открой.{0,10}(?:ats|редактор|конфигуратор)|ats.{0,10}(?:редактор|editor|открой|настрой)|редактор.{0,10}ats/i;
+// Wide — used with Haiku verification. Catches voice input, fillers, all Russian case forms.
+const HH_MY_VACANCIES_WIDE  = /мои.{0,40}вакансии?й?|список.{0,60}вакансий|какие.{0,40}вакансии?й?|с чем работать|покажи.{0,40}вакансии?й?|дай.{0,60}вакансии?й?|мои.{0,15}активные|вакансии?.{0,20}активн|активн.{0,25}вакансии?й?/i;
+const HH_FUNNEL_WIDE        = /сколько.{0,25}откликов|статистика.{0,25}воронки?|что.{0,15}новенького|воронка.{0,25}кандидатов|статистика.{0,50}вакансии?й?|кандидатов.{0,50}вакансии?й?|обновление.{0,35}вакансии?й?|как.{0,15}дела.{0,25}вакансии?й?/i;
+const HH_RESPONSES_WIDE     = /новы[хе].{0,25}отклики?й?|кто.{0,25}откликнулся|покажи.{0,35}кандидатов|новых.{0,25}кандидатов|список.{0,25}откликов|пришли.{0,20}отклики?й?|новы[хе].{0,20}кандидаты/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -332,25 +337,63 @@ function getQuickAnswer(task, userId, workDir) {
   return null;
 }
 
-// Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir) {
+// Calls Haiku with a yes/no question to verify that a wide-regex candidate is actually
+// the expected intent. Returns true=yes, false=no/error. Timeout 3s so it never blocks.
+async function classifyQuickIntent(task, intentLabel, apiKey) {
+  try {
+    const prompt = `Сообщение пользователя: "${task}"\n\nЭто запрос на ${intentLabel}? Ответь только "yes" или "no".`;
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 5,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    const answer = (data.content?.[0]?.text || '').trim().toLowerCase();
+    const result = answer.startsWith('yes');
+    console.log('[classify-intent] %s → %s', intentLabel.slice(0, 40), result ? 'yes' : 'no');
+    return result;
+  } catch (e) {
+    console.log('[classify-intent] timeout/error → Claude:', e.message);
+    return false;
+  }
+}
+
+// With apiKey: wide regexes + Haiku verify (catches voice input, Russian case forms).
+// Without apiKey (tests, dev): narrow regexes only, no Haiku call.
+async function runQuickAnswer(task, userId, workDir, apiKey = null) {
   const sync = getQuickAnswer(task, userId, workDir);
   if (sync !== null) return sync;
 
   if (userId && workDir) {
-    if (HH_MY_VACANCIES_INTENT.test(task)) {
+    const verify = (wide, narrow, label) => {
+      if (!apiKey) return Promise.resolve(narrow.test(task));
+      if (!wide.test(task)) return Promise.resolve(false);
+      return classifyQuickIntent(task, label, apiKey);
+    };
+
+    if (await verify(HH_MY_VACANCIES_WIDE, HH_MY_VACANCIES_INTENT, 'просмотр своих активных вакансий на HH.ru')) {
       const r = await hhMyVacancies(userId, workDir).catch(() => null);
       if (r) return r;
     }
-    if (HH_FUNNEL_INTENT.test(task)) {
+    if (await verify(HH_FUNNEL_WIDE, HH_FUNNEL_INTENT, 'статистику воронки или количество откликов по вакансии на HH.ru')) {
       const r = await hhFunnelStats(userId, workDir).catch(() => null);
       if (r) return r;
     }
-    if (HH_RESPONSES_INTENT.test(task)) {
+    if (await verify(HH_RESPONSES_WIDE, HH_RESPONSES_INTENT, 'список новых откликов или кандидатов по вакансии на HH.ru')) {
       const r = await hhNewResponses(userId, workDir).catch(() => null);
       if (r) return r;
     }
-    if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
+    if (await verify(HH_ATS_EDITOR_INTENT, HH_ATS_EDITOR_INTENT, 'открыть ATS редактор')) return hhAtsEditor(userId);
   }
 
   return null;
@@ -510,7 +553,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets?.ANTHROPIC_API_KEY);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
