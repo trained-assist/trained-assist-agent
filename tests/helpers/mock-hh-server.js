@@ -183,10 +183,17 @@ function createMockHhServer(options = {}) {
       return send(200, employer);
     }
 
-    // GET /vacancies  (list)
+    // GET /vacancies  (list — legacy endpoint, still supported)
     if (req.method === 'GET' && p === '/vacancies') {
       const status = u.searchParams.get('status') || 'active';
       return send(200, { found: vacancies.length, pages: 1, items: vacancies.map(v => ({ ...v, status })) });
+    }
+
+    // GET /employers/{id}/vacancies/{status}  (employer-specific endpoint with manager field)
+    const empVacancies = p.match(/^\/employers\/([^/]+)\/vacancies\/(active|archived|hidden)$/);
+    if (req.method === 'GET' && empVacancies) {
+      const statusFilter = empVacancies[2];
+      return send(200, { found: vacancies.length, pages: 1, items: vacancies.map(v => ({ ...v, status: statusFilter })) });
     }
 
     // GET /vacancies/{id}

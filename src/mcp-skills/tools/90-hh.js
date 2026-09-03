@@ -462,15 +462,19 @@ module.exports = {
           const employerId = token.employer_id;
           if (!employerId) return { error: 'employer_id не задан.' };
           try {
-            const data = await hhGet(`/vacancies?employer_id=${employerId}&status=active&per_page=50`, token);
-            const items = (data.items || []).map(v => ({
-              id: v.id,
-              name: v.name,
-              area: v.area?.name,
-              manager: v.manager?.full_name || v.manager?.id || null,
-              responses: v.counters?.responses,
-              published_at: v.published_at?.slice(0, 10),
-            }));
+            const data = await hhGet(`/employers/${employerId}/vacancies/active`, token);
+            const items = (data.items || []).map(v => {
+              const mgr = v.manager;
+              const managerName = mgr?.full_name || [mgr?.last_name, mgr?.first_name].filter(Boolean).join(' ') || mgr?.id || null;
+              return {
+                id: v.id,
+                name: v.name,
+                area: v.area?.name,
+                manager: managerName,
+                responses: v.counters?.responses,
+                published_at: v.published_at?.slice(0, 10),
+              };
+            });
             return {
               message: 'Выбери вакансию и вызови hh_set_active_vacancy с её id. Поле manager — ответственный рекрутер.',
               vacancies: items,
@@ -511,16 +515,20 @@ module.exports = {
         if (!employerId) return { error: 'employer_id не задан. Укажи при вызове hh_set_token или в настройках.' };
 
         try {
-          const data = await hhGet(`/vacancies?employer_id=${employerId}&status=${status}&per_page=50`, token);
-          const items = (data.items || []).map(v => ({
-            id: v.id,
-            name: v.name,
-            area: v.area?.name,
-            manager: v.manager?.full_name || v.manager?.id || null,
-            salary: v.salary ? `${v.salary.from || ''}–${v.salary.to || ''} ${v.salary.currency}` : null,
-            responses: v.counters?.responses,
-            published_at: v.published_at?.slice(0, 10),
-          }));
+          const data = await hhGet(`/employers/${employerId}/vacancies/${status}`, token);
+          const items = (data.items || []).map(v => {
+            const mgr = v.manager;
+            const managerName = mgr?.full_name || [mgr?.last_name, mgr?.first_name].filter(Boolean).join(' ') || mgr?.id || null;
+            return {
+              id: v.id,
+              name: v.name,
+              area: v.area?.name,
+              manager: managerName,
+              salary: v.salary ? `${v.salary.from || ''}–${v.salary.to || ''} ${v.salary.currency}` : null,
+              responses: v.counters?.responses,
+              published_at: v.published_at?.slice(0, 10),
+            };
+          });
           return { total: data.found, vacancies: items };
         } catch (e) {
           return { error: e.message };
