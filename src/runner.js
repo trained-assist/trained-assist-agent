@@ -94,7 +94,7 @@ const QUICK_SETUPS = [
   },
 ];
 
-async function getQuickAnswer(task, userId, workDir) {
+function getQuickAnswer(task, userId, workDir) {
   // /ping — liveness check
   if (PING_INTENT.test(task)) return '🟢 Онлайн. Готов к работе.';
 
@@ -308,25 +308,6 @@ async function getQuickAnswer(task, userId, workDir) {
     ].join('\n');
   }
 
-  // ── HH quick answers (API calls, no Claude) ────────────────────────────────
-  if (userId && workDir) {
-    if (HH_MY_VACANCIES_INTENT.test(task)) {
-      const r = await hhMyVacancies(userId, workDir).catch(() => null);
-      if (r) return r;
-    }
-    if (HH_FUNNEL_INTENT.test(task)) {
-      const r = await hhFunnelStats(userId, workDir).catch(() => null);
-      if (r) return r;
-    }
-    if (HH_RESPONSES_INTENT.test(task)) {
-      const r = await hhNewResponses(userId, workDir).catch(() => null);
-      if (r) return r;
-    }
-    if (HH_ATS_EDITOR_INTENT.test(task)) {
-      return hhAtsEditor(userId);
-    }
-  }
-
   if (!SETUP_INTENT.test(task)) {
     console.log('[quick-answer] no setup intent, task=%j', task.slice(0, 120));
     return null;
@@ -348,6 +329,30 @@ async function getQuickAnswer(task, userId, workDir) {
   }
 
   console.log('[quick-answer] setup intent matched but no service pattern, task=%j', task.slice(0, 120));
+  return null;
+}
+
+// Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
+async function runQuickAnswer(task, userId, workDir) {
+  const sync = getQuickAnswer(task, userId, workDir);
+  if (sync !== null) return sync;
+
+  if (userId && workDir) {
+    if (HH_MY_VACANCIES_INTENT.test(task)) {
+      const r = await hhMyVacancies(userId, workDir).catch(() => null);
+      if (r) return r;
+    }
+    if (HH_FUNNEL_INTENT.test(task)) {
+      const r = await hhFunnelStats(userId, workDir).catch(() => null);
+      if (r) return r;
+    }
+    if (HH_RESPONSES_INTENT.test(task)) {
+      const r = await hhNewResponses(userId, workDir).catch(() => null);
+      if (r) return r;
+    }
+    if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
+  }
+
   return null;
 }
 
@@ -505,7 +510,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : await getQuickAnswer(task, user.username, user.workDir);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
