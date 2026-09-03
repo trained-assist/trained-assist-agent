@@ -934,24 +934,37 @@ async function main() {
       const tab = url.searchParams.get('tab') || 'waiting';
       const reviewToken = url.searchParams.get('token') || '';
 
-      // waiting = consider (they replied, waiting for us); all = all active states
-      const ACTIVE_STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer'];
-      const fetchStates = tab === 'all' ? ACTIVE_STATES : ['consider'];
+      // Read from cache; sync if stale (>15 min) or vacancy changed
+      const CACHE_TTL_MS = 15 * 60 * 1000;
+      const cacheFile = path.join(dataDir, 'hh', username, 'negotiations-cache.json');
+      let cache = null;
+      try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
 
-      let negotiations = [];
-      try {
-        const results = await Promise.all(
-          fetchStates.map(st =>
-            hhApiRequest('GET', `/negotiations/${st}?vacancy_id=${vacancy.id}&per_page=100&page=0`, tokenData.access_token)
-              .then(d => d.items || [])
-              .catch(() => []),
-          ),
-        );
-        negotiations = results.flat().sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
-      } catch (e) { console.error('[hh/review] fetch error:', e.message); }
+      const cacheAge = cache ? Date.now() - new Date(cache.synced_at || 0).getTime() : Infinity;
+      const cacheStale = cacheAge > CACHE_TTL_MS || cache?.vacancy_id !== vacancy.id;
+
+      if (cacheStale) {
+        try {
+          cache = await syncHhNegotiations(username, vacancy, tokenData.access_token, dataDir);
+        } catch (e) {
+          console.error('[hh/review] sync error:', e.message);
+          cache = cache || { items: [], synced_at: null, total: 0 };
+        }
+      }
+
+      const allItems = cache.items || [];
+      // Filter by tab: waiting = consider state only; all = everything
+      const negotiations = allItems
+        .filter(n => tab === 'waiting' ? (n._state === 'consider') : true)
+        .sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+
+      const syncedAt = cache.synced_at ? new Date(cache.synced_at) : null;
+      const ageMin = syncedAt ? Math.floor((Date.now() - syncedAt.getTime()) / 60000) : null;
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { tab, token: reviewToken });
+      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, {
+        tab, token: reviewToken, totalAll: allItems.length, ageMin,
+      });
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(html);
     }
@@ -1427,6 +1440,35 @@ async function main() {
       return json(res, 200, { ok: true, reset, skipped });
     }
 
+    // POST /hh/sync-negotiations — force-sync HH negotiations to cache (for cron job / manual refresh)
+    if (req.method === 'POST' && url.pathname === '/hh/sync-negotiations') {
+      const body = JSON.parse(await readBody(req));
+      const { username } = body || {};
+      if (!username) return json(res, 400, { error: 'username required' });
+
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+      if (!fs.existsSync(tokenFile)) return json(res, 404, { error: 'HH token not found' });
+      let tokenData;
+      try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return json(res, 500, { error: 'token read error' }); }
+
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const workDir = path.join(dataDir, 'sessions', username);
+      const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+      let vacancy = null;
+      try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
+      if (!vacancy?.id) return json(res, 400, { error: 'no active vacancy' });
+
+      try {
+        const cache = await syncHhNegotiations(username, vacancy, tokenData.access_token, dataDir);
+        console.log(`[hh/sync-negotiations] user=${username} synced=${cache.total}`);
+        return json(res, 200, { ok: true, synced: cache.total, synced_at: cache.synced_at });
+      } catch (e) {
+        console.error('[hh/sync-negotiations] error:', e.message);
+        return json(res, 500, { error: e.message });
+      }
+    }
+
     // POST /hh/ats-config — save ATS config + stages to context
     if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1512,8 +1554,27 @@ function readBody(req, maxBytes = 1_048_576) {
 
 // ── HH review page ────────────────────────────────────────────────────────────
 
+// ── HH negotiations cache sync ────────────────────────────────────────────────
+
+async function syncHhNegotiations(username, vacancy, accessToken, dataDir) {
+  const ACTIVE_STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer'];
+  const results = await Promise.all(
+    ACTIVE_STATES.map(st =>
+      hhApiRequest('GET', `/negotiations/${st}?vacancy_id=${vacancy.id}&per_page=100&page=0`, accessToken)
+        .then(d => (d.items || []).map(n => ({ ...n, _state: st })))
+        .catch(() => []),
+    ),
+  );
+  const items = results.flat();
+  const cache = { synced_at: new Date().toISOString(), vacancy_id: vacancy.id, vacancy_name: vacancy.title, total: items.length, items };
+  const cacheFile = path.join(dataDir, 'hh', String(username), 'negotiations-cache.json');
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify(cache), { mode: 0o600 });
+  return cache;
+}
+
 function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir, opts = {}) {
-  const { tab = 'waiting', token = '' } = opts;
+  const { tab = 'waiting', token = '', totalAll = null, ageMin = null } = opts;
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const candDir = path.join(dataDir || path.join(os.homedir(), 'agent-data'), 'hh', String(username), 'candidates');
@@ -1767,9 +1828,9 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
 <div class="tabs">
   <a class="tab-link${tab === 'waiting' ? ' active' : ''}" href="?username=${esc(username)}&token=${esc(token)}&tab=waiting">💬 Ждут ответа</a>
-  <a class="tab-link${tab === 'all' ? ' active' : ''}" href="?username=${esc(username)}&token=${esc(token)}&tab=all">📋 Все диалоги</a>
+  <a class="tab-link${tab === 'all' ? ' active' : ''}" href="?username=${esc(username)}&token=${esc(token)}&tab=all">📋 Все диалоги${totalAll != null ? ' (' + totalAll + ')' : ''}</a>
 </div>
-<p class="subtitle">${sorted.length} кандидатов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}&token=${esc(token)}&tab=${esc(tab)}" style="color:#6366f1">обновить</a></p>
+<p class="subtitle">${sorted.length} кандидатов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''}${ageMin != null ? ' · кэш ' + (ageMin === 0 ? 'только что' : ageMin + ' мин назад') : ''} · <a href="?username=${esc(username)}&token=${esc(token)}&tab=${esc(tab)}" style="color:#6366f1">обновить</a></p>
 <div class="search-wrap">
   <input id="searchInput" class="search-input" type="search" placeholder="Поиск по ФИО…" oninput="filterCards()">
 </div>
