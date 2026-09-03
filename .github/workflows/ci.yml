@@ -39,8 +39,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Runs after PR auto-merge OR on direct push to main (e.g. GitHub UI squash-merge).
+  # always() lets the job run even when `merge` was skipped (merge only runs on PRs).
   deploy-gcp:
-    needs: merge
+    needs: [ci, merge]
+    if: |
+      always() &&
+      needs.ci.result == 'success' &&
+      (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to GCP VM
@@ -63,7 +69,11 @@ jobs:
             bash scripts/deploy.sh
 
   deploy-ru:
-    needs: merge
+    needs: [ci, merge]
+    if: |
+      always() &&
+      needs.ci.result == 'success' &&
+      (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to RU VM
