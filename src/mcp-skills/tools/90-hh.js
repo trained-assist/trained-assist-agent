@@ -1120,9 +1120,12 @@ function generateReviewHtml(candidates, vacancyName) {
       : '';
 
     const isActionable = c.verdict !== 'ОТКЛОНИТЬ' && !!c.draft_message;
+    const isReject = c.verdict === 'ОТКЛОНИТЬ';
     const checkboxHtml = isActionable
       ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" checked onchange="onCheck()">`
-      : '';
+      : isReject
+        ? `<input type="checkbox" class="reject-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()">`
+        : '';
 
     const msgSection = isActionable
       ? `<div class="msg-section">
@@ -1227,13 +1230,19 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 <h1>Кандидаты: ${escHtml(vacancyName)}</h1>
 <p class="subtitle">${sorted.length} откликов · ${actionable} требуют сообщения</p>
 <div class="toolbar">
-  <span class="toolbar-label">Выбрать:</span>
-  <button class="tb-btn active" id="filter-all" onclick="filterScore(0)">Все</button>
-  <button class="tb-btn" id="filter-8" onclick="filterScore(8)">8.0+</button>
-  <button class="tb-btn" id="filter-6" onclick="filterScore(6)">6.0+</button>
+  <span class="toolbar-label">Балл:</span>
+  <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
+  <button class="tb-btn score-btn" data-bucket="9" onclick="toggleBucket(9)">9</button>
+  <button class="tb-btn score-btn" data-bucket="8" onclick="toggleBucket(8)">8</button>
+  <button class="tb-btn score-btn" data-bucket="7" onclick="toggleBucket(7)">7</button>
+  <button class="tb-btn score-btn" data-bucket="6" onclick="toggleBucket(6)">6</button>
+  <button class="tb-btn score-btn" data-bucket="5" onclick="toggleBucket(5)">5</button>
+  <button class="tb-btn score-btn" data-bucket="4" onclick="toggleBucket(4)">4</button>
+  <button class="tb-btn score-btn" data-bucket="3" onclick="toggleBucket(3)">3</button>
+  <button class="tb-btn score-btn" data-bucket="2" onclick="toggleBucket(2)">2</button>
+  <button class="tb-btn score-btn" data-bucket="1" onclick="toggleBucket(1)">1</button>
   <div class="tb-sep"></div>
-  <button class="tb-btn" onclick="selectFiltered(true)">✓ Выбрать все</button>
-  <button class="tb-btn" onclick="selectFiltered(false)">✗ Снять все</button>
+  <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
 ${cards}
 <div class="footer">
@@ -1241,49 +1250,62 @@ ${cards}
   <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить выбранных (0)</button>
 </div>
 <script>
-const sent = new Set();
-const skipped = new Set();
-let minScore = 0;
+const done = new Set();
 
 function onCheck() {
-  const checks = document.querySelectorAll('.card-cb:checked');
-  const n = checks.length;
-  document.getElementById('selCount').textContent = n;
-  const btn = document.getElementById('sendAllBtn');
-  btn.textContent = 'Отправить выбранных (' + n + ')';
-  btn.disabled = n === 0;
+  const ns = document.querySelectorAll('.card-cb:checked').length;
+  const nr = document.querySelectorAll('.reject-cb:checked').length;
+  document.getElementById('selCount').textContent = ns;
+  document.getElementById('rejCount').textContent = nr;
+  const sb = document.getElementById('sendAllBtn');
+  sb.textContent = 'Отправить (' + ns + ')'; sb.disabled = ns === 0;
+  const rb = document.getElementById('rejectAllBtn');
+  rb.textContent = 'Отказать (' + nr + ')'; rb.disabled = nr === 0;
 }
 
-function filterScore(min) {
-  minScore = min;
-  document.querySelectorAll('[id^=filter-]').forEach(b => b.classList.remove('active'));
-  document.getElementById('filter-' + (min || 'all')).classList.add('active');
-  selectFiltered(true);
+const activeBuckets = new Set();
+
+function toggleBucket(n) {
+  const btn = document.querySelector('.score-btn[data-bucket="'+n+'"]');
+  if (activeBuckets.has(n)) { activeBuckets.delete(n); btn.classList.remove('active'); }
+  else { activeBuckets.add(n); btn.classList.add('active'); }
+  recomputeByBuckets();
 }
 
-function selectFiltered(checked) {
-  document.querySelectorAll('.card-cb').forEach(cb => {
-    const score = parseFloat(cb.dataset.score || 0);
-    if (!sent.has(parseInt(cb.dataset.idx)) && !skipped.has(parseInt(cb.dataset.idx))) {
-      cb.checked = checked && score >= minScore;
-    }
+function recomputeByBuckets() {
+  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+    if (done.has(parseInt(cb.dataset.idx))) return;
+    const bucket = Math.floor(parseFloat(cb.dataset.score || 0));
+    cb.checked = activeBuckets.has(bucket);
   });
   onCheck();
 }
 
-function sendOne(i, negId) {
-  const msg = document.getElementById('msg-'+i)?.value || '';
-  sent.add(i);
+function selectAll(checked) {
+  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+    if (!done.has(parseInt(cb.dataset.idx))) cb.checked = checked;
+  });
+  activeBuckets.clear();
+  document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('active'));
+  onCheck();
+}
+
+function markDone(i) {
+  done.add(i);
   document.getElementById('card-'+i).classList.add('done');
   const cb = document.getElementById('cb-'+i);
   if (cb) { cb.checked = false; cb.disabled = true; }
-  document.getElementById('sentCount').textContent = sent.size;
-  onCheck();
+  document.getElementById('sentCount').textContent = done.size;
+}
+
+function sendOne(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value || '';
+  markDone(i); onCheck();
   console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
 }
 
 function skipOne(i) {
-  skipped.add(i);
+  done.add(i);
   document.getElementById('card-'+i).classList.add('skipped');
   const cb = document.getElementById('cb-'+i);
   if (cb) { cb.checked = false; cb.disabled = true; }
@@ -1293,19 +1315,24 @@ function skipOne(i) {
 function sendAll() {
   document.querySelectorAll('.card-cb:checked').forEach(cb => {
     const i = parseInt(cb.dataset.idx);
-    const card = document.getElementById('card-'+i);
-    const negId = card?.dataset.neg || '';
+    const negId = document.getElementById('card-'+i)?.dataset.neg || '';
     const msg = document.getElementById('msg-'+i)?.value || '';
-    sent.add(i);
-    card.classList.add('done');
-    cb.checked = false; cb.disabled = true;
+    markDone(i);
     console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
   });
-  document.getElementById('sentCount').textContent = sent.size;
   onCheck();
 }
 
-// init count
+function rejectAll() {
+  document.querySelectorAll('.reject-cb:checked').forEach(cb => {
+    const i = parseInt(cb.dataset.idx);
+    const negId = document.getElementById('card-'+i)?.dataset.neg || '';
+    markDone(i);
+    console.log('[HH-REJECT]', JSON.stringify({ negotiation_id: negId }));
+  });
+  onCheck();
+}
+
 onCheck();
 </script>
 </body>
