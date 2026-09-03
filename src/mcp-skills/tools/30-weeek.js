@@ -93,6 +93,23 @@ async function doPrivateFetch(apiPath, { method = 'GET', body, cookie } = {}) {
   return { ok: res.ok, status: res.status, data };
 }
 
+async function tgNotify(text) {
+  const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+  if (!token) return;
+  const chatIdFile = path.join(os.homedir(), 'agent-tokens', String(USER_ID), '.chatid');
+  let chatId;
+  try { chatId = fs.readFileSync(chatIdFile, 'utf8').trim(); } catch { return; }
+  if (!chatId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch { /* best-effort */ }
+}
+
 function refreshWeeekSession(userId) {
   const refreshScript = path.join(os.homedir(), 'trained-assist-agent', 'scripts', 'refresh-weeek-session.js');
   const profile = userId || USER_ID || 'flexi';
@@ -110,6 +127,7 @@ async function weeekPrivateFetch(apiPath, { method = 'GET', body, cookie, userId
   if ((result.status === 401 || result.status === 403) && userId !== false) {
     // Auto-refresh: run headless Playwright login, get fresh cookie, retry once
     console.log('[weeek/L2] Session expired (%d), auto-refreshing…', result.status);
+    tgNotify('🔄 Сессия Weeek обновляется, подождите несколько секунд…').catch(() => {});
     try {
       const freshCookie = refreshWeeekSession(userId);
       if (freshCookie) {
