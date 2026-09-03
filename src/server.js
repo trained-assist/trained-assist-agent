@@ -934,8 +934,14 @@ async function main() {
 
       let negotiations = [];
       try {
-        const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=0`, tokenData.access_token);
-        negotiations = data.items || [];
+        let page = 0;
+        let totalPages = 1;
+        do {
+          const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=${page}`, tokenData.access_token);
+          negotiations = negotiations.concat(data.items || []);
+          totalPages = data.pages ?? 1;
+          page++;
+        } while (page < totalPages);
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
       // Auto-score unscored candidates if ATS config exists (non-blocking for first load,
@@ -1877,8 +1883,10 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
   const actionable = sorted.filter(c => c.verdict && c.verdict !== 'ОТКЛОНИТЬ').length;
   const agentSecret = process.env.AGENT_SECRET || '';
+  const { createHmac } = require('crypto');
+  const pageToken = agentSecret ? createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16) : '';
 
-  const cards = sorted.map((c, i) => {
+  const cardsHtmlArray = sorted.map((c, i) => {
     const hasScore = c.score != null;
     const col = colorMap[c.verdict] || '#94a3b8';
     const bg = bgMap[c.verdict] || '#fff';
@@ -1960,7 +1968,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   ${resumeSection}
   ${msgSection}
 </div>`;
-  }).join('\n');
+  });
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -2044,7 +2052,7 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 </head>
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
-<p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}" style="color:#6366f1">обновить</a></p>
+<p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}&amp;token=${esc(pageToken)}" style="color:#6366f1">обновить</a></p>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
   <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
@@ -2060,7 +2068,9 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
   <div class="tb-sep"></div>
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
-${cards || '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>'}
+${cardsHtmlArray.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>' : ''}
+<div id="cards-container"></div>
+<div id="sentinel" style="height:1px;margin-bottom:80px"></div>
 <div class="footer">
   <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
   <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
@@ -2071,6 +2081,33 @@ const CALLBACK_BASE = '${callbackBase}';
 const HH_USER = '${esc(username)}';
 const HH_SECRET = '${esc(agentSecret)}';
 const done = new Set();
+
+const CARDS_HTML = ${JSON.stringify(cardsHtmlArray)};
+const BATCH_SIZE = 20;
+let rendered = 0;
+let autoGenQueued = false;
+
+function renderBatch() {
+  const container = document.getElementById('cards-container');
+  const end = Math.min(rendered + BATCH_SIZE, CARDS_HTML.length);
+  const frag = document.createDocumentFragment();
+  for (let j = rendered; j < end; j++) {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = CARDS_HTML[j];
+    frag.appendChild(wrapper.firstElementChild);
+  }
+  container.appendChild(frag);
+  rendered = end;
+  onCheck();
+  if (rendered >= CARDS_HTML.length) lazyObserver.disconnect();
+  setTimeout(autoGenerate, 0);
+}
+
+const lazyObserver = new IntersectionObserver(entries => {
+  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) renderBatch();
+}, { rootMargin: '300px' });
+lazyObserver.observe(document.getElementById('sentinel'));
+renderBatch();
 
 function showToast(msg, isError) {
   const t = document.createElement('div');
@@ -2232,9 +2269,6 @@ async function rejectAll() {
 }
 
 onCheck();
-
-// Auto-generate drafts on page load — non-blocking, 4 concurrent
-autoGenerate();
 </script>
 </body>
 </html>`;
