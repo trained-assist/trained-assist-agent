@@ -18,6 +18,7 @@ const { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml } = require('./
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
+const { scoreUnscoredCandidates } = require('./hh-scoring');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -936,6 +937,15 @@ async function main() {
         const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=50&page=0`, tokenData.access_token);
         negotiations = data.items || [];
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
+
+      // Auto-score unscored candidates if ATS config exists (non-blocking for first load,
+      // but we await it so the page shows scores on first open)
+      try {
+        const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 8 });
+        if (scored > 0) console.log(`[hh/review] auto-scored ${scored} candidates for ${username}`);
+      } catch (e) {
+        console.error('[hh/review] auto-score error:', e.message);
+      }
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
       const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir);
