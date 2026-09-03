@@ -14,7 +14,8 @@ cd "$REPO_DIR"
 npm ci --omit=dev
 
 echo "==> Creating data directory..."
-mkdir -p "$HOME/agent-data/sessions"
+# Production uses alesa-data (set via AGENT_DATA_DIR in systemd)
+mkdir -p "$HOME/alesa-data/system-flags"
 
 echo "==> Installing systemd service..."
 sudo cp "$REPO_DIR/systemd/assist-agent.service" "/etc/systemd/system/$SERVICE.service"

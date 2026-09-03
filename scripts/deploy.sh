@@ -65,15 +65,30 @@ echo "==> Restarting service..."
 sudo systemctl restart "$SERVICE"
 
 echo "==> Waiting for service to be healthy (up to 60s)..."
+SERVICE_UP=0
 for i in $(seq 1 12); do
   STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:8080/health 2>/dev/null || echo 000)
   echo "  attempt $i: HTTP $STATUS_CODE"
-  [ "$STATUS_CODE" = "401" ] && break
+  if [ "$STATUS_CODE" = "401" ]; then
+    SERVICE_UP=1
+    break
+  fi
   sleep 5
 done
 sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
-echo "==> Service journal (last 20 lines)..."
-sudo journalctl -u "$SERVICE" --no-pager -n 20 || true
+echo "==> Service journal (last 30 lines)..."
+sudo journalctl -u "$SERVICE" --no-pager -n 30 || true
+
+if [ "$SERVICE_UP" -eq 0 ]; then
+  echo ""
+  echo "❌ Service did not come up after 60s — deploy FAILED"
+  echo "   Common causes:"
+  echo "   - 'Required secret missing: X' → add X to GCP Secret Manager or secrets.env"
+  echo "   - Port 8080 still occupied → sudo fuser -k 8080/tcp && sudo systemctl restart $SERVICE"
+  echo "   - Syntax error in new code → check journal above"
+  exit 1
+fi
+echo "✅ Service is up"
 
 echo "==> Running smoke tests..."
 AGENT_SECRET=$(gcloud secrets versions access latest --secret=AGENT_SECRET --project=alesa-personal-assistent 2>/dev/null || echo "$AGENT_SECRET")

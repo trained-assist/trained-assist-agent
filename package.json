@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Trained Assist Agent — Claude Code session runner",
   "main": "src/server.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",

@@ -21,9 +21,9 @@ apt-get install -y -qq \
   libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 \
   libgbm1 libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0
 
-echo "==> Installing Node.js 20..."
-if ! command -v node &>/dev/null || [[ "$(node --version)" < "v20" ]]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+echo "==> Installing Node.js 22..."
+if ! command -v node &>/dev/null || [[ "$(node --version)" < "v22" ]]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y -qq nodejs
 fi
 node --version && npm --version
