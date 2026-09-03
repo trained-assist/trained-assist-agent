@@ -931,14 +931,27 @@ async function main() {
       try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
       if (!vacancy?.id) return errPage('Вакансия не выбрана. Скажи боту «мои вакансии» и выбери вакансию.');
 
+      const tab = url.searchParams.get('tab') || 'waiting';
+      const reviewToken = url.searchParams.get('token') || '';
+
+      // waiting = consider (they replied, waiting for us); all = all active states
+      const ACTIVE_STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer'];
+      const fetchStates = tab === 'all' ? ACTIVE_STATES : ['consider'];
+
       let negotiations = [];
       try {
-        const data = await hhApiRequest('GET', `/negotiations/response?vacancy_id=${vacancy.id}&per_page=100&page=0&order_by=updated_at`, tokenData.access_token);
-        negotiations = (data.items || []).sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+        const results = await Promise.all(
+          fetchStates.map(st =>
+            hhApiRequest('GET', `/negotiations/${st}?vacancy_id=${vacancy.id}&per_page=100&page=0`, tokenData.access_token)
+              .then(d => d.items || [])
+              .catch(() => []),
+          ),
+        );
+        negotiations = results.flat().sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir);
+      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { tab, token: reviewToken });
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(html);
     }
@@ -1499,7 +1512,8 @@ function readBody(req, maxBytes = 1_048_576) {
 
 // ── HH review page ────────────────────────────────────────────────────────────
 
-function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir) {
+function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir, opts = {}) {
+  const { tab = 'waiting', token = '' } = opts;
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const candDir = path.join(dataDir || path.join(os.homedir(), 'agent-data'), 'hh', String(username), 'candidates');
@@ -1616,9 +1630,10 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
          </div>`
       : '<span class="verdict-none">не оценён</span>';
 
-    const nameHtml = c.alternate_url
-      ? `<a href="${esc(c.alternate_url)}" target="_blank" rel="noopener" class="resume-link">${esc(c.name)}</a>`
-      : esc(c.name);
+    const hhBtnHtml = c.alternate_url
+      ? `<a href="${esc(c.alternate_url)}" target="_blank" rel="noopener" class="hh-btn">HH ↗</a>`
+      : '';
+    const nameHtml = esc(c.name) + hhBtnHtml;
 
     const msgSection = (isActionable && c.draft_message)
       ? `<div class="msg-section">
@@ -1731,6 +1746,12 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .toast{position:fixed;top:20px;right:20px;padding:10px 18px;border-radius:8px;background:#16a34a;color:#fff;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:fadein .2s}
 .toast-err{background:#dc2626}
 @keyframes fadein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:2px solid #e2e8f0;padding-bottom:0}
+.tab-link{padding:10px 20px;font-size:14px;font-weight:600;color:#64748b;text-decoration:none;border-radius:8px 8px 0 0;border:2px solid transparent;border-bottom:none;margin-bottom:-2px;transition:color .15s,background .15s}
+.tab-link:hover{color:#4f46e5;background:#f1f5f9}
+.tab-link.active{color:#4f46e5;background:#fff;border-color:#e2e8f0;border-bottom-color:#fff}
+.hh-btn{display:inline-flex;align-items:center;padding:2px 8px;font-size:12px;font-weight:600;color:#cc0000;border:1px solid #fca5a5;border-radius:4px;text-decoration:none;margin-left:8px;white-space:nowrap;vertical-align:middle}
+.hh-btn:hover{background:#fff1f2}
 .search-wrap{margin-bottom:12px}
 .search-input{width:100%;max-width:360px;padding:8px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;font-family:inherit;outline:none}
 .search-input:focus{border-color:#6366f1}
@@ -1744,7 +1765,11 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 </head>
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
-<p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}" style="color:#6366f1">обновить</a></p>
+<div class="tabs">
+  <a class="tab-link${tab === 'waiting' ? ' active' : ''}" href="?username=${esc(username)}&token=${esc(token)}&tab=waiting">💬 Ждут ответа</a>
+  <a class="tab-link${tab === 'all' ? ' active' : ''}" href="?username=${esc(username)}&token=${esc(token)}&tab=all">📋 Все диалоги</a>
+</div>
+<p class="subtitle">${sorted.length} кандидатов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}&token=${esc(token)}&tab=${esc(tab)}" style="color:#6366f1">обновить</a></p>
 <div class="search-wrap">
   <input id="searchInput" class="search-input" type="search" placeholder="Поиск по ФИО…" oninput="filterCards()">
 </div>
