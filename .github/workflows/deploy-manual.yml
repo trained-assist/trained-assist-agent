@@ -1,46 +1,25 @@
-name: CI + Deploy
+name: Manual Deploy
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Deploy target'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - gcp
+          - ru
+      reason:
+        description: 'Why are you deploying manually? (for the audit log)'
+        required: false
+        type: string
 
 jobs:
-  ci:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-      - run: npm ci
-      - name: Syntax check
-        run: npm run check
-      - name: Unit tests
-        run: npm test
-      - name: Env-sync check
-        run: node scripts/check-env-sync.js
-
-  merge:
-    needs: ci
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: merge-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Squash-merge the PR
-        run: gh pr merge --squash "${{ github.event.pull_request.html_url }}"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   deploy-gcp:
-    needs: merge
+    if: inputs.target == 'gcp' || inputs.target == 'both'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to GCP VM
@@ -50,6 +29,7 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
+            echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             cd /home/vova/trained-assist-agent
             git fetch origin main
             git reset --hard origin/main
@@ -63,7 +43,7 @@ jobs:
             bash scripts/deploy.sh
 
   deploy-ru:
-    needs: merge
+    if: inputs.target == 'ru' || inputs.target == 'both'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to RU VM
@@ -73,6 +53,7 @@ jobs:
           username: ${{ secrets.VM_RU_USER }}
           password: ${{ secrets.VM_RU_PASSWORD }}
           script: |
+            echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
             git fetch origin main

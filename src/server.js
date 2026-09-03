@@ -24,6 +24,10 @@ const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
   path.join(process.env.HOME || '/home/vova', 'users');
 
+const VM_NAME = process.env.VM_NAME || 'unknown';
+let GIT_COMMIT = 'unknown';
+try { GIT_COMMIT = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
+
 async function classifyMessage(message, sessions, apiKey) {
   // Build a compact description of each session
   const sessionDescriptions = sessions.map((s, i) => {
@@ -1435,7 +1439,7 @@ function show(id, type, msg) {
     }
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      return json(res, 200, { status: 'alive', uptime: process.uptime() });
+      return json(res, 200, { status: 'alive', uptime: process.uptime(), vm: VM_NAME, commit: GIT_COMMIT });
     }
 
     // GET /capabilities?userId=XXX — list services with tokens on this machine
