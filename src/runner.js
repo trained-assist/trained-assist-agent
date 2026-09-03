@@ -16,6 +16,7 @@ const {
   SERVICE_DISPLAY,
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
+const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor } = require('./hh-quick');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -44,6 +45,10 @@ const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие)
 // "можешь читать гугл шит", "умеешь работать с гугл таблицами"
 const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
+const HH_MY_VACANCIES_INTENT = /мои.{0,10}вакансии|список.{0,10}вакансий|какие.{0,10}вакансии|с чем работать|покажи.{0,15}вакансии|дай.{0,15}вакансии|мои.{0,10}активные/i;
+const HH_FUNNEL_INTENT      = /сколько откликов|статистика воронки|что новенького|воронка кандидатов|статистика.{0,15}вакансии|кандидатов по.{0,15}вакансии|обновление.{0,15}вакансии/i;
+const HH_RESPONSES_INTENT   = /новые отклики|кто откликнулся|покажи.{0,10}кандидатов|новых кандидатов|список откликов|пришли отклики|новые кандидаты/i;
+const HH_ATS_EDITOR_INTENT  = /открой.{0,10}(?:ats|редактор|конфигуратор)|ats.{0,10}(?:редактор|editor|открой|настрой)|редактор.{0,10}ats/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -327,6 +332,30 @@ function getQuickAnswer(task, userId, workDir) {
   return null;
 }
 
+// Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
+async function runQuickAnswer(task, userId, workDir) {
+  const sync = getQuickAnswer(task, userId, workDir);
+  if (sync !== null) return sync;
+
+  if (userId && workDir) {
+    if (HH_MY_VACANCIES_INTENT.test(task)) {
+      const r = await hhMyVacancies(userId, workDir).catch(() => null);
+      if (r) return r;
+    }
+    if (HH_FUNNEL_INTENT.test(task)) {
+      const r = await hhFunnelStats(userId, workDir).catch(() => null);
+      if (r) return r;
+    }
+    if (HH_RESPONSES_INTENT.test(task)) {
+      const r = await hhNewResponses(userId, workDir).catch(() => null);
+      if (r) return r;
+    }
+    if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
+  }
+
+  return null;
+}
+
 // Per-user serial task queue: Map<userId, Promise>
 // Prevents concurrent Claude processes for the same user (OOM risk on small VMs).
 const userQueues = new Map();
@@ -481,7 +510,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : getQuickAnswer(task, user.username, user.workDir);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
