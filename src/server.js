@@ -1915,10 +1915,20 @@ function loadMore() {
 function filterCards() {
   const q = (document.getElementById('searchInput').value || '').toLowerCase().trim();
   document.querySelectorAll('.card').forEach(card => {
-    if (!q) { card.classList.remove('hidden-search'); return; }
+    if (!q) {
+      card.classList.remove('hidden-search');
+      // restore pagination hiding for cards beyond current shown count
+      const idx = parseInt(card.id.replace('card-', ''));
+      if (idx >= shownCount) card.classList.add('hidden-page');
+      return;
+    }
     const name = card.dataset.name || '';
-    if (name.includes(q)) card.classList.remove('hidden-search');
-    else card.classList.add('hidden-search');
+    if (name.includes(q)) {
+      card.classList.remove('hidden-search');
+      card.classList.remove('hidden-page'); // reveal even if beyond pagination window
+    } else {
+      card.classList.add('hidden-search');
+    }
   });
 }
 
