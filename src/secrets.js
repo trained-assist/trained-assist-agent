@@ -11,7 +11,7 @@ async function loadFromGcp() {
   try {
     const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
     const client = new SecretManagerServiceClient();
-    const PROJECT = 'alesa-personal-assistent'; // GCP project name — cannot be renamed
+    const PROJECT = process.env.GCP_PROJECT || 'alesa-personal-assistent'; // GCP project name — cannot be renamed
 
     async function getSecret(name) {
       const [version] = await client.accessSecretVersion({
