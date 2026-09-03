@@ -333,10 +333,27 @@ function formatCandidateContext(negotiation) {
 
 module.exports = {
   isReady: () => !!readHhToken(USER_ID),
-  setupTools: ['hh_status', 'hh_set_token'],
+  setupTools: ['hh_connect', 'hh_status', 'hh_set_token'],
 
   tools: {
     // ── Setup ──────────────────────────────────────────────────────────────
+
+    hh_connect: {
+      description: 'Generate a one-time OAuth2 link to connect HeadHunter account. Use when user asks to connect / authorize HH.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const crypto = require('crypto');
+        const token = crypto.randomBytes(16).toString('hex');
+        const pendingDir = path.join(os.homedir(), 'connect-pending');
+        fs.mkdirSync(pendingDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(pendingDir, `${token}.json`),
+          JSON.stringify({ uid: USER_ID, service: 'hh', expires: Date.now() + 30 * 60 * 1000 }),
+        );
+        const base = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
+        return { link: `${base}/connect/hh?t=${token}`, note: 'Ссылка действует 30 минут.' };
+      },
+    },
 
     hh_status: {
       description: 'Check HeadHunter connection status. Shows employer info if connected.',
@@ -470,16 +487,25 @@ module.exports = {
             `/negotiations/${state}?vacancy_id=${vacancy_id}&per_page=20&page=${page}`,
             token,
           );
-          const items = (data.items || []).map(neg => ({
-            id: neg.id,
-            state: neg.state?.id,
-            name: [neg.resume?.last_name, neg.resume?.first_name].filter(Boolean).join(' ') || 'Кандидат',
-            title: neg.resume?.title || '',
-            location: neg.resume?.area?.name || '',
-            experience_months: neg.resume?.total_experience?.months,
-            created_at: neg.created_at?.slice(0, 10),
-            has_message: !!neg.message,
-          }));
+          const now = Date.now();
+          const items = (data.items || []).map(neg => {
+            const updatedAt = neg.updated_at || neg.created_at;
+            const daysSince = updatedAt
+              ? Math.floor((now - new Date(updatedAt).getTime()) / (24 * 3600 * 1000))
+              : null;
+            return {
+              id: neg.id,
+              state: neg.state?.id,
+              name: [neg.resume?.last_name, neg.resume?.first_name].filter(Boolean).join(' ') || 'Кандидат',
+              title: neg.resume?.title || '',
+              location: neg.resume?.area?.name || '',
+              experience_months: neg.resume?.total_experience?.months,
+              created_at: neg.created_at?.slice(0, 10),
+              updated_at: updatedAt?.slice(0, 10) || null,
+              days_since_activity: daysSince,
+              has_message: !!neg.message,
+            };
+          });
 
           return {
             vacancy_id,
@@ -570,11 +596,16 @@ module.exports = {
     // ── Messaging ───────────────────────────────────────────────────────────
 
     hh_generate_message: {
-      description: 'Generate a personalized qualifying message for a candidate using LLM. Based on resume and ATS evaluation. Returns draft message for recruiter to review before sending.',
+      description: 'Generate a personalized message for a candidate. Types: initial (first outreach with all qualification questions at once), followup (reminder if no reply), invite_call (invite to 15-min call). Reads candidate history automatically.',
       inputSchema: {
         type: 'object',
         properties: {
           negotiation_id: { type: 'string', description: 'Negotiation ID' },
+          message_type: {
+            type: 'string',
+            enum: ['initial', 'followup', 'invite_call'],
+            description: 'Message type (default: initial)',
+          },
           ats_result: {
             type: 'object',
             description: 'ATS evaluation result from hh_evaluate_candidate (optional — improves message quality)',
@@ -583,7 +614,7 @@ module.exports = {
         },
         required: ['negotiation_id'],
       },
-      handler: async ({ negotiation_id, ats_result, vacancy_context }) => {
+      handler: async ({ negotiation_id, message_type = 'initial', ats_result, vacancy_context }) => {
         const token = readHhToken(USER_ID);
         if (!token) return { error: 'HH не подключён.' };
         const apiKey = readOrKey(USER_ID);
@@ -597,14 +628,52 @@ module.exports = {
             ? `## О вакансии\n${vacancy_context}\n\n${candidateContext}`
             : candidateContext;
 
-          const message = await generateMessage(contextWithVacancy, ats_result || {}, name, apiKey);
+          const history = readCandidateHistory(USER_ID, negotiation_id);
+
+          const message = await generateMessage(
+            contextWithVacancy,
+            ats_result || history.ats_result || {},
+            name,
+            apiKey,
+            message_type,
+            history.messages || [],
+          );
 
           return {
             negotiation_id,
             name,
+            message_type,
             message,
             note: 'Проверь сообщение и отправь через hh_send_message если всё ок.',
           };
+        } catch (e) {
+          return { error: e.message };
+        }
+      },
+    },
+
+    hh_get_messages: {
+      description: 'Get message history for a candidate negotiation thread from hh.ru.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          negotiation_id: { type: 'string', description: 'Negotiation ID' },
+        },
+        required: ['negotiation_id'],
+      },
+      handler: async ({ negotiation_id }) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+
+        try {
+          const data = await hhGet(`/negotiations/${negotiation_id}/messages`, token);
+          const items = (data.items || []).map(m => ({
+            id: m.id,
+            text: m.text,
+            created_at: m.created_at,
+            author_type: m.author?.participant_type || 'unknown',
+          }));
+          return { negotiation_id, total: items.length, messages: items };
         } catch (e) {
           return { error: e.message };
         }
@@ -627,10 +696,163 @@ module.exports = {
 
         try {
           await hhPost(`/negotiations/${negotiation_id}/messages`, token, { message });
+
+          const history = readCandidateHistory(USER_ID, negotiation_id);
+          history.messages = history.messages || [];
+          history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString() });
+          saveCandidateHistory(USER_ID, negotiation_id, history);
+
           return { ok: true, negotiation_id, message_sent: message.slice(0, 80) + (message.length > 80 ? '...' : '') };
         } catch (e) {
           return { error: e.message };
         }
+      },
+    },
+
+    hh_batch_evaluate: {
+      description: 'Batch evaluate all candidates on a vacancy: fetch responses, skip inactive (>max_days_inactive), evaluate each with ATS scoring. Returns sorted results ready for hh_draft_review_page.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          vacancy_id: { type: 'string', description: 'Vacancy ID from hh_list_vacancies' },
+          ats_config: {
+            type: 'object',
+            description: 'ATS config from hh_extract_ats_config',
+          },
+          max_days_inactive: {
+            type: 'number',
+            description: 'Skip candidates with no activity for this many days (default: 14)',
+          },
+        },
+        required: ['vacancy_id', 'ats_config'],
+      },
+      handler: async ({ vacancy_id, ats_config, max_days_inactive = 14 } = {}) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+        const apiKey = readOrKey(USER_ID);
+        if (!apiKey) return { error: 'OpenRouter API key не найден.' };
+
+        try {
+          const data = await hhGet(
+            `/negotiations/response?vacancy_id=${vacancy_id}&per_page=50&page=0`,
+            token,
+          );
+
+          const now = Date.now();
+          const results = [];
+          const skipped = [];
+
+          for (const neg of (data.items || [])) {
+            const updatedAt = neg.updated_at || neg.created_at;
+            const daysSince = updatedAt
+              ? Math.floor((now - new Date(updatedAt).getTime()) / (24 * 3600 * 1000))
+              : null;
+
+            if (daysSince != null && daysSince > max_days_inactive) {
+              const name = [neg.resume?.last_name, neg.resume?.first_name].filter(Boolean).join(' ') || neg.id;
+              skipped.push({ id: neg.id, name, days_since_activity: daysSince, reason: `неактивен ${daysSince}д` });
+              continue;
+            }
+
+            const { name, text: candidateContext } = formatCandidateContext(neg);
+            let atsResult;
+            try {
+              atsResult = await evaluateCandidate(candidateContext, ats_config, apiKey);
+            } catch (e) {
+              atsResult = { score: 0, verdict: 'УТОЧНИТЬ', reasoning: `Ошибка оценки: ${e.message}`, matched: [], gaps: [] };
+            }
+
+            const history = readCandidateHistory(USER_ID, neg.id);
+            if (atsResult.score != null) {
+              history.ats_result = atsResult;
+              saveCandidateHistory(USER_ID, neg.id, history);
+            }
+
+            results.push({
+              negotiation_id: neg.id,
+              name,
+              score: atsResult.score,
+              verdict: atsResult.verdict,
+              reasoning: atsResult.reasoning,
+              matched: atsResult.matched || [],
+              gaps: atsResult.gaps || [],
+              days_since_activity: daysSince,
+              updated_at: updatedAt?.slice(0, 10) || null,
+              resume_text: candidateContext,
+              history_messages: history.messages || [],
+            });
+          }
+
+          results.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+          return {
+            vacancy_id,
+            evaluated: results.length,
+            skipped: skipped.length,
+            skipped_list: skipped,
+            results,
+            note: 'Передай results в hh_draft_review_page чтобы сгенерировать страницу ревью.',
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
+      },
+    },
+
+    hh_draft_review_page: {
+      description: 'Generate HTML review page with all evaluated candidates, their scores, and draft messages for recruiter approval. Opens for review. Returns file path.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          candidates: {
+            type: 'array',
+            description: 'Candidates array from hh_batch_evaluate results',
+          },
+          vacancy_name: { type: 'string', description: 'Vacancy name for the page title' },
+          vacancy_context: { type: 'string', description: 'Brief vacancy description for message generation context' },
+          output_path: { type: 'string', description: 'Where to save the HTML file (default: ~/agent-data/hh-review-{timestamp}.html)' },
+        },
+        required: ['candidates', 'vacancy_name'],
+      },
+      handler: async ({ candidates, vacancy_name, vacancy_context, output_path }) => {
+        const apiKey = readOrKey(USER_ID);
+
+        const enriched = [];
+        for (const c of candidates) {
+          let draft = null;
+          if (c.verdict !== 'ОТКЛОНИТЬ' && apiKey) {
+            const history = readCandidateHistory(USER_ID, c.negotiation_id);
+            const alreadySent = (history.messages || []).some(m => m.role === 'employer');
+            if (!alreadySent) {
+              try {
+                const msgType = c.verdict === 'ПРОПУСТИТЬ' ? 'invite_call' : 'initial';
+                draft = await generateMessage(
+                  vacancy_context ? `## О вакансии\n${vacancy_context}\n\nКандидат: ${c.name}` : `Кандидат: ${c.name}`,
+                  c,
+                  c.name,
+                  apiKey,
+                  msgType,
+                  history.messages || [],
+                );
+              } catch { /* skip if LLM fails */ }
+            }
+          }
+          enriched.push({ ...c, draft_message: draft });
+        }
+
+        const html = generateReviewHtml(enriched, vacancy_name);
+        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+        const filePath = output_path || path.join(dataDir, `hh-review-${Date.now()}.html`);
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, html, 'utf8');
+
+        return {
+          ok: true,
+          file_path: filePath,
+          candidates_count: enriched.length,
+          actionable: enriched.filter(c => c.verdict !== 'ОТКЛОНИТЬ').length,
+          note: `Страница ревью сохранена. Открой ${filePath} в браузере.`,
+        };
       },
     },
 
@@ -814,13 +1036,282 @@ async function evaluateCandidate(candidateText, atsConfig, apiKey) {
   return computeScore(llmResult, atsConfig);
 }
 
-async function generateMessage(candidateContext, atsResult, name, apiKey) {
+async function generateMessage(candidateContext, atsResult, name, apiKey, messageType = 'initial', history = []) {
   const firstName = name.split(' ')[0];
   const gaps = (atsResult.gaps || []).slice(0, 2).join(', ') || 'нет критических пробелов';
-  const userMsg = `Напиши первое сообщение кандидату ${firstName}.\n\nКонтекст:\n${candidateContext}\n\nATS: ${atsResult.score || 'n/a'}/10. Совпадения: ${(atsResult.matched || []).slice(0, 3).join(', ')}. Уточнить: ${gaps}.`;
+
+  let systemPrompt = MESSAGE_SYSTEM;
+  let userMsg;
+
+  if (messageType === 'followup') {
+    systemPrompt = `Ты — рекрутер. Напиши короткий follow-up кандидату, который не ответил на первое сообщение.
+Тон: лёгкий, без давления. Упомяни, что писал ранее. 2-3 предложения максимум.`;
+    const historyLines = history.map(m => `${m.role === 'employer' ? 'Рекрутер' : 'Кандидат'}: ${m.text}`).join('\n');
+    userMsg = `Кандидат ${firstName} не ответил. История:\n${historyLines || '(нет истории)'}\n\nНапиши follow-up.`;
+  } else if (messageType === 'invite_call') {
+    systemPrompt = `Ты — рекрутер. Кандидат ответил на вопросы, результаты хорошие. Напиши приглашение на 15-минутный звонок.
+Предложи конкретное время (ближайшие дни, утро/день). 3-4 предложения.`;
+    userMsg = `Пригласи ${firstName} на короткий звонок. Контекст:\n${candidateContext}`;
+  } else {
+    userMsg = `Напиши первое сообщение кандидату ${firstName}.\n\nКонтекст:\n${candidateContext}\n\nATS: ${atsResult.score || 'n/a'}/10. Совпадения: ${(atsResult.matched || []).slice(0, 3).join(', ')}. Уточнить: ${gaps}.`;
+  }
 
   return llmCall(apiKey, FAST_MODEL, [
-    { role: 'system', content: MESSAGE_SYSTEM },
+    { role: 'system', content: systemPrompt },
     { role: 'user', content: userMsg },
   ], 1000, 0.7);
+}
+
+// ── Per-candidate history ───────────────────────────────────────────────────
+
+function candidateHistoryPath(userId, negotiationId) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(userId || USER_ID), 'candidates', `${negotiationId}.json`);
+}
+
+function readCandidateHistory(userId, negotiationId) {
+  const file = candidateHistoryPath(userId, negotiationId);
+  if (!fs.existsSync(file)) return { messages: [], ats_result: null };
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { messages: [], ats_result: null }; }
+}
+
+function saveCandidateHistory(userId, negotiationId, data) {
+  const file = candidateHistoryPath(userId, negotiationId);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+}
+
+// ── Review page HTML ────────────────────────────────────────────────────────
+
+function generateReviewHtml(candidates, vacancyName) {
+  const verdictOrder = { 'ПРОПУСТИТЬ': 0, 'УТОЧНИТЬ': 1, 'ОТКЛОНИТЬ': 2 };
+  const sorted = [...candidates].sort((a, b) => (verdictOrder[a.verdict] ?? 3) - (verdictOrder[b.verdict] ?? 3));
+
+  const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
+  const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
+  const actionable = sorted.filter(c => c.verdict !== 'ОТКЛОНИТЬ').length;
+
+  const cards = sorted.map((c, i) => {
+    const col = colorMap[c.verdict] || '#6b7280';
+    const bg = bgMap[c.verdict] || '#f9fafb';
+    const scorePct = Math.round((c.score || 0) * 10);
+    const matched = (c.matched || []).map(m => `<span class="tag tag-ok">${escHtml(m)}</span>`).join('');
+    const gaps = (c.gaps || []).map(g => `<span class="tag tag-gap">${escHtml(g)}</span>`).join('');
+    const daysNote = c.days_since_activity != null ? `<span class="meta">активность ${c.days_since_activity}д назад</span>` : '';
+
+    // History section
+    const histMsgs = c.history_messages || [];
+    const histSection = histMsgs.length === 0
+      ? `<div class="hist-none">💬 Первое сообщение — переписки ещё не было</div>`
+      : `<details class="hist-details"><summary class="hist-summary">📨 История диалога (${histMsgs.length} сообщ.)</summary>
+           <div class="hist-thread">${histMsgs.map(m => `
+             <div class="hist-msg hist-${escHtml(m.role || 'employer')}">
+               <span class="hist-who">${m.role === 'employer' ? 'Рекрутер' : 'Кандидат'}</span>
+               <span class="hist-time">${(m.timestamp || '').slice(0, 10)}</span>
+               <div class="hist-text">${escHtml(m.text || '')}</div>
+             </div>`).join('')}
+           </div></details>`;
+
+    // Resume section
+    const resumeSection = c.resume_text
+      ? `<details class="resume-details"><summary class="resume-summary">📄 Резюме (текст)</summary>
+           <pre class="resume-text">${escHtml(c.resume_text)}</pre>
+         </details>`
+      : '';
+
+    const isActionable = c.verdict !== 'ОТКЛОНИТЬ' && !!c.draft_message;
+    const checkboxHtml = isActionable
+      ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" checked onchange="onCheck()">`
+      : '';
+
+    const msgSection = isActionable
+      ? `<div class="msg-section">
+           <label class="msg-label">Черновик сообщения</label>
+           <textarea class="msg-area" id="msg-${i}" rows="5">${escHtml(c.draft_message)}</textarea>
+           <div class="btns">
+             <button class="btn btn-send" onclick="sendOne(${i}, '${escHtml(c.negotiation_id)}')">✓ Отправить</button>
+             <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
+           </div>
+         </div>`
+      : c.verdict === 'ОТКЛОНИТЬ'
+        ? `<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>`
+        : '';
+
+    return `<div class="card" id="card-${i}" data-score="${(c.score || 0).toFixed(1)}" data-neg="${escHtml(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
+  <div class="card-header">
+    <div class="card-header-left">
+      ${checkboxHtml}
+      <div>
+        <span class="name">${escHtml(c.name || 'Кандидат')}</span>
+        ${daysNote}
+      </div>
+    </div>
+    <div class="score-wrap">
+      <div class="score-bar"><div class="score-fill" style="width:${scorePct}%;background:${col}"></div></div>
+      <span class="score-num" style="color:${col}">${(c.score || 0).toFixed(1)}/10</span>
+      <span class="verdict" style="background:${col}">${escHtml(c.verdict)}</span>
+    </div>
+  </div>
+  ${c.reasoning ? `<p class="reasoning">${escHtml(c.reasoning)}</p>` : ''}
+  <div class="tags">${matched}${gaps}</div>
+  ${histSection}
+  ${resumeSection}
+  ${msgSection}
+</div>`;
+  }).join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ревью кандидатов — ${escHtml(vacancyName)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:24px 24px 96px}
+h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.subtitle{color:#64748b;font-size:14px;margin-bottom:16px}
+.toolbar{display:flex;align-items:center;gap:8px;margin-bottom:20px;flex-wrap:wrap}
+.toolbar-label{font-size:13px;color:#64748b;margin-right:4px}
+.tb-btn{padding:5px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#fff;color:#475569;transition:background .15s,color .15s}
+.tb-btn:hover,.tb-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.tb-sep{width:1px;height:20px;background:#e2e8f0;margin:0 4px}
+.card{background:#fff;border-radius:12px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);transition:opacity .3s}
+.card.done{opacity:.4;pointer-events:none}
+.card.skipped{opacity:.35;pointer-events:none}
+.card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:10px}
+.card-header-left{display:flex;align-items:flex-start;gap:10px}
+.card-cb{width:18px;height:18px;margin-top:2px;cursor:pointer;accent-color:#4f46e5;flex-shrink:0}
+.name{font-size:17px;font-weight:600}
+.meta{font-size:12px;color:#94a3b8;margin-left:8px}
+.score-wrap{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.score-bar{width:80px;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
+.score-fill{height:100%;border-radius:3px;transition:width .4s}
+.score-num{font-size:14px;font-weight:600;min-width:38px}
+.verdict{font-size:12px;font-weight:700;color:#fff;padding:3px 8px;border-radius:99px;white-space:nowrap}
+.reasoning{font-size:13px;color:#475569;line-height:1.5;margin-bottom:10px}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.tag{font-size:12px;padding:2px 8px;border-radius:4px;font-weight:500}
+.tag-ok{background:#dcfce7;color:#15803d}
+.tag-gap{background:#fee2e2;color:#b91c1c}
+.msg-section{border-top:1px solid #e2e8f0;padding-top:12px;margin-top:8px}
+.msg-label{display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em}
+.msg-area{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:14px;line-height:1.5;font-family:inherit;resize:vertical;min-height:90px}
+.msg-area:focus{outline:none;border-color:#6366f1}
+.btns{display:flex;gap:8px;margin-top:8px}
+.btn{padding:8px 18px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn:hover{opacity:.85}
+.btn-send{background:#16a34a;color:#fff}
+.btn-skip{background:#e2e8f0;color:#475569}
+.reject-note{font-size:13px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:10px;font-style:italic}
+.hist-none{font-size:12px;color:#94a3b8;margin:8px 0 4px;font-style:italic}
+.hist-details,.resume-details{margin:8px 0 4px}
+.hist-summary,.resume-summary{font-size:12px;font-weight:600;color:#64748b;cursor:pointer;padding:4px 0;user-select:none}
+.hist-thread{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.hist-msg{padding:8px 10px;border-radius:8px;font-size:13px}
+.hist-employer{background:#eff6ff;border-left:3px solid #3b82f6}
+.hist-applicant{background:#f0fdf4;border-left:3px solid #22c55e}
+.hist-who{font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-right:8px}
+.hist-time{font-size:11px;color:#94a3b8}
+.hist-text{margin-top:4px;white-space:pre-wrap;line-height:1.4}
+.resume-text{font-size:12px;white-space:pre-wrap;font-family:inherit;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-top:8px;line-height:1.5;max-height:300px;overflow-y:auto;color:#334155}
+.footer{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e2e8f0;padding:12px 24px;display:flex;align-items:center;gap:16px;box-shadow:0 -2px 8px rgba(0,0,0,.08)}
+.counter{font-size:14px;color:#475569;flex:1}
+.counter strong{color:#1e293b}
+.btn-send-all{background:#4f46e5;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn-send-all:disabled{opacity:.4;cursor:not-allowed}
+.btn-send-all:not(:disabled):hover{opacity:.85}
+</style>
+</head>
+<body>
+<h1>Кандидаты: ${escHtml(vacancyName)}</h1>
+<p class="subtitle">${sorted.length} откликов · ${actionable} требуют сообщения</p>
+<div class="toolbar">
+  <span class="toolbar-label">Выбрать:</span>
+  <button class="tb-btn active" id="filter-all" onclick="filterScore(0)">Все</button>
+  <button class="tb-btn" id="filter-8" onclick="filterScore(8)">8.0+</button>
+  <button class="tb-btn" id="filter-6" onclick="filterScore(6)">6.0+</button>
+  <div class="tb-sep"></div>
+  <button class="tb-btn" onclick="selectFiltered(true)">✓ Выбрать все</button>
+  <button class="tb-btn" onclick="selectFiltered(false)">✗ Снять все</button>
+</div>
+${cards}
+<div class="footer">
+  <div class="counter">Выбрано: <strong id="selCount">0</strong> / <strong>${actionable}</strong> · Отправлено: <strong id="sentCount">0</strong></div>
+  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить выбранных (0)</button>
+</div>
+<script>
+const sent = new Set();
+const skipped = new Set();
+let minScore = 0;
+
+function onCheck() {
+  const checks = document.querySelectorAll('.card-cb:checked');
+  const n = checks.length;
+  document.getElementById('selCount').textContent = n;
+  const btn = document.getElementById('sendAllBtn');
+  btn.textContent = 'Отправить выбранных (' + n + ')';
+  btn.disabled = n === 0;
+}
+
+function filterScore(min) {
+  minScore = min;
+  document.querySelectorAll('[id^=filter-]').forEach(b => b.classList.remove('active'));
+  document.getElementById('filter-' + (min || 'all')).classList.add('active');
+  selectFiltered(true);
+}
+
+function selectFiltered(checked) {
+  document.querySelectorAll('.card-cb').forEach(cb => {
+    const score = parseFloat(cb.dataset.score || 0);
+    if (!sent.has(parseInt(cb.dataset.idx)) && !skipped.has(parseInt(cb.dataset.idx))) {
+      cb.checked = checked && score >= minScore;
+    }
+  });
+  onCheck();
+}
+
+function sendOne(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value || '';
+  sent.add(i);
+  document.getElementById('card-'+i).classList.add('done');
+  const cb = document.getElementById('cb-'+i);
+  if (cb) { cb.checked = false; cb.disabled = true; }
+  document.getElementById('sentCount').textContent = sent.size;
+  onCheck();
+  console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
+}
+
+function skipOne(i) {
+  skipped.add(i);
+  document.getElementById('card-'+i).classList.add('skipped');
+  const cb = document.getElementById('cb-'+i);
+  if (cb) { cb.checked = false; cb.disabled = true; }
+  onCheck();
+}
+
+function sendAll() {
+  document.querySelectorAll('.card-cb:checked').forEach(cb => {
+    const i = parseInt(cb.dataset.idx);
+    const card = document.getElementById('card-'+i);
+    const negId = card?.dataset.neg || '';
+    const msg = document.getElementById('msg-'+i)?.value || '';
+    sent.add(i);
+    card.classList.add('done');
+    cb.checked = false; cb.disabled = true;
+    console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
+  });
+  document.getElementById('sentCount').textContent = sent.size;
+  onCheck();
+}
+
+// init count
+onCheck();
+</script>
+</body>
+</html>`;
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }

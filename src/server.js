@@ -13,9 +13,10 @@ const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./ge
 const { nalogFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
-const { hhSuccessHtml, hhErrorHtml } = require('./connect-forms/hh');
+const { hhSuccessHtml, hhErrorHtml, hhLandingHtml } = require('./connect-forms/hh');
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
+const { weeekFormHtml } = require('./connect-forms/weeek');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -385,7 +386,7 @@ async function main() {
         return;
       }
       if (!code || !state) {
-        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный callback.'));
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhLandingHtml());
         return;
       }
 
@@ -705,9 +706,85 @@ async function main() {
         res.writeHead(405).end(); return;
       }
 
+      // ── weeek — L1 (API token) + optional L2 (login+password for deal comments) ──
+      if (service === 'weeek') {
+        if (req.method === 'GET') {
+          const t = url.searchParams.get('t') || '';
+          let savedToken = null, savedLogin = null;
+          try {
+            if (/^[a-f0-9]{32}$/.test(t)) {
+              const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
+              const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
+              if (pending.uid && pending.expires > Date.now()) {
+                const tokFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'weeek');
+                if (fs.existsSync(tokFile)) savedToken = fs.readFileSync(tokFile, 'utf8').trim() || null;
+                const loginFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'weeek-login');
+                if (fs.existsSync(loginFile)) {
+                  const stored = JSON.parse(fs.readFileSync(loginFile, 'utf8'));
+                  savedLogin = { email: stored.email || null, password: stored.password || null };
+                }
+              }
+            }
+          } catch { /* non-critical */ }
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+            .end(weeekFormHtml(t, savedToken, savedLogin));
+          return;
+        }
+
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          let payload;
+          try { payload = JSON.parse(body); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
+          const { t, token: apiToken, email, password } = payload;
+          if (!t || !apiToken) { res.writeHead(400).end(JSON.stringify({ error: 'missing t or token' })); return; }
+          if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
+
+          const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+          let pending;
+          try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
+          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          if (pending.service !== 'weeek') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
+          if (!/^[a-zA-Z0-9_]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
+
+          const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
+          fs.mkdirSync(tokensDir, { recursive: true });
+          fs.writeFileSync(path.join(tokensDir, 'weeek'), String(apiToken).trim(), { mode: 0o600 });
+
+          const level = ['L1'];
+          if (email && password) {
+            fs.writeFileSync(
+              path.join(tokensDir, 'weeek-login'),
+              JSON.stringify({ email: email.trim(), password }),
+              { mode: 0o600 }
+            );
+            level.push('L2');
+          }
+
+          try { fs.unlinkSync(pendingFile); } catch {}
+          console.log(`[connect] saved weeek token (level=${level.join('+')}) for uid=${pending.uid}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, level }));
+
+          const wkChatId = readChatId(pending.uid);
+          if (wkChatId) {
+            const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+            let notifyText = '✅ Weeek CRM подключён!\n';
+            notifyText += '• L1 (API токен): ✓ создание сделок, контактов, задач\n';
+            if (level.includes('L2')) notifyText += '• L2 (логин+пароль): ✓ комментарии к сделкам\n';
+            notifyText += '\nУправление: /secrets_list';
+            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: wkChatId, text: notifyText }),
+            }).catch(e => console.error('[connect] tg notify failed:', e.message));
+          }
+          return;
+        }
+
+        res.writeHead(405).end(); return;
+      }
+
       const SERVICE_META = {
         github: { name: 'GitHub', placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', hint: 'github.com/settings/tokens → Generate new token (classic) → scopes: <b>repo</b>, <b>read:org</b>' },
-        weeek:  { name: 'Weeek CRM', placeholder: 'Вставьте API токен', hint: 'Weeek → Settings → Integrations → API → Generate token' },
       };
       const meta = SERVICE_META[service];
       if (!meta) { res.writeHead(404).end('Unknown service'); return; }
@@ -758,7 +835,7 @@ async function main() {
         // Notify user in Telegram (fire-and-forget)
         const svcChatId = readChatId(pending.uid);
         if (svcChatId) {
-          const SERVICE_NAMES = { github: 'GitHub', weeek: 'Weeek CRM' };
+          const SERVICE_NAMES = { github: 'GitHub' };
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
           fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
             method: 'POST',

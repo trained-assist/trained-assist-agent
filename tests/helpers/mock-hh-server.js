@@ -44,6 +44,7 @@ const DEFAULT_NEGOTIATIONS = [
     state: { id: 'response' },
     vacancy_id: 'vac-001',
     created_at: '2026-09-02T10:00:00+03:00',
+    updated_at: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
     message: 'Очень интересная позиция! Имею 5 лет опыта с Node.js и PostgreSQL.',
     resume: {
       id: 'res-001',
@@ -78,6 +79,7 @@ const DEFAULT_NEGOTIATIONS = [
     state: { id: 'response' },
     vacancy_id: 'vac-001',
     created_at: '2026-09-02T11:00:00+03:00',
+    updated_at: new Date(Date.now() - 20 * 24 * 3600 * 1000).toISOString(),
     message: null,
     resume: {
       id: 'res-002',
@@ -105,6 +107,7 @@ const DEFAULT_NEGOTIATIONS = [
     state: { id: 'response' },
     vacancy_id: 'vac-001',
     created_at: '2026-09-02T12:00:00+03:00',
+    updated_at: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
     message: 'Рассматриваю предложения. Опыт 3 года: Go, Kubernetes, PostgreSQL.',
     resume: {
       id: 'res-003',
@@ -207,15 +210,30 @@ function createMockHhServer(options = {}) {
       return neg ? send(200, neg) : send(404, { error: 'Not found' });
     }
 
-    // POST /negotiations/{id}/messages
+    // GET/POST /negotiations/{id}/messages
     const negMsg = p.match(/^\/negotiations\/([^/]+)\/messages$/);
-    if (req.method === 'POST' && negMsg) {
+    if (negMsg) {
       const negId = negMsg[1];
-      return readBody(({ message }) => {
-        if (!state.messages[negId]) state.messages[negId] = [];
-        state.messages[negId].push(message);
-        send(201, { ok: true });
-      });
+      if (req.method === 'GET') {
+        const sent = (state.messages[negId] || []).map((text, i) => ({
+          id: `msg-${negId}-${i}`,
+          text,
+          created_at: new Date(Date.now() - (state.messages[negId].length - i) * 3600 * 1000).toISOString(),
+          author: { participant_type: 'employer' },
+        }));
+        const seed = negId === 'neg-001'
+          ? [{ id: 'msg-seed-1', text: 'Здравствуйте, Алексей!', created_at: '2026-09-03T09:00:00+03:00', author: { participant_type: 'employer' } }]
+          : [];
+        const all = [...seed, ...sent];
+        return send(200, { found: all.length, pages: 1, items: all });
+      }
+      if (req.method === 'POST') {
+        return readBody(({ message }) => {
+          if (!state.messages[negId]) state.messages[negId] = [];
+          state.messages[negId].push(message);
+          send(201, { ok: true });
+        });
+      }
     }
 
     // PUT /negotiations/discard_vacancy_closed/{id}
