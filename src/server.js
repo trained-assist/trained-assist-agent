@@ -1779,6 +1779,8 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn-gen{font-size:11px;padding:3px 8px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;color:#475569;font-weight:500}
 .btn-gen:hover:not(:disabled){background:#e2e8f0}
 .btn-gen:disabled{opacity:.5;cursor:not-allowed}
+.msg-area.generating{background:repeating-linear-gradient(90deg,#f1f5f9 0%,#e2e8f0 50%,#f1f5f9 100%);background-size:200% 100%;animation:shimmer 1.4s infinite linear;opacity:.7;cursor:default}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .msg-area{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:14px;line-height:1.5;font-family:inherit;resize:vertical;min-height:80px}
 .msg-area:focus{outline:none;border-color:#6366f1}
 .btns{display:flex;gap:8px;margin-top:8px}
@@ -1906,6 +1908,7 @@ async function generateOne(i, negId, candidateName, alreadySent) {
   const btn = document.getElementById('gen-'+i);
   const ta = document.getElementById('msg-'+i);
   if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+  if (ta) { ta.classList.add('generating'); ta.placeholder = '⏳ Генерирую...'; }
   try {
     const resumeEl = document.querySelector('#card-'+i+' pre.resume-text');
     const resumeText = resumeEl?.textContent || '';
@@ -1915,33 +1918,33 @@ async function generateOne(i, negId, candidateName, alreadySent) {
       resume_text: resumeText,
       already_sent: alreadySent,
     });
-    if (ta) ta.value = data.message || '';
-    if (btn) { btn.disabled = false; btn.textContent = '✦ Перегенерировать'; }
-    showToast('✅ Черновик готов');
+    if (ta) { ta.value = data.message || ''; ta.classList.remove('generating'); ta.placeholder = ''; }
+    if (btn) { btn.disabled = false; btn.textContent = '✦ Переписать'; }
   } catch(e) {
-    showToast('❌ ' + e.message, true);
+    if (ta) { ta.classList.remove('generating'); ta.placeholder = ''; }
     if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать'; }
   }
 }
 
-async function generateAll() {
+async function autoGenerate() {
   const allGenBtns = [...document.querySelectorAll('[id^="gen-"]')];
-  const emptyCards = allGenBtns.filter(btn => {
+  const emptyBtns = allGenBtns.filter(btn => {
     const i = btn.id.replace('gen-', '');
     const ta = document.getElementById('msg-'+i);
     return ta && !ta.value.trim();
   });
-  if (emptyCards.length === 0) { showToast('Все черновики уже заполнены'); return; }
-  const gab = document.getElementById('genAllBtn');
-  if (gab) { gab.disabled = true; gab.textContent = '⏳ Генерирую...'; }
-  let ok = 0;
-  for (const btn of emptyCards) {
-    btn.click();
-    await new Promise(r => setTimeout(r, 300));
-    ok++;
+  if (emptyBtns.length === 0) return;
+  // Run up to 4 concurrent generation requests; page stays fully interactive
+  const CONCURRENCY = 4;
+  let idx = 0;
+  async function worker() {
+    while (idx < emptyBtns.length) {
+      const btn = emptyBtns[idx++];
+      btn.click();
+      await new Promise(r => setTimeout(r, 50));
+    }
   }
-  if (gab) { gab.disabled = false; gab.textContent = '✦ Сгенерировать черновики'; }
-  showToast('✅ Запущена генерация для ' + ok + ' кандидатов');
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, emptyBtns.length) }, worker));
 }
 
 async function sendOne(i, negId) {
@@ -2003,20 +2006,8 @@ async function rejectAll() {
 
 onCheck();
 
-// Auto-generate drafts for candidates with empty textarea on page load
-(async function autoGenerate() {
-  const allGenBtns = [...document.querySelectorAll('[id^="gen-"]')];
-  const emptyCards = allGenBtns.filter(btn => {
-    const i = btn.id.replace('gen-', '');
-    const ta = document.getElementById('msg-'+i);
-    return ta && !ta.value.trim();
-  });
-  if (emptyCards.length === 0) return;
-  for (const btn of emptyCards) {
-    btn.click();
-    await new Promise(r => setTimeout(r, 400));
-  }
-})();
+// Auto-generate drafts on page load — non-blocking, 4 concurrent
+autoGenerate();
 </script>
 </body>
 </html>`;
