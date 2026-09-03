@@ -95,6 +95,15 @@ async function main() {
     cookieStr = fs.readFileSync(TMP_COOKIE_FILE, 'utf8').trim();
     if (!cookieStr) throw new Error('Empty cookie string after capture');
     console.log(`[refresh-weeek] Captured ${cookieStr.split(';').length} cookies`);
+
+    // Save to agent-tokens for profiles that need L2 Weeek session locally
+    const LOCAL_SESSION_PROFILES = (process.env.WEEEK_SESSION_PROFILES || 'flexi').split(',').map(s => s.trim()).filter(Boolean);
+    for (const profile of LOCAL_SESSION_PROFILES) {
+      const tokenDir = path.join(os.homedir(), 'agent-tokens', profile);
+      fs.mkdirSync(tokenDir, { recursive: true });
+      fs.writeFileSync(path.join(tokenDir, 'weeek-session'), cookieStr, 'utf8');
+      console.log(`[refresh-weeek] Saved session to ~/agent-tokens/${profile}/weeek-session`);
+    }
   } catch (e) {
     console.error('[refresh-weeek] Cookie capture failed:', e.message);
     await tgSend(botToken, OPERATOR_CHAT,
