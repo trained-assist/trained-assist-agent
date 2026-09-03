@@ -243,10 +243,12 @@ NOTE: Works well for Russian legal entity names. Brand names (Latin, foreign) �
         const started = Date.now();
         const log = [];
 
-        const { enriched: batchResults } = await enrich(batch, config, ({ done, total, company, result }) => {
+        const enrichResult = await enrich(batch, config, ({ done, total, company, result }) => {
           if (result?.inn) log.push(`✓ ${company.name} → ${result.inn}`);
           else log.push(`✗ ${company.name}`);
         });
+        const batchResults = Array.isArray(enrichResult?.enriched) ? enrichResult.enriched
+          : Array.isArray(enrichResult) ? enrichResult : [];
 
         // Merge batch results into alreadyDone map
         for (const c of batchResults) {
