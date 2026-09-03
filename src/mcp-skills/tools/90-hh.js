@@ -52,6 +52,15 @@ function readOrKey(userId) {
   return process.env.OPENROUTER_API_KEY || null;
 }
 
+function loadCommunicationStyle(userId) {
+  const file = path.join(tokenBase(), String(userId || USER_ID), 'hh-message-style');
+  if (fs.existsSync(file)) {
+    const style = fs.readFileSync(file, 'utf8').trim();
+    if (style) return style;
+  }
+  return null;
+}
+
 // ── HH API ─────────────────────────────────────────────────────────────────
 
 function hhRequest(method, apiPath, accessToken, body) {
@@ -109,7 +118,7 @@ async function hhPut(apiPath, token) {
 
 // ── OpenRouter LLM ─────────────────────────────────────────────────────────
 
-const FAST_MODEL = 'deepseek/deepseek-v4-flash-0731';
+const FAST_MODEL = 'anthropic/claude-haiku-4-5-20251001';
 const SMART_MODEL = 'deepseek/deepseek-chat'; // DeepSeek V3 — for ATS config extraction
 
 function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
@@ -994,30 +1003,33 @@ module.exports = {
         const enriched = [];
         for (const c of candidates) {
           let draft = null;
+          let alreadySent = false;
           if (c.verdict !== 'ОТКЛОНИТЬ' && apiKey) {
             const history = readCandidateHistory(USER_ID, c.negotiation_id);
-            const alreadySent = (history.messages || []).some(m => m.role === 'employer');
-            if (!alreadySent) {
-              try {
-                const msgType = c.verdict === 'ПРОПУСТИТЬ' ? 'invite_call' : 'initial';
-                draft = await generateMessage(
-                  vacancy_context ? `## О вакансии\n${vacancy_context}\n\nКандидат: ${c.name}` : `Кандидат: ${c.name}`,
-                  c,
-                  c.name,
-                  apiKey,
-                  msgType,
-                  history.messages || [],
-                );
-                // Persist draft so the server-side /hh/review page can show it
-                if (draft) {
-                  if (!history.ats_result) history.ats_result = {};
-                  history.ats_result.draft_message = draft;
-                  saveCandidateHistory(USER_ID, c.negotiation_id, history);
-                }
-              } catch { /* skip if LLM fails */ }
+            alreadySent = (history.messages || []).some(m => m.role === 'employer');
+            const msgType = c.verdict === 'ПРОПУСТИТЬ' ? 'invite_call'
+              : alreadySent ? 'followup'
+              : 'initial';
+            try {
+              draft = await generateMessage(
+                vacancy_context ? `## О вакансии\n${vacancy_context}\n\nКандидат: ${c.name}` : `Кандидат: ${c.name}`,
+                c,
+                c.name,
+                apiKey,
+                msgType,
+                history.messages || [],
+                USER_ID,
+              );
+              if (draft) {
+                if (!history.ats_result) history.ats_result = {};
+                history.ats_result.draft_message = draft;
+                saveCandidateHistory(USER_ID, c.negotiation_id, history);
+              }
+            } catch (e) {
+              console.error(`[hh_review] generateMessage failed for ${c.negotiation_id}:`, e.message);
             }
           }
-          enriched.push({ ...c, draft_message: draft });
+          enriched.push({ ...c, draft_message: draft, already_sent: alreadySent });
         }
 
         const callbackBase = process.env.AGENT_PUBLIC_URL
@@ -1239,11 +1251,14 @@ async function evaluateCandidate(candidateText, atsConfig, apiKey) {
   return computeScore(llmResult, atsConfig);
 }
 
-async function generateMessage(candidateContext, atsResult, name, apiKey, messageType = 'initial', history = []) {
+async function generateMessage(candidateContext, atsResult, name, apiKey, messageType = 'initial', history = [], userId = null) {
   const firstName = name.split(' ')[0];
   const gaps = (atsResult.gaps || []).slice(0, 2).join(', ') || 'нет критических пробелов';
 
-  let systemPrompt = MESSAGE_SYSTEM;
+  const commStyle = loadCommunicationStyle(userId || USER_ID);
+  let systemPrompt = commStyle
+    ? `${MESSAGE_SYSTEM}\n\n## Стиль общения рекрутера\n${commStyle}`
+    : MESSAGE_SYSTEM;
   let userMsg;
 
   if (messageType === 'followup') {
@@ -1323,24 +1338,30 @@ function generateReviewHtml(candidates, vacancyName, opts = {}) {
          </details>`
       : '';
 
-    const isActionable = c.verdict !== 'ОТКЛОНИТЬ' && !!c.draft_message;
+    const isActionable = c.verdict !== 'ОТКЛОНИТЬ';
     const isReject = c.verdict === 'ОТКЛОНИТЬ';
     const checkboxHtml = isActionable
-      ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" checked onchange="onCheck()">`
+      ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" ${c.draft_message ? 'checked' : ''} onchange="onCheck()">`
       : isReject
         ? `<input type="checkbox" class="reject-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()">`
         : '';
 
+    const msgLabel = c.already_sent
+      ? 'Follow-up (уже писали)'
+      : c.verdict === 'ПРОПУСТИТЬ'
+        ? 'Приглашение на звонок'
+        : 'Первое сообщение';
+
     const msgSection = isActionable
       ? `<div class="msg-section">
-           <label class="msg-label">Черновик сообщения</label>
-           <textarea class="msg-area" id="msg-${i}" rows="5">${escHtml(c.draft_message)}</textarea>
+           <label class="msg-label">${msgLabel}</label>
+           <textarea class="msg-area" id="msg-${i}" rows="5">${c.draft_message ? escHtml(c.draft_message) : ''}</textarea>
            <div class="btns">
              <button class="btn btn-send" onclick="sendOne(${i}, '${escHtml(c.negotiation_id)}')">✓ Отправить</button>
              <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
            </div>
          </div>`
-      : c.verdict === 'ОТКЛОНИТЬ'
+      : isReject
         ? `<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>`
         : '';
 
