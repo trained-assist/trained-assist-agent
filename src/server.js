@@ -938,7 +938,7 @@ async function main() {
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase);
+      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(html);
     }
@@ -1499,88 +1499,391 @@ function readBody(req, maxBytes = 1_048_576) {
 
 // ── HH review page ────────────────────────────────────────────────────────────
 
-function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase) {
-  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const now = Date.now();
+function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir) {
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-  const cards = negotiations.map((neg, i) => {
+  const candDir = path.join(dataDir || path.join(os.homedir(), 'agent-data'), 'hh', String(username), 'candidates');
+  function readHistory(negId) {
+    const file = path.join(candDir, `${negId}.json`);
+    if (!fs.existsSync(file)) return { messages: [], ats_result: null };
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { messages: [], ats_result: null }; }
+  }
+
+  function buildResumeText(neg) {
     const r = neg.resume || {};
-    const name = [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат';
-    const title = r.title || '';
-    const city = r.area?.name || '';
-    const expMonths = r.total_experience?.months || 0;
-    const expStr = expMonths >= 12 ? `${Math.floor(expMonths / 12)} лет` : expMonths ? `${expMonths} мес.` : '';
-    const daysAgo = neg.updated_at ? Math.floor((now - new Date(neg.updated_at).getTime()) / 86400000) : null;
-    const meta = [city, expStr, daysAgo != null ? `${daysAgo}д. назад` : ''].filter(Boolean).join(' · ');
+    const lines = [];
+    if (r.title) lines.push(`Позиция: ${r.title}`);
+    if (r.total_experience?.months) {
+      const y = Math.floor(r.total_experience.months / 12);
+      const m = r.total_experience.months % 12;
+      lines.push(`Опыт: ${y} лет${m ? ' ' + m + ' мес' : ''}`);
+    }
+    if (r.area?.name) lines.push(`Локация: ${r.area.name}`);
+    if (r.salary) lines.push(`Зарплата: ${r.salary.amount?.toLocaleString('ru-RU')} ${r.salary.currency}`);
+    if (r.experience?.length) {
+      lines.push('\nОпыт работы:');
+      for (const job of r.experience.slice(0, 5)) {
+        const start = job.start?.slice(0, 7) || '';
+        const end = job.end?.slice(0, 7) || 'н.в.';
+        lines.push(`- ${job.company || ''} (${start}–${end}): ${job.position || ''}`);
+        if (job.description) lines.push(`  ${job.description.slice(0, 300)}`);
+      }
+    }
+    if (r.skill_set?.length) lines.push(`\nНавыки: ${r.skill_set.slice(0, 25).join(', ')}`);
+    if (r.education?.primary?.length) {
+      const edu = r.education.primary[0];
+      lines.push(`\nОбразование: ${edu.name || ''}, ${edu.organization || ''} (${edu.year || ''})`);
+    }
+    if (neg.message) lines.push(`\nСопроводительное письмо:\n${neg.message.slice(0, 600)}`);
+    return lines.join('\n');
+  }
 
-    return `<div class="card" id="card-${i}" data-neg="${esc(neg.id)}">
+  const candidates = negotiations.map(neg => {
+    const r = neg.resume || {};
+    const history = readHistory(neg.id);
+    const ats = history.ats_result || null;
+    const daysAgo = neg.updated_at ? Math.floor((Date.now() - new Date(neg.updated_at).getTime()) / 86400000) : null;
+    return {
+      negotiation_id: neg.id,
+      name: [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат',
+      score: ats?.score ?? null,
+      verdict: ats?.verdict ?? null,
+      reasoning: ats?.reasoning ?? null,
+      matched: ats?.matched || [],
+      gaps: ats?.gaps || [],
+      draft_message: ats?.draft_message ?? null,
+      days_since_activity: daysAgo,
+      resume_text: buildResumeText(neg),
+      history_messages: history.messages || [],
+      alternate_url: r.alternate_url || null,
+    };
+  });
+
+  const sorted = [...candidates].sort((a, b) => {
+    if (a.score != null && b.score != null) return (b.score || 0) - (a.score || 0);
+    if (a.score != null) return -1;
+    if (b.score != null) return 1;
+    return 0;
+  });
+
+  const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
+  const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
+  const actionable = sorted.filter(c => c.verdict && c.verdict !== 'ОТКЛОНИТЬ').length;
+  const agentSecret = process.env.AGENT_SECRET || '';
+
+  const cards = sorted.map((c, i) => {
+    const hasScore = c.score != null;
+    const col = colorMap[c.verdict] || '#94a3b8';
+    const bg = bgMap[c.verdict] || '#fff';
+    const scorePct = hasScore ? Math.round((c.score || 0) * 10) : 0;
+
+    const matched = (c.matched || []).map(m => `<span class="tag tag-ok">${esc(m)}</span>`).join('');
+    const gaps = (c.gaps || []).map(g => `<span class="tag tag-gap">${esc(g)}</span>`).join('');
+    const daysNote = c.days_since_activity != null ? `<span class="meta"> · активность ${c.days_since_activity}д назад</span>` : '';
+
+    const histMsgs = c.history_messages || [];
+    const histSection = histMsgs.length === 0
+      ? '<div class="hist-none">💬 Первое сообщение — переписки ещё не было</div>'
+      : `<details class="hist-details"><summary class="hist-summary">📨 История диалога (${histMsgs.length} сообщ.)</summary>
+           <div class="hist-thread">${histMsgs.map(m => `
+             <div class="hist-msg hist-${esc(m.role || 'employer')}">
+               <span class="hist-who">${m.role === 'employer' ? 'Рекрутер' : 'Кандидат'}</span>
+               <span class="hist-time">${(m.timestamp || '').slice(0, 10)}</span>
+               <div class="hist-text">${esc(m.text || '')}</div>
+             </div>`).join('')}
+           </div></details>`;
+
+    const resumeSection = c.resume_text
+      ? `<details class="resume-details"><summary class="resume-summary">📄 Резюме (текст)</summary>
+           <pre class="resume-text">${esc(c.resume_text)}</pre>
+         </details>`
+      : '';
+
+    const isActionable = c.verdict && c.verdict !== 'ОТКЛОНИТЬ';
+    const isReject = c.verdict === 'ОТКЛОНИТЬ';
+
+    const checkboxHtml = isActionable
+      ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" checked onchange="onCheck()">`
+      : isReject
+        ? `<input type="checkbox" class="reject-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()">`
+        : `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="0" onchange="onCheck()">`;
+
+    const scoreHtml = hasScore
+      ? `<div class="score-wrap">
+           <div class="score-bar"><div class="score-fill" style="width:${scorePct}%;background:${col}"></div></div>
+           <span class="score-num" style="color:${col}">${(c.score || 0).toFixed(1)}/10</span>
+           <span class="verdict-badge" style="background:${col}">${esc(c.verdict)}</span>
+         </div>`
+      : '<span class="verdict-none">не оценён</span>';
+
+    const nameHtml = c.alternate_url
+      ? `<a href="${esc(c.alternate_url)}" target="_blank" rel="noopener" class="resume-link">${esc(c.name)}</a>`
+      : esc(c.name);
+
+    const msgSection = (isActionable && c.draft_message)
+      ? `<div class="msg-section">
+           <label class="msg-label">Черновик сообщения</label>
+           <textarea class="msg-area" id="msg-${i}" rows="5">${esc(c.draft_message)}</textarea>
+           <div class="btns">
+             <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
+             <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
+           </div>
+         </div>`
+      : isReject
+        ? '<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>'
+        : `<div class="msg-section">
+             <label class="msg-label">Сообщение</label>
+             <textarea class="msg-area" id="msg-${i}" rows="3" placeholder="Введите сообщение..."></textarea>
+             <div class="btns">
+               <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
+               <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
+             </div>
+           </div>`;
+
+    return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
   <div class="card-header">
-    <input type="checkbox" class="rej-cb" data-idx="${i}" onchange="onCheck()">
-    <div class="card-info">
-      <span class="cname">${esc(name)}</span>
-      ${meta ? `<span class="meta">${esc(meta)}</span>` : ''}
+    <div class="card-header-left">
+      ${checkboxHtml}
+      <div>
+        <span class="name">${nameHtml}</span>
+        ${daysNote}
+      </div>
     </div>
+    ${scoreHtml}
   </div>
-  ${title ? `<p class="jobtitle">${esc(title)}</p>` : ''}
-  <div class="msg-wrap">
-    <textarea class="msg" id="msg-${i}" rows="3" placeholder="Введите сообщение..."></textarea>
-    <div class="btns">
-      <button class="btn send" onclick="sendOne(${i},'${esc(neg.id)}')">✓ Отправить</button>
-      <button class="btn skip" onclick="skipOne(${i})">Пропустить</button>
-    </div>
-  </div>
+  ${c.reasoning ? `<p class="reasoning">${esc(c.reasoning)}</p>` : ''}
+  ${matched || gaps ? `<div class="tags">${matched}${gaps}</div>` : ''}
+  ${histSection}
+  ${resumeSection}
+  ${msgSection}
 </div>`;
   }).join('\n');
 
   return `<!DOCTYPE html>
-<html lang="ru"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Отклики: ${esc(vacancyTitle)}</title>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ревью кандидатов — ${esc(vacancyTitle)}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:20px 20px 90px}
-h1{font-size:20px;font-weight:700;margin-bottom:4px}
-.sub{color:#64748b;font-size:13px;margin-bottom:18px}
-.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.08);transition:opacity .3s}
-.card.done,.card.skipped{opacity:.35;pointer-events:none}
-.card-header{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}
-.rej-cb{width:18px;height:18px;margin-top:3px;flex-shrink:0;accent-color:#dc2626;cursor:pointer}
-.card-info{display:flex;flex-direction:column;gap:2px}
-.cname{font-size:16px;font-weight:600}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:24px 24px 96px}
+h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.subtitle{color:#64748b;font-size:14px;margin-bottom:16px}
+.toolbar{display:flex;align-items:center;gap:8px;margin-bottom:20px;flex-wrap:wrap}
+.toolbar-label{font-size:13px;color:#64748b;margin-right:4px}
+.tb-btn{padding:5px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#fff;color:#475569;transition:background .15s,color .15s}
+.tb-btn:hover,.tb-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.tb-sep{width:1px;height:20px;background:#e2e8f0;margin:0 4px}
+.card{background:#fff;border-radius:12px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);transition:opacity .3s}
+.card.done{opacity:.4;pointer-events:none}
+.card.skipped{opacity:.35;pointer-events:none}
+.card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:10px}
+.card-header-left{display:flex;align-items:flex-start;gap:10px}
+.card-cb,.reject-cb{width:18px;height:18px;margin-top:2px;cursor:pointer;flex-shrink:0}
+.card-cb{accent-color:#4f46e5}
+.reject-cb{accent-color:#dc2626}
+.name{font-size:17px;font-weight:600}
+.resume-link{color:inherit;text-decoration:none}
+.resume-link:hover{text-decoration:underline}
 .meta{font-size:12px;color:#94a3b8}
-.jobtitle{font-size:13px;color:#475569;margin-bottom:10px}
-.msg-wrap{border-top:1px solid #e2e8f0;padding-top:10px;margin-top:8px}
-.msg{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:9px;font-size:14px;line-height:1.5;font-family:inherit;resize:vertical}
-.msg:focus{outline:none;border-color:#6366f1}
+.score-wrap{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.score-bar{width:80px;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
+.score-fill{height:100%;border-radius:3px;transition:width .4s}
+.score-num{font-size:14px;font-weight:600;min-width:38px}
+.verdict-badge{font-size:12px;font-weight:700;color:#fff;padding:3px 8px;border-radius:99px;white-space:nowrap}
+.verdict-none{font-size:12px;color:#94a3b8;font-style:italic}
+.reasoning{font-size:13px;color:#475569;line-height:1.5;margin-bottom:10px}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.tag{font-size:12px;padding:2px 8px;border-radius:4px;font-weight:500}
+.tag-ok{background:#dcfce7;color:#15803d}
+.tag-gap{background:#fee2e2;color:#b91c1c}
+.msg-section{border-top:1px solid #e2e8f0;padding-top:12px;margin-top:8px}
+.msg-label{display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em}
+.msg-area{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:14px;line-height:1.5;font-family:inherit;resize:vertical;min-height:80px}
+.msg-area:focus{outline:none;border-color:#6366f1}
 .btns{display:flex;gap:8px;margin-top:8px}
-.btn{padding:7px 16px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
-.send{background:#16a34a;color:#fff}
-.skip{background:#e2e8f0;color:#475569}
-.footer{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e2e8f0;padding:10px 20px;display:flex;align-items:center;gap:12px;box-shadow:0 -2px 8px rgba(0,0,0,.08)}
-.counter{flex:1;font-size:13px;color:#475569}
-.rej-all{background:#dc2626;color:#fff;padding:8px 20px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
-.rej-all:disabled{opacity:.4;cursor:not-allowed}
-.toast{position:fixed;top:16px;right:16px;padding:9px 16px;border-radius:8px;background:#16a34a;color:#fff;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+.btn{padding:8px 18px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn:hover{opacity:.85}
+.btn-send{background:#16a34a;color:#fff}
+.btn-skip{background:#e2e8f0;color:#475569}
+.reject-note{font-size:13px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:10px;font-style:italic}
+.hist-none{font-size:12px;color:#94a3b8;margin:8px 0 4px;font-style:italic}
+.hist-details,.resume-details{margin:8px 0 4px}
+.hist-summary,.resume-summary{font-size:12px;font-weight:600;color:#64748b;cursor:pointer;padding:4px 0;user-select:none}
+.hist-thread{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.hist-msg{padding:8px 10px;border-radius:8px;font-size:13px}
+.hist-employer{background:#eff6ff;border-left:3px solid #3b82f6}
+.hist-applicant{background:#f0fdf4;border-left:3px solid #22c55e}
+.hist-who{font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-right:8px}
+.hist-time{font-size:11px;color:#94a3b8}
+.hist-text{margin-top:4px;white-space:pre-wrap;line-height:1.4}
+.resume-text{font-size:12px;white-space:pre-wrap;font-family:inherit;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-top:8px;line-height:1.5;max-height:300px;overflow-y:auto;color:#334155}
+.footer{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e2e8f0;padding:12px 24px;display:flex;align-items:center;gap:16px;box-shadow:0 -2px 8px rgba(0,0,0,.08)}
+.counter{font-size:14px;color:#475569;flex:1}
+.counter strong{color:#1e293b}
+.btn-send-all{background:#4f46e5;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn-send-all:disabled{opacity:.4;cursor:not-allowed}
+.btn-send-all:not(:disabled):hover{opacity:.85}
+.btn-reject-all{background:#dc2626;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn-reject-all:disabled{opacity:.4;cursor:not-allowed}
+.btn-reject-all:not(:disabled):hover{opacity:.85}
+.toast{position:fixed;top:20px;right:20px;padding:10px 18px;border-radius:8px;background:#16a34a;color:#fff;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:fadein .2s}
 .toast-err{background:#dc2626}
+@keyframes fadein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
 </style>
-</head><body>
-<h1>Отклики: ${esc(vacancyTitle)}</h1>
-<p class="sub">${negotiations.length} кандидатов · <a href="?username=${esc(username)}" style="color:#6366f1">обновить</a></p>
-${cards || '<p style="color:#94a3b8;padding:24px;text-align:center">Новых откликов нет.</p>'}
+</head>
+<body>
+<h1>Кандидаты: ${esc(vacancyTitle)}</h1>
+<p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}" style="color:#6366f1">обновить</a></p>
+<div class="toolbar">
+  <span class="toolbar-label">Балл:</span>
+  <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
+  <button class="tb-btn score-btn" data-bucket="9" onclick="toggleBucket(9)">9</button>
+  <button class="tb-btn score-btn" data-bucket="8" onclick="toggleBucket(8)">8</button>
+  <button class="tb-btn score-btn" data-bucket="7" onclick="toggleBucket(7)">7</button>
+  <button class="tb-btn score-btn" data-bucket="6" onclick="toggleBucket(6)">6</button>
+  <button class="tb-btn score-btn" data-bucket="5" onclick="toggleBucket(5)">5</button>
+  <button class="tb-btn score-btn" data-bucket="4" onclick="toggleBucket(4)">4</button>
+  <button class="tb-btn score-btn" data-bucket="3" onclick="toggleBucket(3)">3</button>
+  <button class="tb-btn score-btn" data-bucket="2" onclick="toggleBucket(2)">2</button>
+  <button class="tb-btn score-btn" data-bucket="1" onclick="toggleBucket(1)">1</button>
+  <div class="tb-sep"></div>
+  <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
+</div>
+${cards || '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>'}
 <div class="footer">
-  <span class="counter">Выбрано: <strong id="rc">0</strong></span>
-  <button class="rej-all" id="raBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
+  <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
+  <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
+  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить (0)</button>
 </div>
 <script>
-const BASE='${callbackBase}',USER='${esc(username)}';
-function toast(msg,err){const t=document.createElement('div');t.className='toast'+(err?' toast-err':'');t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),3000);}
-function onCheck(){const n=document.querySelectorAll('.rej-cb:checked').length;document.getElementById('rc').textContent=n;const b=document.getElementById('raBtn');b.textContent='Отказать ('+n+')';b.disabled=n===0;}
-async function hhPost(path,data){const r=await fetch(BASE+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:USER,...data})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||r.statusText);return d;}
-async function sendOne(i,negId){const msg=document.getElementById('msg-'+i)?.value?.trim();if(!msg){toast('Введите сообщение',true);return;}try{await hhPost('/hh/send',{negotiation_id:negId,message:msg});document.getElementById('card-'+i)?.classList.add('done');toast('Отправлено!');}catch(e){toast('Ошибка: '+e.message,true);}}
-function skipOne(i){document.getElementById('card-'+i)?.classList.add('skipped');}
-async function rejectAll(){const cbs=[...document.querySelectorAll('.rej-cb:checked')];if(!cbs.length)return;const ids=cbs.map(cb=>document.getElementById('card-'+cb.dataset.idx)?.dataset.neg).filter(Boolean);try{await hhPost('/hh/reject',{negotiation_ids:ids});cbs.forEach(cb=>document.getElementById('card-'+cb.dataset.idx)?.classList.add('done'));toast('Отказано: '+ids.length);onCheck();}catch(e){toast('Ошибка: '+e.message,true);}}
+const CALLBACK_BASE = '${callbackBase}';
+const HH_USER = '${esc(username)}';
+const HH_SECRET = '${esc(agentSecret)}';
+const done = new Set();
+
+function showToast(msg, isError) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (isError ? ' toast-err' : '');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+async function hhAction(endpoint, payload) {
+  const r = await fetch(CALLBACK_BASE + endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
+    body: JSON.stringify({ username: HH_USER, ...payload }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function onCheck() {
+  const ns = document.querySelectorAll('.card-cb:checked').length;
+  const nr = document.querySelectorAll('.reject-cb:checked').length;
+  document.getElementById('selCount').textContent = ns;
+  document.getElementById('rejCount').textContent = nr;
+  const sb = document.getElementById('sendAllBtn');
+  sb.textContent = 'Отправить (' + ns + ')'; sb.disabled = ns === 0;
+  const rb = document.getElementById('rejectAllBtn');
+  rb.textContent = 'Отказать (' + nr + ')'; rb.disabled = nr === 0;
+}
+
+const activeBuckets = new Set();
+function toggleBucket(n) {
+  const btn = document.querySelector('.score-btn[data-bucket="'+n+'"]');
+  if (activeBuckets.has(n)) { activeBuckets.delete(n); btn.classList.remove('active'); }
+  else { activeBuckets.add(n); btn.classList.add('active'); }
+  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+    if (done.has(parseInt(cb.dataset.idx))) return;
+    const bucket = Math.floor(parseFloat(cb.dataset.score || 0));
+    cb.checked = activeBuckets.has(bucket);
+  });
+  onCheck();
+}
+
+function selectAll(checked) {
+  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+    if (!done.has(parseInt(cb.dataset.idx))) cb.checked = checked;
+  });
+  activeBuckets.clear();
+  document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('active'));
+  onCheck();
+}
+
+function markDone(i) {
+  done.add(i);
+  document.getElementById('card-'+i).classList.add('done');
+  const cb = document.getElementById('cb-'+i);
+  if (cb) { cb.checked = false; cb.disabled = true; }
+  document.getElementById('sentCount').textContent = done.size;
+}
+
+async function sendOne(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
+  if (!msg) { showToast('Сообщение пустое', true); return; }
+  const btn = event?.currentTarget;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+  try {
+    await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+    markDone(i); onCheck(); showToast('✅ Отправлено!');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '✓ Отправить'; }
+  }
+}
+
+function skipOne(i) {
+  done.add(i);
+  document.getElementById('card-'+i).classList.add('skipped');
+  const cb = document.getElementById('cb-'+i);
+  if (cb) { cb.checked = false; cb.disabled = true; }
+  onCheck();
+}
+
+async function sendAll() {
+  const cbs = [...document.querySelectorAll('.card-cb:checked')];
+  const sb = document.getElementById('sendAllBtn');
+  sb.disabled = true; sb.textContent = '⏳ Отправляю...';
+  let ok = 0;
+  for (const cb of cbs) {
+    const i = parseInt(cb.dataset.idx);
+    const negId = document.getElementById('card-'+i)?.dataset.neg || '';
+    const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
+    if (!msg) continue;
+    try { await hhAction('/hh/send', { negotiation_id: negId, message: msg }); markDone(i); ok++; }
+    catch(e) { showToast('❌ ' + e.message, true); }
+  }
+  onCheck();
+  if (ok > 0) showToast('✅ Отправлено ' + ok + ' сообщений');
+}
+
+async function rejectAll() {
+  const cbs = [...document.querySelectorAll('.reject-cb:checked')];
+  const negIds = cbs.map(cb => document.getElementById('card-'+parseInt(cb.dataset.idx))?.dataset.neg || '').filter(Boolean);
+  if (!negIds.length) return;
+  const rb = document.getElementById('rejectAllBtn');
+  rb.disabled = true; rb.textContent = '⏳ Отклоняю...';
+  try {
+    const res = await hhAction('/hh/reject', { negotiation_ids: negIds });
+    cbs.forEach(cb => markDone(parseInt(cb.dataset.idx)));
+    onCheck();
+    const failed = (res.results || []).filter(r => !r.ok).length;
+    showToast(failed ? '⚠️ ' + failed + ' ошибок из ' + negIds.length : '✅ Отклонено ' + negIds.length + ' кандидатов');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    rb.disabled = false; rb.textContent = 'Отказать (' + negIds.length + ')';
+  }
+}
+
+onCheck();
 </script>
-</body></html>`;
+</body>
+</html>`;
 }
 
 // ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────
