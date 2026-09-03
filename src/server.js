@@ -161,9 +161,32 @@ async function fetchAllHhNegotiations(vacancyId, accessToken) {
       totalPages = data.pages ?? 1;
       page++;
     } while (page < totalPages);
-    return items;
+    return items.map(item => ({ ...item, _state: state }));
   }));
   return results.flat();
+}
+
+function hhCacheFile(dataDir, username) {
+  return path.join(dataDir, 'hh', String(username), 'negotiations-cache.json');
+}
+
+async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessToken) {
+  const cacheFile = hhCacheFile(dataDir, username);
+  const CACHE_TTL_MS = 15 * 60 * 1000;
+  try {
+    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    const ageMs = Date.now() - (cached.synced_at || 0);
+    if (ageMs < CACHE_TTL_MS && String(cached.vacancy_id) === String(vacancyId)) {
+      return { negotiations: cached.negotiations, synced_at: cached.synced_at };
+    }
+  } catch {}
+  const negotiations = await fetchAllHhNegotiations(vacancyId, accessToken);
+  const synced_at = Date.now();
+  try {
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+    fs.writeFileSync(cacheFile, JSON.stringify({ synced_at, vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
+  } catch (e) { console.error('[hh-cache] write error:', e.message); }
+  return { negotiations, synced_at };
 }
 
 // Background HH scoring: fetch negotiations + score unscored candidates for all users
@@ -966,7 +989,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1007,13 +1030,15 @@ async function main() {
       try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
       if (!vacancy?.id) return errPage('Вакансия не выбрана. Скажи боту «мои вакансии» и выбери вакансию.');
 
-      let negotiations = [];
+      let negotiations = [], syncedAt = null;
       try {
-        negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
+        const result = await getHhNegotiationsWithCache(dataDir, username, vacancy.id, tokenData.access_token);
+        negotiations = result.negotiations;
+        syncedAt = result.synced_at;
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir);
+      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { syncedAt, vacancyId: vacancy.id });
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
 
@@ -1428,6 +1453,31 @@ function show(id, type, msg) {
       } catch (e) {
         console.error('[hh/update-style] error:', e.message);
         return json(res, 500, { error: 'generation failed: ' + e.message });
+      }
+    }
+
+    // POST /hh/sync-negotiations — force-refresh negotiations cache (called from review page)
+    if (req.method === 'POST' && url.pathname === '/hh/sync-negotiations') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username: syncUser, vacancy_id: syncVacancyId } = body || {};
+      if (!syncUser || !syncVacancyId) return json(res, 400, { error: 'missing fields' });
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const syncTokenFile = path.join(hhTokensBase, String(syncUser), 'hh');
+      if (!fs.existsSync(syncTokenFile)) return json(res, 403, { error: 'HH not connected' });
+      const syncTokenData = JSON.parse(fs.readFileSync(syncTokenFile, 'utf8'));
+      const syncDataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      try {
+        const negotiations = await fetchAllHhNegotiations(syncVacancyId, syncTokenData.access_token);
+        const cacheFile = hhCacheFile(syncDataDir, syncUser);
+        fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+        const synced_at = Date.now();
+        fs.writeFileSync(cacheFile, JSON.stringify({ synced_at, vacancy_id: String(syncVacancyId), negotiations }), { mode: 0o600 });
+        console.log(`[hh/sync] user=${syncUser} vacancy=${syncVacancyId} count=${negotiations.length}`);
+        return json(res, 200, { ok: true, count: negotiations.length, synced_at });
+      } catch (e) {
+        console.error('[hh/sync] error:', e.message);
+        return json(res, 500, { error: e.message });
       }
     }
 
@@ -1918,7 +1968,8 @@ function readBody(req, maxBytes = 1_048_576) {
 
 // ── HH review page ────────────────────────────────────────────────────────────
 
-function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir) {
+function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir, opts = {}) {
+  const { syncedAt, vacancyId } = opts;
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const candDir = path.join(dataDir || path.join(os.homedir(), 'agent-data'), 'hh', String(username), 'candidates');
@@ -1964,6 +2015,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const daysAgo = neg.updated_at ? Math.floor((Date.now() - new Date(neg.updated_at).getTime()) / 86400000) : null;
     return {
       negotiation_id: neg.id,
+      neg_state: neg._state || 'response',
       name: [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат',
       score: ats?.score ?? null,
       verdict: ats?.verdict ?? null,
@@ -1978,12 +2030,17 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     };
   });
 
-  const sorted = [...candidates].sort((a, b) => {
-    if (a.score != null && b.score != null) return (b.score || 0) - (a.score || 0);
-    if (a.score != null) return -1;
-    if (b.score != null) return 1;
-    return 0;
-  });
+  function sortCandidates(list) {
+    return [...list].sort((a, b) => {
+      if (a.score != null && b.score != null) return (b.score || 0) - (a.score || 0);
+      if (a.score != null) return -1;
+      if (b.score != null) return 1;
+      return 0;
+    });
+  }
+
+  const sorted = sortCandidates(candidates);
+  const waitingCandidates = sortCandidates(candidates.filter(c => c.neg_state === 'consider'));
 
   const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
   const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
@@ -1992,7 +2049,12 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   const { createHmac } = require('crypto');
   const pageToken = agentSecret ? createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16) : '';
 
-  const cardsHtmlArray = sorted.map((c, i) => {
+  const ageMin = syncedAt ? Math.round((Date.now() - syncedAt) / 60000) : null;
+  const ageText = ageMin === null ? '' : ageMin === 0 ? 'только что' : `${ageMin} мин назад`;
+
+  function buildCardsHtml(list, idxOffset) {
+    return list.map((c, localIdx) => {
+      const i = idxOffset + localIdx;
     const hasScore = c.score != null;
     const col = colorMap[c.verdict] || '#94a3b8';
     const bg = bgMap[c.verdict] || '#fff';
@@ -2074,7 +2136,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   ${resumeSection}
   ${msgSection}
 </div>`;
-  });
+    });
+  }
+
+  const waitingCardsHtml = buildCardsHtml(waitingCandidates, 0);
+  const allCardsHtml = buildCardsHtml(sorted, 10000);
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -2154,11 +2220,23 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .toast{position:fixed;top:20px;right:20px;padding:10px 18px;border-radius:8px;background:#16a34a;color:#fff;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:fadein .2s}
 .toast-err{background:#dc2626}
 @keyframes fadein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid #e2e8f0;padding-bottom:0}
+.tab-btn{padding:8px 18px;border:none;border-radius:8px 8px 0 0;font-size:14px;font-weight:600;cursor:pointer;background:#f1f5f9;color:#64748b;transition:background .15s,color .15s;border-bottom:2px solid transparent;margin-bottom:-2px}
+.tab-btn.active{background:#fff;color:#4f46e5;border-bottom:2px solid #4f46e5}
+.tab-badge{display:inline-block;background:#e2e8f0;color:#475569;font-size:12px;font-weight:700;padding:1px 7px;border-radius:99px;margin-left:6px}
+.tab-btn.active .tab-badge{background:#ede9fe;color:#4f46e5}
+.sync-btn{background:none;border:none;color:#6366f1;font-size:13px;cursor:pointer;font-weight:500;padding:0;text-decoration:underline;text-underline-offset:2px}
+.sync-btn:hover{opacity:.75}
+.sync-btn:disabled{opacity:.5;cursor:not-allowed;text-decoration:none}
 </style>
 </head>
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
-<p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''} · <a href="?username=${esc(username)}&amp;token=${esc(pageToken)}" style="color:#6366f1">обновить</a></p>
+<p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''}${ageText ? ` · обновлено ${ageText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
+<div class="tabs">
+  <button class="tab-btn active" id="tab-waiting" onclick="switchTab('waiting')">Ждут ответа <span class="tab-badge" id="badge-waiting">${waitingCandidates.length}</span></button>
+  <button class="tab-btn" id="tab-all" onclick="switchTab('all')">Все диалоги <span class="tab-badge" id="badge-all">${sorted.length}</span></button>
+</div>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
   <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
@@ -2174,9 +2252,14 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
   <div class="tb-sep"></div>
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
-${cardsHtmlArray.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>' : ''}
-<div id="cards-container"></div>
-<div id="sentinel" style="height:1px;margin-bottom:80px"></div>
+<div id="tab-waiting-container">
+  ${waitingCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Нет кандидатов, ожидающих ответа.</p>' : waitingCardsHtml.join('')}
+</div>
+<div id="tab-all-container" style="display:none">
+  ${allCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>' : ''}
+  <div id="cards-container"></div>
+  <div id="sentinel" style="height:1px;margin-bottom:80px"></div>
+</div>
 <div class="footer">
   <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
   <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
@@ -2186,34 +2269,61 @@ ${cardsHtmlArray.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align
 const CALLBACK_BASE = '${callbackBase}';
 const HH_USER = '${esc(username)}';
 const HH_SECRET = '${esc(agentSecret)}';
+const HH_VACANCY_ID = '${esc(String(vacancyId || ''))}';
 const done = new Set();
+let activeTab = 'waiting';
 
-const CARDS_HTML = ${JSON.stringify(cardsHtmlArray)};
-const FIRST_BATCH = 30;
+const CARDS_HTML_ALL = ${JSON.stringify(allCardsHtml)};
 const LAZY_BATCH = 50;
 let rendered = 0;
 
 function renderBatch(count) {
   const container = document.getElementById('cards-container');
-  const end = Math.min(rendered + (count || LAZY_BATCH), CARDS_HTML.length);
+  const end = Math.min(rendered + (count || LAZY_BATCH), CARDS_HTML_ALL.length);
   const frag = document.createDocumentFragment();
   for (let j = rendered; j < end; j++) {
     const wrapper = document.createElement('div');
-    wrapper.innerHTML = CARDS_HTML[j];
+    wrapper.innerHTML = CARDS_HTML_ALL[j];
     frag.appendChild(wrapper.firstElementChild);
   }
   container.appendChild(frag);
   rendered = end;
   onCheck();
-  if (rendered >= CARDS_HTML.length) lazyObserver.disconnect();
+  if (rendered >= CARDS_HTML_ALL.length) lazyObserver.disconnect();
   setTimeout(autoGenerate, 0);
 }
 
 const lazyObserver = new IntersectionObserver(entries => {
-  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) renderBatch(LAZY_BATCH);
+  if (entries[0].isIntersecting && rendered < CARDS_HTML_ALL.length) renderBatch(LAZY_BATCH);
 }, { rootMargin: '1500px' });
 lazyObserver.observe(document.getElementById('sentinel'));
-renderBatch(FIRST_BATCH);
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById('tab-waiting-container').style.display = tab === 'waiting' ? '' : 'none';
+  document.getElementById('tab-all-container').style.display = tab === 'all' ? '' : 'none';
+  document.getElementById('tab-waiting').classList.toggle('active', tab === 'waiting');
+  document.getElementById('tab-all').classList.toggle('active', tab === 'all');
+  if (tab === 'all' && rendered === 0) renderBatch(50);
+  onCheck();
+}
+
+async function syncNow() {
+  const btn = document.getElementById('syncBtn');
+  btn.disabled = true; btn.textContent = '↻ Обновляю…';
+  try {
+    const r = await fetch(CALLBACK_BASE + '/hh/sync-negotiations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: HH_USER, vacancy_id: HH_VACANCY_ID }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    location.reload();
+  } catch(e) {
+    showToast('❌ Ошибка обновления: ' + e.message, true);
+    btn.disabled = false; btn.textContent = '↻ Обновить';
+  }
+}
 
 function showToast(msg, isError) {
   const t = document.createElement('div');
