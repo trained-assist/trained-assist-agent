@@ -5,6 +5,32 @@
 // currentConfig: the saved ats_config value (may be null)
 
 const TEMPLATES = {
+  webinar: {
+    label: 'Вебинарный специалист',
+    stages: ['Скрининг резюме', 'Тестовое задание', 'Интервью с тимлидом', 'Оффер'],
+    config: {
+      vacancy_title: 'Вебинарный специалист / Webinar Manager',
+      vacancy_context: 'Проведение обучающих и продающих вебинаров, взаимодействие с аудиторией, работа с платформами (Zoom, Bizon365, Webinar.ru).',
+      knockout: [
+        'Нет опыта проведения онлайн-мероприятий / вебинаров',
+        'Нет навыков публичных выступлений',
+      ],
+      required: [
+        { name: 'Опыт проведения вебинаров / онлайн-мероприятий', weight: 3.0 },
+        { name: 'Работа с вебинарными платформами (Zoom, Bizon365, Webinar.ru)', weight: 2.5 },
+        { name: 'Навыки презентации и публичных выступлений', weight: 2.5 },
+      ],
+      preferred: [
+        { name: 'Опыт в EdTech или онлайн-образовании', weight: 1.5 },
+        { name: 'Продающие вебинары / конверсия', weight: 1.5 },
+        { name: 'Работа с чатами и модерация аудитории', weight: 1.0 },
+        { name: 'Базовая работа с видео и стримингом (OBS, Restream)', weight: 1.0 },
+      ],
+      filters: { min_experience_years: 1, remote_ok: true, salary_max_rub: null },
+      pass_threshold: 7.0,
+      review_threshold: 4.5,
+    },
+  },
   marketing: {
     label: 'Маркетолог',
     stages: ['Первичный скрининг', 'Тестовое задание', 'Интервью с CMO', 'Оффер'],
@@ -223,6 +249,7 @@ pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radi
   <label for="tplSelect" style="font-size:12px;color:var(--muted);margin-right:4px">Шаблон:</label>
   <select id="tplSelect">
     <option value="">— выбрать шаблон —</option>
+    <option value="webinar">Вебинарный специалист</option>
     <option value="marketing">Маркетолог</option>
     <option value="cpp3d">C++ / 3D Программист</option>
     <option value="office">Офисный сотрудник</option>
@@ -234,6 +261,8 @@ pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radi
   <button class="btn btn-secondary btn-sm" id="exportBtn">↓ JSON</button>
   &nbsp;
   <button class="btn btn-primary" id="saveBtn" ${isLive ? '' : 'disabled title="Сохранение недоступно в offline-режиме"'}>Сохранить в контекст</button>
+  &nbsp;
+  <button class="btn btn-danger" id="resetAtsBtn" ${isLive ? '' : 'disabled title="Недоступно в offline-режиме"'} title="Сбросить ats_result у всех кандидатов — они будут переоценены при следующем batch review">↺ Пересмотреть кандидатов</button>
 </header>
 
 <main>
@@ -637,6 +666,34 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Сохранить в контекст';
+  }
+});
+
+// ── Reset ATS results ─────────────────────────────────────────────────────────
+
+document.getElementById('resetAtsBtn').addEventListener('click', async () => {
+  if (!CALLBACK_BASE) return;
+  if (!confirm('Сбросить ats_result у всех кандидатов? Они будут переоценены с текущим конфигом при следующем hh_batch_review.')) return;
+  const btn = document.getElementById('resetAtsBtn');
+  btn.disabled = true;
+  btn.textContent = 'Сбрасываю...';
+  try {
+    const r = await fetch(CALLBACK_BASE + '/hh/reset-ats-results', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
+      body: JSON.stringify({ username: HH_USER }),
+    });
+    const data = await r.json();
+    if (r.ok && data.ok) {
+      toast(\`Сброшено: \${data.reset} кандидатов. Запусти hh_batch_review для переоценки.\`, 'success');
+    } else {
+      toast('Ошибка: ' + (data.error || r.status), 'error');
+    }
+  } catch(e) {
+    toast('Ошибка сети: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '↺ Пересмотреть кандидатов';
   }
 });
 

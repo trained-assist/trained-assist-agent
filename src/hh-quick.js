@@ -140,10 +140,21 @@ async function hhNewResponses(userId, workDir) {
   return `💼 ${vacancy.title} — новые отклики (${data.found}):\n\n${lines.join('\n')}${more}`;
 }
 
+// HH_PLATFORM_URL overrides AGENT_PUBLIC_URL for HH-specific pages (review, ATS editor).
+// Use it on GCP VM to point HH links at the RU VM (platform.recruiter-assistant.ru)
+// while keeping AGENT_PUBLIC_URL for other GCP-hosted services.
+function hhBase() {
+  return (process.env.HH_PLATFORM_URL || process.env.AGENT_PUBLIC_URL || 'https://platform.recruiter-assistant.ru').replace(/\/$/, '');
+}
+
 // "открой ATS редактор" — no API call
 function hhAtsEditor(userId) {
-  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-  return `🎯 Открой ATS-редактор в браузере:\n${base}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
+  return `🎯 Открой ATS-редактор в браузере:\n${hhBase()}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
+}
+
+// "покажи страницу ревью кандидатов" — no API call
+function hhReviewPage(userId) {
+  return `📋 Страница ревью кандидатов:\n${hhBase()}/hh/review?username=${encodeURIComponent(userId)}`;
 }
 
 // "покажи страницу ревью кандидатов" — no API call
