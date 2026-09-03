@@ -953,6 +953,42 @@ async function main() {
       return res.end(html);
     }
 
+    // GET /hh/ats-editor?username=X&token=Y — serve the ATS Template Editor HTML page
+    // Must be before Bearer-auth gate so browsers can open it directly.
+    if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
+      const username = url.searchParams.get('username') || '';
+      const agentSecret = process.env.AGENT_SECRET || '';
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        const expected = createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16);
+        const given = url.searchParams.get('token') || '';
+        if (given !== expected) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end('<!doctype html><html><body style="font-family:system-ui;padding:48px;text-align:center"><h2>Ссылка недействительна. Запроси новую у бота.</h2></body></html>');
+        }
+      }
+      const { atsEditorHtml } = require('./hh-ats-editor-html.js');
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const workDir = path.join(dataDir, 'sessions', username);
+      const contextBase = path.join(workDir, 'contexts');
+      const configFile = path.join(contextBase, 'hh', 'ats_config.json');
+      const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
+      let currentConfig = null;
+      let currentStages = null;
+      try {
+        if (fs.existsSync(configFile)) currentConfig = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
+        if (fs.existsSync(stagesFile)) currentStages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
+      } catch {}
+      const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      const html = atsEditorHtml(currentConfig, currentStages, {
+        callbackBase,
+        username,
+        agentSecret: agentSecret || '',
+      });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(html);
+    }
+
     // POST /hh/send — send a message to a candidate (called from review page)
     if (req.method === 'POST' && url.pathname === '/hh/send') {
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1485,33 +1521,14 @@ async function main() {
 
     // ── ATS Template Editor ────────────────────────────────────────────────────
 
-    // GET /hh/ats-editor?username=X — serve the ATS Template Editor HTML page
-    if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
-      const username = url.searchParams.get('username') || '';
-      const { atsEditorHtml } = require('./hh-ats-editor-html.js');
-      const contextBase = process.env.CONTEXT_DIR || path.join(process.cwd(), 'contexts');
-      const configFile = path.join(contextBase, 'hh', 'ats_config.json');
-      const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
-      let currentConfig = null;
-      let currentStages = null;
-      try {
-        if (fs.existsSync(configFile)) currentConfig = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
-        if (fs.existsSync(stagesFile)) currentStages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
-      } catch {}
-      const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-      const html = atsEditorHtml(currentConfig, currentStages, {
-        callbackBase,
-        username: username || secrets.HH_DEFAULT_USER || '',
-        agentSecret: secrets.AGENT_SECRET || '',
-      });
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(html);
-    }
-
     // GET /hh/ats-config?username=X — read current ATS config from context
     if (req.method === 'GET' && url.pathname === '/hh/ats-config') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      const contextBase = process.env.CONTEXT_DIR || path.join(process.cwd(), 'contexts');
+      const username = url.searchParams.get('username') || '';
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const contextBase = username
+        ? path.join(dataDir, 'sessions', username, 'contexts')
+        : path.join(process.cwd(), 'contexts');
       const configFile = path.join(contextBase, 'hh', 'ats_config.json');
       const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
       let config = null;
@@ -1559,9 +1576,12 @@ async function main() {
     if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
       res.setHeader('Access-Control-Allow-Origin', '*');
       const body = JSON.parse(await readBody(req));
-      const { config, stages } = body || {};
+      const { config, stages, username } = body || {};
       if (!config || typeof config !== 'object') return json(res, 400, { error: 'config required' });
-      const contextBase = process.env.CONTEXT_DIR || path.join(process.cwd(), 'contexts');
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const contextBase = username
+        ? path.join(dataDir, 'sessions', username, 'contexts')
+        : path.join(process.cwd(), 'contexts');
       const hhContextDir = path.join(contextBase, 'hh');
       fs.mkdirSync(hhContextDir, { recursive: true });
       const now = new Date().toISOString();
@@ -1575,7 +1595,7 @@ async function main() {
           JSON.stringify({ value: stages, updated_at: now }, null, 2),
         );
       }
-      console.log(`[hh/ats-config] saved vacancy="${config.vacancy_title}" stages=${stages?.length || 0}`);
+      console.log(`[hh/ats-config] saved vacancy="${config.vacancy_title}" stages=${stages?.length || 0} user=${username || 'default'}`);
       return json(res, 200, { ok: true });
     }
 
