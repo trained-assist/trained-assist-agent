@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
@@ -1126,6 +1127,79 @@ async function main() {
       return;
     }
 
+    // ── HH Action Endpoints — called by the review page HTML ─────────────────
+
+    // OPTIONS preflight for browser CORS (review page on localhost:9876 → agent on :3001)
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject')) {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      });
+      return res.end();
+    }
+
+    // POST /hh/send — send a message to a candidate (called from review page)
+    if (req.method === 'POST' && url.pathname === '/hh/send') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username, negotiation_id, message } = body || {};
+      if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
+
+      const tokenFile = path.join(os.homedir(), 'agent-tokens', String(username), 'hh');
+      if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
+      const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
+
+      try {
+        await hhApiPost(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
+
+        // Save to candidate history (same path as 90-hh.js)
+        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+        const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
+        fs.mkdirSync(histDir, { recursive: true });
+        const histFile = path.join(histDir, `${negotiation_id}.json`);
+        const history = fs.existsSync(histFile)
+          ? JSON.parse(fs.readFileSync(histFile, 'utf8'))
+          : { messages: [] };
+        history.messages = history.messages || [];
+        history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString() });
+        fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
+
+        console.log(`[hh/send] user=${username} neg=${negotiation_id} len=${message.length}`);
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        console.error('[hh/send] error:', e.message);
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /hh/reject — bulk reject candidates (called from review page)
+    if (req.method === 'POST' && url.pathname === '/hh/reject') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username, negotiation_ids } = body || {};
+      if (!username || !Array.isArray(negotiation_ids) || negotiation_ids.length === 0) {
+        return json(res, 400, { error: 'missing fields' });
+      }
+
+      const tokenFile = path.join(os.homedir(), 'agent-tokens', String(username), 'hh');
+      if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
+      const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
+
+      const results = [];
+      for (const negId of negotiation_ids) {
+        try {
+          await hhApiPut(`/negotiations/discard_vacancy_closed/${negId}`, tokenData.access_token);
+          results.push({ negotiation_id: negId, ok: true });
+        } catch (e) {
+          results.push({ negotiation_id: negId, ok: false, error: e.message });
+        }
+      }
+      const failed = results.filter(r => !r.ok).length;
+      console.log(`[hh/reject] user=${username} total=${negotiation_ids.length} failed=${failed}`);
+      return json(res, 200, { ok: true, results });
+    }
+
     json(res, 404, { error: 'not found' });
     } catch (err) {
       console.error('[request-handler] unhandled error:', err);
@@ -1184,6 +1258,40 @@ function readBody(req, maxBytes = 1_048_576) {
     req.on('error', reject);
   });
 }
+
+// ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────
+
+function hhApiRequest(method, apiPath, accessToken, body) {
+  return new Promise((resolve, reject) => {
+    const bodyStr = body ? JSON.stringify(body) : '';
+    const req = https.request({
+      hostname: process.env.HH_API_BASE_URL
+        ? new URL(process.env.HH_API_BASE_URL).hostname
+        : 'api.hh.ru',
+      path: apiPath,
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+        'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+        ...(body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
+      },
+    }, (r) => {
+      let data = '';
+      r.on('data', c => data += c);
+      r.on('end', () => {
+        if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
+        resolve(data ? JSON.parse(data) : {});
+      });
+    });
+    req.on('error', reject);
+    if (body) req.write(bodyStr);
+    req.end();
+  });
+}
+
+function hhApiPost(apiPath, token, body) { return hhApiRequest('POST', apiPath, token, body); }
+function hhApiPut(apiPath, token, body) { return hhApiRequest('PUT', apiPath, token, body || undefined); }
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[unhandledRejection] at:', promise, 'reason:', reason);
