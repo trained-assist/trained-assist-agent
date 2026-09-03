@@ -61,6 +61,38 @@ function hhErrorHtml(msg) {
 </html>`;
 }
 
+function hhConfirmHtml(t) {
+  const safeT = encodeURIComponent(t);
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Подключить HeadHunter</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { background: #fff; border-radius: 16px; padding: 40px 32px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,.10); text-align: center; }
+    .icon { font-size: 52px; margin-bottom: 16px; }
+    h1 { font-size: 22px; font-weight: 700; color: #1a1a1a; margin-bottom: 10px; }
+    p { color: #666; font-size: 15px; line-height: 1.5; margin-bottom: 24px; }
+    .btn { display: inline-block; background: #d6001c; color: #fff; font-size: 16px; font-weight: 600; padding: 14px 32px; border-radius: 10px; text-decoration: none; transition: background .15s; }
+    .btn:hover { background: #b0001a; }
+    .note { margin-top: 18px; font-size: 13px; color: #999; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🔐</div>
+    <h1>Подключить HeadHunter</h1>
+    <p>Нажми кнопку ниже — откроется страница авторизации hh.ru.</p>
+    <a class="btn" href="/connect/hh/authorize?t=${safeT}">Войти через HH</a>
+    <p class="note">Ссылка одноразовая и действует 30 минут.</p>
+  </div>
+</body>
+</html>`;
+}
+
 function hhLandingHtml() {
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -93,4 +125,4 @@ function hhLandingHtml() {
 </html>`;
 }
 
-module.exports = { hhSuccessHtml, hhErrorHtml, hhLandingHtml };
+module.exports = { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml };

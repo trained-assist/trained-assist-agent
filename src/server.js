@@ -14,7 +14,7 @@ const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./ge
 const { nalogFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
-const { hhSuccessHtml, hhErrorHtml, hhLandingHtml } = require('./connect-forms/hh');
+const { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml } = require('./connect-forms/hh');
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
@@ -325,7 +325,9 @@ async function main() {
       return;
     }
 
-    // ── GET /connect/hh/start?t=TOKEN — redirect to hh.ru OAuth2 ─────────────
+    // ── GET /connect/hh/start?t=TOKEN — confirm page (token NOT consumed here) ──
+    // Telegram link previews auto-fetch URLs; we show a button page so the token
+    // is only consumed when the user actually clicks through to /connect/hh/authorize.
     if (req.method === 'GET' && url.pathname === '/connect/hh/start') {
       const t = url.searchParams.get('t') || '';
       if (!/^[a-f0-9]{32}$/.test(t)) {
@@ -353,18 +355,52 @@ async function main() {
         res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный сервис.'));
         return;
       }
-      if (!/^[a-zA-Z0-9_-]+$/.test(pending.uid)) {
+
+      // Token is valid — show confirm page. Do NOT delete the file yet.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhConfirmHtml(t));
+      return;
+    }
+
+    // ── GET /connect/hh/authorize?t=TOKEN — consume token, redirect to hh.ru OAuth ──
+    if (req.method === 'GET' && url.pathname === '/connect/hh/authorize') {
+      const t = url.searchParams.get('t') || '';
+      if (!/^[a-f0-9]{32}$/.test(t)) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный токен.'));
+        return;
+      }
+      if (!HH_CLIENT_ID) {
+        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('HH OAuth не настроен на сервере.'));
+        return;
+      }
+
+      const CONNECT_PENDING_DIR_AUTH = path.join(os.homedir(), 'connect-pending');
+      const pendingFileAuth = path.join(CONNECT_PENDING_DIR_AUTH, `${t}.json`);
+      let pendingAuth;
+      try { pendingAuth = JSON.parse(fs.readFileSync(pendingFileAuth, 'utf8')); } catch {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка недействительна или устарела.'));
+        return;
+      }
+      if (pendingAuth.expires < Date.now()) {
+        try { fs.unlinkSync(pendingFileAuth); } catch {}
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка устарела. Попроси новую через Telegram.'));
+        return;
+      }
+      if (pendingAuth.service !== 'hh') {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный сервис.'));
+        return;
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(pendingAuth.uid)) {
         res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Неверный UID.'));
         return;
       }
 
-      try { fs.unlinkSync(pendingFile); } catch {
+      try { fs.unlinkSync(pendingFileAuth); } catch {
         res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка уже использована.'));
         return;
       }
       const crypto = require('crypto');
       const hhStateToken = crypto.randomBytes(16).toString('hex');
-      oauthStateStore.set(hhStateToken, { userId: pending.uid, expires: Date.now() + 15 * 60 * 1000 });
+      oauthStateStore.set(hhStateToken, { userId: pendingAuth.uid, expires: Date.now() + 15 * 60 * 1000 });
 
       const hhAuthUrl = new URL('https://hh.ru/oauth/authorize');
       hhAuthUrl.searchParams.set('response_type', 'code');
