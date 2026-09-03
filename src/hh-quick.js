@@ -2,11 +2,8 @@
 // HH quick-answer handlers — API calls without Claude.
 // Each function returns a formatted string or null (fall through to Claude).
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const { readHhToken, readHhContext, writeHhContext, hhFetch } = require('./hh-utils');
 
-const HH_API = 'https://api.hh.ru';
 const CACHE_TTL_MS = 4 * 60 * 1000; // 4 min
 
 // Simple per-process TTL cache keyed by "type:userId:vacancyId"
@@ -21,66 +18,34 @@ function _cached(key, fn) {
   });
 }
 
-// ── Token & context helpers ──────────────────────────────────────────────────
-
-function _readToken(userId) {
-  try {
-    const raw = fs.readFileSync(
-      path.join(os.homedir(), 'agent-tokens', String(userId), 'hh'),
-      'utf8',
-    );
-    return raw.trim().startsWith('{') ? JSON.parse(raw) : { access_token: raw.trim() };
-  } catch { return null; }
-}
-
 function _readActiveVacancy(workDir) {
-  try {
-    const d = JSON.parse(
-      fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'),
-    );
-    return d.value || null;
-  } catch { return null; }
-}
-
-function _writeActiveVacancy(workDir, value) {
-  const file = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ value, updated_at: new Date().toISOString() }, null, 2));
-}
-
-async function _hhGet(apiPath, token) {
-  const res = await fetch(`${HH_API}${apiPath}`, {
-    headers: {
-      Authorization: `Bearer ${token.access_token}`,
-      'User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
-      'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
-    },
-  });
-  if (!res.ok) throw new Error(`HH API ${res.status}`);
-  return res.json();
+  const ctx = readHhContext(workDir, 'hh', 'active_vacancy');
+  return ctx?.value || null;
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 // "мои вакансии" / "список вакансий"
 async function hhMyVacancies(userId, workDir) {
-  const token = _readToken(userId);
+  const token = readHhToken(userId);
   if (!token?.access_token || !token.employer_id) return null;
 
   let data;
   try {
     data = await _cached(`vacancies:${userId}`, () =>
-      _hhGet(`/employers/${token.employer_id}/vacancies/active`, token),
+      hhFetch(`/employers/${token.employer_id}/vacancies/active`, token),
     );
   } catch { return null; }
 
   const items = data.items || [];
   if (!items.length) return '💼 Нет активных вакансий.';
 
-  // Auto-set active if exactly 1
+  // Auto-set active vacancy when exactly 1 — next HH calls work without extra step
   if (items.length === 1 && workDir) {
     const v = items[0];
-    _writeActiveVacancy(workDir, { id: v.id, title: v.name, set_at: new Date().toISOString() });
+    await writeHhContext(workDir, 'hh', 'active_vacancy', {
+      id: v.id, title: v.name, set_at: new Date().toISOString(),
+    }).catch(() => { /* non-fatal */ });
   }
 
   const lines = items.map((v, i) => {
@@ -102,7 +67,7 @@ async function hhMyVacancies(userId, workDir) {
 
 // "сколько откликов" / "статистика воронки" / "что новенького"
 async function hhFunnelStats(userId, workDir) {
-  const token = _readToken(userId);
+  const token = readHhToken(userId);
   if (!token?.access_token) return null;
 
   const vacancy = _readActiveVacancy(workDir);
@@ -116,16 +81,15 @@ async function hhFunnelStats(userId, workDir) {
 
   let counts;
   try {
-    counts = await _cached(`funnel:${userId}:${vacancy.id}`, async () => {
-      const results = await Promise.all(
+    counts = await _cached(`funnel:${userId}:${vacancy.id}`, () =>
+      Promise.all(
         STATES.map(st =>
-          _hhGet(`/negotiations/${st}?vacancy_id=${vacancy.id}&per_page=1&page=0`, token)
+          hhFetch(`/negotiations/${st}?vacancy_id=${vacancy.id}&per_page=1&page=0`, token)
             .then(d => [st, d.found || 0])
             .catch(() => [st, 0]),
         ),
-      );
-      return Object.fromEntries(results);
-    });
+      ).then(Object.fromEntries),
+    );
   } catch { return null; }
 
   const activeTotal = STATES
@@ -146,7 +110,7 @@ async function hhFunnelStats(userId, workDir) {
 
 // "новые отклики" / "кто откликнулся" / "покажи кандидатов"
 async function hhNewResponses(userId, workDir) {
-  const token = _readToken(userId);
+  const token = readHhToken(userId);
   if (!token?.access_token) return null;
 
   const vacancy = _readActiveVacancy(workDir);
@@ -155,7 +119,7 @@ async function hhNewResponses(userId, workDir) {
   let data;
   try {
     data = await _cached(`responses:${userId}:${vacancy.id}`, () =>
-      _hhGet(`/negotiations/response?vacancy_id=${vacancy.id}&per_page=10&page=0`, token),
+      hhFetch(`/negotiations/response?vacancy_id=${vacancy.id}&per_page=10&page=0`, token),
     );
   } catch { return null; }
 
@@ -176,11 +140,10 @@ async function hhNewResponses(userId, workDir) {
   return `💼 ${vacancy.title} — новые отклики (${data.found}):\n\n${lines.join('\n')}${more}`;
 }
 
-// "открой ATS редактор" / "ats editor" — no API needed
+// "открой ATS редактор" — no API call
 function hhAtsEditor(userId) {
   const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-  const url = `${base}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
-  return `🎯 Открой ATS-редактор в браузере:\n${url}`;
+  return `🎯 Открой ATS-редактор в браузере:\n${base}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
 }
 
 // Export cache invalidation for tests
