@@ -59,6 +59,45 @@ async function weeekCall(apiPath, opts, userId) {
   return weeekFetch(apiPath, { ...opts, token });
 }
 
+const WEEEK_PRIVATE_BASE = 'https://api.weeek.net';
+
+function readSession(userId) {
+  const file = path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'weeek-session');
+  if (!fs.existsSync(file)) return null;
+  return fs.readFileSync(file, 'utf8').trim() || null;
+}
+
+function parseWorkspaceId(cookieStr) {
+  const m = cookieStr.match(/workspace_id=([^;]+)/);
+  return m ? m[1].trim() : null;
+}
+
+async function weeekPrivateFetch(apiPath, { method = 'GET', body, cookie } = {}) {
+  const url = `${WEEEK_PRIVATE_BASE}${apiPath}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      Cookie: cookie,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Origin: 'https://app.weeek.net',
+      Referer: 'https://app.weeek.net/',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('Weeek L2 сессия устарела. Обновите через /connect/weeek (логин + пароль).');
+    }
+    throw new Error(`Weeek Private API ${res.status}: ${data?.message || text.slice(0, 200)}`);
+  }
+  return data;
+}
+
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -195,13 +234,12 @@ module.exports = {
       handler: async ({ status_id, title, amount, contact_id, custom_fields, user_id }) => {
         const uid = user_id || USER_ID;
         const body = {
-          statusId: status_id,
           title,
           ...(amount !== undefined && { price: amount }),
           ...(contact_id && { contactId: contact_id }),
           ...(custom_fields && { customFields: custom_fields }),
         };
-        const data = await weeekCall('/crm/deals', { method: 'POST', body }, uid);
+        const data = await weeekCall(`/crm/statuses/${encodeURIComponent(status_id)}/deals`, { method: 'POST', body }, uid);
         return data.deal ?? data;
       },
     },
@@ -339,6 +377,39 @@ module.exports = {
         if (custom_fields !== undefined) body.customFields = custom_fields;
         const data = await weeekCall(`/crm/contacts/${encodeURIComponent(contact_id)}`, { method: 'PATCH', body }, uid);
         return data.contact ?? data;
+      },
+    },
+
+    weeek_add_comment: {
+      description: 'Add a comment to a CRM deal (requires L2 session — login+password configured via /connect/weeek).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          deal_id: { type: 'string', description: 'Deal ID to comment on' },
+          text: { type: 'string', description: 'Comment text (plain text, newlines allowed)' },
+          workspace_id: { type: 'string', description: 'Workspace ID (auto-detected from session cookie if omitted)' },
+          user_id: { type: 'string' },
+        },
+        required: ['deal_id', 'text'],
+      },
+      handler: async ({ deal_id, text, workspace_id, user_id }) => {
+        const uid = user_id || USER_ID;
+        const cookie = readSession(uid);
+        if (!cookie) throw new Error('Weeek L2 сессия не настроена. Добавьте логин+пароль через /connect/weeek.');
+        const wsId = workspace_id || parseWorkspaceId(cookie);
+        if (!wsId) throw new Error('Не удалось определить workspace_id. Передайте его явно.');
+        const content = {
+          type: 'doc',
+          content: String(text).split(/\r?\n/).map(line =>
+            line ? { type: 'paragraph', content: [{ type: 'text', text: line }] }
+                 : { type: 'paragraph' }
+          ),
+        };
+        const data = await weeekPrivateFetch(
+          `/ws/${encodeURIComponent(wsId)}/crm/deals/${encodeURIComponent(deal_id)}/comments`,
+          { method: 'POST', body: { parentId: null, content }, cookie }
+        );
+        return data.comment ?? data;
       },
     },
   },

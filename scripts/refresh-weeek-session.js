@@ -155,12 +155,16 @@ async function captureViaPlaywright(profiles) {
     }
     console.log('[refresh-weeek/pw] Login success, url=%s', finalUrl);
 
-    // Extract cookies for app.weeek.net
-    const cookies = await context.cookies('https://app.weeek.net');
-    if (!cookies.length) throw new Error('Куки для app.weeek.net не найдены после входа');
+    // Wait for auth cookies to settle (weeek_session is set on .api.weeek.net after login)
+    await page.waitForTimeout(2000);
+
+    // Extract cookies from ALL weeek.net domains (weeek_session lives on .api.weeek.net, not .app.weeek.net)
+    const allCookies = await context.cookies();
+    const cookies = allCookies.filter(c => c.domain.includes('weeek'));
+    if (!cookies.length) throw new Error('Куки для weeek.net не найдены после входа');
 
     const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-    console.log(`[refresh-weeek/pw] Captured ${cookies.length} cookies`);
+    console.log(`[refresh-weeek/pw] Captured ${cookies.length} weeek cookies`);
 
     await browser.close();
     return cookieStr;
