@@ -1008,6 +1008,12 @@ module.exports = {
                   msgType,
                   history.messages || [],
                 );
+                // Persist draft so the server-side /hh/review page can show it
+                if (draft) {
+                  if (!history.ats_result) history.ats_result = {};
+                  history.ats_result.draft_message = draft;
+                  saveCandidateHistory(USER_ID, c.negotiation_id, history);
+                }
               } catch { /* skip if LLM fails */ }
             }
           }
