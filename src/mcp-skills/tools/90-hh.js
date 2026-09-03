@@ -778,6 +778,8 @@ module.exports = {
               gaps: atsResult.gaps || [],
               days_since_activity: daysSince,
               updated_at: updatedAt?.slice(0, 10) || null,
+              resume_text: candidateContext,
+              history_messages: history.messages || [],
             });
           }
 
@@ -1096,24 +1098,56 @@ function generateReviewHtml(candidates, vacancyName) {
     const matched = (c.matched || []).map(m => `<span class="tag tag-ok">${escHtml(m)}</span>`).join('');
     const gaps = (c.gaps || []).map(g => `<span class="tag tag-gap">${escHtml(g)}</span>`).join('');
     const daysNote = c.days_since_activity != null ? `<span class="meta">активность ${c.days_since_activity}д назад</span>` : '';
-    const msgSection = c.verdict !== 'ОТКЛОНИТЬ' && c.draft_message
+
+    // History section
+    const histMsgs = c.history_messages || [];
+    const histSection = histMsgs.length === 0
+      ? `<div class="hist-none">💬 Первое сообщение — переписки ещё не было</div>`
+      : `<details class="hist-details"><summary class="hist-summary">📨 История диалога (${histMsgs.length} сообщ.)</summary>
+           <div class="hist-thread">${histMsgs.map(m => `
+             <div class="hist-msg hist-${escHtml(m.role || 'employer')}">
+               <span class="hist-who">${m.role === 'employer' ? 'Рекрутер' : 'Кандидат'}</span>
+               <span class="hist-time">${(m.timestamp || '').slice(0, 10)}</span>
+               <div class="hist-text">${escHtml(m.text || '')}</div>
+             </div>`).join('')}
+           </div></details>`;
+
+    // Resume section
+    const resumeSection = c.resume_text
+      ? `<details class="resume-details"><summary class="resume-summary">📄 Резюме (текст)</summary>
+           <pre class="resume-text">${escHtml(c.resume_text)}</pre>
+         </details>`
+      : '';
+
+    const isActionable = c.verdict !== 'ОТКЛОНИТЬ' && !!c.draft_message;
+    const isReject = c.verdict === 'ОТКЛОНИТЬ';
+    const cbType = isReject ? 'reject-cb' : 'card-cb';
+    const cbChecked = isReject ? '' : 'checked';
+    const checkboxHtml = (isActionable || isReject)
+      ? `<input type="checkbox" class="${cbType}" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" data-type="${isReject ? 'reject' : 'send'}" ${cbChecked} onchange="onCheck()">`
+      : '';
+
+    const msgSection = isActionable
       ? `<div class="msg-section">
            <label class="msg-label">Черновик сообщения</label>
            <textarea class="msg-area" id="msg-${i}" rows="5">${escHtml(c.draft_message)}</textarea>
            <div class="btns">
-             <button class="btn btn-send" onclick="approve(${i}, '${escHtml(c.negotiation_id)}')">✓ Отправить</button>
-             <button class="btn btn-skip" onclick="skip(${i})">✗ Пропустить</button>
+             <button class="btn btn-send" onclick="sendOne(${i}, '${escHtml(c.negotiation_id)}')">✓ Отправить</button>
+             <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
            </div>
          </div>`
-      : c.verdict === 'ОТКЛОНИТЬ'
-        ? `<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>`
+      : isReject
+        ? `<div class="reject-note">Отказать через bulk_reject (без сообщения)</div>`
         : '';
 
-    return `<div class="card" id="card-${i}" style="background:${bg};border-left:4px solid ${col}">
+    return `<div class="card" id="card-${i}" data-score="${(c.score || 0).toFixed(1)}" data-neg="${escHtml(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
   <div class="card-header">
-    <div>
-      <span class="name">${escHtml(c.name || 'Кандидат')}</span>
-      ${daysNote}
+    <div class="card-header-left">
+      ${checkboxHtml}
+      <div>
+        <span class="name">${escHtml(c.name || 'Кандидат')}</span>
+        ${daysNote}
+      </div>
     </div>
     <div class="score-wrap">
       <div class="score-bar"><div class="score-fill" style="width:${scorePct}%;background:${col}"></div></div>
@@ -1123,6 +1157,8 @@ function generateReviewHtml(candidates, vacancyName) {
   </div>
   ${c.reasoning ? `<p class="reasoning">${escHtml(c.reasoning)}</p>` : ''}
   <div class="tags">${matched}${gaps}</div>
+  ${histSection}
+  ${resumeSection}
   ${msgSection}
 </div>`;
   }).join('\n');
@@ -1135,12 +1171,20 @@ function generateReviewHtml(candidates, vacancyName) {
 <title>Ревью кандидатов — ${escHtml(vacancyName)}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:24px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:24px 24px 96px}
 h1{font-size:22px;font-weight:700;margin-bottom:4px}
-.subtitle{color:#64748b;font-size:14px;margin-bottom:24px}
+.subtitle{color:#64748b;font-size:14px;margin-bottom:16px}
+.toolbar{display:flex;align-items:center;gap:8px;margin-bottom:20px;flex-wrap:wrap}
+.toolbar-label{font-size:13px;color:#64748b;margin-right:4px}
+.tb-btn{padding:5px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;background:#fff;color:#475569;transition:background .15s,color .15s}
+.tb-btn:hover,.tb-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.tb-sep{width:1px;height:20px;background:#e2e8f0;margin:0 4px}
 .card{background:#fff;border-radius:12px;padding:20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);transition:opacity .3s}
-.card.done{opacity:.45}
+.card.done{opacity:.4;pointer-events:none}
+.card.skipped{opacity:.35;pointer-events:none}
 .card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:10px}
+.card-header-left{display:flex;align-items:flex-start;gap:10px}
+.card-cb{width:18px;height:18px;margin-top:2px;cursor:pointer;accent-color:#4f46e5;flex-shrink:0}
 .name{font-size:17px;font-weight:600}
 .meta{font-size:12px;color:#94a3b8;margin-left:8px}
 .score-wrap{display:flex;align-items:center;gap:8px;flex-shrink:0}
@@ -1153,7 +1197,7 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .tag{font-size:12px;padding:2px 8px;border-radius:4px;font-weight:500}
 .tag-ok{background:#dcfce7;color:#15803d}
 .tag-gap{background:#fee2e2;color:#b91c1c}
-.msg-section{border-top:1px solid #e2e8f0;padding-top:12px}
+.msg-section{border-top:1px solid #e2e8f0;padding-top:12px;margin-top:8px}
 .msg-label{display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em}
 .msg-area{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:10px;font-size:14px;line-height:1.5;font-family:inherit;resize:vertical;min-height:90px}
 .msg-area:focus{outline:none;border-color:#6366f1}
@@ -1163,29 +1207,116 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn-send{background:#16a34a;color:#fff}
 .btn-skip{background:#e2e8f0;color:#475569}
 .reject-note{font-size:13px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:10px;font-style:italic}
-.footer{position:sticky;bottom:0;background:#fff;border-top:1px solid #e2e8f0;padding:12px 16px;display:flex;align-items:center;gap:16px;border-radius:0 0 12px 12px;box-shadow:0 -2px 8px rgba(0,0,0,.06);margin-top:8px}
-.counter{font-size:14px;color:#475569}
+.hist-none{font-size:12px;color:#94a3b8;margin:8px 0 4px;font-style:italic}
+.hist-details,.resume-details{margin:8px 0 4px}
+.hist-summary,.resume-summary{font-size:12px;font-weight:600;color:#64748b;cursor:pointer;padding:4px 0;user-select:none}
+.hist-thread{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.hist-msg{padding:8px 10px;border-radius:8px;font-size:13px}
+.hist-employer{background:#eff6ff;border-left:3px solid #3b82f6}
+.hist-applicant{background:#f0fdf4;border-left:3px solid #22c55e}
+.hist-who{font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-right:8px}
+.hist-time{font-size:11px;color:#94a3b8}
+.hist-text{margin-top:4px;white-space:pre-wrap;line-height:1.4}
+.resume-text{font-size:12px;white-space:pre-wrap;font-family:inherit;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-top:8px;line-height:1.5;max-height:300px;overflow-y:auto;color:#334155}
+.footer{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e2e8f0;padding:12px 24px;display:flex;align-items:center;gap:16px;box-shadow:0 -2px 8px rgba(0,0,0,.08)}
+.counter{font-size:14px;color:#475569;flex:1}
 .counter strong{color:#1e293b}
-.btn-send-all{background:#4f46e5;color:#fff;padding:8px 20px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.btn-send-all{background:#4f46e5;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn-send-all:disabled{opacity:.4;cursor:not-allowed}
+.btn-send-all:not(:disabled):hover{opacity:.85}
+.btn-reject-all{background:#dc2626;color:#fff;padding:9px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.btn-reject-all:disabled{opacity:.4;cursor:not-allowed}
+.btn-reject-all:not(:disabled):hover{opacity:.85}
+.reject-cb{accent-color:#dc2626}
 </style>
 </head>
 <body>
 <h1>Кандидаты: ${escHtml(vacancyName)}</h1>
 <p class="subtitle">${sorted.length} откликов · ${actionable} требуют сообщения</p>
+<div class="toolbar">
+  <span class="toolbar-label">Выбрать для отправки:</span>
+  <button class="tb-btn active" id="filter-all" onclick="filterScore(0,'send')">Все</button>
+  <button class="tb-btn" id="filter-8" onclick="filterScore(8,'send')">8.0+</button>
+  <button class="tb-btn" id="filter-6" onclick="filterScore(6,'send')">6.0+</button>
+  <div class="tb-sep"></div>
+  <button class="tb-btn" id="filter-weak" onclick="filterScore(0,'reject')" style="color:#dc2626;border-color:#fca5a5">Слабые (отказ)</button>
+  <div class="tb-sep"></div>
+  <button class="tb-btn" onclick="selectAll(true)">✓ Все</button>
+  <button class="tb-btn" onclick="selectAll(false)">✗ Снять</button>
+</div>
 ${cards}
 <div class="footer">
-  <div class="counter">Одобрено: <strong id="approvedCount">0</strong> / <strong>${actionable}</strong></div>
+  <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
+  <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
+  <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить (0)</button>
 </div>
 <script>
-const approved = new Set();
-function approve(i, negId) {
-  approved.add(i);
-  document.getElementById('card-'+i).classList.add('done');
-  document.getElementById('approvedCount').textContent = approved.size;
+const sent = new Set();
+const skipped = new Set();
+let minScore = 0;
+
+function onCheck() {
+  const checks = document.querySelectorAll('.card-cb:checked');
+  const n = checks.length;
+  document.getElementById('selCount').textContent = n;
+  const btn = document.getElementById('sendAllBtn');
+  btn.textContent = 'Отправить выбранных (' + n + ')';
+  btn.disabled = n === 0;
 }
-function skip(i) {
-  document.getElementById('card-'+i).classList.add('done');
+
+function filterScore(min) {
+  minScore = min;
+  document.querySelectorAll('[id^=filter-]').forEach(b => b.classList.remove('active'));
+  document.getElementById('filter-' + (min || 'all')).classList.add('active');
+  selectFiltered(true);
 }
+
+function selectFiltered(checked) {
+  document.querySelectorAll('.card-cb').forEach(cb => {
+    const score = parseFloat(cb.dataset.score || 0);
+    if (!sent.has(parseInt(cb.dataset.idx)) && !skipped.has(parseInt(cb.dataset.idx))) {
+      cb.checked = checked && score >= minScore;
+    }
+  });
+  onCheck();
+}
+
+function sendOne(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value || '';
+  sent.add(i);
+  document.getElementById('card-'+i).classList.add('done');
+  const cb = document.getElementById('cb-'+i);
+  if (cb) { cb.checked = false; cb.disabled = true; }
+  document.getElementById('sentCount').textContent = sent.size;
+  onCheck();
+  console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
+}
+
+function skipOne(i) {
+  skipped.add(i);
+  document.getElementById('card-'+i).classList.add('skipped');
+  const cb = document.getElementById('cb-'+i);
+  if (cb) { cb.checked = false; cb.disabled = true; }
+  onCheck();
+}
+
+function sendAll() {
+  document.querySelectorAll('.card-cb:checked').forEach(cb => {
+    const i = parseInt(cb.dataset.idx);
+    const card = document.getElementById('card-'+i);
+    const negId = card?.dataset.neg || '';
+    const msg = document.getElementById('msg-'+i)?.value || '';
+    sent.add(i);
+    card.classList.add('done');
+    cb.checked = false; cb.disabled = true;
+    console.log('[HH-SEND]', JSON.stringify({ negotiation_id: negId, message: msg }));
+  });
+  document.getElementById('sentCount').textContent = sent.size;
+  onCheck();
+}
+
+// init count
+onCheck();
 </script>
 </body>
 </html>`;
