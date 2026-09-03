@@ -153,7 +153,7 @@ function createMockHhServer(options = {}) {
 
   const LIST_STATES = new Set([
     'response', 'consider', 'phone_interview', 'assessment',
-    'interview', 'offer', 'hired', 'discard',
+    'interview', 'offer', 'hired', 'discard', 'with_applicant_new',
   ]);
 
   const server = http.createServer((req, res) => {

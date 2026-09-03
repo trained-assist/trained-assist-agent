@@ -118,10 +118,21 @@ Plain text only. No HTML. Sparingly use `code` formatting for commands.
 
 ## Cron jobs — scheduled tasks
 
-Use cron_hh_digest(schedule) to set up automatic HH processing. Before creating:
+Use cron_hh_digest(schedule) to set up automatic HH monitoring. The digest is fast (no LLM) — just funnel stats.
+Before creating:
 1. Ensure active_vacancy is set: context_get('hh', 'active_vacancy') must return found=true
-2. Ensure ats_config is set: context_get('hh', 'ats_config') must return found=true
-3. Then: cron_hh_digest("*/30 * * * *") — or whatever interval user wants
+2. Then: cron_hh_digest("*/30 * * * *") — or whatever interval user wants
+
+Common interval schedules:
+- Every 15 min: "*/15 * * * *"
+- Every 30 min: "*/30 * * * *"
+- Every 1 hour: "0 * * * *"
+- Every 2 hours: "0 */2 * * *"
+- Every 3 hours: "0 */3 * * *"
+- Every 6 hours: "0 */6 * * *"
+- Daily at 9am: "0 9 * * *"
+
+Digest sends: new responses count, unread messages count, full stage breakdown, hint when new responses exist.
 
 For custom crons: cron_create(schedule, task, label). The task prompt runs as a full Claude session with all skills available.
 

@@ -681,3 +681,69 @@ describe('hh_draft_review_page', () => {
     }
   });
 });
+
+// ── hh_funnel_stats — fast funnel snapshot ────────────────────────────────────
+
+describe('hh_funnel_stats', () => {
+  it('returns counts per stage for active vacancy from context', async () => {
+    const { mkdtempSync: tmpDir, rmSync: rm, mkdirSync, writeFileSync } = await import('fs');
+    const { join: pathJoin } = await import('path');
+    const { tmpdir: td } = await import('os');
+
+    const tmp = tmpDir(pathJoin(td(), 'hh-funnel-ctx-'));
+
+    const savedCwd = process.cwd();
+    process.chdir(tmp);
+
+    try {
+      // Write active_vacancy context so funnel_stats can read it without args
+      mkdirSync(pathJoin(tmp, 'contexts', 'hh'), { recursive: true });
+      writeFileSync(
+        pathJoin(tmp, 'contexts', 'hh', 'active_vacancy.json'),
+        JSON.stringify({ value: { id: 'vac-001', title: 'Backend Dev' }, updated_at: new Date().toISOString() }),
+      );
+
+      const r = await tools().hh_funnel_stats.handler();
+
+      expect(r.ok).toBe(true);
+      expect(r.vacancy_id).toBe('vac-001');
+      expect(r.vacancy_title).toBe('Backend Dev');
+      // All 3 mock candidates are in 'response' state
+      expect(r.new_responses).toBe(3);
+      expect(r.by_stage.response).toBe(3);
+      expect(r.by_stage.consider).toBe(0);
+      expect(r.by_stage.interview).toBe(0);
+      // active_total counts all non-discard stages
+      expect(r.active_total).toBe(3);
+      // unread_messages is a number or null (mock returns 0 for with_applicant_new)
+      expect(r.unread_messages === 0 || r.unread_messages === null).toBe(true);
+    } finally {
+      process.chdir(savedCwd);
+      try { rm(tmp, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  it('returns error when no vacancy selected and no context', async () => {
+    const { mkdtempSync: tmpDir, rmSync: rm } = await import('fs');
+    const { join: pathJoin } = await import('path');
+    const { tmpdir: td } = await import('os');
+
+    const tmp = tmpDir(pathJoin(td(), 'hh-funnel-noctx-'));
+    const savedCwd = process.cwd();
+    process.chdir(tmp);
+    try {
+      const r = await tools().hh_funnel_stats.handler();
+      expect(r.error).toMatch(/вакансия/i);
+    } finally {
+      process.chdir(savedCwd);
+      try { rm(tmp, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  it('accepts explicit vacancy_id', async () => {
+    const r = await tools().hh_funnel_stats.handler({ vacancy_id: 'vac-001' });
+    expect(r.ok).toBe(true);
+    expect(r.vacancy_id).toBe('vac-001');
+    expect(r.new_responses).toBe(3);
+  });
+});
