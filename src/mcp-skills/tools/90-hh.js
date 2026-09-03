@@ -497,6 +497,15 @@ module.exports = {
 
         const value = { id: vacancy_id, title, set_at: new Date().toISOString() };
         writeContext('hh', 'active_vacancy', value);
+
+        // Kick off background negotiations sync so /hh/review is instant on first open
+        const agentBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/$/, '');
+        fetch(`${agentBase}/hh/sync-negotiations`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: USER_ID, vacancy_id }),
+        }).catch(() => {}); // fire-and-forget
+
         return { ok: true, active_vacancy: value, message: `Активная вакансия: «${title}» (${vacancy_id})` };
       },
     },
