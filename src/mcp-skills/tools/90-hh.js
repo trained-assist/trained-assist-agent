@@ -585,6 +585,87 @@ module.exports = {
       },
     },
 
+    // ── Funnel stats (fast, no LLM) ─────────────────────────────────────────
+
+    hh_funnel_stats: {
+      description: 'Fast snapshot of the recruiting funnel for the active vacancy — counts candidates by stage, unread applicant messages, new responses. No LLM, sub-second. Use in digest crons and monitoring.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          vacancy_id: { type: 'string', description: 'Vacancy ID. Omit to read from context (active_vacancy).' },
+        },
+      },
+      handler: async ({ vacancy_id } = {}) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+
+        let resolvedVacancyId = vacancy_id;
+        let vacancyTitle = '';
+        if (!resolvedVacancyId) {
+          const ctx = readContext('hh', 'active_vacancy');
+          if (!ctx) return { error: 'Вакансия не выбрана. Укажи vacancy_id или сохрани активную вакансию через hh_set_active_vacancy.' };
+          resolvedVacancyId = ctx.value?.id || ctx.value;
+          vacancyTitle = ctx.value?.title || '';
+        }
+
+        const STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer', 'hired', 'discard'];
+        const counts = {};
+        let unreadMessages = 0;
+
+        try {
+          // Count candidates per stage
+          for (const st of STATES) {
+            try {
+              const data = await hhGet(
+                `/negotiations/${st}?vacancy_id=${resolvedVacancyId}&per_page=1&page=0`,
+                token,
+              );
+              counts[st] = data.found || 0;
+            } catch {
+              counts[st] = 0;
+            }
+          }
+
+          // Count unread applicant messages (with_applicant_new state)
+          try {
+            const unread = await hhGet(
+              `/negotiations/with_applicant_new?vacancy_id=${resolvedVacancyId}&per_page=1&page=0`,
+              token,
+            );
+            unreadMessages = unread.found || 0;
+          } catch {
+            // endpoint may not exist in all HH plans
+            unreadMessages = null;
+          }
+
+          const activeTotal = STATES
+            .filter(s => s !== 'discard')
+            .reduce((sum, s) => sum + (counts[s] || 0), 0);
+
+          return {
+            ok: true,
+            vacancy_id: resolvedVacancyId,
+            vacancy_title: vacancyTitle,
+            new_responses: counts.response || 0,
+            unread_messages: unreadMessages,
+            active_total: activeTotal,
+            by_stage: {
+              response: counts.response,
+              consider: counts.consider,
+              phone_interview: counts.phone_interview,
+              assessment: counts.assessment,
+              interview: counts.interview,
+              offer: counts.offer,
+              hired: counts.hired,
+              discard: counts.discard,
+            },
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
+      },
+    },
+
     // ── ATS & Evaluation ────────────────────────────────────────────────────
 
     hh_extract_ats_config: {
