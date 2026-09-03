@@ -2083,13 +2083,13 @@ const HH_SECRET = '${esc(agentSecret)}';
 const done = new Set();
 
 const CARDS_HTML = ${JSON.stringify(cardsHtmlArray)};
-const BATCH_SIZE = 20;
+const FIRST_BATCH = 30;
+const LAZY_BATCH = 50;
 let rendered = 0;
-let autoGenQueued = false;
 
-function renderBatch() {
+function renderBatch(count) {
   const container = document.getElementById('cards-container');
-  const end = Math.min(rendered + BATCH_SIZE, CARDS_HTML.length);
+  const end = Math.min(rendered + count, CARDS_HTML.length);
   const frag = document.createDocumentFragment();
   for (let j = rendered; j < end; j++) {
     const wrapper = document.createElement('div');
@@ -2100,14 +2100,17 @@ function renderBatch() {
   rendered = end;
   onCheck();
   if (rendered >= CARDS_HTML.length) lazyObserver.disconnect();
-  setTimeout(autoGenerate, 0);
 }
 
 const lazyObserver = new IntersectionObserver(entries => {
-  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) renderBatch();
-}, { rootMargin: '300px' });
+  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) {
+    renderBatch(LAZY_BATCH);
+    setTimeout(autoGenerate, 0);
+  }
+}, { rootMargin: '1500px' });
 lazyObserver.observe(document.getElementById('sentinel'));
-renderBatch();
+renderBatch(FIRST_BATCH);
+setTimeout(autoGenerate, 0);
 
 function showToast(msg, isError) {
   const t = document.createElement('div');
