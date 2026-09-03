@@ -853,6 +853,16 @@ async function main() {
       res.writeHead(405).end(); return;
     }
 
+    // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject')) {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      });
+      return res.end();
+    }
+
     // Auth: all endpoints require Bearer token
     const auth = req.headers['authorization'] || '';
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
@@ -1129,16 +1139,6 @@ async function main() {
 
     // ── HH Action Endpoints — called by the review page HTML ─────────────────
 
-    // OPTIONS preflight for browser CORS (review page on localhost:9876 → agent on :3001)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject')) {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      });
-      return res.end();
-    }
-
     // POST /hh/send — send a message to a candidate (called from review page)
     if (req.method === 'POST' && url.pathname === '/hh/send') {
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1146,7 +1146,8 @@ async function main() {
       const { username, negotiation_id, message } = body || {};
       if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
 
-      const tokenFile = path.join(os.homedir(), 'agent-tokens', String(username), 'hh');
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile = path.join(hhTokensBase, String(username), 'hh');
       if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
       const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
 
@@ -1182,7 +1183,8 @@ async function main() {
         return json(res, 400, { error: 'missing fields' });
       }
 
-      const tokenFile = path.join(os.homedir(), 'agent-tokens', String(username), 'hh');
+      const hhTokensBase2 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile = path.join(hhTokensBase2, String(username), 'hh');
       if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
       const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
 
@@ -1263,11 +1265,12 @@ function readBody(req, maxBytes = 1_048_576) {
 
 function hhApiRequest(method, apiPath, accessToken, body) {
   return new Promise((resolve, reject) => {
+    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
+    const u = new URL(base);
+    const lib = u.protocol === 'https:' ? https : http;
     const bodyStr = body ? JSON.stringify(body) : '';
-    const req = https.request({
-      hostname: process.env.HH_API_BASE_URL
-        ? new URL(process.env.HH_API_BASE_URL).hostname
-        : 'api.hh.ru',
+    const reqOpts = {
+      hostname: u.hostname,
       path: apiPath,
       method,
       headers: {
@@ -1276,12 +1279,15 @@ function hhApiRequest(method, apiPath, accessToken, body) {
         'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
         ...(body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
       },
-    }, (r) => {
+    };
+    if (u.port) reqOpts.port = parseInt(u.port, 10);
+    const req = lib.request(reqOpts, (r) => {
       let data = '';
       r.on('data', c => data += c);
       r.on('end', () => {
+        if (r.statusCode === 204 || !data) return resolve({});
         if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
-        resolve(data ? JSON.parse(data) : {});
+        try { resolve(JSON.parse(data)); } catch { resolve({}); }
       });
     });
     req.on('error', reject);
