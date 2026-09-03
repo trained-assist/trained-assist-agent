@@ -16,6 +16,7 @@ Environment=NODE_ENV=production
 Environment=PORT=8080
 Environment=AGENT_DATA_DIR=/home/vova/alesa-data
 Environment=AGENT_PUBLIC_URL=https://136-65-7-197.sslip.io/agent
+Environment=HH_PLATFORM_URL=https://platform.recruiter-assistant.ru
 Environment=VM_NAME=gcp-main
 
 [Install]
