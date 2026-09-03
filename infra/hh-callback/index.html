@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Авторизация HH...</title>
+  <script>
+    // Redirect all query params (code, state, error) to the GCP agent.
+    // AGENT_URL must match the GCP VM's public HTTPS address.
+    var AGENT_URL = 'https://136-65-7-197.sslip.io';
+    window.location.replace(AGENT_URL + '/hh-callback' + window.location.search);
+  </script>
+</head>
+<body>
+  <p>Перенаправление...</p>
+</body>
+</html>
