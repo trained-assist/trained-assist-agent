@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 
 const USER_ID = process.env.USER_ID || '';
 const WEEEK_BASE = 'https://api.weeek.net/public/v1';
@@ -72,7 +73,7 @@ function parseWorkspaceId(cookieStr) {
   return m ? m[1].trim() : null;
 }
 
-async function weeekPrivateFetch(apiPath, { method = 'GET', body, cookie } = {}) {
+async function doPrivateFetch(apiPath, { method = 'GET', body, cookie } = {}) {
   const url = `${WEEEK_PRIVATE_BASE}${apiPath}`;
   const res = await fetch(url, {
     method,
@@ -89,13 +90,42 @@ async function weeekPrivateFetch(apiPath, { method = 'GET', body, cookie } = {})
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
-      throw new Error('Weeek L2 сессия устарела. Обновите через /connect/weeek (логин + пароль).');
+  return { ok: res.ok, status: res.status, data };
+}
+
+function refreshWeeekSession(userId) {
+  const refreshScript = path.join(os.homedir(), 'trained-assist-agent', 'scripts', 'refresh-weeek-session.js');
+  const profile = userId || USER_ID || 'flexi';
+  const profiles = profile === 'flexi' ? 'flexi' : `${profile},flexi`;
+  execSync(`node "${refreshScript}"`, {
+    timeout: 90000,
+    env: { ...process.env, WEEEK_SESSION_PROFILES: profiles },
+    stdio: 'pipe',
+  });
+  return readSession(userId);
+}
+
+async function weeekPrivateFetch(apiPath, { method = 'GET', body, cookie, userId } = {}) {
+  let result = await doPrivateFetch(apiPath, { method, body, cookie });
+  if ((result.status === 401 || result.status === 403) && userId !== false) {
+    // Auto-refresh: run headless Playwright login, get fresh cookie, retry once
+    console.log('[weeek/L2] Session expired (%d), auto-refreshing…', result.status);
+    try {
+      const freshCookie = refreshWeeekSession(userId);
+      if (freshCookie) {
+        result = await doPrivateFetch(apiPath, { method, body, cookie: freshCookie });
+      }
+    } catch (e) {
+      console.error('[weeek/L2] Auto-refresh failed:', e.message.slice(0, 150));
     }
-    throw new Error(`Weeek Private API ${res.status}: ${data?.message || text.slice(0, 200)}`);
   }
-  return data;
+  if (!result.ok) {
+    if (result.status === 401 || result.status === 403) {
+      throw new Error('Weeek L2 сессия устарела и авторефреш не удался. Обновите вручную через /connect/weeek.');
+    }
+    throw new Error(`Weeek Private API ${result.status}: ${result.data?.message || JSON.stringify(result.data).slice(0, 200)}`);
+  }
+  return result.data;
 }
 
 // ── Tools ─────────────────────────────────────────────────────────────────────

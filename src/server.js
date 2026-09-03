@@ -1137,6 +1137,34 @@ async function main() {
       return;
     }
 
+    // POST /admin/refresh-weeek-session — synchronous refresh, returns new cookie
+    // Used by CF Workers (flexi-exhibition-deal-bot) to recover from 401/403 mid-request
+    if (req.method === 'POST' && url.pathname === '/admin/refresh-weeek-session') {
+      const { execSync } = require('child_process');
+      const refreshScript = path.join(__dirname, '..', 'scripts', 'refresh-weeek-session.js');
+      const body = await readBody(req).then(b => { try { return JSON.parse(b); } catch { return {}; } });
+      const profiles = (body.profiles || 'flexi,flexi-consult').split(',').map(s => s.trim()).filter(Boolean);
+      const env = {
+        ...process.env,
+        TELEGRAM_BOT_TOKEN: secrets.BOT_TOKEN,
+        CF_API_TOKEN: secrets.CF_API_TOKEN || '',
+        OPERATOR_CHAT_ID: secrets.OPERATOR_CHAT_ID || '1714048',
+        WEEEK_SESSION_PROFILES: profiles.join(','),
+      };
+      try {
+        execSync(`node "${refreshScript}"`, { env, timeout: 90000, stdio: 'pipe' });
+        // Read back the freshly written cookie
+        const cookiePath = path.join(os.homedir(), 'agent-tokens', profiles[0], 'weeek-session');
+        const cookie = fs.existsSync(cookiePath) ? fs.readFileSync(cookiePath, 'utf8').trim() : '';
+        if (!cookie) return json(res, 500, { ok: false, error: 'Refresh succeeded but cookie file is empty' });
+        console.log('[weeek-session] Sync refresh done, profile=%s, cookie length=%d', profiles[0], cookie.length);
+        return json(res, 200, { ok: true, cookie });
+      } catch (e) {
+        console.error('[weeek-session] Sync refresh failed:', e.message.slice(0, 200));
+        return json(res, 500, { ok: false, error: e.message.slice(0, 300) });
+      }
+    }
+
     // ── HH Action Endpoints — called by the review page HTML ─────────────────
 
     // POST /hh/send — send a message to a candidate (called from review page)
