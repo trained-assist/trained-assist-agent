@@ -1124,11 +1124,11 @@ async function main() {
             method: 'POST',
             headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(reqBody) },
           }, (hres) => {
-            let data = '';
-            hres.on('data', c => (data += c));
+            const chunks = [];
+            hres.on('data', c => chunks.push(c));
             hres.on('end', () => {
               try {
-                const p = JSON.parse(data);
+                const p = JSON.parse(Buffer.concat(chunks).toString('utf8'));
                 if (p.error) reject(new Error(p.error.message || JSON.stringify(p.error)));
                 else resolve(p.choices[0].message.content);
               } catch (e) { reject(e); }
@@ -2115,9 +2115,10 @@ function hhApiRequest(method, apiPath, accessToken, body) {
     };
     if (u.port) reqOpts.port = parseInt(u.port, 10);
     const req = lib.request(reqOpts, (r) => {
-      let data = '';
-      r.on('data', c => data += c);
+      const chunks = [];
+      r.on('data', c => chunks.push(c));
       r.on('end', () => {
+        const data = Buffer.concat(chunks).toString('utf8');
         if (r.statusCode === 204 || !data) return resolve({});
         if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
         try { resolve(JSON.parse(data)); } catch { resolve({}); }
