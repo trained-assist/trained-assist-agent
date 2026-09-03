@@ -26,6 +26,7 @@ const DEFAULT_VACANCIES = [
     salary: { from: 150000, to: 250000, currency: 'RUR' },
     counters: { responses: 3 },
     published_at: '2026-09-01T00:00:00+03:00',
+    manager: { id: 'mgr-001', full_name: 'Анна Рекрутер' },
   },
   {
     id: 'vac-002',
@@ -34,6 +35,7 @@ const DEFAULT_VACANCIES = [
     salary: null,
     counters: { responses: 0 },
     published_at: '2026-09-01T00:00:00+03:00',
+    manager: { id: 'mgr-002', full_name: 'Иван Менеджер' },
   },
 ];
 
