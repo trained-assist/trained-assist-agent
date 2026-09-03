@@ -425,6 +425,163 @@ module.exports = {
       },
     },
 
+    company_review: {
+      description: `Full company deep-dive in one call: find by name → get INN → fetch contacts, director, revenue, website.
+Use when user says: "пробей компанию X", "проанализируй X", "что за компания X", "найди информацию по X", "кто такие X".
+Returns both a formatted Telegram card (card_text) and structured data.
+Works without DaData token (free Rusprofile). With DaData token — faster and more complete.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Company name or keywords to search for. Skip if inn is provided.',
+          },
+          inn: {
+            type: 'string',
+            description: 'INN (10 or 12 digits). Skip the name search step if provided.',
+          },
+          user_id: { type: 'string' },
+        },
+      },
+      handler: async ({ name, inn, user_id }) => {
+        const uid = user_id || USER_ID;
+        const dadataToken = readDadataToken(uid);
+
+        let profile = null;
+        let searchResults = null;
+
+        // Step 1: resolve INN if not provided
+        if (!inn && name) {
+          if (dadataToken) {
+            const results = await dadataFindByName(name, dadataToken, 3);
+            searchResults = results.slice(0, 3);
+            const best = results.find(r => r.inn) || results[0];
+            if (!best?.inn) return { found: false, error: `Компания не найдена по запросу: "${name}"` };
+            inn = best.inn;
+          } else {
+            const search = await rusprofileSearch(name);
+            searchResults = search.all.slice(0, 3);
+            const best = search.all.find(r => !r.inactive) || search.all[0];
+            if (!best?.inn) return { found: false, error: `Компания не найдена по запросу: "${name}"` };
+            inn = best.inn;
+          }
+        }
+
+        if (!inn) return { found: false, error: 'Укажи name или inn' };
+        const normalizedInn = normalizeInn(inn);
+
+        // Step 2: full profile by INN
+        if (dadataToken) {
+          profile = await dadataFindByInn(normalizedInn, dadataToken);
+          if (profile) profile = { source: 'dadata', found: true, ...profile };
+        }
+
+        if (!profile) {
+          const search = await rusprofileSearch(normalizedInn);
+          const selected =
+            search.all.find(i => normalizeInn(i.inn) === normalizedInn && i.refType === 'UL') ||
+            search.all.find(i => normalizeInn(i.inn) === normalizedInn) || null;
+
+          if (!selected) {
+            return { found: false, inn: normalizedInn, error: 'Компания с таким ИНН не найдена в Rusprofile' };
+          }
+
+          const card = await rusprofileCard(selected.link);
+          let finance = null;
+          if (selected.refType === 'UL' && selected.id) {
+            try { finance = await rusprofileFinance(selected.id); } catch {}
+          }
+          profile = {
+            found: true, source: 'rusprofile',
+            inn: card.inn || normalizedInn, kpp: card.kpp, ogrn: card.ogrn,
+            name: selected.name, fullName: card.fullName,
+            status: card.statusText, region: selected.region,
+            address: card.address || selected.address,
+            okved: selected.okved, okvedDescription: selected.okvedDescription,
+            registrationDate: selected.registrationDate,
+            ceoName: selected.ceoName, directorBlock: card.directorBlock,
+            contacts: card.contacts, finance,
+            rusprofileUrl: selected.url,
+          };
+        }
+
+        // Step 3: format card
+        function rubles(n) {
+          if (!n) return null;
+          if (n >= 1e9) return `${(n / 1e9).toFixed(1).replace('.0', '')} млрд руб.`;
+          if (n >= 1e6) return `${Math.round(n / 1e6)} млн руб.`;
+          return `${n.toLocaleString('ru-RU')} руб.`;
+        }
+
+        const lines = [];
+        lines.push(`🏢 *${profile.name || profile.fullName || name}*`);
+        if (profile.fullName && profile.fullName !== profile.name)
+          lines.push(`   ${profile.fullName}`);
+
+        const ids = [profile.inn && `ИНН: ${profile.inn}`, profile.ogrn && `ОГРН: ${profile.ogrn}`].filter(Boolean);
+        if (ids.length) lines.push(`📋 ${ids.join(' | ')}`);
+        if (profile.status) lines.push(`⚡️ Статус: ${profile.status}`);
+
+        lines.push('');
+        const director = profile.ceoName || (profile.directorBlock?.name);
+        if (director) lines.push(`👔 Директор: ${director}`);
+        if (profile.region) lines.push(`📍 Регион: ${profile.region}`);
+        if (profile.okvedDescription) lines.push(`🏭 ОКВЭД ${profile.okved || ''}: ${profile.okvedDescription}`);
+        if (profile.registrationDate) lines.push(`📅 Зарегистрирована: ${profile.registrationDate}`);
+
+        // Finance
+        const fin = profile.finance;
+        if (fin?.years?.length) {
+          lines.push('');
+          for (const yr of fin.years.slice(0, 2)) {
+            if (yr.revenue) lines.push(`💰 Выручка ${yr.year}: ${rubles(yr.revenue)}`);
+            if (yr.profit !== undefined && yr.profit !== null) {
+              const sign = yr.profit >= 0 ? '+' : '';
+              lines.push(`   Прибыль: ${sign}${rubles(yr.profit)}`);
+            }
+          }
+        } else if (profile.financeRevenueMlnRub) {
+          lines.push('');
+          lines.push(`💰 Выручка: ~${profile.financeRevenueMlnRub} млн руб.`);
+        }
+
+        // Contacts
+        const contacts = profile.contacts || {};
+        const phones = contacts.phones || profile.phones || [];
+        const emails = contacts.emails || profile.emails || [];
+        const websites = contacts.websites || profile.websites || [];
+        if (websites.length || phones.length || emails.length) {
+          lines.push('');
+          if (websites.length) lines.push(`🌐 Сайт: ${websites.slice(0, 2).join(', ')}`);
+          if (phones.length)   lines.push(`📞 Тел: ${phones.slice(0, 3).join(', ')}`);
+          if (emails.length)   lines.push(`📧 Email: ${emails.slice(0, 3).join(', ')}`);
+        }
+
+        if (profile.address) {
+          lines.push('');
+          lines.push(`🗺 Адрес: ${profile.address}`);
+        }
+        if (profile.rusprofileUrl) lines.push(`🔗 ${profile.rusprofileUrl}`);
+
+        return {
+          found: true,
+          card_text: lines.join('\n'),
+          inn: profile.inn,
+          ogrn: profile.ogrn,
+          name: profile.name || profile.fullName,
+          director: director || null,
+          region: profile.region,
+          okved: profile.okved,
+          okvedDescription: profile.okvedDescription,
+          revenue: fin?.years?.[0]?.revenue || null,
+          contacts: { phones, emails, websites },
+          rusprofileUrl: profile.rusprofileUrl,
+          source: profile.source,
+        };
+      },
+    },
+
     company_find_by_email: {
       description: 'Find company by email address (requires DaData token — paid). Returns INN and company info.',
       inputSchema: {
