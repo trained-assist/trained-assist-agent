@@ -157,6 +157,12 @@ function hhReviewPage(userId) {
   return `📋 Страница ревью кандидатов:\n${hhBase()}/hh/review?username=${encodeURIComponent(userId)}`;
 }
 
+// "покажи страницу ревью кандидатов" — no API call
+function hhReviewPage(userId) {
+  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+  return `📋 Страница ревью кандидатов:\n${base}/hh/review?username=${encodeURIComponent(userId)}`;
+}
+
 // Export cache invalidation for tests
 function _clearCache() { _cache.clear(); }
 
