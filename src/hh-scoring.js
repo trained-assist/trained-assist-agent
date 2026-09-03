@@ -48,109 +48,56 @@ function parseLlmJson(content) {
 }
 
 function buildAtsPrompt(config) {
-  const knockoutList = (config.knockout || []).map(k => `  - ${k}`).join('\n');
-  const reqLines = (config.required || []).map(c => `  - "${c.name}" (вес ${c.weight})`).join('\n');
-  const prefLines = (config.preferred || []).map(c => `  - "${c.name}" (вес ${c.weight})`).join('\n');
+  // Support both new (must_have/nice_to_have) and legacy (required/preferred) config shapes
+  const mustHave = config.must_have || (config.required || []).map(c => c.name);
+  const niceToHave = config.nice_to_have || (config.preferred || []).map(c => c.name);
 
-  const filters = config.filters || {};
-  const filterNotes = [];
-  if (filters.min_experience_years) filterNotes.push(`минимум ${filters.min_experience_years} лет опыта`);
-  if (filters.allowed_locations?.length) filterNotes.push(`локация: ${filters.allowed_locations.join(', ')}`);
-  if (filters.salary_max_rub) filterNotes.push(`зарплата до ${filters.salary_max_rub.toLocaleString()} руб.`);
-  const filterText = filterNotes.join('; ') || 'без ограничений';
+  const mustList = mustHave.map(r => `  - ${r}`).join('\n');
+  const niceList = niceToHave.map(r => `  - ${r}`).join('\n') || '  (не указано)';
 
-  const allCriteria = [...(config.required || []), ...(config.preferred || [])];
-  const criteriaTemplate = JSON.stringify(
-    allCriteria.map(c => ({ name: c.name, score: 0, evidence: '' })),
-    null, 4,
-  );
-
-  return `Ты — ATS-система для технического рекрутинга. Оцени кандидата по структурированной рубрике.
-
-=== ВАКАНСИЯ ===
-${config.vacancy_title}
+  return `Ты — опытный рекрутер. Оцени кандидата для позиции: ${config.vacancy_title}.
 Контекст: ${config.vacancy_context}
 
-=== НОКАУТ-КРИТЕРИИ (любой провален → ОТКЛОНИТЬ, без скоринга) ===
-${knockoutList}
+ОБЯЗАТЕЛЬНЫЕ требования (отсутствие каждого снижает оценку):
+${mustList}
 
-=== ОБЯЗАТЕЛЬНЫЕ КРИТЕРИИ ===
-${reqLines}
+ЖЕЛАТЕЛЬНЫЕ навыки (наличие повышает оценку):
+${niceList}
 
-=== ЖЕЛАТЕЛЬНЫЕ КРИТЕРИИ ===
-${prefLines}
+ШКАЛА ОЦЕНКИ (1–10, абсолютная — не подгоняй под пул):
+  9–10: Идеальное совпадение — все обязательные + большинство желательных, сильные примеры
+  7–8:  Хорошее совпадение — большинство обязательных подтверждены, есть желательные
+  5–6:  Частичное совпадение — часть обязательных есть, остальное неясно из резюме
+  3–4:  Слабое совпадение — мало обязательных, или опыт не релевантен роли
+  1–2:  Не подходит — явное несоответствие ключевым требованиям
 
-=== ФИЛЬТРЫ ===
-${filterText}
-
-=== РУБРИКА ОЦЕНКИ ===
-0 = нет упоминания
-1 = упоминается / косвенный сигнал
-2 = подтверждено в production проекте
-3 = сильный опыт / экспертный уровень
-
-=== ИНСТРУКЦИЯ ===
-1. Нокаут-критерий считается ПРОВАЛЕННЫМ только если в резюме ЯВНО указано что кандидат не имеет этого опыта, или если резюме явно противоречит требованию (например, человек всю карьеру в офлайн без какого-либо digital). Если навык просто не упомянут — это НЕ нокаут, а низкий балл в скоринге. Сомнение = в пользу кандидата.
-2. Оцени каждый критерий 0-3, укажи evidence (цитата/факт из резюме, макс 60 символов). 0 = не упомянуто (не нокаут!), 1 = косвенный сигнал, 2 = подтверждено, 3 = экспертный уровень.
-3. Проверь фильтры.
+ВАЖНО: Данные HH-резюме могут быть краткими. Если навык не упомянут — ставь низкий балл, но не 0 за одно только отсутствие упоминания. 0 — только явное несоответствие.
 
 Отвечай ТОЛЬКО JSON без markdown:
 {
-  "knockout_failed": [],
-  "filters_ok": { "experience_years_ok": true, "location_ok": true, "salary_ok": true },
-  "criteria": ${criteriaTemplate},
-  "reasoning": "<2-3 предложения об итоговом впечатлении>"
+  "score": 7.5,
+  "strong": ["что сильное в кандидате — конкретно из резюме"],
+  "missing": ["чего не хватает или неясно"],
+  "reasoning": "2–3 предложения: общее впечатление и главный аргумент за/против"
 }`;
 }
 
 function computeScore(llmResult, config) {
-  if (llmResult.knockout_failed?.length) {
-    return {
-      ...llmResult,
-      score: 0.0,
-      verdict: 'ОТКЛОНИТЬ',
-      matched: [],
-      gaps: llmResult.knockout_failed,
-    };
-  }
-
-  const filtersOk = llmResult.filters_ok || {};
-  if (!Object.values(filtersOk).every(Boolean)) {
-    const failed = Object.entries(filtersOk).filter(([, v]) => !v).map(([k]) => k);
-    return {
-      ...llmResult,
-      score: 0.0,
-      verdict: 'ОТКЛОНИТЬ',
-      matched: [],
-      gaps: failed.map(f => `Фильтр не пройден: ${f}`),
-    };
-  }
-
-  const allConfig = [...(config.required || []), ...(config.preferred || [])];
-  const criteriaMap = Object.fromEntries((llmResult.criteria || []).map(c => [c.name, c]));
-
-  let raw = 0;
-  let maxRaw = 0;
-  const matched = [];
-  const gaps = [];
-
-  for (const criterion of allConfig) {
-    const weight = criterion.weight;
-    maxRaw += weight * 3;
-    const entry = criteriaMap[criterion.name] || {};
-    const score = entry.score || 0;
-    raw += weight * score;
-    if (score >= 2) matched.push(`${criterion.name} (${score}/3)`);
-    else if (score <= 1) gaps.push(`${criterion.name} (${score}/3)`);
-  }
-
-  const finalScore = maxRaw > 0 ? Math.round((raw / maxRaw) * 100) / 10 : 0;
+  const score = Math.round(Math.max(0, Math.min(10, llmResult.score || 0)) * 2) / 2;
+  const passThreshold = config.pass_threshold || 7;
+  const reviewThreshold = config.review_threshold || 5;
   let verdict;
-  if (finalScore >= config.pass_threshold) verdict = 'ПРОПУСТИТЬ';
-  else if (finalScore >= config.review_threshold) verdict = 'УТОЧНИТЬ';
+  if (score >= passThreshold) verdict = 'ПРОПУСТИТЬ';
+  else if (score >= reviewThreshold) verdict = 'УТОЧНИТЬ';
   else verdict = 'ОТКЛОНИТЬ';
 
-  return { ...llmResult, score: finalScore, verdict, matched, gaps };
+  return {
+    score,
+    verdict,
+    matched: llmResult.strong || [],
+    gaps: llmResult.missing || [],
+    reasoning: llmResult.reasoning || '',
+  };
 }
 
 async function evaluateCandidate(candidateText, atsConfig, apiKey) {
