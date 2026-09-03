@@ -54,6 +54,15 @@
 | ✅ реализовано | Token storage | ~/agent-tokens/{USER_ID}/{label}, инжектируется в env через runner.js |
 | ✅ реализовано | Session управление | sessions.json, buildContext, appendUserMessage |
 | ✅ реализовано | Браузерная сессия | noVNC → Chrome CDP, захват кукисов |
+| ✅ реализовано | **Infra manifest + CI sync check** | `infra/env-manifest.json` — единый источник правды для всех секретов. `scripts/check-env-sync.js` валидирует ci.yml в CI. |
+| ✅ реализовано | **Деплой на push в main** | ci.yml: deploy-jobs принимают merge.result == success ИЛИ push to main — больше не нужно PR чтобы задеплоить hotfix. |
+| ✅ реализовано | **Manual Deploy workflow** | `workflow_dispatch` без PR: GitHub → Actions → Manual Deploy → выбор таргета gcp/ru/both. |
+| ✅ реализовано | **Health endpoint: vm + commit** | `/health` возвращает `{ vm: "gcp-main", commit: "abc1234" }` — сразу видно что на каком VM. |
+| ✅ реализовано | **Test isolation (AGENT_TOKENS_ROOT)** | `src/user-tokens.js` читает `AGENT_TOKENS_ROOT` env var — тесты больше не трогают реальный `~/agent-tokens/`. PR #201. |
+| 🔵 планируется | **Credential Store (шифрование at rest)** | Токены юзеров хранятся plain text. Перевести на AES-256-GCM с мастер-ключом из GCP SM. Детальный план: `docs/credential-store-migration.md`. |
+| 🔵 планируется | **TTL для nalog-токенов** | `/capabilities` отдаёт `nalog` даже если токен протух 3ч назад. Добавить `.meta` с `expires_at`, фильтровать. Входит в credential store migration. |
+| 🔵 планируется | **CI: кэш node_modules** | `npm ci` переустанавливает Playwright каждый раз (~30-60s). Добавить `actions/cache` по хешу `package-lock.json`. |
+| 🔵 планируется | **Тесты: secrets.js + user-tokens coverage** | Нет тестов на REQUIRED validation, SECRETS_SOURCE=env, listConnectedServices, revokeService, generateConnectLink, `/capabilities` TTL. См. `docs/test-audit.md`. |
 | 🔵 планируется | Лимиты Wordstat | Per-user дневной лимит запросов (free: 100, paid: безлимит) |
 | 🔵 планируется | yt-dlp на VM | pip3 install yt-dlp → добавить в setup.sh |
 
