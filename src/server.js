@@ -890,7 +890,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1372,6 +1372,38 @@ async function main() {
         if (fs.existsSync(stagesFile)) stages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
       } catch {}
       return json(res, 200, { ok: true, config, stages });
+    }
+
+    // POST /hh/reset-ats-results — clear ats_result from all candidate history files
+    // so hh_batch_review re-evaluates them with the current (updated) ATS config
+    if (req.method === 'POST' && url.pathname === '/hh/reset-ats-results') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username } = body || {};
+      if (!username) return json(res, 400, { error: 'username required' });
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const candDir = path.join(dataDir, 'hh', String(username), 'candidates');
+      let reset = 0;
+      let skipped = 0;
+      if (fs.existsSync(candDir)) {
+        for (const f of fs.readdirSync(candDir)) {
+          if (!f.endsWith('.json')) continue;
+          const fp = path.join(candDir, f);
+          try {
+            const hist = JSON.parse(fs.readFileSync(fp, 'utf8'));
+            if (hist.ats_result !== undefined) {
+              delete hist.ats_result;
+              hist.ats_reset_at = new Date().toISOString();
+              fs.writeFileSync(fp, JSON.stringify(hist, null, 2));
+              reset++;
+            } else {
+              skipped++;
+            }
+          } catch { skipped++; }
+        }
+      }
+      console.log(`[hh/reset-ats-results] user=${username} reset=${reset} skipped=${skipped}`);
+      return json(res, 200, { ok: true, reset, skipped });
     }
 
     // POST /hh/ats-config — save ATS config + stages to context
