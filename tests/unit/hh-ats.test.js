@@ -2,7 +2,7 @@
 // HH API calls → real HTTP to mock-hh-server (127.0.0.1)
 // OpenRouter calls → nock interception (https://openrouter.ai)
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -350,6 +350,71 @@ describe('hh_get_messages', () => {
   });
 });
 
+// ── hh_batch_evaluate — context auto-read ─────────────────────────────────────
+
+describe('hh_batch_evaluate — reads vacancy_id and ats_config from context', () => {
+  let origCwd;
+  let ctxDir;
+
+  beforeEach(() => {
+    origCwd = process.cwd();
+    ctxDir = mkdtempSync(join(tmpdir(), 'hh-batch-ctx-'));
+    process.chdir(ctxDir);
+
+    // Pre-write active_vacancy context
+    const hhCtxDir = join(ctxDir, 'contexts', 'hh');
+    mkdirSync(hhCtxDir, { recursive: true });
+    writeFileSync(join(hhCtxDir, 'active_vacancy.json'), JSON.stringify({
+      value: { id: 'vac-001', title: 'Backend Developer (Node.js)', set_at: new Date().toISOString() },
+      updated_at: new Date().toISOString(),
+    }));
+    writeFileSync(join(hhCtxDir, 'ats_config.json'), JSON.stringify({
+      value: ATS,
+      updated_at: new Date().toISOString(),
+    }));
+  });
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    nock.cleanAll();
+    rmSync(ctxDir, { recursive: true, force: true });
+  });
+
+  it('no args → reads vacancy_id and ats_config from context, evaluates candidates', async () => {
+    // Two LLM mocks for neg-001 and neg-003
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true },
+      criteria: [{ name: 'Node.js', score: 3, evidence: '5 лет' }],
+      reasoning: 'Сильный.',
+    }));
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true },
+      criteria: [{ name: 'Node.js', score: 1, evidence: 'Go' }],
+      reasoning: 'Частичное.',
+    }));
+
+    const r = await tools().hh_batch_evaluate.handler({});
+
+    expect(r.evaluated).toBe(2);
+    expect(r.vacancy_title).toBe('Backend Developer (Node.js)');
+    // Both candidates present
+    const ids = r.results.map(c => c.negotiation_id);
+    expect(ids).toContain('neg-001');
+    expect(ids).toContain('neg-003');
+  });
+
+  it('no context → error about missing vacancy', async () => {
+    // Remove context files
+    rmSync(join(ctxDir, 'contexts', 'hh', 'active_vacancy.json'));
+    rmSync(join(ctxDir, 'contexts', 'hh', 'ats_config.json'));
+
+    const r = await tools().hh_batch_evaluate.handler({});
+    expect(r.error).toMatch(/вакансия/i);
+  });
+});
+
 // ── hh_send_message — history persistence ────────────────────────────────────
 
 describe('hh_send_message — history persistence', () => {
@@ -368,6 +433,59 @@ describe('hh_send_message — history persistence', () => {
     expect(history.messages).toHaveLength(1);
     expect(history.messages[0].role).toBe('employer');
     expect(history.messages[0].text).toBe(msg);
+  });
+});
+
+// ── hh_batch_evaluate ────────────────────────────────────────────────────────
+
+// ── hh_set_active_vacancy ─────────────────────────────────────────────────────
+
+describe('hh_set_active_vacancy', () => {
+  let origCwd;
+  let ctxDir;
+
+  beforeEach(() => {
+    origCwd = process.cwd();
+    ctxDir = mkdtempSync(join(tmpdir(), 'hh-sav-ctx-'));
+    process.chdir(ctxDir);
+  });
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    rmSync(ctxDir, { recursive: true, force: true });
+  });
+
+  it('no args → lists active vacancies from HH', async () => {
+    const r = await tools().hh_set_active_vacancy.handler({});
+    expect(r.vacancies).toBeDefined();
+    expect(Array.isArray(r.vacancies)).toBe(true);
+    expect(r.vacancies.length).toBeGreaterThanOrEqual(2);
+    const vac = r.vacancies.find(v => v.id === 'vac-001');
+    expect(vac).toBeTruthy();
+    expect(vac.name).toContain('Backend Developer');
+  });
+
+  it('with vacancy_id → fetches title, saves to context', async () => {
+    const r = await tools().hh_set_active_vacancy.handler({ vacancy_id: 'vac-001' });
+    expect(r.ok).toBe(true);
+    expect(r.active_vacancy.id).toBe('vac-001');
+    expect(r.active_vacancy.title).toContain('Backend Developer');
+
+    // Verify context file was written
+    const ctxFile = join(ctxDir, 'contexts', 'hh', 'active_vacancy.json');
+    const ctx = JSON.parse(require('fs').readFileSync(ctxFile, 'utf8'));
+    expect(ctx.value.id).toBe('vac-001');
+    expect(ctx.value.title).toContain('Backend Developer');
+    expect(typeof ctx.value.set_at).toBe('string');
+  });
+
+  it('nonexistent vacancy_id → still ok (best-effort title), saves vacancy_id as title', async () => {
+    // Handler uses best-effort: if fetch fails, title = vacancy_id (doesn't throw)
+    const r = await tools().hh_set_active_vacancy.handler({ vacancy_id: 'vac-999' });
+    expect(r.ok).toBe(true);
+    expect(r.active_vacancy.id).toBe('vac-999');
+    // title falls back to id when fetch fails
+    expect(r.active_vacancy.title).toBe('vac-999');
   });
 });
 
