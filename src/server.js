@@ -996,12 +996,42 @@ async function main() {
       const hasPriorContact = msgs.some(m => m.role === 'employer');
       const msgType = already_sent || hasPriorContact ? 'followup' : 'initial';
 
-      const baseSystem = `Ты — рекрутер в технической компании.
-Пиши первое сообщение кандидату на HeadHunter. Тон: профессиональный, уважительный, конкретный.
-Структура: 1) Приветствие с именем 2) 1-2 предложения что в резюме зацепило 3) Короткое описание роли 4) Конкретный вопрос для квалификации (самый важный пробел) 5) Призыв к действию.
-Длина: 4-6 предложений. Не используй шаблонные фразы. Пиши от первого лица.`;
+      // If resume_text from page is too short, fetch full resume from HH API
+      let fullResumeText = (resume_text || '').trim();
+      if (fullResumeText.length < 80 && msgType === 'initial') {
+        try {
+          const hhTokenFile = path.join(hhTokensBase, String(username), 'hh');
+          if (fs.existsSync(hhTokenFile)) {
+            const hhToken = JSON.parse(fs.readFileSync(hhTokenFile, 'utf8'));
+            const neg = await hhApiRequest('GET', `/negotiations/${negotiation_id}`, hhToken.access_token);
+            const r = neg.resume || {};
+            const lines = [];
+            if (r.title) lines.push(`Позиция: ${r.title}`);
+            if (r.total_experience?.months) {
+              const y = Math.floor(r.total_experience.months / 12);
+              lines.push(`Опыт: ${y} лет`);
+            }
+            if (r.area?.name) lines.push(`Локация: ${r.area.name}`);
+            if (r.experience?.length) {
+              lines.push('Опыт работы:');
+              for (const job of r.experience.slice(0, 4)) {
+                lines.push(`- ${job.company || ''}: ${job.position || ''}`);
+                if (job.description) lines.push(`  ${job.description.slice(0, 250)}`);
+              }
+            }
+            if (r.skill_set?.length) lines.push(`Навыки: ${r.skill_set.slice(0, 20).join(', ')}`);
+            if (neg.message) lines.push(`Сопроводительное: ${neg.message.slice(0, 400)}`);
+            if (lines.length > 0) fullResumeText = lines.join('\n');
+          }
+        } catch { /* use whatever we have */ }
+      }
+
+      const baseSystem = `Ты — рекрутер в технической компании. ВСЕГДА пиши сообщение, даже если данных мало.
+Тон: профессиональный, уважительный, конкретный. Пиши от первого лица на русском языке.
+Структура: 1) Приветствие с именем 2) что зацепило в резюме 3) короткое описание роли 4) вопрос-уточнение 5) призыв к действию.
+Длина: 4-6 предложений. Если резюме неполное — напиши общее приглашение с описанием позиции.`;
       const followupSystem = `Ты — рекрутер. Напиши короткий follow-up кандидату, который не ответил на первое сообщение.
-Тон: лёгкий, без давления. Упомяни, что писал ранее. 2-3 предложения максимум.`;
+Тон: лёгкий, без давления. 2-3 предложения. Пиши на русском языке.`;
 
       const systemPrompt = commStyle
         ? `${msgType === 'followup' ? followupSystem : baseSystem}\n\n## Стиль общения рекрутера\n${commStyle}`
@@ -1010,7 +1040,7 @@ async function main() {
       const firstName = (candidate_name || 'Кандидат').split(' ')[0];
       const userMsg = msgType === 'followup'
         ? `Кандидат ${firstName} не ответил. Напиши follow-up.`
-        : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resume_text || '(не указано)'}`;
+        : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}`;
 
       try {
         const message = await new Promise((resolve, reject) => {
