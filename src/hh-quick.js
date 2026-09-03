@@ -170,7 +170,24 @@ function hhReviewPage(userId) {
   return `📋 Страница ревью кандидатов:\n${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}`;
 }
 
+// "где промпт / конфиг / настройки ATS воронки"
+function hhWherePrompt(userId) {
+  const token = hhReviewToken(userId);
+  const tokenParam = token ? `&token=${token}` : '';
+  const editorUrl = `${hhBase()}/hh/ats-editor?username=${encodeURIComponent(userId)}${tokenParam}`;
+  return [
+    '📍 Где настройки воронки:\n',
+    '🎯 Критерии, пороги, этапы — визуальный редактор:',
+    editorUrl,
+    '',
+    '📝 Промпт оценки кандидата (в коде):',
+    '`src/mcp-skills/tools/90-hh.js` — функция `buildAtsPrompt()` (~строка 220)',
+    '',
+    'Скажи «открой ATS редактор» чтобы сразу перейти к редактору.',
+  ].join('\n');
+}
+
 // Export cache invalidation for tests
 function _clearCache() { _cache.clear(); }
 
-module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, _clearCache };
+module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, _clearCache };
