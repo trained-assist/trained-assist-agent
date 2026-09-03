@@ -2186,7 +2186,7 @@ let rendered = 0;
 
 function renderBatch(count) {
   const container = document.getElementById('cards-container');
-  const end = Math.min(rendered + count, CARDS_HTML.length);
+  const end = Math.min(rendered + (count || LAZY_BATCH), CARDS_HTML.length);
   const frag = document.createDocumentFragment();
   for (let j = rendered; j < end; j++) {
     const wrapper = document.createElement('div');
@@ -2197,17 +2197,14 @@ function renderBatch(count) {
   rendered = end;
   onCheck();
   if (rendered >= CARDS_HTML.length) lazyObserver.disconnect();
+  setTimeout(autoGenerate, 0);
 }
 
 const lazyObserver = new IntersectionObserver(entries => {
-  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) {
-    renderBatch(LAZY_BATCH);
-    setTimeout(autoGenerate, 0);
-  }
+  if (entries[0].isIntersecting && rendered < CARDS_HTML.length) renderBatch(LAZY_BATCH);
 }, { rootMargin: '1500px' });
 lazyObserver.observe(document.getElementById('sentinel'));
 renderBatch(FIRST_BATCH);
-setTimeout(autoGenerate, 0);
 
 function showToast(msg, isError) {
   const t = document.createElement('div');
