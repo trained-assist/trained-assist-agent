@@ -187,6 +187,24 @@ function hhWherePrompt(userId) {
   ].join('\n');
 }
 
+// "покажи правила ATS / критерии оценки"
+function hhShowAtsConfig(userId) {
+  const token = hhReviewToken(userId);
+  const tokenParam = token ? '&token=' + token : '';
+  const url = hhBase() + '/hh/ats-editor?username=' + encodeURIComponent(userId) + tokenParam;
+  // Try to read local ATS config and summarise it
+  try {
+    const { readHhContext: _rhc } = require('./hh-utils');
+    const workDir = require('path').join(require('os').homedir(), 'alesa-data', 'sessions', String(userId));
+    const config = readHhContext(workDir, 'hh', 'ats_config')?.value;
+    if (config?.vacancy_title) {
+      const stages = (config.stages || []).map(s => '  · ' + s).join('\n') || '  (этапы не настроены)';
+      return '🎯 Текущий ATS конфиг для вакансии «' + config.vacancy_title + '»:\n' + stages + '\n\nРедактор: ' + url;
+    }
+  } catch { /* ignore */ }
+  return '🎯 ATS конфиг:\n' + url;
+}
+
 // "обнови стиль общения" — link to style update page
 function hhStylePage(userId) {
   const token = hhReviewToken(userId);
