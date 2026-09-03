@@ -854,7 +854,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -1200,6 +1200,70 @@ async function main() {
       const failed = results.filter(r => !r.ok).length;
       console.log(`[hh/reject] user=${username} total=${negotiation_ids.length} failed=${failed}`);
       return json(res, 200, { ok: true, results });
+    }
+
+    // ── ATS Template Editor ────────────────────────────────────────────────────
+
+    // GET /hh/ats-editor?username=X — serve the ATS Template Editor HTML page
+    if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
+      const username = url.searchParams.get('username') || '';
+      const { atsEditorHtml } = require('./hh-ats-editor-html.js');
+      const contextBase = process.env.CONTEXT_DIR || path.join(process.cwd(), 'contexts');
+      const configFile = path.join(contextBase, 'hh', 'ats_config.json');
+      const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
+      let currentConfig = null;
+      let currentStages = null;
+      try {
+        if (fs.existsSync(configFile)) currentConfig = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
+        if (fs.existsSync(stagesFile)) currentStages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
+      } catch {}
+      const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      const html = atsEditorHtml(currentConfig, currentStages, {
+        callbackBase,
+        username: username || secrets.HH_DEFAULT_USER || '',
+        agentSecret: secrets.AGENT_SECRET || '',
+      });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(html);
+    }
+
+    // GET /hh/ats-config?username=X — read current ATS config from context
+    if (req.method === 'GET' && url.pathname === '/hh/ats-config') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const contextBase = process.env.CONTEXT_DIR || path.join(process.cwd(), 'contexts');
+      const configFile = path.join(contextBase, 'hh', 'ats_config.json');
+      const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
+      let config = null;
+      let stages = null;
+      try {
+        if (fs.existsSync(configFile)) config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
+        if (fs.existsSync(stagesFile)) stages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
+      } catch {}
+      return json(res, 200, { ok: true, config, stages });
+    }
+
+    // POST /hh/ats-config — save ATS config + stages to context
+    if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { config, stages } = body || {};
+      if (!config || typeof config !== 'object') return json(res, 400, { error: 'config required' });
+      const contextBase = process.env.CONTEXT_DIR || path.join(process.cwd(), 'contexts');
+      const hhContextDir = path.join(contextBase, 'hh');
+      fs.mkdirSync(hhContextDir, { recursive: true });
+      const now = new Date().toISOString();
+      fs.writeFileSync(
+        path.join(hhContextDir, 'ats_config.json'),
+        JSON.stringify({ value: config, updated_at: now }, null, 2),
+      );
+      if (Array.isArray(stages)) {
+        fs.writeFileSync(
+          path.join(hhContextDir, 'ats_stages.json'),
+          JSON.stringify({ value: stages, updated_at: now }, null, 2),
+        );
+      }
+      console.log(`[hh/ats-config] saved vacancy="${config.vacancy_title}" stages=${stages?.length || 0}`);
+      return json(res, 200, { ok: true });
     }
 
     json(res, 404, { error: 'not found' });
