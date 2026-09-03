@@ -554,3 +554,130 @@ describe('hh_batch_evaluate', () => {
     expect(r.skipped).toBe(2);
   });
 });
+
+// ── hh_draft_review_page — HTML generation ────────────────────────────────────
+
+describe('hh_draft_review_page', () => {
+  it('generates HTML file with callback URL embedded', async () => {
+    const { existsSync, readFileSync, mkdtempSync: tmpDir, rmSync: rm } = await import('fs');
+    const { join: pathJoin } = await import('path');
+    const { tmpdir: td } = await import('os');
+
+    const tmpData = tmpDir(pathJoin(td(), 'hh-review-out-'));
+
+    const savedEnv = {
+      AGENT_PUBLIC_URL: process.env.AGENT_PUBLIC_URL,
+      AGENT_SECRET: process.env.AGENT_SECRET,
+    };
+    process.env.AGENT_PUBLIC_URL = 'http://127.0.0.1:13579';
+    process.env.AGENT_SECRET = 'test-secret-xyz';
+
+    try {
+      // Use all-ОТКЛОНИТЬ candidates so no LLM calls are made
+      const candidates = [
+        {
+          negotiation_id: 'neg-001',
+          name: 'Алексей Иванов',
+          score: 8.5,
+          verdict: 'ОТКЛОНИТЬ',
+          reasoning: 'Не подходит',
+          matched: [],
+          gaps: ['Node.js'],
+          days_since_activity: 2,
+          history_messages: [],
+        },
+        {
+          negotiation_id: 'neg-002',
+          name: 'Мария Петрова',
+          score: 3.0,
+          verdict: 'ОТКЛОНИТЬ',
+          reasoning: 'Нет опыта',
+          matched: [],
+          gaps: ['backend'],
+          days_since_activity: 20,
+          history_messages: [],
+        },
+      ];
+
+      const outFile = pathJoin(tmpData, 'test-review.html');
+      const r = await tools().hh_draft_review_page.handler({
+        candidates,
+        vacancy_name: 'Backend Dev Test',
+        output_path: outFile,
+      });
+
+      expect(r.ok).toBe(true);
+      expect(existsSync(outFile)).toBe(true);
+
+      const html = readFileSync(outFile, 'utf8');
+
+      // Callback URL must be embedded in page JS
+      expect(html).toContain("const CALLBACK_BASE = 'http://127.0.0.1:13579';");
+      expect(html).toContain(`const HH_SECRET = 'test-secret-xyz';`);
+      expect(html).toContain(`const HH_USER = '${TEST_UID}';`);
+
+      // Live badge shown
+      expect(html).toContain('conn-ok');
+      expect(html).toContain('Live');
+
+      // Candidate names in HTML
+      expect(html).toContain('Алексей Иванов');
+      expect(html).toContain('Мария Петрова');
+
+      // Reject checkboxes present (no send textarea for ОТКЛОНИТЬ)
+      expect(html).toContain('reject-cb');
+      expect(html).not.toContain('draft_message');
+
+      // Footer has both send and reject buttons
+      expect(html).toContain('rejectAllBtn');
+      expect(html).toContain('sendAllBtn');
+
+      // Fetch endpoints wired correctly
+      expect(html).toContain("hhAction('/hh/send'");
+      expect(html).toContain("hhAction('/hh/reject'");
+    } finally {
+      process.env.AGENT_PUBLIC_URL = savedEnv.AGENT_PUBLIC_URL;
+      process.env.AGENT_SECRET = savedEnv.AGENT_SECRET;
+      try { rm(tmpData, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  it('offline mode: no AGENT_PUBLIC_URL → CALLBACK_BASE is localhost fallback', async () => {
+    const { existsSync, readFileSync, mkdtempSync: tmpDir, rmSync: rm } = await import('fs');
+    const { join: pathJoin } = await import('path');
+    const { tmpdir: td } = await import('os');
+
+    const tmpData = tmpDir(pathJoin(td(), 'hh-review-offline-'));
+    const savedUrl = process.env.AGENT_PUBLIC_URL;
+    delete process.env.AGENT_PUBLIC_URL;
+
+    try {
+      const candidates = [{
+        negotiation_id: 'neg-003',
+        name: 'Дмитрий Сидоров',
+        score: 6.0,
+        verdict: 'ОТКЛОНИТЬ',
+        reasoning: 'Тест',
+        matched: [],
+        gaps: [],
+        days_since_activity: 5,
+        history_messages: [],
+      }];
+
+      const outFile = pathJoin(tmpData, 'offline-review.html');
+      const r = await tools().hh_draft_review_page.handler({
+        candidates,
+        vacancy_name: 'Offline Test',
+        output_path: outFile,
+      });
+
+      expect(r.ok).toBe(true);
+      const html = readFileSync(outFile, 'utf8');
+      // Should use localhost:3001 as fallback
+      expect(html).toContain('http://localhost:3001');
+    } finally {
+      if (savedUrl) process.env.AGENT_PUBLIC_URL = savedUrl;
+      try { rm(tmpData, { recursive: true, force: true }); } catch {}
+    }
+  });
+});
