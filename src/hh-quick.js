@@ -146,7 +146,13 @@ function hhAtsEditor(userId) {
   return `🎯 Открой ATS-редактор в браузере:\n${base}/hh/ats-editor?username=${encodeURIComponent(userId)}`;
 }
 
+// "покажи страницу ревью кандидатов" — no API call
+function hhReviewPage(userId) {
+  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+  return `📋 Страница ревью кандидатов:\n${base}/hh/review?username=${encodeURIComponent(userId)}`;
+}
+
 // Export cache invalidation for tests
 function _clearCache() { _cache.clear(); }
 
-module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, _clearCache };
+module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, _clearCache };
