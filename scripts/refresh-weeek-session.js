@@ -5,8 +5,9 @@
 //
 // Flow:
 //   1. Capture cookies for app.weeek.net from the running Chrome via CDP
-//   2. Update the Cloudflare Worker secret via CF REST API
-//   3. Send Telegram alert on failure (or success with --verbose)
+//   2. If CDP fails → headless Playwright fallback using weeek-login credentials
+//   3. Update the Cloudflare Worker secret via CF REST API
+//   4. Send Telegram alert on failure (or success with --verbose)
 //
 // Env vars (loaded from GCP secrets by secrets.js or set manually):
 //   TELEGRAM_BOT_TOKEN  — bot token for alert messages
@@ -15,6 +16,7 @@
 //   CF_WORKER_NAME      — Worker script name (default: flexi-telegram-deal-bot)
 //   OPERATOR_CHAT_ID    — Telegram chat ID to send alerts (default: 1714048)
 //   BROWSER_SESSION_URL — noVNC URL shown in failure alerts
+//   WEEEK_SESSION_PROFILES — comma-separated profiles to save session to (default: flexi)
 //
 // Exit codes: 0 = success, 1 = failure (alert sent)
 
@@ -66,6 +68,108 @@ async function updateCfSecret(token, accountId, workerName, secretName, secretVa
   return data;
 }
 
+// ── Headless Playwright fallback ──────────────────────────────────────────────
+
+// Returns a semicolon-separated cookie string for app.weeek.net, or throws.
+async function captureViaPlaywright(profiles) {
+  // Find credentials in any of the profiles
+  let creds = null;
+  let credsProfile = null;
+  for (const profile of profiles) {
+    const loginFile = path.join(os.homedir(), 'agent-tokens', profile, 'weeek-login');
+    try {
+      const raw = JSON.parse(fs.readFileSync(loginFile, 'utf8'));
+      if (raw.email && raw.password) { creds = raw; credsProfile = profile; break; }
+    } catch { /* no creds for this profile */ }
+  }
+  if (!creds) {
+    throw new Error(`weeek-login не найден ни в одном профиле (${profiles.join(', ')}) — добавьте логин/пароль через /connect/weeek`);
+  }
+  console.log('[refresh-weeek/pw] Using credentials from profile=%s', credsProfile);
+
+  let browser;
+  try {
+    const { chromium } = require('playwright');
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+  } catch (e) {
+    throw new Error(`Не удалось запустить Playwright: ${e.message}`);
+  }
+
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      locale: 'ru-RU',
+    });
+    const page = await context.newPage();
+
+    console.log('[refresh-weeek/pw] Navigating to app.weeek.net/login');
+    await page.goto('https://app.weeek.net/login', { waitUntil: 'networkidle', timeout: 30000 });
+
+    // Fill email
+    const emailInput = page.locator('input[type="email"], input[name="email"], input[placeholder*="mail" i], input[placeholder*="логин" i]').first();
+    await emailInput.waitFor({ state: 'visible', timeout: 10000 });
+    await emailInput.fill(creds.email);
+    console.log('[refresh-weeek/pw] Email filled');
+
+    // Fill password — may require clicking Next first on some SPAs
+    const pwInput = page.locator('input[type="password"]').first();
+    const pwVisible = await pwInput.isVisible({ timeout: 2000 }).catch(() => false);
+    if (!pwVisible) {
+      // Click submit/next to reveal password field
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button')).find(b =>
+          /далее|next|продолжить|continue/i.test(b.textContent) || b.type === 'submit'
+        );
+        if (btn) btn.click();
+      });
+      await pwInput.waitFor({ state: 'visible', timeout: 8000 });
+    }
+    await pwInput.fill(creds.password);
+    console.log('[refresh-weeek/pw] Password filled, submitting…');
+
+    // Submit
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b =>
+        b.offsetParent !== null && (/войти|sign.?in|вход|login|enter/i.test(b.textContent) || b.type === 'submit')
+      );
+      if (btn) btn.click();
+    });
+
+    // Wait for successful auth — URL leaves /login or /auth, or app shell loads
+    await Promise.race([
+      page.waitForURL(u => !/login|auth/.test(u), { timeout: 30000 }),
+      page.waitForURL(/app\.weeek\.net\/(w|dashboard|tasks|projects)/, { timeout: 30000 }),
+    ]).catch(() => {});
+
+    const finalUrl = page.url();
+    if (/login|auth/.test(finalUrl)) {
+      // Snapshot for debugging
+      await page.screenshot({ path: `/tmp/weeek-login-fail-${Date.now()}.png` }).catch(() => {});
+      const errText = await page.evaluate(() =>
+        (document.querySelector('[class*="error"], [class*="alert"], .notification') || {}).textContent || ''
+      ).catch(() => '');
+      throw new Error(`Авторизация не прошла (URL: ${finalUrl}). ${errText.trim().slice(0, 150)}`);
+    }
+    console.log('[refresh-weeek/pw] Login success, url=%s', finalUrl);
+
+    // Extract cookies for app.weeek.net
+    const cookies = await context.cookies('https://app.weeek.net');
+    if (!cookies.length) throw new Error('Куки для app.weeek.net не найдены после входа');
+
+    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    console.log(`[refresh-weeek/pw] Captured ${cookies.length} cookies`);
+
+    await browser.close();
+    return cookieStr;
+  } catch (e) {
+    await browser.close().catch(() => {});
+    throw e;
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -84,9 +188,12 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 1: Capture cookies from Chrome
+  const LOCAL_SESSION_PROFILES = (process.env.WEEEK_SESSION_PROFILES || 'flexi').split(',').map(s => s.trim()).filter(Boolean);
+
+  // Step 1: Capture cookies — try Chrome CDP first, fall back to headless Playwright
   console.log('[refresh-weeek] Capturing app.weeek.net cookies via CDP…');
   let cookieStr;
+  let captureMethod = 'cdp';
   try {
     execSync(`node "${CAPTURE_SCRIPT}" app.weeek.net "${TMP_COOKIE_FILE}"`, {
       timeout: 20000,
@@ -94,32 +201,39 @@ async function main() {
     });
     cookieStr = fs.readFileSync(TMP_COOKIE_FILE, 'utf8').trim();
     if (!cookieStr) throw new Error('Empty cookie string after capture');
-    console.log(`[refresh-weeek] Captured ${cookieStr.split(';').length} cookies`);
-
-    // Save to agent-tokens for profiles that need L2 Weeek session locally
-    const LOCAL_SESSION_PROFILES = (process.env.WEEEK_SESSION_PROFILES || 'flexi').split(',').map(s => s.trim()).filter(Boolean);
-    for (const profile of LOCAL_SESSION_PROFILES) {
-      const tokenDir = path.join(os.homedir(), 'agent-tokens', profile);
-      fs.mkdirSync(tokenDir, { recursive: true });
-      fs.writeFileSync(path.join(tokenDir, 'weeek-session'), cookieStr, 'utf8');
-      console.log(`[refresh-weeek] Saved session to ~/agent-tokens/${profile}/weeek-session`);
+    console.log(`[refresh-weeek] CDP: captured ${cookieStr.split(';').length} cookies`);
+  } catch (cdpErr) {
+    console.warn('[refresh-weeek] CDP capture failed (%s) — trying headless Playwright fallback', cdpErr.message.slice(0, 100));
+    try {
+      cookieStr = await captureViaPlaywright(LOCAL_SESSION_PROFILES);
+      captureMethod = 'playwright';
+      console.log('[refresh-weeek] Playwright fallback succeeded');
+    } catch (pwErr) {
+      console.error('[refresh-weeek] Both methods failed. CDP: %s | PW: %s', cdpErr.message.slice(0, 100), pwErr.message.slice(0, 150));
+      await tgSend(botToken, OPERATOR_CHAT,
+        '⚠️ <b>Weeek сессия: авторефреш не удался</b>\n\n' +
+        'Не удалось захватить куки ни через Chrome CDP, ни через headless Playwright.\n\n' +
+        '<b>CDP:</b> ' + cdpErr.message.slice(0, 150) + '\n' +
+        '<b>Playwright:</b> ' + pwErr.message.slice(0, 150) + '\n\n' +
+        '<b>Как починить:</b>\n' +
+        `1. Открой браузер на VM: <a href="${BROWSER_URL}">${BROWSER_URL}</a>\n` +
+        '2. Зайди на app.weeek.net и авторизуйся\n' +
+        '3. Открой расширение Cloud Auth Bridge → Передать токен\n' +
+        '   (или обнови логин/пароль через /connect/weeek)\n\n' +
+        '⏰ Следующая попытка авторефреша — через 6ч'
+      );
+      process.exit(1);
     }
-  } catch (e) {
-    console.error('[refresh-weeek] Cookie capture failed:', e.message);
-    await tgSend(botToken, OPERATOR_CHAT,
-      '⚠️ <b>Weeek сессия: авторефреш не удался</b>\n\n' +
-      'Не удалось захватить куки из браузера на VM.\n\n' +
-      '<b>Причина:</b> ' + e.message.slice(0, 200) + '\n\n' +
-      '<b>Как починить:</b>\n' +
-      `1. Открой браузер на VM: <a href="${BROWSER_URL}">${BROWSER_URL}</a>\n` +
-      '2. Зайди на app.weeek.net и авторизуйся\n' +
-      '3. Открой расширение Cloud Auth Bridge → Передать токен\n' +
-      '   (или напиши боту <code>/refresh_weeek</code> после входа)\n\n' +
-      '⏰ Следующая попытка авторефреша — через 6ч'
-    );
-    process.exit(1);
   } finally {
     try { fs.unlinkSync(TMP_COOKIE_FILE); } catch {}
+  }
+
+  // Save to agent-tokens for profiles that need L2 Weeek session locally
+  for (const profile of LOCAL_SESSION_PROFILES) {
+    const tokenDir = path.join(os.homedir(), 'agent-tokens', profile);
+    fs.mkdirSync(tokenDir, { recursive: true });
+    fs.writeFileSync(path.join(tokenDir, 'weeek-session'), cookieStr, 'utf8');
+    console.log(`[refresh-weeek] Saved session to ~/agent-tokens/${profile}/weeek-session (via ${captureMethod})`);
   }
 
   // Step 2: Update Cloudflare secret
