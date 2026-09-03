@@ -166,27 +166,44 @@ async function fetchAllHhNegotiations(vacancyId, accessToken) {
   return results.flat();
 }
 
-function hhCacheFile(dataDir, username) {
-  return path.join(dataDir, 'hh', String(username), 'negotiations-cache.json');
+function hhSnapshotFile(dataDir, username) {
+  return path.join(dataDir, 'hh', String(username), 'negotiations.json');
 }
 
-async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessToken) {
-  const cacheFile = hhCacheFile(dataDir, username);
-  const CACHE_TTL_MS = 15 * 60 * 1000;
+function writeHhSnapshot(snapshotFile, data) {
   try {
-    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    const ageMs = Date.now() - (cached.synced_at || 0);
-    if (ageMs < CACHE_TTL_MS && String(cached.vacancy_id) === String(vacancyId)) {
-      return { negotiations: cached.negotiations, synced_at: cached.synced_at };
-    }
-  } catch {}
-  const negotiations = await fetchAllHhNegotiations(vacancyId, accessToken);
-  const synced_at = Date.now();
-  try {
-    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-    fs.writeFileSync(cacheFile, JSON.stringify({ synced_at, vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
-  } catch (e) { console.error('[hh-cache] write error:', e.message); }
-  return { negotiations, synced_at };
+    fs.mkdirSync(path.dirname(snapshotFile), { recursive: true });
+    fs.writeFileSync(snapshotFile, JSON.stringify(data), { mode: 0o600 });
+  } catch (e) { console.error('[hh-snapshot] write error:', e.message); }
+}
+
+// Always serves existing snapshot instantly; fetches fresh in background if > 15 min stale.
+// Only blocks on first open (no snapshot yet) or wrong vacancy.
+async function getHhNegotiations(dataDir, username, vacancyId, accessToken) {
+  const snapshotFile = hhSnapshotFile(dataDir, username);
+  const STALE_MS = 15 * 60 * 1000;
+
+  let snapshot = null;
+  try { snapshot = JSON.parse(fs.readFileSync(snapshotFile, 'utf8')); } catch {}
+
+  const wrongVacancy = snapshot && String(snapshot.vacancy_id) !== String(vacancyId);
+  if (!snapshot || wrongVacancy) {
+    // First open or switched vacancy — fetch synchronously
+    const negotiations = await fetchAllHhNegotiations(vacancyId, accessToken);
+    const synced_at = Date.now();
+    writeHhSnapshot(snapshotFile, { synced_at, vacancy_id: String(vacancyId), negotiations });
+    return { negotiations, synced_at };
+  }
+
+  // Have data — serve immediately, refresh in background if stale
+  const ageMs = Date.now() - (snapshot.synced_at || 0);
+  if (ageMs > STALE_MS) {
+    fetchAllHhNegotiations(vacancyId, accessToken)
+      .then(negotiations => writeHhSnapshot(snapshotFile, { synced_at: Date.now(), vacancy_id: String(vacancyId), negotiations }))
+      .catch(e => console.error('[hh-snapshot] bg refresh error:', e.message));
+  }
+
+  return { negotiations: snapshot.negotiations, synced_at: snapshot.synced_at };
 }
 
 // Background HH scoring: fetch negotiations + score unscored candidates for all users
@@ -1032,7 +1049,7 @@ async function main() {
 
       let negotiations = [], syncedAt = null;
       try {
-        const result = await getHhNegotiationsWithCache(dataDir, username, vacancy.id, tokenData.access_token);
+        const result = await getHhNegotiations(dataDir, username, vacancy.id, tokenData.access_token);
         negotiations = result.negotiations;
         syncedAt = result.synced_at;
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
@@ -1469,10 +1486,8 @@ function show(id, type, msg) {
       const syncDataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
       try {
         const negotiations = await fetchAllHhNegotiations(syncVacancyId, syncTokenData.access_token);
-        const cacheFile = hhCacheFile(syncDataDir, syncUser);
-        fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
         const synced_at = Date.now();
-        fs.writeFileSync(cacheFile, JSON.stringify({ synced_at, vacancy_id: String(syncVacancyId), negotiations }), { mode: 0o600 });
+        writeHhSnapshot(hhSnapshotFile(syncDataDir, syncUser), { synced_at, vacancy_id: String(syncVacancyId), negotiations });
         console.log(`[hh/sync] user=${syncUser} vacancy=${syncVacancyId} count=${negotiations.length}`);
         return json(res, 200, { ok: true, count: negotiations.length, synced_at });
       } catch (e) {
