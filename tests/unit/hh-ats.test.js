@@ -68,9 +68,10 @@ beforeAll(async () => {
   await mockHh.start();
 
   // Set env vars before first module load
-  process.env.USER_ID           = TEST_UID;
-  process.env.AGENT_TOKENS_DIR  = tokensDir;
-  process.env.HH_API_BASE_URL   = mockHh.baseUrl;
+  process.env.USER_ID            = TEST_UID;
+  process.env.AGENT_TOKENS_DIR   = tokensDir;
+  process.env.AGENT_DATA_DIR     = tokensDir;   // isolate history writes to temp dir
+  process.env.HH_API_BASE_URL    = mockHh.baseUrl;
   process.env.OPENROUTER_API_KEY = 'test-or-key';
 
   // Block all real network except 127.0.0.1 (mock HH server)
@@ -81,6 +82,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.USER_ID;
   delete process.env.AGENT_TOKENS_DIR;
+  delete process.env.AGENT_DATA_DIR;
   delete process.env.HH_API_BASE_URL;
   delete process.env.OPENROUTER_API_KEY;
 
