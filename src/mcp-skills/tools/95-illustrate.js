@@ -125,18 +125,28 @@ async function generateOpenAI(prompt) {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
-      model: 'dall-e-3',
+      model: 'gpt-image-1',
       prompt,
       n: 1,
       size: '1024x1024',
-      quality: 'standard',
-      response_format: 'url',
+      quality: 'high',
     }),
   });
+  if (res.status === 429 || res.status === 402 ||
+      res.data?.error?.code === 'insufficient_quota' ||
+      res.data?.error?.type === 'insufficient_quota') {
+    throw new Error('BILLING_LIMIT: На аккаунте OpenAI закончились деньги. Попробуй другой провайдер или пополни баланс на platform.openai.com');
+  }
   if (res.status !== 200) throw new Error(`OpenAI error ${res.status}: ${JSON.stringify(res.data)}`);
-  const url = res.data?.data?.[0]?.url;
-  if (!url) throw new Error('No URL in OpenAI response');
-  return { url, provider: 'DALL-E 3 (OpenAI)', model: 'dall-e-3' };
+  // gpt-image-1 returns base64; save to agent-data/images/ and serve via /images/ route
+  const b64 = res.data?.data?.[0]?.b64_json;
+  if (!b64) throw new Error('No image data in OpenAI response');
+  const imgDir = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'images');
+  fs.mkdirSync(imgDir, { recursive: true });
+  const fname = `gptimage_${Date.now()}.png`;
+  fs.writeFileSync(path.join(imgDir, fname), Buffer.from(b64, 'base64'));
+  const publicBase = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io/agent').replace(/\/$/, '');
+  return { url: `${publicBase}/images/${fname}`, provider: 'GPT-Image-1 (OpenAI)', model: 'gpt-image-1' };
 }
 
 async function generateFal(prompt) {
