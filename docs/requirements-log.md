@@ -30,6 +30,19 @@
 | ✅ реализовано | **WEEEK_SESSION_PROFILES** | `flexi,flexi-consult` в systemd-сервисе — авторефреш каждые ~6ч |
 | 🔵 планируется | **Расширенное тестирование Weeek** | Тест-флоу на базе текстов SD1: создание задач через natural language ("на вторник", "на завтра"), отправка визиток, голосовых. Тестировать разные формулировки, пытаться сломать систему. Отложено до стабилизации базового флоу. |
 
+## Illustrate skill (медицинские иллюстрации)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | **95-illustrate.js** (PR #207, #217, #224) | Генерация иллюстраций: Ideogram, fal/FLUX, OpenAI gpt-image-1, Recraft. 4 стиля (medical/flat/anatomical/infographic). Wizard UX: preview промпта → подтверждение → генерация. Язык по умолчанию — русский. |
+| ✅ реализовано | **labels_mode** (PR #224) | Три режима: `embedded` (подписи в картинке), `caption` (чистая картинка + текст ниже), `none` (без подписей). Сохраняется в историю для рефайна. |
+| ✅ реализовано | **96-label.js + gpt-image-1** (PR #226, pending merge) | `image_label` скилл: накладывает кириллические подписи через sharp+SVG. AUTO-режим: Claude Vision (Haiku) определяет координаты. MANUAL: x/y вручную. gpt-image-1 вместо dall-e-3, b64→файл→публичный URL. `/images/` роут до auth gate. |
+| 🟡 в работе | **Provider приоритет и fallback** | Текущий порядок: openai→fal→ideogram→recraft. FAL_KEY без баланса → нужно ставить ideogram первым. Добавить auto-fallback внутри тула (не через Claude). |
+| 🟡 в работе | **Промпт для Ideogram** | Ideogram плохо понимает абстрактные русскоязычные запросы ("анатомия ногтя" → сгенерировал руку в тарелке). Нужно: Claude должен всегда составлять точный английский промпт для Ideogram. Добавить в system prompt тула указание писать описание по-английски. |
+| 🔵 планируется | **Ideogram Cyrillic limitation** | Ideogram не поддерживает кирилицу в embedded режиме. Рекомендуемый workflow: generate с `labels_mode: none` → `image_label` скилл для наложения кириллических подписей. Нужно добавить это в описание тула. |
+| 🔵 планируется | **Баланс провайдеров** | FAL_KEY — нет денег, нужно пополнить. OPENAI_API_KEY — не добавлен в secrets ещё. RECRAFT_API_KEY — не добавлен. Добавить OpenAI ключ после регистрации. |
+| 🔵 планируется | **Тест полного workflow** | Тема: анатомия ногтя для школы подологии Ефимовой. 1) Ideogram: `labels_mode=none`, точный английский промпт "medical cross-section fingernail anatomy diagram, lateral view, nail plate, nail bed, matrix, cuticle, lunula, hyponychium, white background, no text, Netter style". 2) `image_label` AUTO: structures=["Ногтевая пластина","Ногтевое ложе","Матрикс","Кутикула","Луночка","Гипонихий"]. |
+
 ## MCP Skills
 
 | Статус | Требование | Описание |
