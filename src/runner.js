@@ -138,6 +138,10 @@ function getQuickAnswer(task, userId, workDir) {
   // Vacancy creation flow — intercept before other intents so collecting mode takes priority
   if (workDir) {
     const vs = readVacancyState(workDir);
+    if (vs?.status === 'generating') {
+      // Already running an Anthropic API call — block new messages to prevent concurrent generation
+      return '⏳ Генерирую вакансию, подожди немного...';
+    }
     if (vs?.status === 'collecting') {
       // Cancel — let user escape collecting mode
       if (VACANCY_CANCEL_INTENT.test(task)) {
@@ -158,9 +162,13 @@ function getQuickAnswer(task, userId, workDir) {
     }
   }
 
-  // New job post command — start collecting mode
+  // New job post command — start collecting mode (guard against overwriting live drafts)
   if (NEW_JOB_INTENT.test(task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
+    const existingVs = readVacancyState(workDir);
+    if (existingVs && !['cancelled', 'hh_draft'].includes(existingVs.status)) {
+      return `⚠️ Уже есть активная вакансия (статус: ${existingVs.status}). Чтобы отменить её и начать новую — скажи «отмени создание вакансии».`;
+    }
     initVacancyState(workDir);
     return [
       '📋 Создаём новую вакансию!',
@@ -827,7 +835,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     ...(fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
     '--print', prompt,
   ], {
-    cwd: user.workDir,
+    cwd: user.cwd || user.workDir,
     env: {
       ...cleanEnv,
       ...userTokens,
