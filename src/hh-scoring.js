@@ -9,6 +9,21 @@ const path = require('path');
 const os = require('os');
 
 const FAST_MODEL = 'deepseek/deepseek-v4-flash-0731';
+const FALLBACK_MODEL = 'google/gemini-flash-2.0';
+
+const CHINESE_RE = /[一-鿿㐀-䶿豈-﫿぀-ヿ]/;
+
+function hasGarbage(text) {
+  if (!text) return false;
+  return CHINESE_RE.test(text) || text.includes('�');
+}
+
+function isCleanResult(llmResult) {
+  if (hasGarbage(llmResult.reasoning)) return false;
+  if ((llmResult.strong || []).some(s => hasGarbage(s))) return false;
+  if ((llmResult.missing || []).some(m => hasGarbage(m))) return false;
+  return true;
+}
 
 function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
   return new Promise((resolve, reject) => {
@@ -102,13 +117,28 @@ function computeScore(llmResult, config) {
 
 async function evaluateCandidate(candidateText, atsConfig, apiKey) {
   const systemPrompt = buildAtsPrompt(atsConfig);
-  const content = await llmCall(apiKey, FAST_MODEL, [
+  const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Оцени кандидата:\n\n${candidateText}` },
-  ], 2000, 0.1);
+  ];
 
-  const llmResult = parseLlmJson(content);
-  return computeScore(llmResult, atsConfig);
+  const models = [FAST_MODEL, FAST_MODEL, FALLBACK_MODEL];
+  for (let attempt = 0; attempt < models.length; attempt++) {
+    const model = models[attempt];
+    try {
+      const content = await llmCall(apiKey, model, messages, 2000, 0.1);
+      const llmResult = parseLlmJson(content);
+      if (!isCleanResult(llmResult)) {
+        console.warn(`[hh-scoring] attempt ${attempt + 1} (${model}) returned garbage text, retrying...`);
+        continue;
+      }
+      return computeScore(llmResult, atsConfig);
+    } catch (e) {
+      if (attempt === models.length - 1) throw e;
+      console.warn(`[hh-scoring] attempt ${attempt + 1} failed: ${e.message}, retrying...`);
+    }
+  }
+  throw new Error('LLM returned garbage text after all attempts');
 }
 
 // Read ATS config from user's session workDir context
@@ -275,10 +305,18 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
           ? `Напиши вежливый отказ кандидату ${firstName}.`
           : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resumeText}`;
 
-        const message = await llmCall(apiKey, FAST_MODEL, [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMsg },
-        ], 600, 0.7);
+        let message;
+        const draftModels = [FAST_MODEL, FALLBACK_MODEL];
+        for (let attempt = 0; attempt < draftModels.length; attempt++) {
+          message = await llmCall(apiKey, draftModels[attempt], [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMsg },
+          ], 600, 0.7);
+          if (!hasGarbage(message)) break;
+          console.warn(`[hh-drafts] attempt ${attempt + 1} (${draftModels[attempt]}) returned garbage, retrying...`);
+          message = null;
+        }
+        if (!message) throw new Error('draft generation returned garbage after all attempts');
 
         history.ats_result.draft_message = message.trim();
         saveCandidateHistory(username, neg.id, history);
