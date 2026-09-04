@@ -53,6 +53,7 @@ const HH_REVIEW_PAGE_INTENT = /страниц.{0,20}ревью|ревью.{0,20}
 const HH_WHERE_PROMPT_INTENT = /где.{0,30}(?:промпт|конфиг|настройк|критери).{0,30}(?:ats|воронк|оценк|кандидат)|(?:промпт|конфиг|настройки).{0,30}(?:ats|воронк|оценк|кандидат)|как.{0,30}(?:посмотреть|правит|редактиров|изменить).{0,50}(?:промпт|конфиг|критери|воронк|оценк)/i;
 const HH_SHOW_ATS_CONFIG_INTENT = /(?:покажи|посмотр|какие|что за|дай|вывед).{0,30}(?:правила|критери|оценк|ats|конфиг|настройк).{0,30}(?:кандидат|воронк|оценк|скрининг|ats)|(?:правила|критери|настройки).{0,20}(?:для|по).{0,10}(?:кандидат|оценк|скрининг)|ats.{0,15}правила|что.{0,15}у меня.{0,30}(?:правила|критери|оценк|ats)/i;
 const HH_STYLE_INTENT        = /(?:обнови|загрузи|обновить|загрузить|настрой|поменяй|задай|update).{0,30}стиль|стиль.{0,30}(?:общения|переписки|сообщений|рекрут)|communication.{0,15}style|update.{0,15}style/i;
+const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -111,6 +112,7 @@ function getQuickAnswer(task, userId, workDir) {
       '',
       '📁 Работа с файлами, кодом, данными',
       '🔗 Интеграции: GitHub, Weeek, Налог.ру, Tilda, GetCourse, Google Drive',
+      '🎨 Иллюстрации — генерирую картинки по описанию (DALL-E 3, FLUX, Ideogram, Recraft)',
       '🏢 INN Enrichment — поиск ИНН/ОГРН/директоров/выручки по списку компаний',
       '🎪 Выставки — собрать участников/экспонентов по URL сайта → CSV',
       '🌐 Браузер — вхожу на сайты и выполняю действия',
@@ -276,6 +278,11 @@ function getQuickAnswer(task, userId, workDir) {
       return 'Google Drive не настроен. Напиши «подключи Google Drive» — помогу настроить за пару минут.';
     }
     return null; // share intent without config — let Claude call gdrive_setup automatically
+  }
+
+  // Capability question about illustration generation
+  if (ILLUSTRATE_CAPABILITY_INTENT.test(task)) {
+    return 'Да, умею генерировать иллюстрации.\n\nПросто опиши что нарисовать — голосом или текстом. Например:\n• «нарисуй как работают потовые железы в коже» \n• «схема слоёв эпидермиса в разрезе»\n• «инфографика про уход за кожей»\n\nСтили: медицинская схема, flat design, детальная анатомия, инфографика.\n\nПровайдеры: DALL-E 3, FLUX, Ideogram, Recraft — могу попробовать несколько вариантов.\n\nПосле каждой картинки можешь попросить изменить детали: «темнее», «добавь подписи», «другой стиль».';
   }
 
   // Capability question about exhibition participants — check before INN (expo+INN combo questions → expo answer)
@@ -685,6 +692,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       ...cleanEnv,
       ...userTokens,
       AGENT_USER_ID: String(user.username),
+      AGENT_CHAT_ID: String(chatId),
+      ...(secrets.BOT_TOKEN      ? { AGENT_BOT_TOKEN:    secrets.BOT_TOKEN }      : {}),
+      ...(secrets.OPENAI_API_KEY ? { OPENAI_API_KEY:     secrets.OPENAI_API_KEY } : {}),
+      ...(secrets.FAL_KEY        ? { FAL_KEY:            secrets.FAL_KEY }        : {}),
+      ...(secrets.IDEOGRAM_API_KEY ? { IDEOGRAM_API_KEY: secrets.IDEOGRAM_API_KEY } : {}),
+      ...(secrets.RECRAFT_API_KEY  ? { RECRAFT_API_KEY:  secrets.RECRAFT_API_KEY }  : {}),
       ...(user.name     ? { AGENT_USER_NAME: user.name }         : {}),
       ...(user.username ? { AGENT_USER_HANDLE: user.username }   : {}),
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),

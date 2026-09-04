@@ -33,11 +33,15 @@ jobs:
             cd /home/vova/trained-assist-agent
             git fetch origin main
             git reset --hard origin/main
-            printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\n' \
+            printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
               '${{ secrets.INN_DADATA_SECRET }}' \
               '${{ secrets.INN_CHECKO_KEY }}' \
+              '${{ secrets.OPENAI_API_KEY }}' \
+              '${{ secrets.FAL_KEY }}' \
+              '${{ secrets.IDEOGRAM_API_KEY }}' \
+              '${{ secrets.RECRAFT_API_KEY }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             bash scripts/deploy.sh
@@ -58,7 +62,7 @@ jobs:
             cd /home/vova/trained-assist-agent
             git fetch origin main
             git reset --hard origin/main
-            printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\n' \
+            printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\n' \
               '${{ secrets.TELEGRAM_BOT_TOKEN }}' \
               '${{ secrets.ANTHROPIC_API_KEY }}' \
               '${{ secrets.AGENT_SECRET }}' \
@@ -68,6 +72,10 @@ jobs:
               '${{ secrets.INN_DADATA_TOKEN }}' \
               '${{ secrets.INN_DADATA_SECRET }}' \
               '${{ secrets.INN_CHECKO_KEY }}' \
+              '${{ secrets.OPENAI_API_KEY }}' \
+              '${{ secrets.FAL_KEY }}' \
+              '${{ secrets.IDEOGRAM_API_KEY }}' \
+              '${{ secrets.RECRAFT_API_KEY }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
