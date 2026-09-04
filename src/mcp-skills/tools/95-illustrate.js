@@ -316,10 +316,63 @@ function loadHistory() {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
+// ── Opt-in flag ──────────────────────────────────────────────────────────────
+
+function enabledFlagPath() {
+  return path.join(process.cwd(), 'contexts', 'illustrate', '.enabled');
+}
+
+function isEnabled() {
+  return fs.existsSync(enabledFlagPath());
+}
+
+function enableSkill() {
+  const p = enabledFlagPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify({ enabled_at: new Date().toISOString() }));
+}
+
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: isEnabled,
+  setupTools: ['illustrate_setup'],
+
   tools: {
+
+    illustrate_setup: {
+      description: [
+        'Enable or check status of the illustration generation skill.',
+        'Call this when the user asks about drawing, illustrations, or image generation.',
+        'If not yet enabled — explain what the skill does and enable it.',
+        'After enabling, tell the user the tools will be available on the next message.',
+      ].join(' '),
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const available = availableProviders();
+        if (isEnabled()) {
+          return {
+            status: 'already_enabled',
+            providers: available,
+            message: 'Скил иллюстраций уже включён. Доступны: illustrate_preview_prompt, illustrate_generate, illustrate_refine, image_label.',
+          };
+        }
+        if (available.length === 0) {
+          return {
+            status: 'no_providers',
+            message: 'Нет настроенных провайдеров генерации изображений. Нужен OPENAI_API_KEY или IDEOGRAM_API_KEY.',
+          };
+        }
+        enableSkill();
+        return {
+          status: 'enabled',
+          providers: available,
+          default_provider: available[0],
+          message: 'Скил иллюстраций включён! На следующем сообщении появятся все инструменты: illustrate_preview_prompt (показывает промпт перед генерацией), illustrate_generate (генерация), illustrate_refine (доработка), image_label (наложение подписей).',
+          next_step: 'Скажи пользователю: "Готово, теперь я умею рисовать медицинские иллюстрации. Напиши что нарисовать — и начнём!"',
+        };
+      },
+    },
 
     illustrate_providers: {
       description:
