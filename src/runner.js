@@ -569,13 +569,11 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
     }
     if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
     if (HH_REVIEW_PAGE_INTENT.test(task)) {
-      // Vacancy draft exists → user means "publish landing page", let Claude decide
-      const vs = workDir ? readVacancyState(workDir) : null;
-      if (vs?.draft) return null;
-      // No active HH vacancy selected → review page is useless, let Claude handle
+      // Vacancy draft active → user likely means "publish landing page" → Claude decides
+      if (workDir && readVacancyState(workDir)?.draft) return null;
+      // Active vacancy exists → return review page; otherwise fall through to other checks
       const av = workDir ? readActiveVacancy(workDir) : null;
-      if (!av) return null;
-      return hhReviewPage(userId);
+      if (av) return hhReviewPage(userId);
     }
     if (HH_WHERE_PROMPT_INTENT.test(task)) return hhWherePrompt(userId);
     if (HH_SHOW_ATS_CONFIG_INTENT.test(task)) return hhShowAtsConfig(userId);
