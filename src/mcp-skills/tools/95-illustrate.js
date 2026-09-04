@@ -385,7 +385,10 @@ module.exports = {
           language_used: labels_mode === 'embedded' ? language : 'n/a',
           labels_mode,
           char_count: prompt.length,
-          instruction: 'Show this prompt to the user. Ask: "Промт готов — подправить что-то или генерировать?" Then wait for their answer before calling illustrate_generate.',
+          labels_question: labels_mode === DEFAULT_LABELS_MODE
+            ? 'After showing the prompt, ask the user: "Подписи прямо на картинке или сначала нарисую чистую, потом наложим отдельно?" (embedded = подписи в картинке, caption/none = чистая картинка, потом image_label). Wait for their answer and set labels_mode accordingly before calling illustrate_generate.'
+            : null,
+          instruction: 'Show this prompt to the user. If labels_question is set — ask it too. Wait for confirmation and labels preference before calling illustrate_generate.',
         };
       },
     },
