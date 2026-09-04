@@ -944,6 +944,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       ...(secrets.FAL_KEY        ? { FAL_KEY:            secrets.FAL_KEY }        : {}),
       ...(secrets.IDEOGRAM_API_KEY ? { IDEOGRAM_API_KEY: secrets.IDEOGRAM_API_KEY } : {}),
       ...(secrets.RECRAFT_API_KEY  ? { RECRAFT_API_KEY:  secrets.RECRAFT_API_KEY }  : {}),
+      ...(secrets.CF_API_TOKEN     ? { CLOUDFLARE_API_TOKEN: secrets.CF_API_TOKEN } : {}),
       ...(user.name     ? { AGENT_USER_NAME: user.name }         : {}),
       ...(user.username ? { AGENT_USER_HANDLE: user.username }   : {}),
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
