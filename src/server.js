@@ -2084,7 +2084,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   }
 
   const sorted = sortCandidates(candidates);
-  const waitingCandidates = sortCandidates(candidates.filter(c => c.neg_state === 'consider'));
+  const waitingCandidates = sortCandidates(candidates.filter(c => c.neg_state === 'response' && c.verdict !== 'ОТКЛОНИТЬ'));
 
   const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
   const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
