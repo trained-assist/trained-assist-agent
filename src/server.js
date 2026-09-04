@@ -253,8 +253,13 @@ async function resumePendingTasks(secrets) {
   console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
+  // Import clearPendingTask to remove original files before re-running
+  const { clearPendingTask: _clearPending } = require('./runner');
+
   for (const p of toResume) {
     console.log(`[resume] task=${p.taskId} user=${p.username} task="${String(p.task).slice(0, 60)}"`);
+    // Delete original file immediately — the new runTask will journal under its own taskId
+    _clearPending(p.taskId);
     if (p.initialMsgId && secrets.BOT_TOKEN) {
       fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
         method: 'POST',

@@ -61,6 +61,23 @@ function loadCommunicationStyle(userId) {
   return null;
 }
 
+const DEFAULT_REJECTION_TEMPLATE = 'Здравствуйте, {firstName}! Спасибо за отклик. К сожалению, ваш профиль не соответствует нашим текущим требованиям. Желаем успехов в поиске!';
+
+function loadRejectionTemplate(userId) {
+  const file = path.join(tokenBase(), String(userId || USER_ID), 'hh-rejection-template');
+  if (fs.existsSync(file)) {
+    const t = fs.readFileSync(file, 'utf8').trim();
+    if (t) return t;
+  }
+  return DEFAULT_REJECTION_TEMPLATE;
+}
+
+function saveRejectionTemplate(userId, template) {
+  const file = path.join(tokenBase(), String(userId || USER_ID), 'hh-rejection-template');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, template.trim(), { mode: 0o600 });
+}
+
 // ── HH API ─────────────────────────────────────────────────────────────────
 
 function hhRequest(method, apiPath, accessToken, body) {
@@ -770,8 +787,8 @@ module.exports = {
           negotiation_id: { type: 'string', description: 'Negotiation ID' },
           message_type: {
             type: 'string',
-            enum: ['initial', 'followup', 'invite_call'],
-            description: 'Message type (default: initial)',
+            enum: ['initial', 'followup', 'invite_call', 'rejection'],
+            description: 'Message type (default: initial). rejection — uses stored template, no LLM',
           },
           ats_result: {
             type: 'object',
@@ -784,13 +801,29 @@ module.exports = {
       handler: async ({ negotiation_id, message_type = 'initial', ats_result, vacancy_context }) => {
         const token = readHhToken(USER_ID);
         if (!token) return { error: 'HH не подключён.' };
-        const apiKey = readOrKey(USER_ID);
-        if (!apiKey) return { error: 'OpenRouter API key не найден.' };
 
         try {
           const neg = await hhGet(`/negotiations/${negotiation_id}`, token);
-          const { name, text: candidateContext } = formatCandidateContext(neg);
+          const { name } = formatCandidateContext(neg);
 
+          if (message_type === 'rejection') {
+            const template = loadRejectionTemplate(USER_ID);
+            const firstName = name.split(' ')[0];
+            const message = template.replace(/\{firstName\}/g, firstName);
+            return {
+              negotiation_id,
+              name,
+              message_type,
+              message,
+              template,
+              note: 'Шаблон отказа. Проверь и отправь через hh_send_message, или измени шаблон через hh_set_rejection_template.',
+            };
+          }
+
+          const apiKey = readOrKey(USER_ID);
+          if (!apiKey) return { error: 'OpenRouter API key не найден.' };
+
+          const { text: candidateContext } = formatCandidateContext(neg);
           const contextWithVacancy = vacancy_context
             ? `## О вакансии\n${vacancy_context}\n\n${candidateContext}`
             : candidateContext;
@@ -816,6 +849,27 @@ module.exports = {
         } catch (e) {
           return { error: e.message };
         }
+      },
+    },
+
+    hh_set_rejection_template: {
+      description: 'Get or set the rejection message template. Use {firstName} as placeholder. No args — returns current template. Pass template to save it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          template: { type: 'string', description: 'New template text with {firstName} placeholder. Omit to just view current template.' },
+        },
+      },
+      handler: async ({ template } = {}) => {
+        if (!template) {
+          return {
+            template: loadRejectionTemplate(USER_ID),
+            default: DEFAULT_REJECTION_TEMPLATE,
+            note: 'Передай template чтобы сохранить новый шаблон. Используй {firstName} для имени.',
+          };
+        }
+        saveRejectionTemplate(USER_ID, template);
+        return { saved: true, template };
       },
     },
 
@@ -1048,6 +1102,7 @@ module.exports = {
           callbackBase,
           username: USER_ID,
           agentSecret: process.env.AGENT_SECRET || '',
+          rejectionTemplate: loadRejectionTemplate(USER_ID),
         });
         const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
         const filePath = output_path || path.join(dataDir, `hh-review-${Date.now()}.html`);
@@ -1311,7 +1366,7 @@ function saveCandidateHistory(userId, negotiationId, data) {
 // ── Review page HTML ────────────────────────────────────────────────────────
 
 function generateReviewHtml(candidates, vacancyName, opts = {}) {
-  const { callbackBase = '', username = '', agentSecret = '' } = opts;
+  const { callbackBase = '', username = '', agentSecret = '', rejectionTemplate = DEFAULT_REJECTION_TEMPLATE } = opts;
   const verdictOrder = { 'ПРОПУСТИТЬ': 0, 'УТОЧНИТЬ': 1, 'ОТКЛОНИТЬ': 2 };
   const sorted = [...candidates].sort((a, b) => (verdictOrder[a.verdict] ?? 3) - (verdictOrder[b.verdict] ?? 3));
 
@@ -1361,6 +1416,8 @@ function generateReviewHtml(candidates, vacancyName, opts = {}) {
         ? 'Приглашение на звонок'
         : 'Первое сообщение';
 
+    const rejectionText = isReject ? rejectionTemplate.replace(/\{firstName\}/g, (c.name || '').split(' ')[0] || 'Кандидат') : '';
+
     const msgSection = isActionable
       ? `<div class="msg-section">
            <label class="msg-label">${msgLabel}</label>
@@ -1371,7 +1428,14 @@ function generateReviewHtml(candidates, vacancyName, opts = {}) {
            </div>
          </div>`
       : isReject
-        ? `<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>`
+        ? `<div class="msg-section">
+             <label class="msg-label">Сообщение об отказе</label>
+             <textarea class="msg-area" id="msg-${i}" rows="3">${escHtml(rejectionText)}</textarea>
+             <div class="btns">
+               <button class="btn btn-reject-send" onclick="sendRejectionMsg(${i}, '${escHtml(c.negotiation_id)}')">✉ Отправить сообщение</button>
+               <button class="btn btn-skip" onclick="skipOne(${i})">✗ Без сообщения</button>
+             </div>
+           </div>`
         : '';
 
     return `<div class="card" id="card-${i}" data-score="${(c.score || 0).toFixed(1)}" data-neg="${escHtml(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
@@ -1440,7 +1504,7 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn:hover{opacity:.85}
 .btn-send{background:#16a34a;color:#fff}
 .btn-skip{background:#e2e8f0;color:#475569}
-.reject-note{font-size:13px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:10px;font-style:italic}
+.btn-reject-send{background:#dc2626;color:#fff}
 .hist-none{font-size:12px;color:#94a3b8;margin:8px 0 4px;font-style:italic}
 .hist-details,.resume-details{margin:8px 0 4px}
 .hist-summary,.resume-summary{font-size:12px;font-weight:600;color:#64748b;cursor:pointer;padding:4px 0;user-select:none}
@@ -1582,6 +1646,21 @@ async function sendOne(i, negId) {
   } catch(e) {
     showToast('❌ ' + e.message, true);
     if (btn) { btn.disabled = false; btn.textContent = '✓ Отправить'; }
+  }
+}
+
+async function sendRejectionMsg(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
+  if (!msg) { skipOne(i); return; }
+  const btn = event?.currentTarget;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Отправляю...'; }
+  try {
+    await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+    markDone(i); onCheck();
+    showToast('✅ Сообщение отправлено');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '✉ Отправить сообщение'; }
   }
 }
 

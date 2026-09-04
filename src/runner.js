@@ -958,7 +958,7 @@ async function tgEdit(token, chatId, messageId, text) {
 }
 
 module.exports = {
-  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks,
+  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };
