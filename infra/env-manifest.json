@@ -78,7 +78,7 @@
       { "name": "NODE_ENV",           "value": "production" },
       { "name": "PORT",               "value": "8080" },
       { "name": "AGENT_DATA_DIR",     "value": "/home/vova/alesa-data" },
-      { "name": "AGENT_PUBLIC_URL",   "value": "https://178-212-14-192.sslip.io" },
+      { "name": "AGENT_PUBLIC_URL",   "value": "https://platform.recruiter-assistant.ru" },
       { "name": "TELEGRAM_API_URL",   "value": "https://136-65-7-197.sslip.io/tg-proxy" },
       { "name": "ANTHROPIC_BASE_URL", "value": "https://136-65-7-197.sslip.io/anthropic-proxy" },
       { "name": "SECRETS_SOURCE",     "value": "env" },
@@ -89,7 +89,7 @@
   "static_values_in_secrets_env": {
     "_doc": "Values written to secrets.env during deploy but NOT from GitHub Secrets — they are static config values hardcoded in ci.yml.",
     "ru": [
-      { "name": "AGENT_PUBLIC_URL", "value": "https://178-212-14-192.sslip.io", "description": "Public base URL for /connect/* links on RU VM" }
+      { "name": "AGENT_PUBLIC_URL", "value": "https://platform.recruiter-assistant.ru", "description": "Public base URL for /connect/* links on RU VM" }
     ]
   },
 
