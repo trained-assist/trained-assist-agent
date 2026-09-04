@@ -144,15 +144,19 @@ describe('generateVacancyLandingHtml — XSS safety', () => {
     expect(html).toContain('&lt;evil&gt;');
   });
 
-  it('contains apply button', () => {
+  it('has apply button without application form', () => {
     expect(html).toContain('class="apply-btn"');
     expect(html).toContain('Откликнуться');
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('name="email"');
+    expect(html).not.toContain('name="phone"');
   });
 
   it('is valid HTML with required structure', () => {
     expect(html).toContain('<!DOCTYPE html>');
     expect(html).toContain('<html lang="ru">');
-    expect(html).toContain('</html>');
+    expect(html).toContain('<header');
+    expect(html).toContain('vacancy-title');
   });
 });
 
