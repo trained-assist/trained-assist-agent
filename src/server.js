@@ -19,6 +19,7 @@ const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
+const { storeApplication } = require('./hh-vacancy');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -1716,6 +1717,83 @@ function show(id, type, msg) {
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
+    }
+
+    // POST /apply/:username/:vacancyId — no auth, public endpoint for candidate applications
+    if (req.method === 'POST' && /^\/apply\/[a-zA-Z0-9_-]+\/vac-\d+$/.test(url.pathname)) {
+      const parts = url.pathname.split('/');
+      const applyUsername = parts[2];
+      const vacancyId = parts[3];
+      const workDir = path.join(BASE_USERS_DIR, applyUsername);
+
+      let fields = {};
+      try {
+        const ct = req.headers['content-type'] || '';
+        const body = await readBody(req);
+        if (ct.includes('application/json')) {
+          fields = JSON.parse(body);
+        } else if (ct.includes('application/x-www-form-urlencoded')) {
+          for (const pair of body.split('&')) {
+            const [k, v] = pair.split('=');
+            if (k) fields[decodeURIComponent(k)] = decodeURIComponent(v || '');
+          }
+        } else if (ct.includes('multipart/form-data')) {
+          // Extract only text fields from multipart (resume file ignored in v1)
+          const boundary = ct.match(/boundary=([^\s;]+)/)?.[1];
+          if (boundary) {
+            const buf = Buffer.from(body, 'binary');
+            const parts2 = buf.toString().split(`--${boundary}`);
+            for (const part of parts2) {
+              const m = part.match(/Content-Disposition:[^\n]*name="([^"]+)"[^\r\n]*\r?\n\r?\n([\s\S]*?)(?:\r?\n)?$/);
+              if (m && m[1] !== 'resume') fields[m[1]] = m[2].trim();
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[apply] parse error:', e.message);
+        return json(res, 400, { error: 'invalid request body' });
+      }
+
+      const email = String(fields.email || '').trim();
+      const phone = String(fields.phone || '').trim();
+      if (!email || !phone) return json(res, 400, { error: 'email and phone are required' });
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: 'invalid email' });
+
+      try {
+        const app = storeApplication(workDir, vacancyId, {
+          name: String(fields.name || '').trim().slice(0, 200),
+          email,
+          phone: phone.slice(0, 30),
+          telegram: String(fields.telegram || '').trim().slice(0, 100),
+          message: String(fields.message || '').trim().slice(0, 3000),
+        }, null, null);
+
+        // Notify recruiter via Telegram if chatId is known
+        const chatIdFile = path.join(process.env.HOME || '/home/vova', 'agent-tokens', applyUsername, '.chatid');
+        const chatId = fs.existsSync(chatIdFile) ? fs.readFileSync(chatIdFile, 'utf8').trim() : null;
+        if (chatId && secrets.BOT_TOKEN) {
+          const notifLines = [
+            `📬 Новый отклик на вакансию!`,
+            '',
+            app.name ? `👤 ${app.name}` : '👤 (имя не указано)',
+            `📧 ${app.email}`,
+            `📞 ${app.phone}`,
+            app.telegram ? `✈️ ${app.telegram}` : null,
+            app.message ? `\n💬 ${app.message.slice(0, 300)}` : null,
+          ].filter(Boolean).join('\n');
+          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: notifLines }),
+          }).catch(e => console.error('[apply] tg notify error:', e.message));
+        }
+
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        console.error('[apply] store error:', e.message);
+        return json(res, 500, { error: 'failed to store application' });
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/tokens') {
