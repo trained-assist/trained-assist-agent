@@ -144,15 +144,18 @@ describe('generateVacancyLandingHtml — XSS safety', () => {
     expect(html).toContain('&lt;evil&gt;');
   });
 
-  it('contains apply form with correct action URL', () => {
-    expect(html).toContain('/apply/testuser/vac-123');
+  it('has apply button without application form', () => {
+    // Form removed in HH-style redesign — button links to contact instead
+    expect(html).toContain('Откликнуться');
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('name="email"');
+    expect(html).not.toContain('name="phone"');
   });
 
   it('is valid HTML with required structure', () => {
     expect(html).toContain('<!DOCTYPE html>');
-    expect(html).toContain('<form id="applyForm"');
-    expect(html).toContain('name="email"');
-    expect(html).toContain('name="phone"');
+    expect(html).toContain('<header');
+    expect(html).toContain('vacancy-title');
   });
 });
 
