@@ -4,7 +4,6 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFile } = require('child_process');
 const { readHhToken, hhPost } = require('./hh-utils');
 
 const STATE_SKILL = 'hh';
@@ -381,36 +380,18 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
 </html>`;
 }
 
-// ── Publish landing page via instant-publish ──────────────────────────────────
+// ── Publish landing page via built-in agent route ─────────────────────────────
 
 function publishVacancyPage(workDir, draft, vacancyId, username) {
-  return new Promise((resolve, reject) => {
-    const publicUrl = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
-    const html = generateVacancyLandingHtml(draft, vacancyId, username, publicUrl);
-
-    const tmpDir = path.join(workDir, 'vacancy-drafts');
-    fs.mkdirSync(tmpDir, { recursive: true });
-    const htmlPath = path.join(tmpDir, `${vacancyId}.html`);
-    fs.writeFileSync(htmlPath, html, 'utf8');
-
-    const slug = `vacancy-${vacancyId.replace(/^vac-/, '').slice(-8)}`;
-
-    execFile('npx', ['instant-publish', 'deploy', htmlPath, '--slug', slug],
-      { timeout: 30000, cwd: os.homedir() },
-      (err, stdout, stderr) => {
-        if (err) return reject(new Error(`instant-publish failed: ${stderr || err.message}`));
-        // Parse URL from stdout: looks for "https://..." line
-        const urlMatch = stdout.match(/https?:\/\/[^\s]+/);
-        if (!urlMatch) return reject(new Error(`Could not parse URL from: ${stdout}`));
-        const url = urlMatch[0];
-
-        // Save URL to state
-        const state = readVacancyState(workDir) || {};
-        writeVacancyState(workDir, { ...state, landing_url: url, status: 'draft_ready' });
-
-        resolve(url);
-      });
-  });
+  const publicUrl = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
+  const html = generateVacancyLandingHtml(draft, vacancyId, username, publicUrl);
+  const draftsDir = path.join(os.homedir(), 'users', username, 'vacancy-drafts');
+  fs.mkdirSync(draftsDir, { recursive: true });
+  fs.writeFileSync(path.join(draftsDir, `${vacancyId}.html`), html, 'utf8');
+  const pageUrl = `${publicUrl}/vacancy/${username}/${vacancyId}`;
+  const state = readVacancyState(workDir);
+  if (state) writeVacancyState(workDir, { ...state, landing_url: pageUrl, status: 'draft_ready' });
+  return Promise.resolve(pageUrl);
 }
 
 // ── Application storage (called by server's POST /apply/:username/:vacancyId) ──
