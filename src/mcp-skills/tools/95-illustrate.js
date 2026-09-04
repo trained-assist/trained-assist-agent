@@ -169,7 +169,18 @@ async function generateFal(prompt) {
   return { url, provider: 'FLUX.1 Dev (fal.ai)', model: 'fal-ai/flux/dev' };
 }
 
-async function generateIdeogram(prompt) {
+// Map our style presets to Ideogram style_type.
+// DESIGN = graphic design / posters / typography — wrong for medical content.
+// ILLUSTRATION = drawings, diagrams, educational art — correct default.
+const IDEOGRAM_STYLE_TYPE = {
+  medical:     'ILLUSTRATION',
+  anatomical:  'ILLUSTRATION',
+  flat:        'DESIGN',
+  infographic: 'DESIGN',
+};
+
+async function generateIdeogram(prompt, style = DEFAULT_STYLE) {
+  const styleType = IDEOGRAM_STYLE_TYPE[style] || 'ILLUSTRATION';
   const res = await fetchJson('https://api.ideogram.ai/generate', {
     method: 'POST',
     headers: { 'Api-Key': process.env.IDEOGRAM_API_KEY },
@@ -178,14 +189,14 @@ async function generateIdeogram(prompt) {
         prompt,
         model: 'V_2',
         aspect_ratio: 'ASPECT_1_1',
-        style_type: 'DESIGN',
+        style_type: styleType,
       },
     }),
   });
   if (res.status !== 200) throw new Error(`Ideogram error ${res.status}: ${JSON.stringify(res.data)}`);
   const url = res.data?.data?.[0]?.url;
   if (!url) throw new Error('No URL in Ideogram response');
-  return { url, provider: 'Ideogram 2.0', model: 'V_2' };
+  return { url, provider: 'Ideogram 2.0', model: 'V_2', ideogram_style_type: styleType };
 }
 
 async function generateRecraft(prompt) {
@@ -204,12 +215,14 @@ async function generateRecraft(prompt) {
   return { url, provider: 'Recraft v3', model: 'recraft-v3' };
 }
 
-const GENERATORS = {
-  openai:  generateOpenAI,
-  fal:     generateFal,
-  ideogram: generateIdeogram,
-  recraft: generateRecraft,
-};
+function makeGenerators(style) {
+  return {
+    openai:   (prompt) => generateOpenAI(prompt),
+    fal:      (prompt) => generateFal(prompt),
+    ideogram: (prompt) => generateIdeogram(prompt, style),
+    recraft:  (prompt) => generateRecraft(prompt),
+  };
+}
 
 // ── Prompt building ──────────────────────────────────────────────────────────
 
@@ -516,13 +529,14 @@ module.exports = {
         // Generate with auto-fallback: if billing/quota error → try next provider automatically
         const BILLING_ERRORS = /billing|payment|quota|insufficient|credit|balance|funds|limit exceeded/i;
         const candidateProviders = [preferredProvider, ...available.filter(p => p !== preferredProvider)];
+        const generators = makeGenerators(style);
 
         let result;
         let chosenProvider;
         const attemptErrors = [];
         for (const p of candidateProviders) {
           try {
-            result = await GENERATORS[p](fullPrompt);
+            result = await generators[p](fullPrompt);
             chosenProvider = p;
             break;
           } catch (e) {
@@ -662,7 +676,7 @@ module.exports = {
         }
 
         const newPrompt = buildPrompt(newDescription, last.style, last.language || DEFAULT_LANGUAGE, last.labels_mode || DEFAULT_LABELS_MODE);
-        const generate = GENERATORS[chosenProvider];
+        const generate = makeGenerators(last.style)[chosenProvider];
 
         let result;
         try {
@@ -727,6 +741,109 @@ module.exports = {
             : undefined,
         };
       },
+    },
+
+    illustrate_tips: {
+      description: [
+        'Return a playbook of workarounds and tips for image generation quality issues.',
+        'Call this when:',
+        '  - the generated image looks wrong, garbled, or off-topic',
+        '  - text labels inside the image are unreadable or wrong',
+        '  - user says "плохо нарисовал", "чепуха", "не то", "подписи кривые"',
+        '  - you want to suggest a better strategy before retrying',
+        'Optionally pass the current provider and style to get targeted advice.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          provider: { type: 'string', enum: ['openai', 'fal', 'ideogram', 'recraft'], description: 'Current provider (optional — for targeted tips)' },
+          style:    { type: 'string', enum: ['medical', 'flat', 'anatomical', 'infographic'], description: 'Current style (optional)' },
+          problem:  { type: 'string', description: 'Short description of what went wrong (optional)' },
+        },
+      },
+      handler: async ({ provider, style, problem } = {}) => ({
+        playbook: {
+          providers: {
+            openai: {
+              strengths: ['Medical and educational diagrams', 'Clean anatomical cross-sections', 'Consistent style adherence', 'Handles complex multi-element prompts well'],
+              weaknesses: ['Text labels inside image often garbled or misplaced', 'Expensive ($0.04/image with gpt-image-1 high quality)', 'Slower than others'],
+              best_for: ['medical', 'anatomical', 'flat styles'],
+              tips: [
+                'For text labels — use labels_mode:"caption" (clean image + labels as text below) instead of embedded',
+                'More specific anatomy terms = better: list every structure explicitly',
+                'Add "white background, no decorative borders, no watermarks" to avoid visual noise',
+                'If result has wrong structures — add "NOT [wrong thing]" to prompt',
+              ],
+            },
+            ideogram: {
+              strengths: ['Best at readable text INSIDE the image (letters, cyrillic, numbers)', 'Great for infographics and design with typography', 'Fast and reliable'],
+              weaknesses: ['Medical realism varies — may produce stylized/poster look', 'DESIGN style_type is wrong for anatomy (now fixed: medical→ILLUSTRATION)', 'Less precise for complex anatomical cross-sections'],
+              best_for: ['infographic', 'flat styles', 'any case with labels_mode:"embedded"'],
+              tips: [
+                'Use labels_mode:"embedded" — this is where Ideogram genuinely beats everyone',
+                'If result looks like a poster — style was wrong (now fixed via IDEOGRAM_STYLE_TYPE map)',
+                'For anatomical work, be very explicit: "cross-section, cutaway view, showing layers" etc.',
+                'Prompt in English works better than Russian for anatomy terms',
+              ],
+            },
+            fal: {
+              strengths: ['Best photorealism and artistic depth', 'Detailed textures', 'Good price/quality ratio ($0.025/img)'],
+              weaknesses: ['Clean diagram/educational style harder to achieve', 'Text labels essentially never work', 'Tends toward artistic rather than technical look'],
+              best_for: ['Photorealistic anatomical art, not schematic diagrams', 'When user wants a "beautiful" illustration vs a technical one'],
+              tips: [
+                'Always use labels_mode:"caption" or "none" — text in image will be garbage',
+                'Add "medical illustration, textbook quality, clinical diagram" to steer away from artistic',
+                'For anatomical art (not diagrams): FLUX is excellent — Netter\'s Atlas watercolor style',
+              ],
+            },
+            recraft: {
+              strengths: ['Vector-like clean lines', 'Flat design and icons', 'Consistent color palettes', 'Good for UI/infographic elements'],
+              weaknesses: ['Less anatomical knowledge than OpenAI', 'Text quality inconsistent'],
+              best_for: ['flat', 'infographic styles', 'icon-heavy diagrams'],
+              tips: [
+                'Use style: "flat" — that\'s where Recraft shines',
+                'Prompt with color names explicitly: "blue, white, light gray"',
+                'Good for process diagrams (step 1 → step 2 → ...) with clean arrows',
+              ],
+            },
+          },
+          labels_mode_guide: {
+            embedded: 'Text rendered inside image. BEST with Ideogram. Risky with OpenAI/FLUX (garbled). Use for: simple diagrams with few labels, when user will screenshot and share.',
+            caption:  'Clean image generated, then Claude sends a numbered label list as a separate text message. Works with ALL providers. Use when: text quality is uncertain, many labels needed, or user wants to add labels themselves.',
+            none:     'Pure illustration, no labels. Use for: artistic renders, when labels will be added externally (e.g. in Canva), or when user just wants the picture.',
+          },
+          retry_strategies: [
+            { problem: 'Текст/подписи нечитаемые или кривые', fix: 'Switch to labels_mode:"caption" (clean image) or switch provider to Ideogram (best at cyrillic text)' },
+            { problem: 'Результат выглядит как плакат/постер, а не схема', fix: 'Was Ideogram with DESIGN style_type — now fixed. If still happens: add "technical diagram, no decorative elements, clinical illustration" to prompt' },
+            { problem: 'Не те структуры нарисованы / путается анатомия', fix: 'List every structure explicitly. Add "showing ONLY: [list]". Add "NOT showing: [wrong things]". Switch to OpenAI — it has better medical anatomy training.' },
+            { problem: 'Слишком художественно, не как учебник', fix: 'Add to prompt: "schematic diagram, textbook illustration, not artistic". Switch style to medical or anatomical.' },
+            { problem: 'Фон грязный / лишние элементы', fix: 'Add: "white background, clean background, no texture, no shadows, no decorative borders, no watermark"' },
+            { problem: 'Пропорции неправильные', fix: 'Add explicit size cues: "to scale", "proportional", "anatomically accurate proportions"' },
+            { problem: 'Нужно больше деталей', fix: 'Call illustrate_refine with changes:"add more detail to [specific area], show [specific structures]". Or switch to fal (FLUX) for maximum detail.' },
+          ],
+          prompt_engineering: {
+            rules: [
+              'Describe what TO show, not what NOT to show (negatives work poorly)',
+              'Exception: "no text", "no labels", "no watermarks" — these negative phrases work reliably',
+              'Anatomy: list structures by their medical names, not lay terms',
+              'Perspective: always specify (cross-section, lateral view, anterior view, top-down)',
+              'Style anchors that work: "Netter\'s Atlas style", "Gray\'s Anatomy illustration", "medical textbook diagram", "clinical illustration"',
+              'For Ideogram specifically: shorter, punchier prompts often beat long ones',
+            ],
+          },
+        },
+        targeted_advice: provider ? (() => {
+          const tips = {
+            openai:   'OpenAI selected. For embedded text labels — consider switching to Ideogram. Otherwise solid choice for medical diagrams.',
+            ideogram: style === 'medical' || style === 'anatomical'
+              ? 'Ideogram with ILLUSTRATION style_type (fixed). If result still looks wrong — try adding "anatomical diagram, educational illustration, clinical" to description.'
+              : 'Ideogram with DESIGN style_type — correct for flat/infographic content.',
+            fal:      'FLUX selected — great for artistic depth, but use labels_mode:"caption" or "none" as text in image will not render correctly.',
+            recraft:  'Recraft selected — use style:"flat" for best results. For anatomy, OpenAI will be more accurate.',
+          };
+          return tips[provider] || null;
+        })() : null,
+      }),
     },
 
   },
