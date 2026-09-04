@@ -18,7 +18,7 @@ const { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml } = require('./
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
-const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
+const { scoreUnscoredCandidates, generateDraftMessages, readAtsConfig, readOrKey, evaluateCandidate, candidateHistoryPath, buildResumeText: buildResumeScoringText } = require('./hh-scoring');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -1022,7 +1022,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations' || url.pathname === '/hh/rescore')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1953,6 +1953,43 @@ function show(id, type, msg) {
       return json(res, 200, { ok: true, reset, skipped });
     }
 
+    // POST /hh/rescore — re-score a single candidate and return updated result
+    if (req.method === 'POST' && url.pathname === '/hh/rescore') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username, negotiation_id } = body || {};
+      if (!username || !negotiation_id) return json(res, 400, { error: 'username and negotiation_id required' });
+
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const workDir = path.join(dataDir, 'sessions', String(username));
+      const atsConfig = readAtsConfig(workDir);
+      if (!atsConfig) return json(res, 503, { error: 'ATS config not found' });
+
+      const apiKey = readOrKey(username);
+      if (!apiKey) return json(res, 503, { error: 'OpenRouter key not configured' });
+
+      const cacheFile = hhCacheFile(dataDir, username);
+      let neg = null;
+      try {
+        const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+        neg = (cache.negotiations || []).find(n => String(n.id) === String(negotiation_id));
+      } catch {}
+      if (!neg) return json(res, 404, { error: 'negotiation not found in cache' });
+
+      const resumeText = buildResumeScoringText(neg);
+      const result = await evaluateCandidate(resumeText, atsConfig, apiKey);
+
+      const histFile = candidateHistoryPath(username, negotiation_id);
+      let history = { messages: [], ats_result: null };
+      try { history = JSON.parse(fs.readFileSync(histFile, 'utf8')); } catch {}
+      history.ats_result = { ...(history.ats_result || {}), ...result };
+      fs.mkdirSync(path.dirname(histFile), { recursive: true });
+      fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
+
+      console.log(`[hh/rescore] user=${username} neg=${negotiation_id} score=${result.score} verdict=${result.verdict}`);
+      return json(res, 200, { ok: true, ...result });
+    }
+
     // POST /hh/ats-config — save ATS config + stages to context
     if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -2215,7 +2252,10 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     </div>
     ${scoreHtml}
   </div>
-  ${c.reasoning ? `<p class="reasoning">${esc(c.reasoning)}</p>` : ''}
+  <div class="reasoning-row">
+    <p class="reasoning" id="reasoning-${i}">${c.reasoning ? esc(c.reasoning) : ''}</p>
+    <button class="btn-rescore" id="rescore-${i}" onclick="rescoreOne(${i},'${esc(c.negotiation_id)}')" title="Перегенерировать оценку">↺</button>
+  </div>
   ${matched || gaps ? `<div class="tags">${matched}${gaps}</div>` : ''}
   ${histSection}
   ${resumeSection}
@@ -2261,7 +2301,11 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .score-num{font-size:14px;font-weight:600;min-width:38px}
 .verdict-badge{font-size:12px;font-weight:700;color:#fff;padding:3px 8px;border-radius:99px;white-space:nowrap}
 .verdict-none{font-size:12px;color:#94a3b8;font-style:italic}
-.reasoning{font-size:13px;color:#475569;line-height:1.5;margin-bottom:10px}
+.reasoning-row{display:flex;align-items:flex-start;gap:6px;margin-bottom:10px}
+.reasoning{font-size:13px;color:#475569;line-height:1.5;flex:1}
+.btn-rescore{flex-shrink:0;background:none;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;color:#94a3b8;font-size:14px;padding:1px 6px;line-height:1.4;transition:color .15s,border-color .15s}
+.btn-rescore:hover{color:#4f46e5;border-color:#4f46e5}
+.btn-rescore:disabled{opacity:.4;cursor:not-allowed}
 .tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
 .tag{font-size:12px;padding:2px 8px;border-radius:4px;font-weight:500}
 .tag-ok{background:#dcfce7;color:#15803d}
@@ -2510,6 +2554,48 @@ async function generateRejection(i, negId, candidateName) {
     if (ta) { ta.classList.remove('generating'); ta.placeholder = ''; }
     if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать отказ'; }
     showToast('❌ ' + e.message, true);
+  }
+}
+
+async function rescoreOne(i, negId) {
+  const btn = document.getElementById('rescore-' + i);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  try {
+    const data = await hhAction('/hh/rescore', { negotiation_id: negId });
+    const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
+    const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
+    const col = colorMap[data.verdict] || '#94a3b8';
+    const bg = bgMap[data.verdict] || '#fff';
+    const card = document.getElementById('card-' + i);
+    if (card) {
+      card.style.background = bg;
+      card.style.borderLeftColor = col;
+      card.dataset.score = (data.score || 0).toFixed(1);
+    }
+    const reasoningEl = document.getElementById('reasoning-' + i);
+    if (reasoningEl) reasoningEl.textContent = data.reasoning || '';
+    // Update score/verdict badge
+    const scoreWrap = card?.querySelector('.score-wrap') || card?.querySelector('.verdict-none');
+    if (scoreWrap && data.score != null) {
+      const scorePct = Math.round((data.score || 0) * 10);
+      scoreWrap.outerHTML = \`<div class="score-wrap">
+        <div class="score-bar"><div class="score-fill" style="width:\${scorePct}%;background:\${col}"></div></div>
+        <span class="score-num" style="color:\${col}">\${(data.score || 0).toFixed(1)}/10</span>
+        <span class="verdict-badge" style="background:\${col}">\${data.verdict}</span>
+      </div>\`;
+    }
+    // Update matched/gaps tags
+    const tagsEl = card?.querySelector('.tags');
+    if (tagsEl) {
+      const matched = (data.matched || []).map(m => \`<span class="tag tag-ok">\${m}</span>\`).join('');
+      const gaps = (data.gaps || []).map(g => \`<span class="tag tag-gap">\${g}</span>\`).join('');
+      tagsEl.innerHTML = matched + gaps;
+    }
+    showToast('✅ Оценка обновлена');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↺'; }
   }
 }
 
