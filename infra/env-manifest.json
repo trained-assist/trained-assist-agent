@@ -46,7 +46,8 @@
       { "name": "OPENAI_API_KEY",    "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "OpenAI API key for DALL-E 3 image generation" },
       { "name": "FAL_KEY",           "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "fal.ai API key for FLUX image generation" },
       { "name": "IDEOGRAM_API_KEY",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Ideogram API key for text-in-image illustration" },
-      { "name": "RECRAFT_API_KEY",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Recraft v3 API key for vector-style illustration" }
+      { "name": "RECRAFT_API_KEY",    "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Recraft v3 API key for vector-style illustration" },
+      { "name": "GIGACHAT_API_KEY",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "GigaChat base64 credentials (client_id:secret) — shared key for all recruiters" }
     ]
   },
 
