@@ -228,17 +228,54 @@ function mdToHtml(md) {
 
 // ── Landing page HTML generation ──────────────────────────────────────────────
 
+// Split description_md by ## headings into [{title, body}] sections.
+// Content before the first ## becomes a section with title=null.
+function parseDescriptionSections(md) {
+  if (!md) return [];
+  const sections = [];
+  let current = null;
+  for (const line of md.split('\n')) {
+    const h2 = line.match(/^## (.+)$/);
+    if (h2) {
+      if (current) sections.push(current);
+      current = { title: h2[1].trim(), lines: [] };
+    } else if (current) {
+      current.lines.push(line);
+    } else if (line.trim()) {
+      current = { title: null, lines: [line] };
+    }
+  }
+  if (current) sections.push(current);
+  return sections.map(s => ({ title: s.title, body: s.lines.join('\n').trim() }));
+}
+
+function buildApplyHref(draft) {
+  const c = draft.contacts || {};
+  if (c.telegram) return `https://t.me/${c.telegram.replace(/^@/, '')}`;
+  if (c.email) return `mailto:${c.email}`;
+  if (c.phone) return `tel:${c.phone.replace(/\s/g, '')}`;
+  return '#';
+}
+
 function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
-  const applyUrl = `${publicUrl}/apply/${encodeURIComponent(username)}/${encodeURIComponent(vacancyId)}`;
   const salary = formatSalary(draft) || 'по договорённости';
   const exp = EXPERIENCE_LABELS[draft.experience] || '';
   const emp = EMPLOYMENT_LABELS[draft.employment] || '';
   const sched = SCHEDULE_LABELS[draft.schedule] || '';
-  const tags = [exp, emp, sched].filter(Boolean);
-  const descHtml = mdToHtml(draft.description_md || '');
+  const conditionTags = [exp, emp, sched].filter(Boolean);
+  const sections = parseDescriptionSections(draft.description_md || '');
   const skillsHtml = draft.key_skills?.length
-    ? draft.key_skills.map(s => `<span class="skill">${escapeHtml(s)}</span>`).join(' ')
+    ? draft.key_skills.map(s => `<span class="skill-tag">${escapeHtml(s)}</span>`).join('')
     : '';
+  const applyHref = buildApplyHref(draft);
+  const pubDate = new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+
+  const sectionCards = sections.map(({ title, body }) => {
+    const content = mdToHtml(body);
+    if (!content) return '';
+    const heading = title ? `<h2 class="card-title">${escapeHtml(title)}</h2>` : '';
+    return `<div class="card">${heading}<div class="card-body">${content}</div></div>`;
+  }).join('\n');
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -248,113 +285,98 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
 <title>${escapeHtml(draft.name) || 'Вакансия'}</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; }
-  .hero { background: linear-gradient(135deg, #1a56db 0%, #0e3fa1 100%); color: #fff; padding: 48px 24px 36px; }
-  .hero h1 { margin: 0 0 8px; font-size: clamp(22px, 4vw, 36px); font-weight: 700; line-height: 1.2; }
-  .company { font-size: 18px; opacity: .85; margin-bottom: 16px; }
-  .salary { font-size: 22px; font-weight: 600; }
-  .location { opacity: .75; margin-top: 6px; font-size: 15px; }
-  .tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
-  .tag { background: rgba(255,255,255,.18); border-radius: 20px; padding: 4px 14px; font-size: 13px; }
-  .container { max-width: 760px; margin: 0 auto; padding: 0 16px 60px; }
-  .card { background: #fff; border-radius: 12px; padding: 28px 24px; margin-top: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-  .card h2 { margin: 0 0 16px; font-size: 18px; color: #1a56db; }
-  .skills { display: flex; flex-wrap: wrap; gap: 8px; }
-  .skill { background: #eef2fb; color: #1a56db; border-radius: 20px; padding: 4px 12px; font-size: 13px; }
-  .desc h2, .desc h3 { color: #333; }
-  .desc ul { padding-left: 20px; }
-  .desc p, .desc li { line-height: 1.7; color: #444; }
-  .form-section { background: #fff; border-radius: 12px; padding: 28px 24px; margin-top: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-  .form-section h2 { margin: 0 0 20px; font-size: 20px; }
-  label { display: block; margin-bottom: 4px; font-size: 14px; font-weight: 500; color: #333; }
-  input, textarea, select { width: 100%; padding: 10px 14px; border: 1.5px solid #ddd; border-radius: 8px; font-size: 15px; margin-bottom: 16px; font-family: inherit; transition: border-color .2s; }
-  input:focus, textarea:focus { outline: none; border-color: #1a56db; }
-  textarea { min-height: 100px; resize: vertical; }
-  .req { color: #e53e3e; }
-  .hint { font-size: 12px; color: #888; margin-top: -12px; margin-bottom: 16px; }
-  .file-label { display: flex; align-items: center; gap: 10px; border: 2px dashed #ddd; border-radius: 8px; padding: 16px; cursor: pointer; margin-bottom: 16px; color: #666; font-size: 14px; }
-  .file-label:hover { border-color: #1a56db; color: #1a56db; }
-  #resumeFile { display: none; }
-  .submit-btn { width: 100%; background: #1a56db; color: #fff; border: none; border-radius: 8px; padding: 14px; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 8px; transition: background .2s; }
-  .submit-btn:hover { background: #1447b8; }
-  .submit-btn:disabled { background: #aaa; cursor: default; }
-  .success { display: none; text-align: center; padding: 32px 16px; }
-  .success h2 { color: #22863a; }
-  @media (max-width: 480px) { .hero { padding: 32px 16px 28px; } .card, .form-section { padding: 20px 16px; } }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f4f4f5; color: #1a1a1a; font-size: 15px; line-height: 1.5; }
+
+  /* ── Header ── */
+  .page-header { background: #fff; border-bottom: 1px solid #e8e8e8; padding: 24px 16px 20px; }
+  .page-header .inner { max-width: 900px; margin: 0 auto; }
+  .vacancy-title { margin: 0 0 10px; font-size: clamp(20px, 4vw, 30px); font-weight: 700; line-height: 1.25; color: #1a1a1a; }
+  .vacancy-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; color: #767676; font-size: 14px; }
+  .meta-company { color: #1a1a1a; font-weight: 500; }
+  .meta-sep { color: #ccc; }
+
+  /* ── Layout ── */
+  .layout { max-width: 900px; margin: 20px auto; padding: 0 16px 80px; display: grid; grid-template-columns: 1fr 280px; gap: 16px; align-items: start; }
+  @media (max-width: 680px) { .layout { grid-template-columns: 1fr; padding-bottom: 100px; } .sidebar { display: none; } }
+
+  /* ── Card ── */
+  .card { background: #fff; border-radius: 8px; padding: 20px 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,.07); }
+  .card + .card { margin-top: 12px; }
+  .card-title { margin: 0 0 14px; font-size: 17px; font-weight: 600; color: #1a1a1a; }
+  .card-body { color: #3d3d3d; }
+  .card-body p { margin: 0 0 10px; line-height: 1.7; }
+  .card-body ul { margin: 0 0 10px; padding-left: 20px; }
+  .card-body li { margin-bottom: 4px; line-height: 1.65; }
+  .card-body h3 { margin: 14px 0 8px; font-size: 15px; font-weight: 600; color: #1a1a1a; }
+
+  /* ── Conditions card ── */
+  .salary-line { font-size: 22px; font-weight: 700; color: #1a1a1a; margin-bottom: 12px; }
+  .cond-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cond-tag { background: #f0f0f0; color: #3d3d3d; border-radius: 4px; padding: 4px 10px; font-size: 13px; }
+
+  /* ── Skills ── */
+  .skills-wrap { display: flex; flex-wrap: wrap; gap: 8px; }
+  .skill-tag { background: #e8f0fe; color: #1a56db; border-radius: 4px; padding: 5px 12px; font-size: 13px; font-weight: 500; }
+
+  /* ── Sidebar apply card ── */
+  .apply-card { background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.07); position: sticky; top: 20px; }
+  .apply-btn { display: block; width: 100%; background: #1a56db; color: #fff; border: none; border-radius: 6px; padding: 13px 20px; font-size: 15px; font-weight: 600; text-align: center; text-decoration: none; cursor: pointer; transition: background .15s; }
+  .apply-btn:hover { background: #1447b8; }
+  .apply-contacts { margin-top: 14px; font-size: 13px; color: #767676; display: flex; flex-direction: column; gap: 6px; }
+  .apply-contacts a { color: #1a56db; text-decoration: none; }
+  .apply-contacts a:hover { text-decoration: underline; }
+
+  /* ── Mobile sticky apply bar ── */
+  .mobile-apply-bar { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: #fff; border-top: 1px solid #e8e8e8; padding: 12px 16px; z-index: 100; }
+  .mobile-apply-bar .apply-btn { border-radius: 6px; }
+  @media (max-width: 680px) { .mobile-apply-bar { display: block; } }
 </style>
 </head>
 <body>
-<div class="hero">
-  <h1>${escapeHtml(draft.name) || 'Вакансия'}</h1>
-  ${draft.company_name ? `<div class="company">🏢 ${escapeHtml(draft.company_name)}</div>` : ''}
-  <div class="salary">💰 ${escapeHtml(salary)}</div>
-  ${draft.area_name ? `<div class="location">📍 ${escapeHtml(draft.area_name)}</div>` : ''}
-  ${tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
-</div>
-<div class="container">
-  ${descHtml ? `<div class="card desc"><h2>О вакансии</h2>${descHtml}</div>` : ''}
-  ${skillsHtml ? `<div class="card"><h2>Ключевые навыки</h2><div class="skills">${skillsHtml}</div></div>` : ''}
-  ${draft.company_description ? `<div class="card"><h2>О компании</h2><p>${escapeHtml(draft.company_description)}</p></div>` : ''}
 
-  <div class="form-section" id="applySection">
-    <h2>Откликнуться на вакансию</h2>
-    <form id="applyForm" enctype="multipart/form-data">
-      <label>Имя</label>
-      <input type="text" name="name" placeholder="Ваше имя">
-
-      <label>Email <span class="req">*</span></label>
-      <input type="email" name="email" required placeholder="you@example.com">
-
-      <label>Телефон <span class="req">*</span></label>
-      <input type="tel" name="phone" required placeholder="+7 (999) 000-00-00">
-
-      <label>Telegram</label>
-      <input type="text" name="telegram" placeholder="@username">
-
-      <label>Сопроводительное письмо</label>
-      <textarea name="message" placeholder="Расскажите о себе, опыте, мотивации..."></textarea>
-
-      <label class="file-label" for="resumeFile">
-        📎 <span id="fileLabel">Прикрепить резюме (PDF, DOCX — не обязательно)</span>
-      </label>
-      <input type="file" id="resumeFile" name="resume" accept=".pdf,.doc,.docx,.txt">
-
-      <button type="submit" class="submit-btn" id="submitBtn">Откликнуться</button>
-    </form>
-    <div class="success" id="successMsg">
-      <h2>✅ Отклик отправлен!</h2>
-      <p>Мы свяжемся с вами в ближайшее время.</p>
+<header class="page-header">
+  <div class="inner">
+    <h1 class="vacancy-title">${escapeHtml(draft.name) || 'Вакансия'}</h1>
+    <div class="vacancy-meta">
+      ${draft.company_name ? `<span class="meta-company">${escapeHtml(draft.company_name)}</span>` : ''}
+      ${draft.company_name && draft.area_name ? `<span class="meta-sep">·</span>` : ''}
+      ${draft.area_name ? `<span>${escapeHtml(draft.area_name)}</span>` : ''}
+      ${(draft.company_name || draft.area_name) ? `<span class="meta-sep">·</span>` : ''}
+      <span>Опубликовано ${pubDate}</span>
     </div>
   </div>
+</header>
+
+<div class="layout">
+  <main>
+    <div class="card">
+      <div class="salary-line">${escapeHtml(salary)}</div>
+      ${conditionTags.length ? `<div class="cond-tags">${conditionTags.map(t => `<span class="cond-tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
+    </div>
+
+    ${sectionCards}
+
+    ${skillsHtml ? `<div class="card"><h2 class="card-title">Ключевые навыки</h2><div class="skills-wrap">${skillsHtml}</div></div>` : ''}
+    ${draft.company_description ? `<div class="card"><h2 class="card-title">О компании</h2><div class="card-body"><p>${escapeHtml(draft.company_description)}</p></div></div>` : ''}
+  </main>
+
+  <aside class="sidebar">
+    <div class="apply-card">
+      <a class="apply-btn" href="${escapeHtml(applyHref)}"${applyHref === '#' ? '' : ' target="_blank" rel="noopener"'}>Откликнуться</a>
+      ${draft.contacts?.email || draft.contacts?.telegram || draft.contacts?.phone ? `
+      <div class="apply-contacts">
+        ${draft.contacts.email ? `<a href="mailto:${escapeHtml(draft.contacts.email)}">${escapeHtml(draft.contacts.email)}</a>` : ''}
+        ${draft.contacts.telegram ? `<a href="https://t.me/${escapeHtml(draft.contacts.telegram.replace(/^@/, ''))}" target="_blank" rel="noopener">Telegram: ${escapeHtml(draft.contacts.telegram)}</a>` : ''}
+        ${draft.contacts.phone ? `<a href="tel:${escapeHtml(draft.contacts.phone.replace(/\s/g, ''))}">${escapeHtml(draft.contacts.phone)}</a>` : ''}
+      </div>` : ''}
+    </div>
+  </aside>
 </div>
-<script>
-document.getElementById('resumeFile').addEventListener('change', function() {
-  document.getElementById('fileLabel').textContent = this.files[0]?.name || 'Прикрепить резюме';
-});
-document.getElementById('applyForm').addEventListener('submit', async function(e) {
-  e.preventDefault();
-  const btn = document.getElementById('submitBtn');
-  btn.disabled = true;
-  btn.textContent = 'Отправляю...';
-  const fd = new FormData(this);
-  try {
-    const r = await fetch(${JSON.stringify(applyUrl)}, { method: 'POST', body: fd });
-    if (r.ok) {
-      this.style.display = 'none';
-      document.getElementById('successMsg').style.display = 'block';
-    } else {
-      const d = await r.json().catch(() => ({}));
-      alert(d.error || 'Ошибка при отправке. Попробуйте ещё раз.');
-      btn.disabled = false;
-      btn.textContent = 'Откликнуться';
-    }
-  } catch {
-    alert('Сетевая ошибка. Проверьте соединение и попробуйте ещё раз.');
-    btn.disabled = false;
-    btn.textContent = 'Откликнуться';
-  }
-});
-</script>
+
+<div class="mobile-apply-bar">
+  <a class="apply-btn" href="${escapeHtml(applyHref)}"${applyHref === '#' ? '' : ' target="_blank" rel="noopener"'}>Откликнуться</a>
+</div>
+
 </body>
 </html>`;
 }
