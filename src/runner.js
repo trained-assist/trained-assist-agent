@@ -16,7 +16,7 @@ const {
   SERVICE_DISPLAY,
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
-const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage } = require('./hh-quick');
+const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, readActiveVacancy } = require('./hh-quick');
 const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH } = require('./hh-vacancy');
 
 const STREAM_INTERVAL_MS = 3000;
@@ -568,7 +568,13 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
       if (r) return r;
     }
     if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
-    if (HH_REVIEW_PAGE_INTENT.test(task)) return hhReviewPage(userId);
+    if (HH_REVIEW_PAGE_INTENT.test(task)) {
+      // Vacancy draft active → user likely means "publish landing page" → Claude decides
+      if (workDir && readVacancyState(workDir)?.draft) return null;
+      // Active vacancy exists → return review page; otherwise fall through to other checks
+      const av = workDir ? readActiveVacancy(workDir) : null;
+      if (av) return hhReviewPage(userId);
+    }
     if (HH_WHERE_PROMPT_INTENT.test(task)) return hhWherePrompt(userId);
     if (HH_SHOW_ATS_CONFIG_INTENT.test(task)) return hhShowAtsConfig(userId);
     if (HH_STYLE_INTENT.test(task)) return hhStylePage(userId);

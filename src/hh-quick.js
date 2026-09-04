@@ -223,4 +223,4 @@ function hhStylePage(userId) {
 // Export cache invalidation for tests
 function _clearCache() { _cache.clear(); }
 
-module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, _clearCache };
+module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, _clearCache, readActiveVacancy: _readActiveVacancy };

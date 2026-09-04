@@ -1607,6 +1607,22 @@ function show(id, type, msg) {
       return;
     }
 
+    // POST /vacancy/store — receive and persist a vacancy landing page HTML from another VM
+    if (req.method === 'POST' && url.pathname === '/vacancy/store') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, vacancyId, html } = body || {};
+      if (!username || !vacancyId || !html) return json(res, 400, { error: 'missing fields' });
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username) || !/^[a-zA-Z0-9_-]{1,64}$/.test(vacancyId)) {
+        return json(res, 400, { error: 'invalid username or vacancyId' });
+      }
+      const draftsDir = path.join(os.homedir(), 'users', username, 'vacancy-drafts');
+      fs.mkdirSync(draftsDir, { recursive: true });
+      fs.writeFileSync(path.join(draftsDir, `${vacancyId}.html`), html, 'utf8');
+      const pageUrl = `https://platform.recruiter-assistant.ru/vacancy/${username}/${vacancyId}`;
+      return json(res, 200, { ok: true, url: pageUrl });
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, { status: 'alive', uptime: process.uptime(), vm: VM_NAME, commit: GIT_COMMIT });
     }
