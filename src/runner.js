@@ -669,7 +669,8 @@ function buildContextCard(username, workDir) {
 // Creates or silently updates the context pin after task completion.
 // State (msgId + chatId + lastCard text) is stored in workDir/.pin_state.json.
 // botPinnedMsgId: the pinned message ID known to the bot — used to seed state when we have none.
-async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
+// operatorChatId: if set, used to notify admin when pin creation fails (no rights).
+async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null, operatorChatId = null) {
   const pinFile = path.join(workDir, '.pin_state.json');
   let state = null;
   try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch {}
@@ -699,10 +700,13 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
     console.error(`[pin] edit failed msgId=${state.msgId} chat=${chatId}:`, JSON.stringify(edited));
   }
 
-  // No existing pin (or edit failed) — send new card message and pin it.
+  // No existing pin (or edit failed) — send new card message and try to pin it.
   const msg = await tgSend(token, chatId, card);
   const newId = msg?.result?.message_id;
   if (!newId) return;
+
+  // Always save msgId so next run edits in-place instead of creating another new message.
+  fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: card }));
 
   const res = await fetch(`${TG_API}/bot${token}/pinChatMessage`, {
     method: 'POST',
@@ -711,9 +715,13 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   });
   const pinData = await res.json();
   if (!pinData.ok) {
-    console.error(`[pin] failed chat=${chatId}:`, JSON.stringify(pinData));
-  } else {
-    fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: card }));
+    console.error(`[pin] pinChatMessage failed chat=${chatId}:`, JSON.stringify(pinData));
+    // Notify admin when the bot lacks pin rights in a chat.
+    if (operatorChatId && pinData.description?.includes('not enough rights')) {
+      tgSend(token, operatorChatId,
+        `⚠️ Бот не может закрепить сообщение в чате ${chatId}.\nДай боту права «Закреплять сообщения» в настройках группы.`
+      ).catch(() => {});
+    }
   }
 }
 
@@ -1071,7 +1079,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Update context pin after task (only if skills are configured)
   const card = buildContextCard(user.username, user.workDir);
-  if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
+  const operatorChatId = secrets.OPERATOR_CHAT_ID || '1714048';
+  if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, operatorChatId).catch(() => {});
 
   // Append assistant reply to session history
   if (activeSessionId) {
