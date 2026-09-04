@@ -1786,10 +1786,10 @@ function show(id, type, msg) {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectDir } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectDir, fileBase64, fileName, fileMimeType } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
-      if (!task && !forceClaude) return json(res, 400, { error: 'missing fields' });
+      if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
       if (!/^-?\d{1,20}$/.test(String(userId))) {
         console.log('[/run] 400 invalid userId:', userId);
         return json(res, 400, { error: 'invalid userId' });
@@ -1823,12 +1823,29 @@ function show(id, type, msg) {
       const user = { id: userId, name: username, username, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
+      // Save attached file (base64) to workDir and prepend path info to the task.
+      let effectiveTask = task || '';
+      if (fileBase64 && fileName) {
+        const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+        const uploadsDir = path.join(workDir, 'uploads');
+        fs.mkdirSync(uploadsDir, { recursive: true });
+        const filePath = path.join(uploadsDir, safeName);
+        try {
+          fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'), { mode: 0o600 });
+          const typeNote = fileMimeType ? ` (${fileMimeType})` : '';
+          const fileNote = `[Файл сохранён: ${filePath}${typeNote}]`;
+          effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
+        } catch (e) {
+          console.error('[/run] file save error:', e.message);
+        }
+      }
+
       // Accept request immediately, run task in background
       const taskId = `${username}-${Date.now()}`;
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: task || '', context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets }).catch(err =>
+      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
