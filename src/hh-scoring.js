@@ -4,14 +4,14 @@
 // Used by both 90-hh.js MCP tool and server.js /hh/review endpoint.
 
 const https = require('https');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const FAST_MODEL = 'deepseek/deepseek-v4-flash-0731';
 const FALLBACK_MODEL = 'google/gemini-flash-2.0';
 
-const CHINESE_RE = /[一-鿿㐀-䶿豈-﫿぀-ヿ]/;
+const CHINESE_RE = /[一-鿿㐀-䶿豈-﫿぀-ヿ]/;
 
 function hasGarbage(text) {
   if (!text) return false;
@@ -24,6 +24,8 @@ function isCleanResult(llmResult) {
   if ((llmResult.missing || []).some(m => hasGarbage(m))) return false;
   return true;
 }
+
+// ─── OpenRouter (fallback) ────────────────────────────────────────────────────
 
 function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
   return new Promise((resolve, reject) => {
@@ -53,6 +55,94 @@ function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
     req.end();
   });
 }
+
+// ─── GigaChat (primary) ───────────────────────────────────────────────────────
+
+// Token cache: credentials_b64 → { token, expiresAt }
+const _gcTokenCache = {};
+
+// Sber uses a self-signed cert — skip verification on their endpoints.
+const GC_AUTH_AGENT = new https.Agent({ rejectUnauthorized: false });
+const GC_API_AGENT  = new https.Agent({ rejectUnauthorized: false });
+
+function gcGetToken(credentials) {
+  const cached = _gcTokenCache[credentials];
+  if (cached && cached.expiresAt > Date.now() + 60_000) return Promise.resolve(cached.token);
+
+  return new Promise((resolve, reject) => {
+    const body = 'scope=GIGACHAT_API_PERS';
+    const req = https.request({
+      hostname: 'ngw.devices.sberbank.ru',
+      port: 9443,
+      path: '/api/v2/oauth',
+      method: 'POST',
+      agent: GC_AUTH_AGENT,
+      headers: {
+        Authorization: `Basic ${credentials}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'RqUID': crypto.randomUUID(),
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (!parsed.access_token) return reject(new Error('GigaChat auth failed: ' + data));
+          _gcTokenCache[credentials] = { token: parsed.access_token, expiresAt: parsed.expires_at };
+          resolve(parsed.access_token);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function gcCall(credentials, messages, maxTokens = 2000, temperature = 0.1) {
+  const token = await gcGetToken(credentials);
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ model: 'GigaChat', messages, temperature, max_tokens: maxTokens });
+    const req = https.request({
+      hostname: 'gigachat.devices.sberbank.ru',
+      path: '/api/v1/chat/completions',
+      method: 'POST',
+      agent: GC_API_AGENT,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+          else resolve(parsed.choices[0].message.content);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function readGigachatKey(username) {
+  const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+  const file = path.join(tokensBase, String(username), 'gigachat');
+  if (fs.existsSync(file)) {
+    const key = fs.readFileSync(file, 'utf8').trim();
+    if (key) return key;
+  }
+  return process.env.GIGACHAT_API_KEY || null;
+}
+
+// ─── Shared helpers ───────────────────────────────────────────────────────────
 
 function parseLlmJson(content) {
   if (!content) throw new Error('LLM returned empty content');
@@ -115,33 +205,35 @@ function computeScore(llmResult, config) {
   };
 }
 
-async function evaluateCandidate(candidateText, atsConfig, apiKey) {
-  const systemPrompt = buildAtsPrompt(atsConfig);
+// ─── evaluateCandidate: GigaChat → Gemini fallback ───────────────────────────
+
+async function evaluateCandidate(candidateText, atsConfig, apiKey, gigachatKey) {
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: buildAtsPrompt(atsConfig) },
     { role: 'user', content: `Оцени кандидата:\n\n${candidateText}` },
   ];
 
-  const models = [FAST_MODEL, FAST_MODEL, FALLBACK_MODEL];
-  for (let attempt = 0; attempt < models.length; attempt++) {
-    const model = models[attempt];
+  // Primary: GigaChat (free, no Chinese garbage)
+  if (gigachatKey) {
     try {
-      const content = await llmCall(apiKey, model, messages, 2000, 0.1);
+      const content = await gcCall(gigachatKey, messages, 2000, 0.1);
       const llmResult = parseLlmJson(content);
-      if (!isCleanResult(llmResult)) {
-        console.warn(`[hh-scoring] attempt ${attempt + 1} (${model}) returned garbage text, retrying...`);
-        continue;
-      }
-      return computeScore(llmResult, atsConfig);
+      if (isCleanResult(llmResult)) return computeScore(llmResult, atsConfig);
+      console.warn('[hh-scoring] GigaChat returned garbage, falling back to Gemini');
     } catch (e) {
-      if (attempt === models.length - 1) throw e;
-      console.warn(`[hh-scoring] attempt ${attempt + 1} failed: ${e.message}, retrying...`);
+      console.warn(`[hh-scoring] GigaChat failed: ${e.message}, falling back to Gemini`);
     }
   }
-  throw new Error('LLM returned garbage text after all attempts');
+
+  // Fallback: Gemini via OpenRouter
+  if (!apiKey) throw new Error('No LLM credentials available');
+  const content = await llmCall(apiKey, FALLBACK_MODEL, messages, 2000, 0.1);
+  const llmResult = parseLlmJson(content);
+  return computeScore(llmResult, atsConfig);
 }
 
-// Read ATS config from user's session workDir context
+// ─── Read tokens ──────────────────────────────────────────────────────────────
+
 function readAtsConfig(workDir) {
   const file = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
   if (!fs.existsSync(file)) return null;
@@ -151,7 +243,6 @@ function readAtsConfig(workDir) {
   } catch { return null; }
 }
 
-// Read OpenRouter API key for a user
 function readOrKey(username) {
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const file = path.join(tokensBase, String(username), 'openrouter');
@@ -162,7 +253,8 @@ function readOrKey(username) {
   return process.env.OPENROUTER_API_KEY || null;
 }
 
-// Candidate history path (mirrors 90-hh.js)
+// ─── Candidate history ────────────────────────────────────────────────────────
+
 function candidateHistoryPath(username, negotiationId) {
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
   return path.join(dataDir, 'hh', String(username), 'candidates', `${negotiationId}.json`);
@@ -180,7 +272,6 @@ function saveCandidateHistory(username, negotiationId, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
-// Build resume text from HH negotiation object (for scoring input)
 function buildResumeText(neg) {
   const r = neg.resume || {};
   const lines = [];
@@ -212,14 +303,15 @@ function buildResumeText(neg) {
   return lines.join('\n');
 }
 
-// Score all unscored negotiations in parallel (up to maxConcurrent)
-// Saves ats_result to history files. Returns count of newly scored.
+// ─── Batch scoring: GigaChat primary ─────────────────────────────────────────
+
 async function scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent = 5 } = {}) {
   const atsConfig = readAtsConfig(workDir);
   if (!atsConfig) return 0;
 
+  const gigachatKey = readGigachatKey(username);
   const apiKey = readOrKey(username);
-  if (!apiKey) return 0;
+  if (!gigachatKey && !apiKey) return 0;
 
   const unscored = negotiations.filter(neg => {
     const history = readCandidateHistory(username, neg.id);
@@ -229,13 +321,12 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
   if (!unscored.length) return 0;
 
   let scored = 0;
-  // Process in batches to avoid overwhelming the API
   for (let i = 0; i < unscored.length; i += maxConcurrent) {
     const batch = unscored.slice(i, i + maxConcurrent);
     await Promise.all(batch.map(async (neg) => {
       try {
         const resumeText = buildResumeText(neg);
-        const result = await evaluateCandidate(resumeText, atsConfig, apiKey);
+        const result = await evaluateCandidate(resumeText, atsConfig, apiKey, gigachatKey);
         if (result.score != null) {
           const history = readCandidateHistory(username, neg.id);
           history.ats_result = result;
@@ -251,14 +342,15 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
   return scored;
 }
 
-// Generate draft messages for all scored candidates that don't have a draft yet.
-// Called from background job after scoring. Uses ats_config for vacancy context.
+// ─── Draft generation: GigaChat primary ──────────────────────────────────────
+
 async function generateDraftMessages(negotiations, username, workDir, { maxConcurrent = 3 } = {}) {
   const atsConfig = readAtsConfig(workDir);
   if (!atsConfig) return 0;
 
+  const gigachatKey = readGigachatKey(username);
   const apiKey = readOrKey(username);
-  if (!apiKey) return 0;
+  if (!gigachatKey && !apiKey) return 0;
 
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const styleFile = path.join(tokensBase, String(username), 'hh-message-style');
@@ -305,18 +397,33 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
           ? `Напиши вежливый отказ кандидату ${firstName}.`
           : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resumeText}`;
 
-        let message;
-        const draftModels = [FAST_MODEL, FALLBACK_MODEL];
-        for (let attempt = 0; attempt < draftModels.length; attempt++) {
-          message = await llmCall(apiKey, draftModels[attempt], [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMsg },
-          ], 600, 0.7);
-          if (!hasGarbage(message)) break;
-          console.warn(`[hh-drafts] attempt ${attempt + 1} (${draftModels[attempt]}) returned garbage, retrying...`);
-          message = null;
+        const messages = [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMsg },
+        ];
+
+        let message = null;
+
+        // Primary: GigaChat
+        if (gigachatKey) {
+          try {
+            message = await gcCall(gigachatKey, messages, 600, 0.7);
+            if (hasGarbage(message)) {
+              console.warn(`[hh-drafts] GigaChat returned garbage for ${neg.id}, falling back`);
+              message = null;
+            }
+          } catch (e) {
+            console.warn(`[hh-drafts] GigaChat failed for ${neg.id}: ${e.message}, falling back`);
+          }
         }
-        if (!message) throw new Error('draft generation returned garbage after all attempts');
+
+        // Fallback: Gemini
+        if (!message && apiKey) {
+          message = await llmCall(apiKey, FALLBACK_MODEL, messages, 600, 0.7);
+          if (hasGarbage(message)) throw new Error('Gemini fallback returned garbage');
+        }
+
+        if (!message) throw new Error('No LLM credentials produced a result');
 
         history.ats_result.draft_message = message.trim();
         saveCandidateHistory(username, neg.id, history);
@@ -332,12 +439,14 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
 
 module.exports = {
   llmCall,
+  gcCall,
   parseLlmJson,
   buildAtsPrompt,
   computeScore,
   evaluateCandidate,
   readAtsConfig,
   readOrKey,
+  readGigachatKey,
   readCandidateHistory,
   saveCandidateHistory,
   buildResumeText,
