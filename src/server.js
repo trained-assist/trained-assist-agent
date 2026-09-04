@@ -989,7 +989,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1117,7 +1117,7 @@ async function main() {
     if (req.method === 'POST' && url.pathname === '/hh/generate-message') {
       res.setHeader('Access-Control-Allow-Origin', '*');
       const body = JSON.parse(await readBody(req));
-      const { username, negotiation_id, resume_text, candidate_name, already_sent } = body || {};
+      const { username, negotiation_id, resume_text, candidate_name, already_sent, message_type } = body || {};
       if (!username || !negotiation_id) return json(res, 400, { error: 'missing fields' });
 
       const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -1134,7 +1134,7 @@ async function main() {
       const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
       const msgs = history.messages || [];
       const hasPriorContact = msgs.some(m => m.role === 'employer');
-      const msgType = already_sent || hasPriorContact ? 'followup' : 'initial';
+      const msgType = message_type === 'rejection' ? 'rejection' : (already_sent || hasPriorContact ? 'followup' : 'initial');
 
       // Read HH token once — reused for resume fetch and vacancy fetch
       let hhToken = null;
@@ -1195,15 +1195,20 @@ async function main() {
         (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
       const followupSystem = `Ты — рекрутер. Напиши короткий follow-up кандидату, который не ответил на первое сообщение.
 Тон: лёгкий, без давления. 2-3 предложения. Пиши на русском языке.`;
+      const rejectionSystem = `Ты — рекрутер. Напиши вежливый отказ кандидату.
+Тон: уважительный, тёплый, без объяснения причин. Пожелай удачи в поиске. 2-3 предложения. Пиши на русском языке.`;
 
+      const activeSystem = msgType === 'rejection' ? rejectionSystem : msgType === 'followup' ? followupSystem : baseSystem;
       const systemPrompt = commStyle
-        ? `${msgType === 'followup' ? followupSystem : baseSystem}\n\n## Стиль общения рекрутера\n${commStyle}`
-        : (msgType === 'followup' ? followupSystem : baseSystem);
+        ? `${activeSystem}\n\n## Стиль общения рекрутера\n${commStyle}`
+        : activeSystem;
 
       const firstName = (candidate_name || 'Кандидат').split(' ')[0];
-      const userMsg = msgType === 'followup'
-        ? `Кандидат ${firstName} не ответил. Напиши follow-up.`
-        : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}`;
+      const userMsg = msgType === 'rejection'
+        ? `Напиши вежливый отказ кандидату ${firstName}.`
+        : msgType === 'followup'
+          ? `Кандидат ${firstName} не ответил. Напиши follow-up.`
+          : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}`;
 
       try {
         const message = await new Promise((resolve, reject) => {
@@ -1267,6 +1272,42 @@ async function main() {
       const failed = results.filter(r => !r.ok).length;
       console.log(`[hh/reject] user=${username} total=${negotiation_ids.length} failed=${failed}`);
       return json(res, 200, { ok: true, results });
+    }
+
+    // POST /hh/send-and-reject — send a rejection message then reject in HH
+    if (req.method === 'POST' && url.pathname === '/hh/send-and-reject') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body = JSON.parse(await readBody(req));
+      const { username, negotiation_id, message } = body || {};
+      if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
+
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+      if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
+      const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
+
+      try {
+        // Send rejection message first
+        await hhApiPost(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
+        // Then reject in HH
+        await hhApiPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData.access_token);
+
+        // Save to history
+        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+        const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
+        fs.mkdirSync(histDir, { recursive: true });
+        const histFile = path.join(histDir, `${negotiation_id}.json`);
+        const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
+        history.messages = history.messages || [];
+        history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString(), type: 'rejection' });
+        fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
+
+        console.log(`[hh/send-and-reject] user=${username} neg=${negotiation_id}`);
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        console.error('[hh/send-and-reject] error:', e.message);
+        return json(res, 500, { error: e.message });
+      }
     }
 
     // GET /hh/style?username=X&token=Y — style update page
@@ -2106,7 +2147,17 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const hasDraft = !!c.draft_message;
     const msgLabel = c.already_sent ? 'Follow-up (уже писали)' : hasDraft ? 'Черновик сообщения' : 'Сообщение';
     const msgSection = isReject
-      ? '<div class="reject-note">Будет отклонён через bulk_reject — сообщение не нужно</div>'
+      ? `<div class="msg-section">
+           <div class="msg-label-row">
+             <label class="msg-label" style="color:#dc2626">Сообщение об отказе</label>
+             <button class="btn btn-gen" id="gen-${i}" onclick="generateRejection(${i},'${esc(c.negotiation_id)}','${esc(c.name)}')" title="Сгенерировать отказное сообщение">✦ Сгенерировать отказ</button>
+           </div>
+           <textarea class="msg-area" id="msg-${i}" rows="4">${hasDraft ? esc(c.draft_message) : ''}</textarea>
+           <div class="btns">
+             <button class="btn btn-send-reject" onclick="sendAndRejectOne(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
+             <button class="btn btn-skip" onclick="skipOne(${i})">Пропустить</button>
+           </div>
+         </div>`
       : `<div class="msg-section">
            <div class="msg-label-row">
              <label class="msg-label">${msgLabel}</label>
@@ -2195,6 +2246,7 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .btn{padding:8px 18px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
 .btn:hover{opacity:.85}
 .btn-send{background:#16a34a;color:#fff}
+.btn-send-reject{background:#dc2626;color:#fff}
 .btn-skip{background:#e2e8f0;color:#475569}
 .reject-note{font-size:13px;color:#94a3b8;border-top:1px solid #e2e8f0;padding-top:10px;font-style:italic}
 .hist-none{font-size:12px;color:#94a3b8;margin:8px 0 4px;font-style:italic}
@@ -2404,6 +2456,40 @@ async function generateOne(i, negId, candidateName, alreadySent) {
   } catch(e) {
     if (ta) { ta.classList.remove('generating'); ta.placeholder = ''; }
     if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать'; }
+  }
+}
+
+async function generateRejection(i, negId, candidateName) {
+  const btn = document.getElementById('gen-'+i);
+  const ta = document.getElementById('msg-'+i);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+  if (ta) { ta.classList.add('generating'); ta.placeholder = '⏳ Генерирую...'; }
+  try {
+    const data = await hhAction('/hh/generate-message', {
+      negotiation_id: negId,
+      candidate_name: candidateName,
+      message_type: 'rejection',
+    });
+    if (ta) { ta.value = data.message || ''; ta.classList.remove('generating'); ta.placeholder = ''; }
+    if (btn) { btn.disabled = false; btn.textContent = '✦ Переписать отказ'; }
+  } catch(e) {
+    if (ta) { ta.classList.remove('generating'); ta.placeholder = ''; }
+    if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать отказ'; }
+    showToast('❌ ' + e.message, true);
+  }
+}
+
+async function sendAndRejectOne(i, negId) {
+  const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
+  if (!msg) { showToast('Напишите или сгенерируйте сообщение', true); return; }
+  const btn = event?.currentTarget;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+  try {
+    await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg });
+    markDone(i); onCheck(); showToast('✅ Отказ отправлен');
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = '✗ Отправить отказ'; }
   }
 }
 
