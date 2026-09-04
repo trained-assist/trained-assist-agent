@@ -221,6 +221,77 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
   return scored;
 }
 
+// Generate draft messages for all scored candidates that don't have a draft yet.
+// Called from background job after scoring. Uses ats_config for vacancy context.
+async function generateDraftMessages(negotiations, username, workDir, { maxConcurrent = 3 } = {}) {
+  const atsConfig = readAtsConfig(workDir);
+  if (!atsConfig) return 0;
+
+  const apiKey = readOrKey(username);
+  if (!apiKey) return 0;
+
+  const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+  const styleFile = path.join(tokensBase, String(username), 'hh-message-style');
+  const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
+
+  const vacancyCtx = atsConfig.vacancy_title && atsConfig.vacancy_context
+    ? `Вакансия: ${atsConfig.vacancy_title}\n\n${atsConfig.vacancy_context}`
+    : '';
+
+  const needDraft = negotiations.filter(neg => {
+    const h = readCandidateHistory(username, neg.id);
+    return h.ats_result?.score != null && !h.ats_result?.draft_message;
+  });
+
+  if (!needDraft.length) return 0;
+
+  const baseSystem = 'Ты — рекрутер. ВСЕГДА пиши сообщение, даже если данных мало.\n' +
+    'Тон: профессиональный, уважительный, конкретный. Пиши от первого лица на русском языке.\n' +
+    'Структура: 1) Приветствие с именем 2) что зацепило в резюме 3) короткое описание роли 4) 1-2 конкретных вопроса 5) призыв к действию.\n' +
+    'Длина: 4-7 предложений. Каждый вопрос — отдельная строка.\n' +
+    (vacancyCtx ? `\n## Контекст вакансии\n${vacancyCtx}` : '');
+  const rejectionSystem = 'Ты — рекрутер. Напиши вежливый отказ кандидату.\n' +
+    'Тон: уважительный, тёплый, без объяснения причин. Пожелай удачи в поиске. 2-3 предложения. Пиши на русском языке.';
+
+  let generated = 0;
+
+  for (let i = 0; i < needDraft.length; i += maxConcurrent) {
+    const batch = needDraft.slice(i, i + maxConcurrent);
+    await Promise.all(batch.map(async (neg) => {
+      try {
+        const history = readCandidateHistory(username, neg.id);
+        const verdict = history.ats_result?.verdict || 'ОТКЛОНИТЬ';
+        const isReject = verdict === 'ОТКЛОНИТЬ';
+
+        const r = neg.resume || {};
+        const firstName = r.first_name || r.last_name || 'Кандидат';
+
+        const systemPrompt = commStyle
+          ? `${isReject ? rejectionSystem : baseSystem}\n\n## Стиль рекрутера\n${commStyle}`
+          : (isReject ? rejectionSystem : baseSystem);
+
+        const resumeText = buildResumeText(neg);
+        const userMsg = isReject
+          ? `Напиши вежливый отказ кандидату ${firstName}.`
+          : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resumeText}`;
+
+        const message = await llmCall(apiKey, FAST_MODEL, [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMsg },
+        ], 600, 0.7);
+
+        history.ats_result.draft_message = message.trim();
+        saveCandidateHistory(username, neg.id, history);
+        generated++;
+      } catch (e) {
+        console.error(`[hh-drafts] failed to generate draft for ${neg.id}:`, e.message);
+      }
+    }));
+  }
+
+  return generated;
+}
+
 module.exports = {
   llmCall,
   parseLlmJson,
@@ -233,4 +304,5 @@ module.exports = {
   saveCandidateHistory,
   buildResumeText,
   scoreUnscoredCandidates,
+  generateDraftMessages,
 };

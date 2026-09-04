@@ -18,7 +18,7 @@ const { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml } = require('./
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
-const { scoreUnscoredCandidates } = require('./hh-scoring');
+const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -221,6 +221,9 @@ async function runHhScoringForUser(username) {
 
     const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4 });
     if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
+
+    const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3 });
+    if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
   } catch (e) {
     console.error(`[hh-bg] error for ${username}:`, e.message);
   } finally {
