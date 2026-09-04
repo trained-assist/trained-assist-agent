@@ -163,7 +163,12 @@ function archiveSessions(workDir, sessionIds) {
   const sessions = loadIndex(workDir);
   const remaining = sessions.filter(s => !idSet.has(s.id));
   const archived = sessions.length - remaining.length;
-  if (archived > 0) saveIndex(workDir, remaining);
+  if (archived > 0) {
+    saveIndex(workDir, remaining);
+    for (const id of idSet) {
+      try { fs.unlinkSync(sessionFilePath(workDir, id)); } catch { /* already gone */ }
+    }
+  }
   return archived;
 }
 

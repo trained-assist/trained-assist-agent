@@ -2,7 +2,15 @@
 // HH quick-answer handlers — API calls without Claude.
 // Each function returns a formatted string or null (fall through to Claude).
 
+const path = require('path');
+const os = require('os');
+
 const { readHhToken, readHhContext, writeHhContext, hhFetch } = require('./hh-utils');
+
+function _hhWorkDir(userId) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'sessions', String(userId));
+}
 
 const CACHE_TTL_MS = 4 * 60 * 1000; // 4 min
 
@@ -195,7 +203,7 @@ function hhShowAtsConfig(userId) {
   // Try to read local ATS config and summarise it
   try {
     const { readHhContext: _rhc } = require('./hh-utils');
-    const workDir = require('path').join(require('os').homedir(), 'alesa-data', 'sessions', String(userId));
+    const workDir = _hhWorkDir(userId);
     const config = readHhContext(workDir, 'hh', 'ats_config')?.value;
     if (config?.vacancy_title) {
       const stages = (config.stages || []).map(s => '  · ' + s).join('\n') || '  (этапы не настроены)';
