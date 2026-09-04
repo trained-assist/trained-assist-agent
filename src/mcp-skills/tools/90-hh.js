@@ -1331,6 +1331,7 @@ module.exports = {
           key_skills: { type: 'array', items: { type: 'string' } },
           company_name: { type: 'string' },
           company_description: { type: 'string' },
+          hiring_stages: { type: 'array', items: { type: 'string' }, description: 'Этапы отбора, например ["Скрининг", "Интервью", "Оффер"]' },
           response_letter_required: { type: 'boolean' },
         },
       },
