@@ -370,10 +370,10 @@ Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_D
 ## Claude Code Instructions
 
 ### Architecture rules
-- All state on disk in `AGENT_DATA_DIR` — persists across process restarts
-- User registry: `users.json` — scrypt-hashed passwords
-- Sessions: `sessions.json` — in-memory + disk
-- Per-user workDir: `sessions/<username>/` — files for Claude Code
+- All state on disk in `AGENT_DATA_DIR` — persists across process restarts. **Always read from `process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data')`, never hardcode the path.**
+- Per-user workDir: `$AGENT_DATA_DIR/sessions/<username>/` — files for Claude Code
+- User tokens: `~/agent-tokens/<username>/` — one file per service (github, nalog, gdrive…), `mode 0o600`
+- Connect-pending tokens: `~/connect-pending/<token>.json` — short-lived (30 min), `mode 0o600`
 - HTTP server: no framework, built-in `http` module only
 - Claude: spawned as child process via `spawn('claude', ['--dangerously-skip-permissions', '--print', prompt])`
 - Auth: all endpoints gated by `AGENT_SECRET` Bearer token
@@ -399,6 +399,127 @@ How to add:
 3. For setup flows that generate a connect link, add an entry to `QUICK_SETUPS` array
 
 **Do NOT route through Claude** for: yes/no capability questions, pre-scripted setup instructions, or anything where the server can produce the exact right answer deterministically.
+
+### Session management — architecture and traps
+
+Sessions in Telegram are the core UX feature. Understanding the two-layer architecture prevents common bugs.
+
+#### Two-layer storage
+
+```
+$AGENT_DATA_DIR/sessions/<username>/
+  sessions.json              ← INDEX: array of {id, topic, lastAt, messageCount, lastUserMessage}
+  sessions/
+    s-1234567890.json        ← FULL SESSION: {id, topic, messages: [{role, content, at}]}
+    s-1234567891.json
+    current-session.json     ← POINTER: {id, lastAt} — which session is "active" now
+```
+
+**Rule:** `sessions.json` (the index) is capped at 50 entries. The `sessions/<id>.json` files are the source of truth. `archiveSessions()` removes from both.
+
+#### Session lifecycle
+
+```
+POST /run →
+  1. Look up existing session (explicit sessionId from bot, or current-session.json within 4h TTL)
+  2. getQuickAnswer() → if match: save exchange, return immediately (no Claude)
+  3. If Claude path: appendUserMessage(), spawn Claude, stream output
+  4. On Claude exit: appendReply(), setCurrentSessionId()
+```
+
+Key invariant: **user message is saved before Claude runs** (`appendUserMessage`), reply after. If Claude crashes mid-run, the user message is still in history.
+
+#### Context injected into Claude
+
+`buildContext(workDir, sessionId)` gives Claude the last 6 messages from the session, each truncated to 500 chars. Format:
+
+```
+[Продолжение сессии от 01.09.2026, 14:32]
+Тема: "прочитай sales.xlsx"
+
+Пользователь: прочитай sales.xlsx
+Клод: Прочитал файл. 3 листа: Продажи, Расходы, Итог. Что нужно?
+Пользователь: сделай сводку по итогам
+```
+
+Then the current task is appended as `Пользователь: <task>`. Without the "Пользователь:" prefix, Claude reads the last session message as the current request.
+
+#### Common traps
+
+**1. Never hardcode data directory path.**
+```js
+// ❌ Wrong — breaks on path change
+const workDir = path.join(os.homedir(), 'alesa-data', 'sessions', username);
+
+// ✅ Right
+const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+const workDir = path.join(dataDir, 'sessions', username);
+```
+The systemd service sets `AGENT_DATA_DIR=/home/vova/alesa-data`. On local dev this differs from the default. Always use the env var.
+
+**2. Quick answers that touch state still need null-guard on `workDir`.**
+```js
+// ❌ Wrong — getQuickAnswer can be called with workDir=null
+const flagPath = path.join(workDir, 'contexts', 'feature', '.enabled');
+
+// ✅ Right
+if (!workDir) return null;
+const flagPath = path.join(workDir, 'contexts', 'feature', '.enabled');
+```
+
+**3. Enable-intent + draw-command combination.**  
+If a user message matches BOTH an enable intent ("включи иллюстрации") AND a draw command ("нарисуй лёгкие"), the correct behavior is: **enable the skill first**, then return `null` so Claude handles the draw. Never return `null` before enabling — Claude won't have the tool registered yet.
+
+```js
+if (ENABLE_INTENT.test(task)) {
+  enableSkill(workDir);                     // ← always do this first
+  if (DRAW_COMMAND.test(task)) return null; // ← then let Claude draw
+  return 'Скил включён!';
+}
+```
+
+**4. All token files must be `mode 0o600`.**
+```js
+// connect-pending, agent-tokens — both must use:
+fs.writeFileSync(filePath, content, { mode: 0o600 });
+```
+Files without an explicit mode default to `0o644` (world-readable on a shared VM).
+
+**5. External API calls need timeouts.**
+```js
+// ❌ Wrong — hangs forever if API is down
+const res = await fetch('https://api.hh.ru/...');
+
+// ✅ Right
+const res = await fetch('https://api.hh.ru/...', {
+  signal: AbortSignal.timeout(15_000),
+});
+// Or for http.request: req.setTimeout(15_000, () => req.destroy(...))
+```
+
+**6. POST handler JSON.parse needs try/catch.**
+```js
+// ❌ Wrong — throws on bad JSON, can crash the process
+const body = JSON.parse(await readBody(req));
+
+// ✅ Right
+let body;
+try { body = JSON.parse(await readBody(req)); }
+catch { return json(res, 400, { error: 'bad json' }); }
+```
+
+**7. `sessions.js` is deleted — don't recreate it.**  
+The real session store is `src/session-store.js`. There used to be a dead file `src/sessions.js` with a `SessionManager` class — it was never used. If you need session functionality, use `session-store.js`.
+
+#### server.js is a large file — where things live
+
+`server.js` is ~2900 lines. Key sections:
+- Lines 1–100: OAuth state store, HH scoring scheduler
+- Lines 100–1040: All `/connect/*` and `/hh/*` OAuth/form routes
+- Lines 1040+: Remaining API routes (auth-gated)
+- Lines 2800+: `hhApiRequest`, `tgNotifyNalog`, `generateReviewPageHtml` helpers
+
+When adding HH-related code, the helpers (`hhApiRequest`, `hhApiPost`) are at the bottom of `server.js`, not in a separate `hh-core.js` — this is a known tech debt, not a bug.
 
 ### Git workflow — PR-first
 **Never push directly to `main`.** All changes go through a feature branch + PR:
