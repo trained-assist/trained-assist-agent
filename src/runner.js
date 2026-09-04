@@ -645,7 +645,12 @@ async function updateContextPin(token, chatId, workDir, card) {
       fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, lastCard: card }));
       return;
     }
-    // Edit failed (message deleted?) — fall through to create new
+    // Fall through to recreate ONLY when Telegram confirms the message no longer exists.
+    // Transient errors (network failures, rate limits, 5xx) return ok:false too — treat them
+    // as "skip for now" to avoid creating duplicate pinned cards on every hiccup.
+    const messageGone = edited?.error_code === 400 &&
+      /not found|deleted|message to edit/i.test(edited?.description || '');
+    if (!messageGone) return;
   }
 
   // No existing pin — send new card message and pin it
