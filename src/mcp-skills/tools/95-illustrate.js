@@ -424,7 +424,7 @@ module.exports = {
         type: 'object',
         required: ['description'],
         properties: {
-          description:  { type: 'string', description: 'What to illustrate, in any language' },
+          description:  { type: 'string', description: 'What to illustrate. If the user has a medical specialty, enrich with domain-specific anatomy: for podology add nail plate, nail bed, nail matrix, lateral nail fold, plantar skin layers, heel pad as relevant; for dermatology add epidermis layers, dermis, follicles; etc. The user will see and can correct this description.' },
           style:        { type: 'string', enum: Object.keys(STYLES), description: 'Visual style (default: medical)' },
           language:     { type: 'string', enum: ['ru', 'en'], description: 'Language for embedded labels. Default: ru. Only applies when labels_mode is "embedded".' },
           labels_mode:  { type: 'string', enum: ['embedded', 'caption', 'none'], description: 'Where labels go: "embedded" = text in image (default), "caption" = clean image + labels as text below, "none" = pure illustration, no labels.' },
@@ -468,8 +468,9 @@ module.exports = {
             type: 'string',
             description: [
               'Detailed description of what to illustrate. Be specific: what structure, what process, what perspective, what to highlight.',
-              'For Ideogram (the default provider): write in English, be anatomically precise, list every structure to show.',
-              'Example (fingernail cross-section): "Medical cross-section diagram of human fingernail, lateral view.',
+              'If the user is a medical specialist, enrich with their domain anatomy — for podology: nail plate, nail bed, nail matrix, cuticle/eponychium, lunula, hyponychium, lateral nail fold, phalanx bone, plantar skin layers, heel fat pad, plantar fascia; for dermatology: epidermis layers (stratum corneum/granulosum/spinosum/basale), dermis, hair follicles, sebaceous glands.',
+              'For Ideogram/DALL-E (default providers): write in English, be anatomically precise, list every structure to show.',
+              'Example (podology — nail cross-section): "Medical cross-section diagram of human fingernail, lateral view.',
               'Shows nail plate, nail bed, nail matrix, cuticle (eponychium), lunula, hyponychium, lateral nail fold, bone phalanx.',
               'Clean Netter\'s Atlas style, white background, no text, no labels."',
             ].join(' '),

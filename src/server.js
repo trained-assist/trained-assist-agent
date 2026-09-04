@@ -73,7 +73,10 @@ ${sessionDescriptions}
     signal: AbortSignal.timeout(8000),
   });
 
-  if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`Anthropic API ${res.status}: ${errBody.slice(0, 300)}`);
+  }
   const data = await res.json();
   const answer = data.content?.[0]?.text?.trim() || 'ambiguous';
 
