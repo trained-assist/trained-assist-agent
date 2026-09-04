@@ -181,13 +181,24 @@ function formatVacancyReply(draft, vacancyId) {
     lines.push(`🗂 Этапы: ${draft.hiring_stages.join(' → ')}`);
   }
 
-  // Collect missing optional blocks that make the page richer
+  // Collect missing or ambiguous fields — each needs a clarifying question
   const missing = [];
+
+  if (!draft.salary_from && !draft.salary_to) {
+    missing.push('• *Зарплата* — указываем вилку в вакансии? Если да — пришли (например: «150 – 200к на руки»). Если нет — оставим «по договорённости»');
+  }
+  if (!draft.area_name) {
+    missing.push('• *Город / формат* — где работа? (например: «Москва», «Удалённо», «Москва + удалёнка»)');
+  }
   if (!draft.company_description) {
     missing.push('• *О компании* — напиши пару предложений о компании или скажи «сгенерируй о компании»');
   }
   if (!draft.hiring_stages?.length) {
     missing.push('• *Этапы отбора* — например: «Скрининг → Тех. интервью → Оффер» или скажи «сгенерируй этапы»');
+  }
+  const c = draft.contacts || {};
+  if (!c.telegram && !c.email && !c.phone) {
+    missing.push('• *Контакт для кнопки «Откликнуться»* — Telegram, email или телефон рекрутера');
   }
 
   lines.push('', '📄 Описание сформировано. Проверь и скажи что поправить.');
@@ -195,10 +206,10 @@ function formatVacancyReply(draft, vacancyId) {
   if (missing.length) {
     lines.push(
       '',
-      '📋 Не хватает для полной страницы вакансии:',
+      '📋 Уточни перед публикацией:',
       ...missing,
       '',
-      'Можешь прислать текст — добавлю. Или скажи *«публикуй страницу»* — опубликую как есть.',
+      'Можешь прислать — дополню. Или скажи *«публикуй страницу»* — опубликую как есть.',
     );
   } else {
     lines.push('', 'Готово? Скажи *«публикуй страницу»* — создам лендинг для кандидатов.');
