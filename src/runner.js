@@ -17,7 +17,7 @@ const {
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
 const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage } = require('./hh-quick');
-const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages } = require('./hh-vacancy');
+const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage } = require('./hh-vacancy');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -84,6 +84,7 @@ const HH_STYLE_INTENT        = /(?:обнови|загрузи|обновить|
 const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
+const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|создай.{0,20}страниц.{0,20}вакансии|опубликуй.{0,20}лендинг|создай.{0,20}лендинг|страниц.{0,20}готов/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -460,6 +461,32 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
         return '⚠️ Ошибка при генерации вакансии. Попробуй ещё раз — скажи «всё» когда будешь готов.';
       });
       if (r) return r;
+    }
+  }
+
+  // Publish vacancy landing page — triggered when draft is ready and user says "публикуй страницу"
+  if (workDir && userId && VACANCY_PUBLISH_PAGE_INTENT.test(task)) {
+    const vs = readVacancyState(workDir);
+    if (vs?.status === 'draft_ready' && vs.draft) {
+      const r = await publishVacancyPage(workDir, vs.draft, vs.vacancy_id, userId).then(url => {
+        return [
+          '🌐 Страница вакансии опубликована!',
+          '',
+          url,
+          '',
+          'Отправь эту ссылку рекрутеру для ревью. Кандидаты смогут откликнуться прямо со страницы.',
+          '',
+          'Когда рекрутер даст правки — скажи что изменить, пересоздам страницу.',
+          'Готово публиковать на HH? Скажи «опубликуй черновик на HH».',
+        ].join('\n');
+      }).catch(e => {
+        console.error('[vacancy] publish page error:', e.message);
+        return `⚠️ Ошибка при публикации страницы: ${e.message}`;
+      });
+      if (r) return r;
+    }
+    if (!vs?.draft) {
+      return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
     }
   }
 
