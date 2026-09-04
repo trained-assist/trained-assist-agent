@@ -42,7 +42,11 @@
       { "name": "BOT_SECRET",         "required": false, "written_to": ["ru"],         "gcp_sm": true,  "description": "Chrome extension token relay shared secret" },
       { "name": "INN_DADATA_TOKEN",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "DaData API token for company/INN lookup" },
       { "name": "INN_DADATA_SECRET",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "DaData API secret for company/INN lookup" },
-      { "name": "INN_CHECKO_KEY",     "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Checko API key for company enrichment" }
+      { "name": "INN_CHECKO_KEY",     "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Checko API key for company enrichment" },
+      { "name": "OPENAI_API_KEY",    "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "OpenAI API key for DALL-E 3 image generation" },
+      { "name": "FAL_KEY",           "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "fal.ai API key for FLUX image generation" },
+      { "name": "IDEOGRAM_API_KEY",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Ideogram API key for text-in-image illustration" },
+      { "name": "RECRAFT_API_KEY",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Recraft v3 API key for vector-style illustration" }
     ]
   },
 
