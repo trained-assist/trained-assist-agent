@@ -2036,11 +2036,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     if (r.salary) lines.push(`Зарплата: ${r.salary.amount?.toLocaleString('ru-RU')} ${r.salary.currency}`);
     if (r.experience?.length) {
       lines.push('\nОпыт работы:');
-      for (const job of r.experience.slice(0, 5)) {
+      for (const job of r.experience) {
         const start = job.start?.slice(0, 7) || '';
         const end = job.end?.slice(0, 7) || 'н.в.';
         lines.push(`- ${job.company || ''} (${start}–${end}): ${job.position || ''}`);
-        if (job.description) lines.push(`  ${job.description.slice(0, 300)}`);
+        if (job.description) lines.push(`  ${job.description}`);
       }
     }
     if (r.skill_set?.length) lines.push(`\nНавыки: ${r.skill_set.slice(0, 25).join(', ')}`);
