@@ -1586,6 +1586,20 @@ function show(id, type, msg) {
       return;
     }
 
+    // GET /vacancy/:username/:vacancyId — public vacancy landing page (no auth)
+    const vacancyPageMatch = url.pathname.match(/^\/vacancy\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)$/);
+    if (req.method === 'GET' && vacancyPageMatch) {
+      const [, username, vacancyId] = vacancyPageMatch;
+      const htmlPath = path.join(os.homedir(), 'users', username, 'vacancy-drafts', `${vacancyId}.html`);
+      try {
+        const html = fs.readFileSync(htmlPath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
+      } catch {
+        res.writeHead(404).end('Vacancy not found');
+      }
+      return;
+    }
+
     // Auth: all endpoints require Bearer token
     const auth = req.headers['authorization'] || '';
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
