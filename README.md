@@ -400,6 +400,33 @@ How to add:
 
 **Do NOT route through Claude** for: yes/no capability questions, pre-scripted setup instructions, or anything where the server can produce the exact right answer deterministically.
 
+#### Guard conditions — fall-through vs return null
+
+When an intent matches but a guard condition fails, choose based on whether Claude adds value:
+
+**Fall-through (do NOT `return null`):**
+- Intent matched, but data is missing ("no vacancy", "not connected") and the next pattern may give a useful answer
+- Example: `HH_REVIEW_PAGE_INTENT` + no active vacancy → fall-through, Claude gets the task as-is
+
+**Return null (let Claude decide):**
+- Intent matched, but the situation is genuinely ambiguous and Claude must use context
+- Claude needs to autonomously call a tool (e.g. `gdrive_setup`) to handle the case
+- Example: `GDRIVE_CAPABILITY_INTENT` + not connected → `null`, Claude calls `gdrive_setup`
+- Example: `HH_REVIEW_PAGE_INTENT` + draft exists → `null`, Claude decides if user means publish or review
+
+**Current audit of `return null` inside matched blocks:**
+
+| Location | Guard | Verdict |
+|----------|-------|---------|
+| `GDRIVE_CAPABILITY_INTENT` + `!userId` | no profile | **Keep** — rare edge case, Claude answers fine |
+| `GDRIVE_CAPABILITY_INTENT` + not connected | gdrive not configured | **Keep** — Claude calls `gdrive_setup` autonomously |
+| `GDRIVE_SHARE_INTENT` + no SA config | gdrive not configured | **Keep** — Claude calls `gdrive_setup` autonomously |
+| Illustrate intents + `!workDir` | no session context | **Keep** — no stateless answer possible |
+| `ILLUSTRATE_ENABLE_INTENT` + draw command | combined enable+draw | **Keep** — enable first, then Claude draws (see trap #3) |
+| `ILLUSTRATE_CAPABILITY_INTENT` + draw command | combined question+draw | **Keep** — Claude handles combined query |
+| `HH_REVIEW_PAGE_INTENT` + draft exists | ambiguous context | **Keep** — Claude decides (vacancy publish vs review page) |
+| `HH_REVIEW_PAGE_INTENT` + no active vacancy | no vacancy | **Fixed in #247** — now fall-through ✓ |
+
 ### Session management — architecture and traps
 
 Sessions in Telegram are the core UX feature. Understanding the two-layer architecture prevents common bugs.

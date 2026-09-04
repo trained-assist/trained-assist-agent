@@ -137,6 +137,10 @@ const QUICK_SETUPS = [
   },
 ];
 
+// Guard rule for return null inside a matched intent block:
+//   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
+//   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
+// See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
 function getQuickAnswer(task, userId, workDir) {
   // Vacancy creation flow — intercept before other intents so collecting mode takes priority
   if (workDir) {
