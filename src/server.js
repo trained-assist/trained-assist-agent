@@ -1137,7 +1137,8 @@ async function main() {
     // POST /hh/send — send a message to a candidate (called from review page)
     if (req.method === 'POST' && url.pathname === '/hh/send') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      const body = JSON.parse(await readBody(req));
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
       const { username, negotiation_id, message } = body || {};
       if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
 
@@ -2820,6 +2821,8 @@ onCheck();
 
 // ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────
 
+const HH_API_TIMEOUT_MS = 15_000;
+
 function hhApiRequest(method, apiPath, accessToken, body) {
   return new Promise((resolve, reject) => {
     const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
@@ -2847,6 +2850,9 @@ function hhApiRequest(method, apiPath, accessToken, body) {
         if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
         try { resolve(JSON.parse(data)); } catch { resolve({}); }
       });
+    });
+    req.setTimeout(HH_API_TIMEOUT_MS, () => {
+      req.destroy(new Error(`HH API timeout after ${HH_API_TIMEOUT_MS / 1000}s: ${method} ${apiPath}`));
     });
     req.on('error', reject);
     if (body) req.write(bodyStr);

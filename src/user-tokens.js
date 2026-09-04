@@ -174,7 +174,8 @@ function generateConnectLink(userId, service) {
   fs.mkdirSync(CONNECT_PENDING_DIR, { recursive: true });
   fs.writeFileSync(
     path.join(CONNECT_PENDING_DIR, `${token}.json`),
-    JSON.stringify({ uid: String(userId), service, expires: Date.now() + 30 * 60 * 1000 })
+    JSON.stringify({ uid: String(userId), service, expires: Date.now() + 30 * 60 * 1000 }),
+    { mode: 0o600 }
   );
   try {
     const now = Date.now();

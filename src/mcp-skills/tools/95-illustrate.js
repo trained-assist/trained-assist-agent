@@ -833,15 +833,19 @@ module.exports = {
           },
         },
         targeted_advice: provider ? (() => {
+          const ideogramStyleType = IDEOGRAM_STYLE_TYPE[style] || 'ILLUSTRATION';
           const tips = {
             openai:   'OpenAI selected. For embedded text labels — consider switching to Ideogram. Otherwise solid choice for medical diagrams.',
-            ideogram: style === 'medical' || style === 'anatomical'
-              ? 'Ideogram with ILLUSTRATION style_type (fixed). If result still looks wrong — try adding "anatomical diagram, educational illustration, clinical" to description.'
-              : 'Ideogram with DESIGN style_type — correct for flat/infographic content.',
+            ideogram: `Ideogram with ${ideogramStyleType} style_type${style ? ` (style=${style})` : ' (default)'}. `
+              + (ideogramStyleType === 'ILLUSTRATION'
+                ? 'If result still looks wrong — try adding "anatomical diagram, educational illustration, clinical" to description.'
+                : 'Correct for flat/infographic content. If image looks too clinical — this style_type is right, adjust prompt instead.'),
             fal:      'FLUX selected — great for artistic depth, but use labels_mode:"caption" or "none" as text in image will not render correctly.',
             recraft:  'Recraft selected — use style:"flat" for best results. For anatomy, OpenAI will be more accurate.',
           };
-          return tips[provider] || null;
+          const base = tips[provider] || null;
+          if (!base) return null;
+          return problem ? `${base}\n\nFor reported problem "${problem}": see retry_strategies above for a matching fix.` : base;
         })() : null,
       }),
     },
