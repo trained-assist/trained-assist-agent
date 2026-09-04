@@ -1343,6 +1343,52 @@ module.exports = {
         return { ok: true, updated_fields: Object.keys(args), vacancy_id: state.vacancy_id };
       },
     },
+
+    hh_vacancy_create_draft: {
+      description:
+        'Create a vacancy draft from free-form text (job description, requirements, conditions). ' +
+        'Calls Claude to parse the text into a structured draft JSON and saves it. ' +
+        'Use when user pastes a vacancy description and wants to create a landing page.',
+      inputSchema: {
+        type: 'object',
+        required: ['text'],
+        properties: {
+          text: { type: 'string', description: 'Free-form vacancy text — description, requirements, salary, contacts etc.' },
+        },
+      },
+      handler: async ({ text }) => {
+        const {
+          initVacancyState,
+          appendVacancyMessage,
+          generateVacancyFromMessages,
+          readVacancyState,
+        } = require('./../../hh-vacancy');
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) return { error: 'ANTHROPIC_API_KEY не найден.' };
+        const workDir = process.cwd();
+        initVacancyState(workDir);
+        appendVacancyMessage(workDir, text);
+        const state = readVacancyState(workDir);
+        const reply = await generateVacancyFromMessages(workDir, state.messages, apiKey);
+        const updated = readVacancyState(workDir);
+        return { ok: true, vacancy_id: updated?.vacancy_id, draft: updated?.draft, message: reply };
+      },
+    },
+
+    hh_vacancy_publish_page: {
+      description:
+        'Publish the current vacancy draft as a public landing page via instant-publish. ' +
+        'Returns the page URL. The draft must exist — call hh_vacancy_create_draft or hh_vacancy_update_draft first.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const { readVacancyState, publishVacancyPage } = require('./../../hh-vacancy');
+        const workDir = process.cwd();
+        const state = readVacancyState(workDir);
+        if (!state?.draft) return { error: 'No vacancy draft found. Use hh_vacancy_create_draft first.' };
+        const url = await publishVacancyPage(workDir, state.draft, state.vacancy_id, USER_ID);
+        return { ok: true, url, vacancy_id: state.vacancy_id };
+      },
+    },
   },
 };
 
