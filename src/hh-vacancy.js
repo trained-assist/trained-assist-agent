@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
+const { readHhToken, hhPost } = require('./hh-utils');
 
 const STATE_SKILL = 'hh';
 const STATE_KEY = 'vacancy_draft';
@@ -42,9 +43,12 @@ function initVacancyState(workDir) {
   return id;
 }
 
+const MAX_MESSAGE_BYTES = 10_000;
+
 function appendVacancyMessage(workDir, text) {
   const state = readVacancyState(workDir) || { messages: [] };
-  state.messages = [...(state.messages || []), text.trim()];
+  const trimmed = text.trim().slice(0, MAX_MESSAGE_BYTES);
+  state.messages = [...(state.messages || []), trimmed];
   writeVacancyState(workDir, state);
   return state.messages.length;
 }
@@ -189,6 +193,18 @@ function readVacancyDraft(workDir) {
   return state?.draft || null;
 }
 
+// ── HTML helpers ──────────────────────────────────────────────────────────────
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
 // ── Markdown → HTML (minimal, enough for vacancy descriptions) ────────────────
 
 function mdToHtml(md) {
@@ -214,14 +230,14 @@ function mdToHtml(md) {
 
 function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
   const applyUrl = `${publicUrl}/apply/${encodeURIComponent(username)}/${encodeURIComponent(vacancyId)}`;
-  const salary = formatSalary(draft) || 'по договорённості';
+  const salary = formatSalary(draft) || 'по договорённости';
   const exp = EXPERIENCE_LABELS[draft.experience] || '';
   const emp = EMPLOYMENT_LABELS[draft.employment] || '';
   const sched = SCHEDULE_LABELS[draft.schedule] || '';
   const tags = [exp, emp, sched].filter(Boolean);
   const descHtml = mdToHtml(draft.description_md || '');
   const skillsHtml = draft.key_skills?.length
-    ? draft.key_skills.map(s => `<span class="skill">${s}</span>`).join(' ')
+    ? draft.key_skills.map(s => `<span class="skill">${escapeHtml(s)}</span>`).join(' ')
     : '';
 
   return `<!DOCTYPE html>
@@ -229,7 +245,7 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${draft.name || 'Вакансия'}</title>
+<title>${escapeHtml(draft.name) || 'Вакансия'}</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; }
@@ -269,16 +285,16 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
 </head>
 <body>
 <div class="hero">
-  <h1>${draft.name || 'Вакансия'}</h1>
-  ${draft.company_name ? `<div class="company">🏢 ${draft.company_name}</div>` : ''}
-  <div class="salary">💰 ${salary}</div>
-  ${draft.area_name ? `<div class="location">📍 ${draft.area_name}</div>` : ''}
-  ${tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>` : ''}
+  <h1>${escapeHtml(draft.name) || 'Вакансия'}</h1>
+  ${draft.company_name ? `<div class="company">🏢 ${escapeHtml(draft.company_name)}</div>` : ''}
+  <div class="salary">💰 ${escapeHtml(salary)}</div>
+  ${draft.area_name ? `<div class="location">📍 ${escapeHtml(draft.area_name)}</div>` : ''}
+  ${tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
 </div>
 <div class="container">
   ${descHtml ? `<div class="card desc"><h2>О вакансии</h2>${descHtml}</div>` : ''}
   ${skillsHtml ? `<div class="card"><h2>Ключевые навыки</h2><div class="skills">${skillsHtml}</div></div>` : ''}
-  ${draft.company_description ? `<div class="card"><h2>О компании</h2><p>${draft.company_description}</p></div>` : ''}
+  ${draft.company_description ? `<div class="card"><h2>О компании</h2><p>${escapeHtml(draft.company_description)}</p></div>` : ''}
 
   <div class="form-section" id="applySection">
     <h2>Откликнуться на вакансию</h2>
@@ -427,7 +443,6 @@ function resolveAreaId(areaName) {
 // ── Publish vacancy as draft to HH ────────────────────────────────────────────
 
 async function publishToHH(workDir, userId) {
-  const { readHhToken, hhPost } = require('./hh-utils');
   const token = readHhToken(userId);
   if (!token?.access_token) throw new Error('HH не подключён. Скажи «подключи hh» для авторизации.');
   if (!token.employer_id) throw new Error('employer_id не найден в токене HH.');

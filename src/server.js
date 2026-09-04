@@ -1719,6 +1719,18 @@ function show(id, type, msg) {
       return;
     }
 
+    // CORS preflight for /apply (form is hosted on chillai.space, different origin)
+    if (req.method === 'OPTIONS' && /^\/apply\//.test(url.pathname)) {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400',
+      });
+      res.end();
+      return;
+    }
+
     // POST /apply/:username/:vacancyId — no auth, public endpoint for candidate applications
     if (req.method === 'POST' && /^\/apply\/[a-zA-Z0-9_-]+\/vac-\d+$/.test(url.pathname)) {
       const parts = url.pathname.split('/');
@@ -1751,13 +1763,21 @@ function show(id, type, msg) {
         }
       } catch (e) {
         console.error('[apply] parse error:', e.message);
-        return json(res, 400, { error: 'invalid request body' });
+        res.writeHead(400, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid request body' }));
+        return;
+      }
+
+      const corsHeaders = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+      function applyJson(status, data) {
+        res.writeHead(status, corsHeaders);
+        res.end(JSON.stringify(data));
       }
 
       const email = String(fields.email || '').trim();
       const phone = String(fields.phone || '').trim();
-      if (!email || !phone) return json(res, 400, { error: 'email and phone are required' });
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: 'invalid email' });
+      if (!email || !phone) return applyJson(400, { error: 'email and phone are required' });
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return applyJson(400, { error: 'invalid email' });
 
       try {
         const app = storeApplication(workDir, vacancyId, {
@@ -1789,10 +1809,10 @@ function show(id, type, msg) {
           }).catch(e => console.error('[apply] tg notify error:', e.message));
         }
 
-        return json(res, 200, { ok: true });
+        return applyJson(200, { ok: true });
       } catch (e) {
         console.error('[apply] store error:', e.message);
-        return json(res, 500, { error: 'failed to store application' });
+        return applyJson(500, { error: 'failed to store application' });
       }
     }
 
