@@ -59,4 +59,20 @@ async function hhFetch(apiPath, token) {
   return res.json();
 }
 
-module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhTokenPath };
+async function hhPost(apiPath, token, body) {
+  const res = await fetch(`${hhApiBase()}${apiPath}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token.access_token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+      'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`HH API POST ${res.status}: ${JSON.stringify(data).slice(0, 200)}`);
+  return data;
+}
+
+module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhTokenPath };
