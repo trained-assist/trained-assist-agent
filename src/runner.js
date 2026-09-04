@@ -23,6 +23,33 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min hard limit — batch INN enrichment takes 10-15 min for 300 companies
 
+// ── Pending-task journal — survives process restart ──────────────────────────
+const PENDING_DIR = path.join(
+  process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
+  'pending-tasks'
+);
+
+function savePendingTask(taskId, params) {
+  try {
+    fs.mkdirSync(PENDING_DIR, { recursive: true });
+    fs.writeFileSync(path.join(PENDING_DIR, `${taskId}.json`), JSON.stringify(params), { mode: 0o600 });
+  } catch { /* non-critical */ }
+}
+
+function clearPendingTask(taskId) {
+  try { fs.unlinkSync(path.join(PENDING_DIR, `${taskId}.json`)); } catch { /* non-critical */ }
+}
+
+function getPendingTasks() {
+  try {
+    if (!fs.existsSync(PENDING_DIR)) return [];
+    return fs.readdirSync(PENDING_DIR)
+      .filter(f => f.endsWith('.json'))
+      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')); } catch { return null; } })
+      .filter(Boolean);
+  } catch { return []; }
+}
+
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
 
@@ -438,6 +465,7 @@ function runTask(opts) {
   });
   userQueues.set(userId, current);
   current.finally(() => {
+    clearPendingTask(opts.taskId);
     // Only clear if no newer task was enqueued after us
     if (userQueues.get(userId) === current) userQueues.delete(userId);
   });
@@ -524,6 +552,13 @@ async function updateContextPin(token, chatId, workDir, card) {
 async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
+
+  savePendingTask(taskId, {
+    taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    task, context, sessionId, contextFromSession, forceClaude,
+    initialMsgId, pinnedMsgId,
+    startedAt: Date.now(),
+  });
 
   fs.mkdirSync(user.workDir, { recursive: true });
   initLog(user.workDir);
@@ -923,7 +958,7 @@ async function tgEdit(token, chatId, messageId, text) {
 }
 
 module.exports = {
-  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink,
+  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };

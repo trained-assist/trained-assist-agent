@@ -5,7 +5,7 @@ const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
-const { runTask, generateConnectLink, getQuickAnswer } = require('./runner');
+const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions } = require('./session-store');
@@ -242,6 +242,36 @@ function scheduleHhBackgroundScoring() {
   }
   setTimeout(() => run().catch(() => {}), 3 * 60 * 1000); // first run 3 min after start
   setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
+}
+
+async function resumePendingTasks(secrets) {
+  const pending = getPendingTasks();
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  const toResume = pending.filter(t => t.startedAt && t.startedAt > cutoff && t.username && t.userId && t.task);
+  if (toResume.length === 0) return;
+
+  console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
+  const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+
+  for (const p of toResume) {
+    console.log(`[resume] task=${p.taskId} user=${p.username} task="${String(p.task).slice(0, 60)}"`);
+    if (p.initialMsgId && secrets.BOT_TOKEN) {
+      fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: p.userId, message_id: p.initialMsgId, text: '🔄 Перезапускаю после сбоя…' }),
+      }).catch(() => {});
+    }
+    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
+    const user = { id: p.userId, name: p.username, username: p.username, workDir };
+    const newTaskId = `${p.username}-resume-${Date.now()}`;
+    runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
+      sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
+      forceClaude: !!p.forceClaude, initialMsgId: p.initialMsgId || null,
+      pinnedMsgId: p.pinnedMsgId || null, secrets,
+    }).catch(err => console.error(`[resume] ${newTaskId} error:`, err.message));
+    await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
+  }
 }
 
 async function main() {
@@ -1966,6 +1996,7 @@ function show(id, type, msg) {
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
+  resumePendingTasks(secrets).catch(err => console.error('[resume] startup error:', err.message));
 
   const shutdown = () => {
     server.close(() => process.exit(0));
