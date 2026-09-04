@@ -19,6 +19,7 @@
 | ✅ реализовано | **Два таба: Ждут ответа / Все диалоги** (PR #176) | Таб "Ждут ответа" = `consider` стейт (кандидат ответил, ждёт нашего ответа). Таб "Все диалоги" = все 6 активных стейтов параллельно. |
 | ✅ реализовано | **Кэш переговоров на диск** (PR #179) | `POST /hh/sync-negotiations` — синкает все стейты в `{dataDir}/hh/{username}/negotiations-cache.json`. `/hh/review` читает из кэша, синкает если > 15 мин. Subtitle показывает возраст кэша. |
 | ✅ реализовано | **draft_message в history файл** | `hh_draft_review_page` теперь сохраняет сгенерированный draft в `history.ats_result.draft_message` — так сервер-страница `/hh/review` показывает преднаполненные сообщения без повторной генерации. **Ядро функционала**: Claude оценивает кандидата → генерирует сообщение → пользователь просматривает и жмёт "Отправить". |
+| ✅ реализовано | **Vacancy landing pages** (PR #244–246) | Создание вакансий через Claude (`hh_vacancy_create_draft`, `hh_vacancy_publish_page`). Лендинги всегда хранятся и отдаются с RU VM: `platform.recruiter-assistant.ru/vacancy/<username>/<id>`. GCP VM форвардит HTML через `POST /vacancy/store`. Публикация черновика на hh.ru через `hh_vacancy_publish_hh`. |
 
 ## Weeek CRM — flexi-consult (Миша)
 

@@ -1390,7 +1390,7 @@ module.exports = {
     },
 
     hh_vacancy_publish_page: {
-      description: 'Publish the vacancy draft as a public landing page via instant-publish. Returns the URL to share with the recruiter.',
+      description: 'Publish the vacancy draft as a public landing page on platform.recruiter-assistant.ru. Returns the URL to share with candidates.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
         const { readVacancyState, publishVacancyPage } = require('./../../hh-vacancy');

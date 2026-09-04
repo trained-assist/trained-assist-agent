@@ -69,7 +69,7 @@ jobs:
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.DEEPGRAM_API_KEY }}' \
               '${{ secrets.BOT_SECRET }}' \
-              'https://178-212-14-192.sslip.io' \
+              'https://platform.recruiter-assistant.ru' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
               '${{ secrets.INN_DADATA_SECRET }}' \
               '${{ secrets.INN_CHECKO_KEY }}' \

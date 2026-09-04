@@ -291,7 +291,7 @@ sudo -u vova npx playwright install-deps chromium
 Add to `/home/vova/secrets.env` on the RU VM:
 
 ```
-AGENT_PUBLIC_URL=https://178-212-14-192.sslip.io
+AGENT_PUBLIC_URL=https://platform.recruiter-assistant.ru
 ```
 
 This is what goes into the connect-link sent to users via Telegram.
@@ -363,7 +363,7 @@ npm run check  # syntax check all src files
 | `PORT` | `3000` | HTTP listen port |
 | `AGENT_DATA_DIR` | `~/agent-data` | Data directory for sessions + user registry |
 | `NODE_ENV` | — | Set to `production` in systemd |
-| `AGENT_PUBLIC_URL` | `https://136-65-7-197.sslip.io` | Public base URL for connect-links (set to RU VM URL on RU VM) |
+| `AGENT_PUBLIC_URL` | `https://recruiter-assistant.ru` | Public base URL for connect-links. RU VM: `https://platform.recruiter-assistant.ru` |
 
 Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_DATA_DIR=/home/vova/alesa-data` explicitly.
 

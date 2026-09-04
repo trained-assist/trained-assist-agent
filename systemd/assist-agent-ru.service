@@ -19,7 +19,7 @@ Environment=VM_NAME=ru-vm
 Environment=SECRETS_SOURCE=env
 
 # Public URL used in /connect/* links sent to users via Telegram
-Environment=AGENT_PUBLIC_URL=https://178-212-14-192.sslip.io
+Environment=AGENT_PUBLIC_URL=https://platform.recruiter-assistant.ru
 
 # Route Telegram API through GCP proxy (Hostland blocks 149.154.x.x)
 Environment=TELEGRAM_API_URL=https://136-65-7-197.sslip.io/tg-proxy
