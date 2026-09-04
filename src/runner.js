@@ -547,7 +547,10 @@ function buildContextCard(username, workDir) {
       try {
         const d = JSON.parse(fs.readFileSync(file, 'utf8'));
         if (d.value) {
-          const v = typeof d.value === 'string' ? d.value : JSON.stringify(d.value);
+          let v;
+          if (typeof d.value === 'string') v = d.value;
+          else if (d.value.title || d.value.name) v = d.value.title || d.value.name;
+          else v = JSON.stringify(d.value);
           lines.push(`${label} ${v.slice(0, 80)}`);
         }
       } catch {}
