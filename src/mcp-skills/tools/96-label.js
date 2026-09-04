@@ -191,9 +191,17 @@ function sendToTelegram(buf, filename, caption) {
   });
 }
 
+// ── Opt-in gate (same flag as 95-illustrate) ─────────────────────────────────
+
+function isEnabled() {
+  return fs.existsSync(path.join(process.cwd(), 'contexts', 'illustrate', '.enabled'));
+}
+
 // ── Main tool ─────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: isEnabled,
+  tools: {
   image_label: {
     description:
       'Add text annotations to an image in any language including Russian/Cyrillic. ' +
@@ -335,5 +343,6 @@ module.exports = {
         iteration_tip: 'If any label position is wrong, call image_label again with labels[] (manual mode) — copy detected_positions above and adjust the x/y values of the wrong ones.',
       };
     },
+  },
   },
 };
