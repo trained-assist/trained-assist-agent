@@ -17,7 +17,7 @@ const {
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
 const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage } = require('./hh-quick');
-const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage } = require('./hh-vacancy');
+const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH } = require('./hh-vacancy');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -85,6 +85,7 @@ const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|создай.{0,20}страниц.{0,20}вакансии|опубликуй.{0,20}лендинг|создай.{0,20}лендинг|страниц.{0,20}готов/i;
+const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -488,6 +489,30 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
     if (!vs?.draft) {
       return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
     }
+  }
+
+  // Publish vacancy as HH draft
+  if (workDir && userId && VACANCY_HH_PUBLISH_INTENT.test(task)) {
+    const vs2 = readVacancyState(workDir);
+    if (!vs2?.draft) {
+      return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
+    }
+    const r2 = await publishToHH(workDir, userId).then(({ hhId, areaName, areaId }) => {
+      const areaNote = areaId ? '' : `\n⚠️ Город «${areaName}» не распознан — вакансия создана с регионом «Россия». Поправь город в черновике на hh.ru.`;
+      return [
+        `✅ Черновик вакансии сохранён на HeadHunter!`,
+        '',
+        `🆔 ID вакансии: ${hhId}`,
+        `🔗 Редактировать: https://hh.ru/employer/vacancy/${hhId}/edit`,
+        areaNote,
+        '',
+        'Проверь черновик на hh.ru и опубликуй когда будешь готов.',
+      ].filter(Boolean).join('\n');
+    }).catch(e => {
+      console.error('[vacancy] HH publish error:', e.message);
+      return `⚠️ Ошибка при публикации на HH: ${e.message}`;
+    });
+    if (r2) return r2;
   }
 
   if (userId && workDir) {

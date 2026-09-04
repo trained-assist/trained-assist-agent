@@ -390,6 +390,90 @@ function storeApplication(workDir, vacancyId, fields, resumeBuffer, resumeName) 
   return meta;
 }
 
+// ── HH area name → ID mapping (most common cities) ────────────────────────────
+
+const HH_AREA_MAP = {
+  'москва': '1',
+  'moscow': '1',
+  'санкт-петербург': '2',
+  'спб': '2',
+  'saint petersburg': '2',
+  'russia': '113',
+  'россия': '113',
+  'удалённо': '113',
+  'remote': '113',
+  'удаленно': '113',
+  'новосибирск': '4',
+  'екатеринбург': '3',
+  'нижний новгород': '66',
+  'казань': '88',
+  'ростов-на-дону': '76',
+  'красноярск': '26',
+  'уфа': '99',
+  'воронеж': '15',
+  'самара': '78',
+  'краснодар': '53',
+  'омск': '68',
+  'челябинск': '104',
+  'пермь': '72',
+};
+
+function resolveAreaId(areaName) {
+  if (!areaName) return null;
+  const key = areaName.toLowerCase().trim();
+  return HH_AREA_MAP[key] || null;
+}
+
+// ── Publish vacancy as draft to HH ────────────────────────────────────────────
+
+async function publishToHH(workDir, userId) {
+  const { readHhToken, hhPost } = require('./hh-utils');
+  const token = readHhToken(userId);
+  if (!token?.access_token) throw new Error('HH не подключён. Скажи «подключи hh» для авторизации.');
+  if (!token.employer_id) throw new Error('employer_id не найден в токене HH.');
+
+  const state = readVacancyState(workDir);
+  const draft = state?.draft;
+  if (!draft) throw new Error('Нет готового черновика вакансии.');
+
+  const areaId = resolveAreaId(draft.area_name);
+
+  const payload = {
+    name: draft.name,
+    description: mdToHtml(draft.description_md || ''),
+    area: { id: areaId || '113' }, // fallback to Russia/remote if unknown city
+    type: { id: 'open' },
+    billing_type: { id: 'standard' },
+    experience: { id: draft.experience || 'noExperience' },
+    employment: { id: draft.employment || 'full' },
+    schedule: { id: draft.schedule || 'fullDay' },
+    response_letter_required: !!draft.response_letter_required,
+    accept_temporary: false,
+  };
+
+  if (draft.salary_from || draft.salary_to) {
+    payload.salary = {
+      currency: draft.salary_currency || 'RUR',
+      gross: draft.salary_gross === true,
+    };
+    if (draft.salary_from) payload.salary.from = draft.salary_from;
+    if (draft.salary_to) payload.salary.to = draft.salary_to;
+  }
+
+  if (draft.key_skills?.length) {
+    payload.key_skills = draft.key_skills.slice(0, 30).map(name => ({ name }));
+  }
+
+  const result = await hhPost(`/vacancies?employer_id=${token.employer_id}`, token, payload);
+  const hhId = result.id || result.vacancy_id;
+
+  if (hhId) {
+    writeVacancyState(workDir, { ...state, hh_vacancy_id: String(hhId), status: 'hh_draft' });
+  }
+
+  return { hhId, areaId, areaName: draft.area_name };
+}
+
 module.exports = {
   readVacancyState,
   writeVacancyState,
@@ -400,7 +484,10 @@ module.exports = {
   formatVacancyReply,
   generateVacancyLandingHtml,
   publishVacancyPage,
+  publishToHH,
   storeApplication,
+  resolveAreaId,
+  HH_AREA_MAP,
   EXPERIENCE_LABELS,
   EMPLOYMENT_LABELS,
   SCHEDULE_LABELS,
