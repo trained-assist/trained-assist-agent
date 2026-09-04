@@ -55,8 +55,8 @@ const DEFAULT_STYLE = 'medical';
 
 function availableProviders() {
   const list = [];
-  if (process.env.IDEOGRAM_API_KEY)  list.push('ideogram');
   if (process.env.OPENAI_API_KEY)    list.push('openai');
+  if (process.env.IDEOGRAM_API_KEY)  list.push('ideogram');
   if (process.env.FAL_KEY)           list.push('fal');
   if (process.env.RECRAFT_API_KEY)   list.push('recraft');
   return list;
@@ -343,7 +343,7 @@ module.exports = {
           providers: rows,
           note: available.length === 0
             ? 'No image providers configured. Add OPENAI_API_KEY, FAL_KEY, IDEOGRAM_API_KEY, or RECRAFT_API_KEY to secrets.'
-            : `Default provider: ${available[0]}`,
+            : `Default provider: ${available[0]}. After generating with DALL-E 3, tell the user they can also try Ideogram (better at text labels inside the image) by saying "попробуй Ideogram".`,
         };
       },
     },
@@ -542,7 +542,7 @@ module.exports = {
           image_url: result.url,
           saved_as: filename,
           alternatives: others.length > 0
-            ? `Other available providers: ${others.map(p => providerLabels[p] || p).join(', ')}. User can ask to regenerate with a specific one.`
+            ? `Other available providers: ${others.map(p => providerLabels[p] || p).join(', ')}. After showing the image, tell the user they can also try Ideogram — it handles text labels inside the image better. Say: "Также можно попробовать Ideogram — он лучше рисует подписи прямо на иллюстрации. Написать \\"попробуй Ideogram\\"?"`
             : 'This is the only configured provider.',
           iteration_tip: 'Prompt saved. User can say "make it darker", "add labels", "more detailed" — call illustrate_refine to iterate.',
         };
