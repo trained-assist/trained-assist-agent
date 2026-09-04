@@ -667,11 +667,23 @@ function buildContextCard(username, workDir) {
 }
 
 // Creates or silently updates the context pin after task completion.
-// State (msgId + lastCard text) is stored in workDir/.pin_state.json.
-async function updateContextPin(token, chatId, workDir, card) {
+// State (msgId + chatId + lastCard text) is stored in workDir/.pin_state.json.
+// botPinnedMsgId: the pinned message ID known to the bot — used to seed state when we have none.
+async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
   const pinFile = path.join(workDir, '.pin_state.json');
   let state = null;
   try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch {}
+
+  // Discard state from a different chat (many-chats-one-profile scenario).
+  if (state?.chatId && state.chatId !== chatId) {
+    console.log(`[pin] chatId mismatch (stored=${state.chatId} current=${chatId}), resetting state`);
+    state = null;
+  }
+
+  // Seed from bot's authoritative pinned message when we have no local state.
+  if (!state?.msgId && botPinnedMsgId) {
+    state = { msgId: botPinnedMsgId, chatId, lastCard: null };
+  }
 
   if (state?.msgId) {
     // Nothing changed — skip entirely to avoid Telegram "message is not modified" error
@@ -680,13 +692,14 @@ async function updateContextPin(token, chatId, workDir, card) {
 
     const edited = await tgEdit(token, chatId, state.msgId, card).catch(() => null);
     if (edited?.ok) {
-      fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, lastCard: card }));
+      fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, chatId, lastCard: card }));
       return;
     }
-    // Edit failed (message deleted?) — fall through to create new
+    // Edit failed — log the error before falling through to create new.
+    console.error(`[pin] edit failed msgId=${state.msgId} chat=${chatId}:`, JSON.stringify(edited));
   }
 
-  // No existing pin — send new card message and pin it
+  // No existing pin (or edit failed) — send new card message and pin it.
   const msg = await tgSend(token, chatId, card);
   const newId = msg?.result?.message_id;
   if (!newId) return;
@@ -700,7 +713,7 @@ async function updateContextPin(token, chatId, workDir, card) {
   if (!pinData.ok) {
     console.error(`[pin] failed chat=${chatId}:`, JSON.stringify(pinData));
   } else {
-    fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, lastCard: card }));
+    fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: card }));
   }
 }
 
@@ -1058,7 +1071,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Update context pin after task (only if skills are configured)
   const card = buildContextCard(user.username, user.workDir);
-  if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card).catch(() => {});
+  if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
 
   // Append assistant reply to session history
   if (activeSessionId) {
