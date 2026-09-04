@@ -192,6 +192,24 @@ function formatVacancyReply(draft, vacancyId) {
   return lines.join('\n');
 }
 
+// ── Missing fields check ──────────────────────────────────────────────────────
+
+function getMissingFields(draft) {
+  const missing = [];
+  if (!draft.salary_from && !draft.salary_to)
+    missing.push('• *Зарплата* — указываем вилку в вакансии? Если да — пришли (например: «150 – 200к на руки»). Если нет — оставим «по договорённости»');
+  if (!draft.area_name)
+    missing.push('• *Город / формат* — где работа? (например: «Москва», «Удалённо», «Москва + удалёнка»)');
+  if (!draft.company_description)
+    missing.push('• *О компании* — напиши пару предложений или скажи «сгенерируй о компании»');
+  if (!draft.hiring_stages?.length)
+    missing.push('• *Этапы отбора* — например: «Скрининг → Тех. интервью → Оффер» или скажи «сгенерируй этапы»');
+  const c = draft.contacts || {};
+  if (!c.telegram && !c.email && !c.phone)
+    missing.push('• *Контакт для «Откликнуться»* — Telegram, email или телефон рекрутера');
+  return missing;
+}
+
 // ── Vacancy draft read (for landing page and HH publish steps) ────────────────
 
 function readVacancyDraft(workDir) {
@@ -550,6 +568,7 @@ module.exports = {
   generateVacancyFromMessages,
   readVacancyDraft,
   formatVacancyReply,
+  getMissingFields,
   generateVacancyLandingHtml,
   publishVacancyPage,
   publishToHH,

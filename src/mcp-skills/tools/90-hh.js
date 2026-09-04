@@ -1394,12 +1394,16 @@ module.exports = {
       description: 'Publish the vacancy draft as a public landing page on platform.recruiter-assistant.ru. Returns the URL to share with candidates.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
-        const { readVacancyState, publishVacancyPage } = require('./../../hh-vacancy');
+        const { readVacancyState, publishVacancyPage, getMissingFields } = require('./../../hh-vacancy');
         const state = readVacancyState(process.cwd());
         if (!state?.draft) return { error: 'No vacancy draft found. Create one first with hh_vacancy_create_draft.' };
         try {
           const url = await publishVacancyPage(process.cwd(), state.draft, state.vacancy_id, USER_ID);
-          return { ok: true, url, message: `Страница вакансии опубликована: ${url}` };
+          const missing = getMissingFields(state.draft);
+          const missingNote = missing.length
+            ? `\n\n📋 Уточни, чтобы дополнить страницу:\n${missing.join('\n')}`
+            : '';
+          return { ok: true, url, message: `Страница опубликована: ${url}${missingNote}\n\nОбнови браузер, чтобы увидеть свежую версию.` };
         } catch (e) {
           return { error: `Ошибка публикации: ${e.message}` };
         }
