@@ -37,7 +37,7 @@ function trackProjectUsage(workDir, projectName) {
   try { fs.writeFileSync(file, JSON.stringify(usage)); } catch {}
 }
 
-async function classifyMessage(message, sessions, _apiKey, openrouterKey) {
+async function classifyMessage(message, sessions, anthropicKey, openrouterKey) {
   // Build a compact description of each session
   const sessionDescriptions = sessions.map((s, i) => {
     const lastMsg = s.lastUserMessage ? `\n   Последнее: "${s.lastUserMessage.slice(0, 100)}"` : '';
@@ -58,28 +58,51 @@ ${sessionDescriptions}
 - Если сообщение может относиться к нескольким диалогам или ни к одному — напиши "ambiguous"
 - Не пиши ничего лишнего, только ID или "ambiguous"`;
 
-  if (!openrouterKey) throw new Error('OPENROUTER_API_KEY not configured');
-
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${openrouterKey}`,
-    },
-    body: JSON.stringify({
-      model: 'google/gemini-2.0-flash-lite-001',
-      max_tokens: 64,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-    signal: AbortSignal.timeout(8000),
-  });
-
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    throw new Error(`OpenRouter API ${res.status}: ${errBody.slice(0, 300)}`);
+  let answer;
+  if (openrouterKey) {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openrouterKey}`,
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.0-flash-lite-001',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`OpenRouter API ${res.status}: ${errBody.slice(0, 300)}`);
+    }
+    const data = await res.json();
+    answer = data.choices?.[0]?.message?.content?.trim() || 'ambiguous';
+  } else if (anthropicKey) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': anthropicKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`Anthropic API ${res.status}: ${errBody.slice(0, 300)}`);
+    }
+    const data = await res.json();
+    answer = data.content?.[0]?.text?.trim() || 'ambiguous';
+  } else {
+    throw new Error('No API key configured for classify (OPENROUTER_API_KEY or ANTHROPIC_API_KEY required)');
   }
-  const data = await res.json();
-  const answer = data.choices?.[0]?.message?.content?.trim() || 'ambiguous';
 
   if (answer === 'ambiguous') return { sessionId: null, confidence: 'low' };
 
