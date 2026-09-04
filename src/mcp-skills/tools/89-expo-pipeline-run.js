@@ -123,6 +123,9 @@ For hands-free completion without user interaction, create a cron:
 
       let batchesDone  = 0;
       let lastEnrichResult;
+      let lastBuiltPath = null;
+
+      const buildTool = require('./88-expo-catalog.js').tools.expo_build_catalog;
 
       while (batchesDone < max_batches) {
         const result = await enrichTool.handler({
@@ -141,6 +144,14 @@ For hands-free completion without user interaction, create a cron:
         batchesDone++;
         stepLog(`🔍 Шаг 2/4: ИНН ${fmtProgress(result.done, result.total)} — ИНН найдено: ${result.with_inn ?? '?'}`);
 
+        // Rebuild catalog after every batch so the site is always fresh with partial data
+        const built = await buildTool.handler({
+          expo_id: expoId, event_key, expo_title, catalog_base, favicon_emoji,
+          use_targets: false,
+          ...(production_okved ? { production_okved } : {}),
+        }, ctx);
+        if (!built.error) lastBuiltPath = built.outputPath;
+
         if (result.remaining === 0) break;
       }
 
@@ -148,7 +159,7 @@ For hands-free completion without user interaction, create a cron:
       const enrichTotal     = lastEnrichResult?.total     ?? totalCompanies;
       const enrichRemaining = lastEnrichResult?.remaining ?? 0;
 
-      // Ещё не всё обогащено — вернём прогресс
+      // Ещё не всё обогащено — вернём прогресс + путь к частичному сайту
       if (enrichRemaining > 0) {
         const batchesLeft = Math.ceil(enrichRemaining / batch_size);
         const offerCron   = batchesLeft > 5;
@@ -156,17 +167,19 @@ For hands-free completion without user interaction, create a cron:
         const msg = [
           `⏳ Обработано ${enrichDone} из ${enrichTotal} компаний`,
           `Осталось: ${enrichRemaining} (≈ ${batchesLeft} батчей по ${batch_size})`,
+          lastBuiltPath ? `🏗️ Частичный сайт обновлён: ${lastBuiltPath}` : '',
           '',
           offerCron
             ? '💡 Хочешь автодобивание без участия? Напиши "активируй крон для этой выставки" — запущу задачу каждые 10 минут.'
             : '▶️ Напиши "продолжить" — обработаю следующий батч.',
-        ].join('\n');
+        ].filter(Boolean).join('\n');
 
         return {
           ok: true,
           next_action:  'call_again',
           step:         'inn_enrich_batch',
           progress:     { done: enrichDone, total: enrichTotal, remaining: enrichRemaining, pct: Math.round(enrichDone / enrichTotal * 100) },
+          partial_site: lastBuiltPath,
           message:      msg,
           cron_prompt:  offerCron ? `Продолжай вызывать expo_pipeline_run для ${expo_url} с event_key=${event_key} и expo_title="${expo_title}" пока next_action != "done". Вызывай каждые 10 минут.` : null,
           expo_id:      expoId,
@@ -185,12 +198,12 @@ For hands-free completion without user interaction, create a cron:
         stepLog(`✅ Целевых: ${qualified.qualified}, отсеяно: ${qualified.rejected}`);
       }
 
-      // ── Шаг 4: expo_build_catalog ─────────────────────────────────────────
-      stepLog('🏗️ Шаг 4/4: Генерирую HTML-каталог…');
-      const buildTool = require('./88-expo-catalog.js').tools.expo_build_catalog;
-      const built     = await buildTool.handler({
+      // ── Шаг 4: expo_build_catalog (финальный — все данные есть) ──────────
+      stepLog('🏗️ Шаг 4/4: Финальный каталог…');
+      const built = await buildTool.handler({
         expo_id: expoId, event_key, expo_title, catalog_base, favicon_emoji,
         use_targets: false,
+        ...(production_okved ? { production_okved } : {}),
       }, ctx);
 
       if (built.error) {
