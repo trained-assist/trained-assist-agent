@@ -91,6 +91,8 @@ const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.
 const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|создай.{0,20}страниц.{0,20}вакансии|опубликуй.{0,20}лендинг|создай.{0,20}лендинг|страниц.{0,20}готов/i;
 const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
+const CONTEXT_OFF_INTENT    = /^\/context_off$|выключи.{0,15}контекст|скрой.{0,15}контекст|отключи.{0,15}(?:статус|контекст|карточк)/i;
+const CONTEXT_ON_INTENT     = /^\/context_on$|включи.{0,15}контекст|покажи.{0,15}контекст|включи.{0,15}(?:статус|карточк)/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
 const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|компани|квалиф)|критери.{0,20}(?:целев|отбор|компани|выставк)|целев.{0,20}(?:критери|требовани|компани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
@@ -236,6 +238,18 @@ function getQuickAnswer(task, userId, workDir) {
     if (t.cache_read > 0) lines.push(`• Из кэша: ${t.cache_read.toLocaleString('ru-RU')}`);
     if (t.cache_write > 0) lines.push(`• В кэш записано: ${t.cache_write.toLocaleString('ru-RU')}`);
     return lines.join('\n');
+  }
+
+  // /context_off / /context_on — toggle context card
+  if (CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task)) {
+    if (!workDir) return 'Не удалось определить рабочую директорию.';
+    const flagPath = path.join(workDir, '.context_disabled');
+    if (CONTEXT_OFF_INTENT.test(task)) {
+      fs.writeFileSync(flagPath, '1');
+      return '📌 Контекст-карточка выключена. Чтобы включить — /context_on';
+    }
+    try { fs.unlinkSync(flagPath); } catch {}
+    return '📌 Контекст-карточка включена. Буду показывать статус после каждой задачи.';
   }
 
   // /secrets_list — show connected services
@@ -666,8 +680,10 @@ function buildContextCard(username, workDir) {
   return lines.join('\n');
 }
 
+const NO_PIN_HINT = '\n\n💡 Дай мне права Admin в группе — буду обновлять без спама. Или /context_off чтобы скрыть.';
+
 // Creates or silently updates the context pin after task completion.
-// State (msgId + chatId + lastCard text) is stored in workDir/.pin_state.json.
+// State (msgId + chatId + lastCard + noPin) is stored in workDir/.pin_state.json.
 // botPinnedMsgId: the pinned message ID known to the bot — used to seed state when we have none.
 async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
   const pinFile = path.join(workDir, '.pin_state.json');
@@ -685,9 +701,28 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
     state = { msgId: botPinnedMsgId, chatId, lastCard: null };
   }
 
+  // In no-pin mode (bot lacks admin rights): just edit the message in-place with a hint.
+  // Never attempt pinChatMessage again — it would fail and spam the chat.
+  if (state?.noPin) {
+    const cardWithHint = card + NO_PIN_HINT;
+    if (state.lastCard === cardWithHint) return;
+    if (state?.msgId) {
+      const edited = await tgEdit(token, chatId, state.msgId, cardWithHint).catch(() => null);
+      if (edited?.ok) {
+        fs.writeFileSync(pinFile, JSON.stringify({ ...state, lastCard: cardWithHint }));
+        return;
+      }
+      console.error(`[pin] edit failed (no-pin mode) msgId=${state.msgId} chat=${chatId}:`, JSON.stringify(edited));
+    }
+    // Previous message was deleted — send a new one (still no pin attempt).
+    const msg = await tgSend(token, chatId, cardWithHint);
+    const newId = msg?.result?.message_id;
+    if (newId) fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: cardWithHint, noPin: true }));
+    return;
+  }
+
   if (state?.msgId) {
-    // Nothing changed — skip entirely to avoid Telegram "message is not modified" error
-    // which would be misread as a failed edit and trigger a duplicate pin.
+    // Nothing changed — skip entirely to avoid Telegram "message is not modified" error.
     if (state.lastCard === card) return;
 
     const edited = await tgEdit(token, chatId, state.msgId, card).catch(() => null);
@@ -695,14 +730,17 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
       fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, chatId, lastCard: card }));
       return;
     }
-    // Edit failed — log the error before falling through to create new.
+    // Edit failed — log and fall through to create new.
     console.error(`[pin] edit failed msgId=${state.msgId} chat=${chatId}:`, JSON.stringify(edited));
   }
 
-  // No existing pin (or edit failed) — send new card message and pin it.
+  // No existing pin (or edit failed) — send new card message and try to pin it.
   const msg = await tgSend(token, chatId, card);
   const newId = msg?.result?.message_id;
   if (!newId) return;
+
+  // Always save msgId so next run edits in-place instead of sending another new message.
+  fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: card }));
 
   const res = await fetch(`${TG_API}/bot${token}/pinChatMessage`, {
     method: 'POST',
@@ -711,9 +749,13 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   });
   const pinData = await res.json();
   if (!pinData.ok) {
-    console.error(`[pin] failed chat=${chatId}:`, JSON.stringify(pinData));
-  } else {
-    fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: card }));
+    console.error(`[pin] pinChatMessage failed chat=${chatId}:`, JSON.stringify(pinData));
+    if (pinData.description?.includes('not enough rights')) {
+      // Enter no-pin mode: add hint to the existing message and remember the flag.
+      const cardWithHint = card + NO_PIN_HINT;
+      await tgEdit(token, chatId, newId, cardWithHint).catch(() => {});
+      fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: cardWithHint, noPin: true }));
+    }
   }
 }
 
@@ -787,7 +829,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
       SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
-      SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task);
+      SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
+      CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task);
 
     if (!isUtility) {
       if (sessionExists) {
@@ -1069,9 +1112,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`);
   }
 
-  // Update context pin after task (only if skills are configured)
-  const card = buildContextCard(user.username, user.workDir);
-  if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
+  // Update context pin after task (skipped when user ran /context_off)
+  const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
+  if (!contextDisabled) {
+    const card = buildContextCard(user.username, user.workDir);
+    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
+  }
 
   // Append assistant reply to session history
   if (activeSessionId) {
