@@ -71,6 +71,7 @@ const VACANCY_PROMPT = `Ты HR-эксперт. Получи материалы 
 - key_skills: массив строк (ключевые навыки, до 30 штук)
 - company_name: название компании (строка или null)
 - company_description: описание компании (строка или null)
+- hiring_stages: массив этапов отбора (строки, например ["Скрининг резюме", "Техническое интервью", "Финальное интервью", "Оффер"]) или null если не упомянуто в материалах
 - response_letter_required: нужно ли сопроводительное письмо? (true/false)
 - contacts: { email, phone, telegram } — если упомянуты в материалах
 
@@ -176,6 +177,12 @@ function formatVacancyReply(draft, vacancyId) {
     lines.push(`🔑 Навыки: ${draft.key_skills.slice(0, 8).join(', ')}`);
   }
 
+  if (!draft.hiring_stages?.length) {
+    lines.push('', '❓ Не указаны этапы отбора — пришли список (например: «Скрининг → Интервью → Оффер»), добавлю на страницу.');
+  } else {
+    lines.push(`🗂 Этапы: ${draft.hiring_stages.join(' → ')}`);
+  }
+
   lines.push(
     '',
     '📄 Описание сформировано. Проверь вакансию и при необходимости скажи что поправить.',
@@ -267,6 +274,8 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
   const skillsHtml = draft.key_skills?.length
     ? draft.key_skills.map(s => `<span class="skill-tag">${escapeHtml(s)}</span>`).join('')
     : '';
+  const companyHtml = draft.company_description ? mdToHtml(draft.company_description) : '';
+  const hiringStages = draft.hiring_stages?.length ? draft.hiring_stages : null;
   const applyHref = buildApplyHref(draft);
   const pubDate = new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
 
@@ -276,6 +285,14 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
     const heading = title ? `<h2 class="card-title">${escapeHtml(title)}</h2>` : '';
     return `<div class="card">${heading}<div class="card-body">${content}</div></div>`;
   }).join('\n');
+
+  const hiringBlockHtml = hiringStages ? `
+      <div class="hiring-block">
+        <h3>Процесс рассмотрения</h3>
+        <ol class="hiring-stages">
+          ${hiringStages.map(s => `<li>${escapeHtml(s)}</li>`).join('')}
+        </ol>
+      </div>` : '';
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -326,10 +343,19 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
   .apply-contacts a { color: #1a56db; text-decoration: none; }
   .apply-contacts a:hover { text-decoration: underline; }
 
+  /* ── Hiring stages (sidebar) ── */
+  .hiring-block { margin-top: 20px; border-top: 1px solid #f0f0f0; padding-top: 16px; }
+  .hiring-block h3 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: #767676; text-transform: uppercase; letter-spacing: .05em; }
+  .hiring-stages { list-style: none; margin: 0; padding: 0; counter-reset: stage; }
+  .hiring-stages li { counter-increment: stage; display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; font-size: 13px; color: #3d3d3d; line-height: 1.4; }
+  .hiring-stages li::before { content: counter(stage); flex-shrink: 0; width: 20px; height: 20px; background: #e8f0fe; color: #1a56db; border-radius: 50%; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+
   /* ── Mobile sticky apply bar ── */
   .mobile-apply-bar { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: #fff; border-top: 1px solid #e8e8e8; padding: 12px 16px; z-index: 100; }
   .mobile-apply-bar .apply-btn { border-radius: 6px; }
-  @media (max-width: 680px) { .mobile-apply-bar { display: block; } }
+  /* Hiring stages card in main col — shown only on mobile when sidebar is hidden */
+  .hiring-main-card { display: none; }
+  @media (max-width: 680px) { .mobile-apply-bar { display: block; } .hiring-main-card { display: block; } }
 </style>
 </head>
 <body>
@@ -357,7 +383,8 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
     ${sectionCards}
 
     ${skillsHtml ? `<div class="card"><h2 class="card-title">Ключевые навыки</h2><div class="skills-wrap">${skillsHtml}</div></div>` : ''}
-    ${draft.company_description ? `<div class="card"><h2 class="card-title">О компании</h2><div class="card-body"><p>${escapeHtml(draft.company_description)}</p></div></div>` : ''}
+    ${companyHtml ? `<div class="card"><h2 class="card-title">О компании</h2><div class="card-body">${companyHtml}</div></div>` : ''}
+    ${hiringStages ? `<div class="card hiring-main-card"><h2 class="card-title">Процесс рассмотрения</h2><ol class="hiring-stages">${hiringStages.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
   </main>
 
   <aside class="sidebar">
@@ -369,6 +396,7 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
         ${draft.contacts.telegram ? `<a href="https://t.me/${escapeHtml(draft.contacts.telegram.replace(/^@/, ''))}" target="_blank" rel="noopener">Telegram: ${escapeHtml(draft.contacts.telegram)}</a>` : ''}
         ${draft.contacts.phone ? `<a href="tel:${escapeHtml(draft.contacts.phone.replace(/\s/g, ''))}">${escapeHtml(draft.contacts.phone)}</a>` : ''}
       </div>` : ''}
+      ${hiringBlockHtml}
     </div>
   </aside>
 </div>
