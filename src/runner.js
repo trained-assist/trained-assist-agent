@@ -362,22 +362,24 @@ function getQuickAnswer(task, userId, workDir) {
 
   // Capability question about illustration generation
   if (ILLUSTRATE_ENABLE_INTENT.test(task) || ILLUSTRATE_CAPABILITY_INTENT.test(task)) {
-    // If the message also contains a concrete drawing subject — let Claude handle it directly
-    if (ILLUSTRATE_DRAW_COMMAND.test(task)) return null;
+    if (!workDir) return null;
 
-    const illustrateFlagPath = require('path').join(workDir, 'contexts', 'illustrate', '.enabled');
-    const illustrateEnabled = require('fs').existsSync(illustrateFlagPath);
+    const illustrateFlagPath = path.join(workDir, 'contexts', 'illustrate', '.enabled');
+    const illustrateEnabled = fs.existsSync(illustrateFlagPath);
 
     if (ILLUSTRATE_ENABLE_INTENT.test(task)) {
-      if (illustrateEnabled) {
-        return 'Скил иллюстраций уже включён. Опиши что нарисовать — и начнём!';
+      if (!illustrateEnabled) {
+        fs.mkdirSync(path.dirname(illustrateFlagPath), { recursive: true });
+        fs.writeFileSync(illustrateFlagPath, JSON.stringify({ enabled_at: new Date().toISOString() }));
       }
-      require('fs').mkdirSync(require('path').dirname(illustrateFlagPath), { recursive: true });
-      require('fs').writeFileSync(illustrateFlagPath, JSON.stringify({ enabled_at: new Date().toISOString() }));
+      // If message also has a concrete draw command — enable the skill silently and let Claude handle the drawing
+      if (ILLUSTRATE_DRAW_COMMAND.test(task)) return null;
+      if (illustrateEnabled) return 'Скил иллюстраций уже включён. Опиши что нарисовать — и начнём!';
       return 'Готово! Скил генерации иллюстраций включён.\n\nТеперь могу рисовать медицинские схемы, анатомические диаграммы и инфографику.\nИспользую DALL-E 3 (основной) и Ideogram (альтернатива, лучше с подписями).\n\nОпиши что нарисовать — и начнём!';
     }
 
-    // ILLUSTRATE_CAPABILITY_INTENT
+    // ILLUSTRATE_CAPABILITY_INTENT — pure capability question (no draw command)
+    if (ILLUSTRATE_DRAW_COMMAND.test(task)) return null;
     if (illustrateEnabled) {
       return 'Да, скил иллюстраций включён.\n\nПросто опиши что нарисовать — голосом или текстом. Например:\n• «нарисуй как работают потовые железы в коже»\n• «схема слоёв эпидермиса в разрезе»\n• «инфографика про уход за кожей»\n\nСтили: медицинская схема, flat design, детальная анатомия, инфографика.\nПосле картинки могу наложить подписи по-русски отдельным инструментом.';
     }
