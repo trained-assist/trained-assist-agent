@@ -1299,6 +1299,50 @@ module.exports = {
         }
       },
     },
+
+    // ── Vacancy draft tools (for recruiter review/edit loop) ──────────────────
+
+    hh_vacancy_get_draft: {
+      description: 'Read the current vacancy draft in JSON format. Use when recruiter asks to see or edit the vacancy.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const { readVacancyState } = require('./../../hh-vacancy');
+        const state = readVacancyState(process.cwd());
+        if (!state?.draft) return { error: 'No vacancy draft found. Create one first.' };
+        return { vacancy_id: state.vacancy_id, status: state.status, draft: state.draft, landing_url: state.landing_url };
+      },
+    },
+
+    hh_vacancy_update_draft: {
+      description: 'Update fields in the current vacancy draft. Pass only the fields you want to change.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Job title' },
+          description_md: { type: 'string', description: 'Full job description in Markdown' },
+          area_name: { type: 'string', description: 'City/region name in Russian' },
+          salary_from: { type: 'number' },
+          salary_to: { type: 'number' },
+          salary_currency: { type: 'string', enum: ['RUR', 'USD', 'EUR'] },
+          salary_gross: { type: 'boolean' },
+          experience: { type: 'string', enum: ['noExperience', 'between1And3', 'between3And6', 'moreThan6'] },
+          employment: { type: 'string', enum: ['full', 'part', 'project', 'volunteer', 'probation'] },
+          schedule: { type: 'string', enum: ['fullDay', 'shift', 'flexible', 'remote', 'flyInFlyOut'] },
+          key_skills: { type: 'array', items: { type: 'string' } },
+          company_name: { type: 'string' },
+          company_description: { type: 'string' },
+          response_letter_required: { type: 'boolean' },
+        },
+      },
+      handler: async (args) => {
+        const { readVacancyState, writeVacancyState } = require('./../../hh-vacancy');
+        const state = readVacancyState(process.cwd());
+        if (!state?.draft) return { error: 'No vacancy draft found.' };
+        const updatedDraft = { ...state.draft, ...args };
+        writeVacancyState(process.cwd(), { ...state, draft: updatedDraft, status: 'draft_ready' });
+        return { ok: true, updated_fields: Object.keys(args), vacancy_id: state.vacancy_id };
+      },
+    },
   },
 };
 

@@ -19,6 +19,7 @@ const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
+const { storeApplication } = require('./hh-vacancy');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -27,6 +28,14 @@ const BASE_USERS_DIR = process.env.USERS_DIR ||
 const VM_NAME = process.env.VM_NAME || 'unknown';
 let GIT_COMMIT = 'unknown';
 try { GIT_COMMIT = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
+
+function trackProjectUsage(workDir, projectName) {
+  const file = path.join(workDir, '.project-usage.json');
+  let usage = {};
+  try { usage = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  usage[projectName] = (usage[projectName] || 0) + 1;
+  try { fs.writeFileSync(file, JSON.stringify(usage)); } catch {}
+}
 
 async function classifyMessage(message, sessions, apiKey) {
   // Build a compact description of each session
@@ -1676,12 +1685,38 @@ function show(id, type, msg) {
       });
     }
 
+    // GET /projects?username=xxx — list project subdirs sorted by session frequency
+    if (req.method === 'GET' && url.pathname === '/projects') {
+      const username = url.searchParams.get('username');
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+
+      const workDir = path.join(BASE_USERS_DIR, username);
+      let usage = {};
+      try { usage = JSON.parse(fs.readFileSync(path.join(workDir, '.project-usage.json'), 'utf8')); } catch {}
+
+      let subdirs = [];
+      try {
+        subdirs = fs.readdirSync(workDir, { withFileTypes: true })
+          .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+          .map(e => e.name);
+      } catch {}
+
+      // Root dir always first in candidates; sort by count desc then name asc
+      const projects = [
+        { name: '', label: '🏠 Корень', count: usage[''] || 0 },
+        ...subdirs.map(name => ({ name, label: name, count: usage[name] || 0 })),
+      ].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+
+      return json(res, 200, { projects });
+    }
+
     if (req.method === 'POST' && url.pathname === '/run') {
       const body = await readBody(req);
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectDir } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude) return json(res, 400, { error: 'missing fields' });
@@ -1701,10 +1736,21 @@ function show(id, type, msg) {
         return json(res, 400, { error: 'invalid sessionId' });
       if (contextFromSession && !/^[a-zA-Z0-9_-]+$/.test(contextFromSession))
         return json(res, 400, { error: 'invalid contextFromSession' });
+      if (projectDir && !/^[a-zA-Z0-9][a-zA-Z0-9_\-.]*$/.test(projectDir))
+        return json(res, 400, { error: 'invalid projectDir' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
-      const user = { id: userId, name: username, username, workDir, telegramUserId: telegramUserId || null };
+
+      // cwd = project subdir for Claude; workDir stays as data dir for sessions/logs
+      const cwd = projectDir ? path.resolve(path.join(workDir, projectDir)) : workDir;
+      if (!cwd.startsWith(workDir)) return json(res, 400, { error: 'invalid projectDir' });
+      if (projectDir) {
+        fs.mkdirSync(cwd, { recursive: true });
+        trackProjectUsage(workDir, projectDir);
+      }
+
+      const user = { id: userId, name: username, username, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
       // Accept request immediately, run task in background
@@ -1716,6 +1762,114 @@ function show(id, type, msg) {
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
+    }
+
+    // CORS preflight for /apply (form is hosted on chillai.space, different origin)
+    if (req.method === 'OPTIONS' && /^\/apply\//.test(url.pathname)) {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400',
+      });
+      res.end();
+      return;
+    }
+
+    // POST /apply/:username/:vacancyId — no auth, public endpoint for candidate applications
+    if (req.method === 'POST' && /^\/apply\/[a-zA-Z0-9_-]+\/vac-\d+$/.test(url.pathname)) {
+      const parts = url.pathname.split('/');
+      const applyUsername = parts[2];
+      const vacancyId = parts[3];
+      const workDir = path.join(BASE_USERS_DIR, applyUsername);
+
+      let fields = {};
+      try {
+        const ct = req.headers['content-type'] || '';
+        if (ct.includes('multipart/form-data')) {
+          // Parse multipart from raw bytes to preserve UTF-8 text correctly
+          const rawBuf = await readBodyBuffer(req);
+          const boundary = ct.match(/boundary=([^\s;]+)/)?.[1];
+          if (boundary) {
+            const sep = Buffer.from(`--${boundary}`);
+            const parts2 = splitBuffer(rawBuf, sep);
+            for (const part of parts2) {
+              const headerEnd = indexOfSeq(part, Buffer.from('\r\n\r\n'));
+              if (headerEnd === -1) continue;
+              const header = part.slice(0, headerEnd).toString();
+              const value = part.slice(headerEnd + 4);
+              const m = header.match(/Content-Disposition:[^\n]*name="([^"]+)"/);
+              if (m && m[1] !== 'resume') {
+                // Strip trailing \r\n that multipart adds before next boundary
+                const text = value.slice(-2).equals(Buffer.from('\r\n')) ? value.slice(0, -2) : value;
+                fields[m[1]] = text.toString('utf8').trim();
+              }
+            }
+          }
+        } else {
+          const body = await readBody(req);
+          if (ct.includes('application/json')) {
+            fields = JSON.parse(body);
+          } else if (ct.includes('application/x-www-form-urlencoded')) {
+            for (const pair of body.split('&')) {
+              const [k, v] = pair.split('=');
+              if (k) fields[decodeURIComponent(k)] = decodeURIComponent(v || '');
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[apply] parse error:', e.message);
+        res.writeHead(400, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid request body' }));
+        return;
+      }
+
+      const corsHeaders = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+      function applyJson(status, data) {
+        res.writeHead(status, corsHeaders);
+        res.end(JSON.stringify(data));
+      }
+
+      const email = String(fields.email || '').trim();
+      const phone = String(fields.phone || '').trim();
+      if (!email || !phone) return applyJson(400, { error: 'email and phone are required' });
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return applyJson(400, { error: 'invalid email' });
+
+      try {
+        const app = storeApplication(workDir, vacancyId, {
+          name: String(fields.name || '').trim().slice(0, 200),
+          email,
+          phone: phone.slice(0, 30),
+          telegram: String(fields.telegram || '').trim().slice(0, 100),
+          message: String(fields.message || '').trim().slice(0, 3000),
+        }, null, null);
+
+        // Notify recruiter via Telegram if chatId is known
+        const chatIdFile = path.join(process.env.HOME || '/home/vova', 'agent-tokens', applyUsername, '.chatid');
+        const chatId = fs.existsSync(chatIdFile) ? fs.readFileSync(chatIdFile, 'utf8').trim() : null;
+        if (chatId && secrets.BOT_TOKEN) {
+          const notifLines = [
+            `📬 Новый отклик на вакансию!`,
+            '',
+            app.name ? `👤 ${app.name}` : '👤 (имя не указано)',
+            `📧 ${app.email}`,
+            `📞 ${app.phone}`,
+            app.telegram ? `✈️ ${app.telegram}` : null,
+            app.message ? `\n💬 ${app.message.slice(0, 300)}` : null,
+          ].filter(Boolean).join('\n');
+          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: notifLines }),
+          }).catch(e => console.error('[apply] tg notify error:', e.message));
+        }
+
+        return applyJson(200, { ok: true });
+      } catch (e) {
+        console.error('[apply] store error:', e.message);
+        return applyJson(500, { error: 'failed to store application' });
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/tokens') {
@@ -2044,6 +2198,39 @@ function readBody(req, maxBytes = 1_048_576) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });
+}
+
+function readBodyBuffer(req, maxBytes = 1_048_576) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', c => {
+      total += c.length;
+      if (total > maxBytes) { req.destroy(); return reject(new Error('body too large')); }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function indexOfSeq(buf, seq) {
+  for (let i = 0; i <= buf.length - seq.length; i++) {
+    if (buf.slice(i, i + seq.length).equals(seq)) return i;
+  }
+  return -1;
+}
+
+function splitBuffer(buf, sep) {
+  const parts = [];
+  let start = 0;
+  let pos;
+  while ((pos = indexOfSeq(buf.slice(start), sep)) !== -1) {
+    parts.push(buf.slice(start, start + pos));
+    start += pos + sep.length;
+  }
+  parts.push(buf.slice(start));
+  return parts.filter(p => p.length > 0);
 }
 
 // ── HH review page ────────────────────────────────────────────────────────────

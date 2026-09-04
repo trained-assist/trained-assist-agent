@@ -17,7 +17,7 @@ const {
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
 const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage } = require('./hh-quick');
-const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages } = require('./hh-vacancy');
+const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH } = require('./hh-vacancy');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -84,6 +84,9 @@ const HH_STYLE_INTENT        = /(?:обнови|загрузи|обновить|
 const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
+const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
+const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|создай.{0,20}страниц.{0,20}вакансии|опубликуй.{0,20}лендинг|создай.{0,20}лендинг|страниц.{0,20}готов/i;
+const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -135,7 +138,16 @@ function getQuickAnswer(task, userId, workDir) {
   // Vacancy creation flow — intercept before other intents so collecting mode takes priority
   if (workDir) {
     const vs = readVacancyState(workDir);
+    if (vs?.status === 'generating') {
+      // Already running an Anthropic API call — block new messages to prevent concurrent generation
+      return '⏳ Генерирую вакансию, подожди немного...';
+    }
     if (vs?.status === 'collecting') {
+      // Cancel — let user escape collecting mode
+      if (VACANCY_CANCEL_INTENT.test(task)) {
+        writeVacancyState(workDir, { ...vs, status: 'cancelled' });
+        return '❌ Создание вакансии отменено. Чтобы начать заново — скажи «новая вакансия».';
+      }
       if (VACANCY_DONE_INTENT.test(task.trim())) {
         // Mark as generating; runQuickAnswer async section will call Anthropic API
         writeVacancyState(workDir, { ...vs, status: 'generating' });
@@ -144,14 +156,19 @@ function getQuickAnswer(task, userId, workDir) {
       // Skip other quick-answer patterns while collecting (except ping/help)
       if (!PING_INTENT.test(task) && !HELP_INTENT.test(task)) {
         const count = appendVacancyMessage(workDir, task);
-        return `✅ Принял (${count} ${count === 1 ? 'блок' : count < 5 ? 'блока' : 'блоков'}). Ещё что-нибудь? Или скажи «всё» — начну генерировать вакансию.`;
+        const countLabel = count === 1 ? 'блок' : count < 5 ? 'блока' : 'блоков';
+        return `✅ Принял (${count} ${countLabel}). Ещё что-нибудь? Или скажи «всё» — начну генерировать.\nЧтобы отменить: «отмени создание вакансии».`;
       }
     }
   }
 
-  // New job post command — start collecting mode
+  // New job post command — start collecting mode (guard against overwriting live drafts)
   if (NEW_JOB_INTENT.test(task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
+    const existingVs = readVacancyState(workDir);
+    if (existingVs && !['cancelled', 'hh_draft'].includes(existingVs.status)) {
+      return `⚠️ Уже есть активная вакансия (статус: ${existingVs.status}). Чтобы отменить её и начать новую — скажи «отмени создание вакансии».`;
+    }
     initVacancyState(workDir);
     return [
       '📋 Создаём новую вакансию!',
@@ -463,6 +480,56 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
     }
   }
 
+  // Publish vacancy landing page — triggered when draft is ready and user says "публикуй страницу"
+  if (workDir && userId && VACANCY_PUBLISH_PAGE_INTENT.test(task)) {
+    const vs = readVacancyState(workDir);
+    if (vs?.status === 'draft_ready' && vs.draft) {
+      const r = await publishVacancyPage(workDir, vs.draft, vs.vacancy_id, userId).then(url => {
+        return [
+          '🌐 Страница вакансии опубликована!',
+          '',
+          url,
+          '',
+          'Отправь эту ссылку рекрутеру для ревью. Кандидаты смогут откликнуться прямо со страницы.',
+          '',
+          'Когда рекрутер даст правки — скажи что изменить, пересоздам страницу.',
+          'Готово публиковать на HH? Скажи «опубликуй черновик на HH».',
+        ].join('\n');
+      }).catch(e => {
+        console.error('[vacancy] publish page error:', e.message);
+        return `⚠️ Ошибка при публикации страницы: ${e.message}`;
+      });
+      if (r) return r;
+    }
+    if (!vs?.draft) {
+      return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
+    }
+  }
+
+  // Publish vacancy as HH draft
+  if (workDir && userId && VACANCY_HH_PUBLISH_INTENT.test(task)) {
+    const vs2 = readVacancyState(workDir);
+    if (!vs2?.draft) {
+      return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
+    }
+    const r2 = await publishToHH(workDir, userId).then(({ hhId, areaName, areaId }) => {
+      const areaNote = areaId ? '' : `\n⚠️ Город «${areaName}» не распознан — вакансия создана с регионом «Россия». Поправь город в черновике на hh.ru.`;
+      return [
+        `✅ Черновик вакансии сохранён на HeadHunter!`,
+        '',
+        `🆔 ID вакансии: ${hhId}`,
+        `🔗 Редактировать: https://hh.ru/employer/vacancy/${hhId}/edit`,
+        areaNote,
+        '',
+        'Проверь черновик на hh.ru и опубликуй когда будешь готов.',
+      ].filter(Boolean).join('\n');
+    }).catch(e => {
+      console.error('[vacancy] HH publish error:', e.message);
+      return `⚠️ Ошибка при публикации на HH: ${e.message}`;
+    });
+    if (r2) return r2;
+  }
+
   if (userId && workDir) {
     if (HH_MY_VACANCIES_INTENT.test(task)) {
       const r = await hhMyVacancies(userId, workDir).catch(() => null);
@@ -768,7 +835,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     ...(fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
     '--print', prompt,
   ], {
-    cwd: user.workDir,
+    cwd: user.cwd || user.workDir,
     env: {
       ...cleanEnv,
       ...userTokens,
