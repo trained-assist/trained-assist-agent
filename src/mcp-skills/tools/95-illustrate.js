@@ -55,9 +55,9 @@ const DEFAULT_STYLE = 'medical';
 
 function availableProviders() {
   const list = [];
+  if (process.env.IDEOGRAM_API_KEY)  list.push('ideogram');
   if (process.env.OPENAI_API_KEY)    list.push('openai');
   if (process.env.FAL_KEY)           list.push('fal');
-  if (process.env.IDEOGRAM_API_KEY)  list.push('ideogram');
   if (process.env.RECRAFT_API_KEY)   list.push('recraft');
   return list;
 }
@@ -410,7 +410,13 @@ module.exports = {
         properties: {
           description: {
             type: 'string',
-            description: 'Detailed description of what to illustrate. Be specific: what structure, what process, what perspective, what to highlight.',
+            description: [
+              'Detailed description of what to illustrate. Be specific: what structure, what process, what perspective, what to highlight.',
+              'For Ideogram (the default provider): write in English, be anatomically precise, list every structure to show.',
+              'Example (fingernail cross-section): "Medical cross-section diagram of human fingernail, lateral view.',
+              'Shows nail plate, nail bed, nail matrix, cuticle (eponychium), lunula, hyponychium, lateral nail fold, bone phalanx.',
+              'Clean Netter\'s Atlas style, white background, no text, no labels."',
+            ].join(' '),
           },
           style: {
             type: 'string',
@@ -444,19 +450,34 @@ module.exports = {
           };
         }
 
-        // Pick provider
-        const chosenProvider = (provider && available.includes(provider)) ? provider : available[0];
-        const generate = GENERATORS[chosenProvider];
+        // Pick provider (explicit or first available)
+        const preferredProvider = (provider && available.includes(provider)) ? provider : available[0];
 
         // Build prompt
         const fullPrompt = buildPrompt(description, style, language, labels_mode);
 
-        // Generate image
+        // Generate with auto-fallback: if billing/quota error → try next provider automatically
+        const BILLING_ERRORS = /billing|payment|quota|insufficient|credit|balance|funds|limit exceeded/i;
+        const candidateProviders = [preferredProvider, ...available.filter(p => p !== preferredProvider)];
+
         let result;
-        try {
-          result = await generate(fullPrompt);
-        } catch (e) {
-          return { error: 'generation_failed', provider: chosenProvider, message: e.message };
+        let chosenProvider;
+        const attemptErrors = [];
+        for (const p of candidateProviders) {
+          try {
+            result = await GENERATORS[p](fullPrompt);
+            chosenProvider = p;
+            break;
+          } catch (e) {
+            if (BILLING_ERRORS.test(e.message) && p !== candidateProviders[candidateProviders.length - 1]) {
+              attemptErrors.push({ provider: p, error: e.message });
+              continue; // try next
+            }
+            return { error: 'generation_failed', provider: p, attempted: attemptErrors, message: e.message };
+          }
+        }
+        if (!result) {
+          return { error: 'all_providers_failed', attempted: attemptErrors };
         }
 
         // Download image buffer
@@ -516,6 +537,7 @@ module.exports = {
           style_used: style,
           labels_mode,
           telegram_sent: telegramOk,
+          ...(attemptErrors.length > 0 ? { fallback_used: true, skipped_providers: attemptErrors.map(a => a.provider) } : {}),
           telegram_error: telegramError || undefined,
           image_url: result.url,
           saved_as: filename,
