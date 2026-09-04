@@ -17,6 +17,7 @@ const {
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
 const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage } = require('./hh-quick');
+const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages } = require('./hh-vacancy');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -81,6 +82,8 @@ const HH_WHERE_PROMPT_INTENT = /где.{0,30}(?:промпт|конфиг|нас
 const HH_SHOW_ATS_CONFIG_INTENT = /(?:покажи|посмотр|какие|что за|дай|вывед).{0,30}(?:правила|критери|оценк|ats|конфиг|настройк).{0,30}(?:кандидат|воронк|оценк|скрининг|ats)|(?:правила|критери|настройки).{0,20}(?:для|по).{0,10}(?:кандидат|оценк|скрининг)|ats.{0,15}правила|что.{0,15}у меня.{0,30}(?:правила|критери|оценк|ats)/i;
 const HH_STYLE_INTENT        = /(?:обнови|загрузи|обновить|загрузить|настрой|поменяй|задай|update).{0,30}стиль|стиль.{0,30}(?:общения|переписки|сообщений|рекрут)|communication.{0,15}style|update.{0,15}style/i;
 const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
+const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
+const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
@@ -129,6 +132,36 @@ const QUICK_SETUPS = [
 ];
 
 function getQuickAnswer(task, userId, workDir) {
+  // Vacancy creation flow — intercept before other intents so collecting mode takes priority
+  if (workDir) {
+    const vs = readVacancyState(workDir);
+    if (vs?.status === 'collecting') {
+      if (VACANCY_DONE_INTENT.test(task.trim())) {
+        // Mark as generating; runQuickAnswer async section will call Anthropic API
+        writeVacancyState(workDir, { ...vs, status: 'generating' });
+        return null; // fall through to async handler
+      }
+      // Skip other quick-answer patterns while collecting (except ping/help)
+      if (!PING_INTENT.test(task) && !HELP_INTENT.test(task)) {
+        const count = appendVacancyMessage(workDir, task);
+        return `✅ Принял (${count} ${count === 1 ? 'блок' : count < 5 ? 'блока' : 'блоков'}). Ещё что-нибудь? Или скажи «всё» — начну генерировать вакансию.`;
+      }
+    }
+  }
+
+  // New job post command — start collecting mode
+  if (NEW_JOB_INTENT.test(task)) {
+    if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
+    initVacancyState(workDir);
+    return [
+      '📋 Создаём новую вакансию!',
+      '',
+      'Кидай всё что есть — черновики, требования, заметки со звонков, переговоры с клиентом. Можно кусками, можно всё сразу.',
+      '',
+      'Когда всё скинешь — скажи «всё».',
+    ].join('\n');
+  }
+
   // /ping — liveness check
   if (PING_INTENT.test(task)) return '🟢 Онлайн. Готов к работе.';
 
@@ -413,9 +446,22 @@ function getQuickAnswer(task, userId, workDir) {
 }
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir) {
+async function runQuickAnswer(task, userId, workDir, apiKey = null) {
   const sync = getQuickAnswer(task, userId, workDir);
   if (sync !== null) return sync;
+
+  // Vacancy generation — triggered when collecting mode is done ("всё" set status → "generating")
+  if (workDir && apiKey) {
+    const vs = readVacancyState(workDir);
+    if (vs?.status === 'generating' && vs.messages?.length > 0) {
+      const r = await generateVacancyFromMessages(workDir, vs.messages, apiKey).catch(e => {
+        console.error('[vacancy] generation error:', e.message);
+        writeVacancyState(workDir, { ...vs, status: 'collecting' }); // rollback so user can retry
+        return '⚠️ Ошибка при генерации вакансии. Попробуй ещё раз — скажи «всё» когда будешь готов.';
+      });
+      if (r) return r;
+    }
+  }
 
   if (userId && workDir) {
     if (HH_MY_VACANCIES_INTENT.test(task)) {
@@ -602,7 +648,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.ANTHROPIC_API_KEY);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
