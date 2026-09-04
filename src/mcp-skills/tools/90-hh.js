@@ -1343,6 +1343,67 @@ module.exports = {
         return { ok: true, updated_fields: Object.keys(args), vacancy_id: state.vacancy_id };
       },
     },
+
+    hh_vacancy_create_draft: {
+      description: 'Create or overwrite the vacancy draft from collected data. Use when you have enough info to build a structured draft (title, description, salary, etc).',
+      inputSchema: {
+        type: 'object',
+        required: ['name', 'description_md'],
+        properties: {
+          name: { type: 'string', description: 'Job title' },
+          description_md: { type: 'string', description: 'Full job description in Markdown with sections: ## Обязанности, ## Требования, ## Условия' },
+          area_name: { type: 'string', description: 'City in Russian, e.g. Москва' },
+          salary_from: { type: 'number' },
+          salary_to: { type: 'number' },
+          salary_currency: { type: 'string', enum: ['RUR', 'USD', 'EUR'], default: 'RUR' },
+          experience: { type: 'string', enum: ['noExperience', 'between1And3', 'between3And6', 'moreThan6'] },
+          employment: { type: 'string', enum: ['full', 'part', 'project', 'volunteer', 'probation'], default: 'full' },
+          schedule: { type: 'string', enum: ['fullDay', 'shift', 'flexible', 'remote', 'flyInFlyOut'], default: 'fullDay' },
+          key_skills: { type: 'array', items: { type: 'string' } },
+          company_name: { type: 'string' },
+          company_description: { type: 'string' },
+        },
+      },
+      handler: async (args) => {
+        const { writeVacancyState } = require('./../../hh-vacancy');
+        const crypto = require('crypto');
+        const vacancyId = `draft-${crypto.randomBytes(6).toString('hex')}`;
+        const draft = {
+          name: args.name,
+          description_md: args.description_md,
+          area_name: args.area_name || null,
+          salary_from: args.salary_from || null,
+          salary_to: args.salary_to || null,
+          salary_currency: args.salary_currency || 'RUR',
+          salary_gross: false,
+          experience: args.experience || 'between3And6',
+          employment: args.employment || 'full',
+          schedule: args.schedule || 'fullDay',
+          key_skills: args.key_skills || [],
+          company_name: args.company_name || null,
+          company_description: args.company_description || null,
+          response_letter_required: false,
+        };
+        writeVacancyState(process.cwd(), { vacancy_id: vacancyId, status: 'draft_ready', draft, landing_url: null });
+        return { ok: true, vacancy_id: vacancyId, message: `Черновик создан: «${args.name}». Используй hh_vacancy_publish_page чтобы опубликовать страницу.` };
+      },
+    },
+
+    hh_vacancy_publish_page: {
+      description: 'Publish the vacancy draft as a public landing page via instant-publish. Returns the URL to share with the recruiter.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const { readVacancyState, publishVacancyPage } = require('./../../hh-vacancy');
+        const state = readVacancyState(process.cwd());
+        if (!state?.draft) return { error: 'No vacancy draft found. Create one first with hh_vacancy_create_draft.' };
+        try {
+          const url = await publishVacancyPage(process.cwd(), state.draft, state.vacancy_id, USER_ID);
+          return { ok: true, url, message: `Страница вакансии опубликована: ${url}` };
+        } catch (e) {
+          return { error: `Ошибка публикации: ${e.message}` };
+        }
+      },
+    },
   },
 };
 
