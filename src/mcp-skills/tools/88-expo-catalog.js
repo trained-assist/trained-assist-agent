@@ -58,10 +58,11 @@ Parameters:
           favicon_emoji: { type: 'string', description: 'Browser tab emoji', default: '🌸' },
           out_dir:       { type: 'string', description: 'Output directory (default: expo pipeline dir)' },
           use_targets:   { type: 'boolean', description: 'Use targets.json instead of enriched.json', default: false },
+          production_okved: { type: 'array', items: { type: 'string' }, description: 'ОКВЭД-префиксы производства для классификации t:1/nt:1. Default: ["13.","14."] (текстиль). Для цветов: ["01.","16.","20.","22.","23.","25.","26.","27.","28.","32."]' },
         },
       },
 
-      handler: async ({ expo_id, event_key, expo_title, expo_date = '', catalog_base = '', favicon_emoji = '🌸', out_dir, use_targets = false }, ctx) => {
+      handler: async ({ expo_id, event_key, expo_title, expo_date = '', catalog_base = '', favicon_emoji = '🌸', out_dir, use_targets = false, production_okved }, ctx) => {
         const workDir = ctx?.workDir || process.cwd();
 
         const id = expo_id.startsWith('http') ? slugify(expo_id) : expo_id;
@@ -98,6 +99,7 @@ Parameters:
             companies,
             id_prefix: id.slice(0, 3).toUpperCase(),
             sort_by_stand: true,
+            ...(production_okved ? { production_okved } : {}),
           });
           exArray = JSON.parse(result.ex_json);
         } catch {

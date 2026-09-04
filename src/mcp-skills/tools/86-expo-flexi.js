@@ -24,12 +24,12 @@ function classifyRevenue(rev, prof) {
 
 // ── OKVED classification ──────────────────────────────────────────────────────
 
-const PRODUCTION_OKVED = ['13.', '14.'];    // textile + garment manufacturing
-const TRADE_OKVED      = ['46.', '47.', '52.', '73.', '74.', '63.', '68.'];
+const DEFAULT_PRODUCTION_OKVED = ['13.', '14.'];  // textile + garment manufacturing
+const TRADE_OKVED = ['46.', '47.', '52.', '73.', '74.', '63.', '68.'];
 
-function okvedIsProduction(okved) {
+function okvedIsProduction(okved, productionOkved = DEFAULT_PRODUCTION_OKVED) {
   if (!okved) return null;  // unknown
-  if (PRODUCTION_OKVED.some(p => okved.startsWith(p))) return true;
+  if (productionOkved.some(p => okved.startsWith(p))) return true;
   if (TRADE_OKVED.some(p => okved.startsWith(p))) return false;
   return null;  // unclear
 }
@@ -51,7 +51,7 @@ function nameIsForeign(name) {
 
 // ── Main classify function ────────────────────────────────────────────────────
 
-function classifyCompany(c) {
+function classifyCompany(c, productionOkved = DEFAULT_PRODUCTION_OKVED) {
   // Step 1: country filter
   const country = (c.country || '').trim();
   const ru = c.ru === 1 || c.ru === true || country === 'Россия' || !country;
@@ -60,7 +60,7 @@ function classifyCompany(c) {
   }
 
   // Step 2: production check via OKVED
-  const okvedResult = okvedIsProduction(c.okved);
+  const okvedResult = okvedIsProduction(c.okved, productionOkved);
   if (okvedResult === false) {
     return { t: 0, nt: 0, reason: `ОКВЭД ${c.okved} = торговля/услуги` };
   }
@@ -96,8 +96,8 @@ function classifyCompany(c) {
 
 // ── EX array generation ───────────────────────────────────────────────────────
 
-function toExEntry(c, idx, prefix) {
-  const cls = classifyCompany(c);
+function toExEntry(c, idx, prefix, productionOkved = DEFAULT_PRODUCTION_OKVED) {
+  const cls = classifyCompany(c, productionOkved);
   return {
     id: c.id || `${prefix}${String(idx + 1).padStart(3, '0')}`,
     n: c.name || c.n || '',
@@ -134,11 +134,14 @@ module.exports = {
       description:
         'Классифицировать список компаний выставки как ЦЕЛЕВАЯ / ПОЧТИ ЦЕЛЕВАЯ / не целевая.\n\n' +
         'Критерии Flexi:\n' +
-        '• Целевая (t:1): производитель РФ (ОКВЭД 13.x/14.x) + выручка 150–1000 млн (любая прибыль) или 1–5 млрд (прибыль ≤100 млн)\n' +
+        '• Целевая (t:1): производитель РФ (ОКВЭД из production_okved) + выручка 150–1000 млн (любая прибыль) или 1–5 млрд (прибыль ≤100 млн)\n' +
         '• Почти целевая (nt:1): производитель РФ + выручка неизвестна, или <150 млн, или >5 млрд (прибыль >100 млн)\n' +
         '• Не целевая: дистрибьютор, торговля (ОКВЭД 46.x+), иностранная компания\n\n' +
         'Входные данные: массив компаний. Каждая компания: {name, inn?, okved?, rev?, prof?, country?, ru?, stand?}\n' +
-        'rev и prof в млн руб.',
+        'rev и prof в млн руб.\n\n' +
+        'production_okved: список ОКВЭД-префиксов производства. По умолчанию ["13.","14."] (текстиль/одежда).\n' +
+        'Для цветочной выставки: ["01.","16.","20.","22.","23.","25.","26.","27.","28.","32."]\n' +
+        'Для машиностроения: ["28.","29.","30.","25."]',
       inputSchema: {
         type: 'object',
         required: ['companies'],
@@ -160,13 +163,19 @@ module.exports = {
               },
             },
           },
+          production_okved: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'ОКВЭД-префиксы производства. Default: ["13.","14."] (текстиль/одежда). Для цветов: ["01.","16.","20.","22.","23.","25.","26.","27.","28.","32."]',
+          },
         },
       },
-      handler: async ({ companies }) => {
+      handler: async ({ companies, production_okved }) => {
         if (!Array.isArray(companies)) return { error: 'companies должен быть массивом' };
+        const prodOkved = Array.isArray(production_okved) && production_okved.length ? production_okved : DEFAULT_PRODUCTION_OKVED;
 
         const results = companies.map((c, i) => {
-          const cls = classifyCompany(c);
+          const cls = classifyCompany(c, prodOkved);
           return { ...c, ...cls, _idx: i };
         });
 
@@ -222,12 +231,18 @@ module.exports = {
             description: 'Сортировать по номеру стенда (default: true)',
             default: true,
           },
+          production_okved: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'ОКВЭД-префиксы производства. Default: ["13.","14."] (текстиль/одежда). Для цветов: ["01.","16.","20.","22.","23.","25.","26.","27.","28.","32."]',
+          },
         },
       },
-      handler: async ({ companies, id_prefix = 'EX', sort_by_stand = true }) => {
+      handler: async ({ companies, id_prefix = 'EX', sort_by_stand = true, production_okved }) => {
         if (!Array.isArray(companies)) return { error: 'companies должен быть массивом' };
+        const prodOkved = Array.isArray(production_okved) && production_okved.length ? production_okved : DEFAULT_PRODUCTION_OKVED;
 
-        let entries = companies.map((c, i) => toExEntry(c, i, id_prefix));
+        let entries = companies.map((c, i) => toExEntry(c, i, id_prefix, prodOkved));
 
         if (sort_by_stand) {
           entries.sort((a, b) => {

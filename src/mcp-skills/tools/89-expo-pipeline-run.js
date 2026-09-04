@@ -68,10 +68,11 @@ For hands-free completion without user interaction, create a cron:
         favicon_emoji: { type: 'string', description: 'Emoji для favicon', default: '🌸' },
         batch_size:    { type: 'number', description: 'Компаний за батч ИНН (default 20)', default: 20 },
         max_batches:   { type: 'number', description: 'Макс. батчей за один вызов (default 2)', default: 2 },
+        production_okved: { type: 'array', items: { type: 'string' }, description: 'ОКВЭД-префиксы производства для t:1/nt:1. Default: ["13.","14."] (текстиль). Для цветов: ["01.","16.","20.","22.","23.","25.","26.","27.","28.","32."]' },
       },
     },
 
-    handler: async ({ expo_url, event_key, expo_title, catalog_base = '', favicon_emoji = '🌸', batch_size = 20, max_batches = 2 }, ctx) => {
+    handler: async ({ expo_url, event_key, expo_title, catalog_base = '', favicon_emoji = '🌸', batch_size = 20, max_batches = 2, production_okved }, ctx) => {
       const workDir = ctx?.workDir || process.cwd();
       const expoId  = slugify(expo_url);
       const expoDir = path.join(workDir, 'expo-pipeline', expoId);
