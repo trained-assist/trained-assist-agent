@@ -83,6 +83,8 @@ const HH_SHOW_ATS_CONFIG_INTENT = /(?:покажи|посмотр|какие|ч�
 const HH_STYLE_INTENT        = /(?:обнови|загрузи|обновить|загрузить|настрой|поменяй|задай|update).{0,30}стиль|стиль.{0,30}(?:общения|переписки|сообщений|рекрут)|communication.{0,15}style|update.{0,15}style/i;
 const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
 const ILLUSTRATE_ENABLE_INTENT = /включ.{0,20}(?:рисован|иллюстр|картинк|рисунок)|добав.{0,20}(?:рисован|иллюстр|генерац)|активируй.{0,20}(?:рисован|иллюстр|скил.{0,10}рисован)|\/enable_illustrate/i;
+// Matches concrete draw commands with subject content — these go to Claude even when skill is enabled
+const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|создай.{0,20}(?:иллюстр|картинк|схем)|сделай.{0,20}(?:иллюстр|картинк|схем)|покажи.{0,20}(?:схем|как устроен|анатоми))\s+\S.{5,}/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
@@ -359,19 +361,23 @@ function getQuickAnswer(task, userId, workDir) {
   }
 
   // Capability question about illustration generation
-  if (ILLUSTRATE_ENABLE_INTENT.test(task)) {
-    const illustrateFlagPath = require('path').join(workDir, 'contexts', 'illustrate', '.enabled');
-    if (require('fs').existsSync(illustrateFlagPath)) {
-      return 'Скил иллюстраций уже включён. Опиши что нарисовать — и начнём!';
-    }
-    require('fs').mkdirSync(require('path').dirname(illustrateFlagPath), { recursive: true });
-    require('fs').writeFileSync(illustrateFlagPath, JSON.stringify({ enabled_at: new Date().toISOString() }));
-    return 'Готово! Скил генерации иллюстраций включён.\n\nТеперь могу рисовать медицинские схемы, анатомические диаграммы и инфографику.\nИспользую DALL-E 3 (основной) и Ideogram (альтернатива, лучше с подписями).\n\nОпиши что нарисовать — и начнём!';
-  }
+  if (ILLUSTRATE_ENABLE_INTENT.test(task) || ILLUSTRATE_CAPABILITY_INTENT.test(task)) {
+    // If the message also contains a concrete drawing subject — let Claude handle it directly
+    if (ILLUSTRATE_DRAW_COMMAND.test(task)) return null;
 
-  if (ILLUSTRATE_CAPABILITY_INTENT.test(task)) {
     const illustrateFlagPath = require('path').join(workDir, 'contexts', 'illustrate', '.enabled');
     const illustrateEnabled = require('fs').existsSync(illustrateFlagPath);
+
+    if (ILLUSTRATE_ENABLE_INTENT.test(task)) {
+      if (illustrateEnabled) {
+        return 'Скил иллюстраций уже включён. Опиши что нарисовать — и начнём!';
+      }
+      require('fs').mkdirSync(require('path').dirname(illustrateFlagPath), { recursive: true });
+      require('fs').writeFileSync(illustrateFlagPath, JSON.stringify({ enabled_at: new Date().toISOString() }));
+      return 'Готово! Скил генерации иллюстраций включён.\n\nТеперь могу рисовать медицинские схемы, анатомические диаграммы и инфографику.\nИспользую DALL-E 3 (основной) и Ideogram (альтернатива, лучше с подписями).\n\nОпиши что нарисовать — и начнём!';
+    }
+
+    // ILLUSTRATE_CAPABILITY_INTENT
     if (illustrateEnabled) {
       return 'Да, скил иллюстраций включён.\n\nПросто опиши что нарисовать — голосом или текстом. Например:\n• «нарисуй как работают потовые железы в коже»\n• «схема слоёв эпидермиса в разрезе»\n• «инфографика про уход за кожей»\n\nСтили: медицинская схема, flat design, детальная анатомия, инфографика.\nПосле картинки могу наложить подписи по-русски отдельным инструментом.';
     }
