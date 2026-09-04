@@ -48,6 +48,9 @@ jobs:
       needs.ci.result == 'success' &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-gcp
+      cancel-in-progress: false
     steps:
       - name: Deploy to GCP VM
         uses: appleboy/ssh-action@v1.0.3
@@ -80,6 +83,9 @@ jobs:
       needs.ci.result == 'success' &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-ru
+      cancel-in-progress: false
     steps:
       - name: Deploy to RU VM
         uses: appleboy/ssh-action@v1.0.3
