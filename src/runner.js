@@ -568,7 +568,12 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
       if (r) return r;
     }
     if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
-    if (HH_REVIEW_PAGE_INTENT.test(task)) return hhReviewPage(userId);
+    if (HH_REVIEW_PAGE_INTENT.test(task)) {
+      // If there's an active vacancy draft, the user likely means "publish vacancy page" — let Claude decide
+      const vs = workDir ? readVacancyState(workDir) : null;
+      if (vs?.draft) return null;
+      return hhReviewPage(userId);
+    }
     if (HH_WHERE_PROMPT_INTENT.test(task)) return hhWherePrompt(userId);
     if (HH_SHOW_ATS_CONFIG_INTENT.test(task)) return hhShowAtsConfig(userId);
     if (HH_STYLE_INTENT.test(task)) return hhStylePage(userId);
