@@ -177,18 +177,32 @@ function formatVacancyReply(draft, vacancyId) {
     lines.push(`🔑 Навыки: ${draft.key_skills.slice(0, 8).join(', ')}`);
   }
 
-  if (!draft.hiring_stages?.length) {
-    lines.push('', '❓ Не указаны этапы отбора — пришли список (например: «Скрининг → Интервью → Оффер»), добавлю на страницу.');
-  } else {
+  if (draft.hiring_stages?.length) {
     lines.push(`🗂 Этапы: ${draft.hiring_stages.join(' → ')}`);
   }
 
-  lines.push(
-    '',
-    '📄 Описание сформировано. Проверь вакансию и при необходимости скажи что поправить.',
-    '',
-    'Готово? Скажи *«публикуй страницу»* — создам лендинг для кандидатов.',
-  );
+  // Collect missing optional blocks that make the page richer
+  const missing = [];
+  if (!draft.company_description) {
+    missing.push('• *О компании* — напиши пару предложений о компании или скажи «сгенерируй о компании»');
+  }
+  if (!draft.hiring_stages?.length) {
+    missing.push('• *Этапы отбора* — например: «Скрининг → Тех. интервью → Оффер» или скажи «сгенерируй этапы»');
+  }
+
+  lines.push('', '📄 Описание сформировано. Проверь и скажи что поправить.');
+
+  if (missing.length) {
+    lines.push(
+      '',
+      '📋 Не хватает для полной страницы вакансии:',
+      ...missing,
+      '',
+      'Можешь прислать текст — добавлю. Или скажи *«публикуй страницу»* — опубликую как есть.',
+    );
+  } else {
+    lines.push('', 'Готово? Скажи *«публикуй страницу»* — создам лендинг для кандидатов.');
+  }
 
   return lines.join('\n');
 }
