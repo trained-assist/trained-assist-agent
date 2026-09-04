@@ -1378,16 +1378,20 @@ module.exports = {
 
     hh_vacancy_publish_page: {
       description:
-        'Publish the current vacancy draft as a public landing page via instant-publish. ' +
-        'Returns the page URL. The draft must exist — call hh_vacancy_create_draft or hh_vacancy_update_draft first.',
+        'Publish the current vacancy draft as a public landing page. ' +
+        'Always publishes and returns the URL. Also returns missing_fields — fields not yet filled ' +
+        '(salary, area, company description, hiring stages, contacts). Show these to the recruiter ' +
+        'so they can complete the page after reviewing the published version. ' +
+        'The draft must exist — call hh_vacancy_create_draft or hh_vacancy_update_draft first.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
-        const { readVacancyState, publishVacancyPage } = require('./../../hh-vacancy');
+        const { readVacancyState, publishVacancyPage, getMissingFields } = require('./../../hh-vacancy');
         const workDir = process.cwd();
         const state = readVacancyState(workDir);
         if (!state?.draft) return { error: 'No vacancy draft found. Use hh_vacancy_create_draft first.' };
         const url = await publishVacancyPage(workDir, state.draft, state.vacancy_id, USER_ID);
-        return { ok: true, url, vacancy_id: state.vacancy_id };
+        const missing = getMissingFields(state.draft);
+        return { ok: true, url, vacancy_id: state.vacancy_id, missing_fields: missing };
       },
     },
   },

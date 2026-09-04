@@ -150,6 +150,29 @@ function formatSalary(draft) {
   return `до ${to.toLocaleString('ru-RU')} ${sym}${gross_tag}`;
 }
 
+// Returns array of bullet strings for fields missing from draft.
+// Used both in formatVacancyReply (after generation) and in hh_vacancy_publish_page (on publish).
+function getMissingFields(draft) {
+  const missing = [];
+  if (!draft.salary_from && !draft.salary_to) {
+    missing.push('• *Зарплата* — указываем вилку в вакансии? Если да — пришли (например: «150 – 200к на руки»). Если нет — оставим «по договорённости»');
+  }
+  if (!draft.area_name) {
+    missing.push('• *Город / формат* — где работа? (например: «Москва», «Удалённо», «Москва + удалёнка»)');
+  }
+  if (!draft.company_description) {
+    missing.push('• *О компании* — напиши пару предложений или скажи «сгенерируй о компании»');
+  }
+  if (!draft.hiring_stages?.length) {
+    missing.push('• *Этапы отбора* — например: «Скрининг → Тех. интервью → Оффер» или скажи «сгенерируй этапы»');
+  }
+  const c = draft.contacts || {};
+  if (!c.telegram && !c.email && !c.phone) {
+    missing.push('• *Контакт для «Откликнуться»* — Telegram, email или телефон рекрутера');
+  }
+  return missing;
+}
+
 function formatVacancyReply(draft, vacancyId) {
   const lines = [
     `✅ Черновик вакансии готов (ID: \`${vacancyId}\`)`,
@@ -181,26 +204,7 @@ function formatVacancyReply(draft, vacancyId) {
     lines.push(`🗂 Этапы: ${draft.hiring_stages.join(' → ')}`);
   }
 
-  // Collect missing or ambiguous fields — each needs a clarifying question
-  const missing = [];
-
-  if (!draft.salary_from && !draft.salary_to) {
-    missing.push('• *Зарплата* — указываем вилку в вакансии? Если да — пришли (например: «150 – 200к на руки»). Если нет — оставим «по договорённости»');
-  }
-  if (!draft.area_name) {
-    missing.push('• *Город / формат* — где работа? (например: «Москва», «Удалённо», «Москва + удалёнка»)');
-  }
-  if (!draft.company_description) {
-    missing.push('• *О компании* — напиши пару предложений о компании или скажи «сгенерируй о компании»');
-  }
-  if (!draft.hiring_stages?.length) {
-    missing.push('• *Этапы отбора* — например: «Скрининг → Тех. интервью → Оффер» или скажи «сгенерируй этапы»');
-  }
-  const c = draft.contacts || {};
-  if (!c.telegram && !c.email && !c.phone) {
-    missing.push('• *Контакт для кнопки «Откликнуться»* — Telegram, email или телефон рекрутера');
-  }
-
+  const missing = getMissingFields(draft);
   lines.push('', '📄 Описание сформировано. Проверь и скажи что поправить.');
 
   if (missing.length) {
@@ -572,6 +576,7 @@ module.exports = {
   appendVacancyMessage,
   generateVacancyFromMessages,
   readVacancyDraft,
+  getMissingFields,
   formatVacancyReply,
   generateVacancyLandingHtml,
   publishVacancyPage,
