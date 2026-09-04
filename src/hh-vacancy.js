@@ -382,16 +382,37 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
 
 // ── Publish landing page via built-in agent route ─────────────────────────────
 
-function publishVacancyPage(workDir, draft, vacancyId, username) {
-  const publicUrl = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
-  const html = generateVacancyLandingHtml(draft, vacancyId, username, publicUrl);
-  const draftsDir = path.join(os.homedir(), 'users', username, 'vacancy-drafts');
-  fs.mkdirSync(draftsDir, { recursive: true });
-  fs.writeFileSync(path.join(draftsDir, `${vacancyId}.html`), html, 'utf8');
-  const pageUrl = `${publicUrl}/vacancy/${username}/${vacancyId}`;
+// Vacancy pages are always served from the RU VM at platform.recruiter-assistant.ru.
+// If VACANCY_REMOTE_STORE_URL is set (GCP VM), we POST the HTML there for storage.
+// Otherwise we save locally (we are already on the RU VM).
+const VACANCY_BASE_URL = 'https://platform.recruiter-assistant.ru';
+
+async function publishVacancyPage(workDir, draft, vacancyId, username) {
+  const html = generateVacancyLandingHtml(draft, vacancyId, username, VACANCY_BASE_URL);
+  const pageUrl = `${VACANCY_BASE_URL}/vacancy/${username}/${vacancyId}`;
+
+  const remoteStoreUrl = process.env.VACANCY_REMOTE_STORE_URL;
+  if (remoteStoreUrl) {
+    const endpoint = `${remoteStoreUrl.replace(/\/$/, '')}/vacancy/store`;
+    const storeRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.AGENT_SECRET}`,
+      },
+      body: JSON.stringify({ username, vacancyId, html }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!storeRes.ok) throw new Error(`Vacancy store failed: ${storeRes.status}`);
+  } else {
+    const draftsDir = path.join(os.homedir(), 'users', username, 'vacancy-drafts');
+    fs.mkdirSync(draftsDir, { recursive: true });
+    fs.writeFileSync(path.join(draftsDir, `${vacancyId}.html`), html, 'utf8');
+  }
+
   const state = readVacancyState(workDir);
   if (state) writeVacancyState(workDir, { ...state, landing_url: pageUrl, status: 'draft_ready' });
-  return Promise.resolve(pageUrl);
+  return pageUrl;
 }
 
 // ── Application storage (called by server's POST /apply/:username/:vacancyId) ──
