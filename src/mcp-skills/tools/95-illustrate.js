@@ -208,11 +208,24 @@ const LANGUAGE_SUFFIXES = {
   en: 'All text labels, captions and annotations inside the image must be in English.',
 };
 
-const DEFAULT_LANGUAGE = 'ru';
+// labels_mode: where to place structure labels
+//   'embedded' — text rendered inside the image (default, works best with Ideogram)
+//   'caption'  — clean image, labels listed as text message below image
+//   'none'     — pure illustration, no labels at all
+const DEFAULT_LANGUAGE   = 'ru';
+const DEFAULT_LABELS_MODE = 'embedded';
 
-function buildPrompt(description, style, language = DEFAULT_LANGUAGE) {
+function buildPrompt(description, style, language = DEFAULT_LANGUAGE, labelsMode = DEFAULT_LABELS_MODE) {
   const styleKey = STYLES[style] ? style : DEFAULT_STYLE;
   const styleText = STYLES[styleKey];
+
+  if (labelsMode === 'none') {
+    return `${description}. Style: ${styleText}. No text, no labels, no annotations — pure illustration only.`;
+  }
+  if (labelsMode === 'caption') {
+    return `${description}. Style: ${styleText}. Clean illustration without any text, numbers or labels inside the image — labels will be provided separately as text.`;
+  }
+  // embedded (default)
   const langSuffix = LANGUAGE_SUFFIXES[language] || `All text labels must be in ${language}.`;
   return `${description}. Style: ${styleText}. ${langSuffix}`;
 }
@@ -348,17 +361,19 @@ module.exports = {
         type: 'object',
         required: ['description'],
         properties: {
-          description: { type: 'string', description: 'What to illustrate, in any language' },
-          style:       { type: 'string', enum: Object.keys(STYLES), description: 'Visual style (default: medical)' },
-          language:    { type: 'string', enum: ['ru', 'en'], description: 'Language for text labels inside the image. Default: ru (Russian).' },
+          description:  { type: 'string', description: 'What to illustrate, in any language' },
+          style:        { type: 'string', enum: Object.keys(STYLES), description: 'Visual style (default: medical)' },
+          language:     { type: 'string', enum: ['ru', 'en'], description: 'Language for embedded labels. Default: ru. Only applies when labels_mode is "embedded".' },
+          labels_mode:  { type: 'string', enum: ['embedded', 'caption', 'none'], description: 'Where labels go: "embedded" = text in image (default), "caption" = clean image + labels as text below, "none" = pure illustration, no labels.' },
         },
       },
-      handler: async ({ description, style = DEFAULT_STYLE, language = DEFAULT_LANGUAGE }) => {
-        const prompt = buildPrompt(description, style, language);
+      handler: async ({ description, style = DEFAULT_STYLE, language = DEFAULT_LANGUAGE, labels_mode = DEFAULT_LABELS_MODE }) => {
+        const prompt = buildPrompt(description, style, language, labels_mode);
         return {
           preview_prompt: prompt,
           style_used: style,
-          language_used: language,
+          language_used: labels_mode === 'embedded' ? language : 'n/a',
+          labels_mode,
           char_count: prompt.length,
           instruction: 'Show this prompt to the user. Ask: "Промт готов — подправить что-то или генерировать?" Then wait for their answer before calling illustrate_generate.',
         };
@@ -395,7 +410,12 @@ module.exports = {
           language: {
             type: 'string',
             enum: ['ru', 'en'],
-            description: 'Language for text labels inside the image. Default: ru (Russian).',
+            description: 'Language for embedded labels. Default: ru. Only applies when labels_mode is "embedded".',
+          },
+          labels_mode: {
+            type: 'string',
+            enum: ['embedded', 'caption', 'none'],
+            description: '"embedded" = labels rendered inside image (default). "caption" = clean image + labels sent as text message below. "none" = pure illustration, no labels.',
           },
           provider: {
             type: 'string',
@@ -404,7 +424,7 @@ module.exports = {
           },
         },
       },
-      handler: async ({ description, style = DEFAULT_STYLE, language = DEFAULT_LANGUAGE, provider }) => {
+      handler: async ({ description, style = DEFAULT_STYLE, language = DEFAULT_LANGUAGE, labels_mode = DEFAULT_LABELS_MODE, provider }) => {
         const available = availableProviders();
         if (available.length === 0) {
           return {
@@ -419,7 +439,7 @@ module.exports = {
         const generate = GENERATORS[chosenProvider];
 
         // Build prompt
-        const fullPrompt = buildPrompt(description, style, language);
+        const fullPrompt = buildPrompt(description, style, language, labels_mode);
 
         // Generate image
         let result;
@@ -466,6 +486,7 @@ module.exports = {
           description,
           style,
           language,
+          labels_mode,
           provider: chosenProvider,
           fullPrompt,
           url: result.url,
@@ -478,11 +499,12 @@ module.exports = {
         const others = available.filter(p => p !== chosenProvider);
         const providerLabels = { openai: 'DALL-E 3', fal: 'FLUX.1 Dev', ideogram: 'Ideogram', recraft: 'Recraft v3' };
 
-        return {
+        const response = {
           ok: true,
           provider_used: result.provider,
           model: result.model,
           style_used: style,
+          labels_mode,
           telegram_sent: telegramOk,
           telegram_error: telegramError || undefined,
           image_url: result.url,
@@ -492,6 +514,17 @@ module.exports = {
             : 'This is the only configured provider.',
           iteration_tip: 'Prompt saved. User can say "make it darker", "add labels", "more detailed" — call illustrate_refine to iterate.',
         };
+
+        // For caption mode: Claude must send a text message after the image listing labeled elements
+        if (labels_mode === 'caption') {
+          response.caption_instruction =
+            'Image was generated WITHOUT embedded labels. ' +
+            'Now write a text message to the user listing the labeled elements from the illustration, ' +
+            `in ${language === 'ru' ? 'Russian' : 'English'}, using numbered list or arrows (→). ` +
+            'Format: "Обозначения к иллюстрации:" followed by the list.';
+        }
+
+        return response;
       },
     },
 
@@ -539,7 +572,7 @@ module.exports = {
           return { error: 'no_provider', message: 'No image providers configured.' };
         }
 
-        const newPrompt = buildPrompt(newDescription, last.style, last.language || DEFAULT_LANGUAGE);
+        const newPrompt = buildPrompt(newDescription, last.style, last.language || DEFAULT_LANGUAGE, last.labels_mode || DEFAULT_LABELS_MODE);
         const generate = GENERATORS[chosenProvider];
 
         let result;
@@ -581,6 +614,7 @@ module.exports = {
           description: newDescription,
           style: last.style,
           language: last.language || DEFAULT_LANGUAGE,
+          labels_mode: last.labels_mode || DEFAULT_LABELS_MODE,
           provider: chosenProvider,
           fullPrompt: newPrompt,
           url: result.url,
