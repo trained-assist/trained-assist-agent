@@ -203,10 +203,18 @@ const GENERATORS = {
 
 // ── Prompt building ──────────────────────────────────────────────────────────
 
-function buildPrompt(description, style) {
+const LANGUAGE_SUFFIXES = {
+  ru: 'All text labels, captions and annotations inside the image must be in Russian (Cyrillic script).',
+  en: 'All text labels, captions and annotations inside the image must be in English.',
+};
+
+const DEFAULT_LANGUAGE = 'ru';
+
+function buildPrompt(description, style, language = DEFAULT_LANGUAGE) {
   const styleKey = STYLES[style] ? style : DEFAULT_STYLE;
   const styleText = STYLES[styleKey];
-  return `${description}. Style: ${styleText}`;
+  const langSuffix = LANGUAGE_SUFFIXES[language] || `All text labels must be in ${language}.`;
+  return `${description}. Style: ${styleText}. ${langSuffix}`;
 }
 
 // ── Telegram image sending ───────────────────────────────────────────────────
@@ -334,23 +342,25 @@ module.exports = {
     illustrate_preview_prompt: {
       description:
         'Generate and show the full image prompt WITHOUT actually creating an image. ' +
-        'Use this when the user wants to review or tweak the prompt before generating, ' +
-        'or when you want to confirm you understood the request correctly.',
+        'ALWAYS call this first before illustrate_generate — show the prompt to the user, ' +
+        'ask for confirmation or changes, and only then proceed to generate.',
       inputSchema: {
         type: 'object',
         required: ['description'],
         properties: {
           description: { type: 'string', description: 'What to illustrate, in any language' },
           style:       { type: 'string', enum: Object.keys(STYLES), description: 'Visual style (default: medical)' },
+          language:    { type: 'string', enum: ['ru', 'en'], description: 'Language for text labels inside the image. Default: ru (Russian).' },
         },
       },
-      handler: async ({ description, style = DEFAULT_STYLE }) => {
-        const prompt = buildPrompt(description, style);
+      handler: async ({ description, style = DEFAULT_STYLE, language = DEFAULT_LANGUAGE }) => {
+        const prompt = buildPrompt(description, style, language);
         return {
           preview_prompt: prompt,
           style_used: style,
+          language_used: language,
           char_count: prompt.length,
-          tip: 'Share this prompt with the user to confirm before generating.',
+          instruction: 'Show this prompt to the user. Ask: "Промт готов — подправить что-то или генерировать?" Then wait for their answer before calling illustrate_generate.',
         };
       },
     },
@@ -358,13 +368,16 @@ module.exports = {
     illustrate_generate: {
       description: [
         'Generate an educational illustration and send it to the user in Telegram.',
-        'IMPORTANT: Before calling, make sure description is specific enough.',
-        'If the user\'s request is vague (e.g. "draw skin"), first ask clarifying questions:',
-        '  1. What specifically to show (cross-section? process? comparison?)',
-        '  2. What style (medical diagram, flat, anatomical, infographic)?',
-        '  3. Any specific elements to include or highlight?',
-        'After generation, tell the user which provider drew it and offer to try others.',
-        'Store prompt history so illustrate_refine can iterate on the same image.',
+        '',
+        'MANDATORY WORKFLOW — always follow this order:',
+        '  1. Call illustrate_preview_prompt first — build and show the prompt to the user',
+        '  2. Present the prompt and ask: "Промт готов — подправить что-то или генерировать?"',
+        '  3. Wait for user reply. If they want changes — revise description and preview again.',
+        '  4. Only after user confirms — call illustrate_generate.',
+        '',
+        'NEVER skip step 1-3 and call illustrate_generate directly.',
+        '',
+        'After generation: tell which provider drew it, offer to try another provider or refine.',
       ].join('\n'),
       inputSchema: {
         type: 'object',
@@ -379,6 +392,11 @@ module.exports = {
             enum: Object.keys(STYLES),
             description: `Visual style preset. Default: ${DEFAULT_STYLE}. Use 'illustrate_styles' to see options.`,
           },
+          language: {
+            type: 'string',
+            enum: ['ru', 'en'],
+            description: 'Language for text labels inside the image. Default: ru (Russian).',
+          },
           provider: {
             type: 'string',
             enum: ['openai', 'fal', 'ideogram', 'recraft'],
@@ -386,7 +404,7 @@ module.exports = {
           },
         },
       },
-      handler: async ({ description, style = DEFAULT_STYLE, provider }) => {
+      handler: async ({ description, style = DEFAULT_STYLE, language = DEFAULT_LANGUAGE, provider }) => {
         const available = availableProviders();
         if (available.length === 0) {
           return {
@@ -401,7 +419,7 @@ module.exports = {
         const generate = GENERATORS[chosenProvider];
 
         // Build prompt
-        const fullPrompt = buildPrompt(description, style);
+        const fullPrompt = buildPrompt(description, style, language);
 
         // Generate image
         let result;
@@ -447,6 +465,7 @@ module.exports = {
         const historyEntry = {
           description,
           style,
+          language,
           provider: chosenProvider,
           fullPrompt,
           url: result.url,
@@ -520,7 +539,7 @@ module.exports = {
           return { error: 'no_provider', message: 'No image providers configured.' };
         }
 
-        const newPrompt = buildPrompt(newDescription, last.style);
+        const newPrompt = buildPrompt(newDescription, last.style, last.language || DEFAULT_LANGUAGE);
         const generate = GENERATORS[chosenProvider];
 
         let result;
@@ -561,6 +580,7 @@ module.exports = {
         saveHistory({
           description: newDescription,
           style: last.style,
+          language: last.language || DEFAULT_LANGUAGE,
           provider: chosenProvider,
           fullPrompt: newPrompt,
           url: result.url,
