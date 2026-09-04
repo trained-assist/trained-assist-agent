@@ -629,16 +629,20 @@ function buildContextCard(username, workDir) {
 }
 
 // Creates or silently updates the context pin after task completion.
-// State (msgId of the pinned card) is stored in workDir/.pin_state.json.
+// State (msgId + lastCard text) is stored in workDir/.pin_state.json.
 async function updateContextPin(token, chatId, workDir, card) {
   const pinFile = path.join(workDir, '.pin_state.json');
   let state = null;
   try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch {}
 
   if (state?.msgId) {
+    // Nothing changed — skip entirely to avoid Telegram "message is not modified" error
+    // which would be misread as a failed edit and trigger a duplicate pin.
+    if (state.lastCard === card) return;
+
     const edited = await tgEdit(token, chatId, state.msgId, card).catch(() => null);
     if (edited?.ok) {
-      fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId }));
+      fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, lastCard: card }));
       return;
     }
     // Edit failed (message deleted?) — fall through to create new
@@ -658,7 +662,7 @@ async function updateContextPin(token, chatId, workDir, card) {
   if (!pinData.ok) {
     console.error(`[pin] failed chat=${chatId}:`, JSON.stringify(pinData));
   } else {
-    fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId }));
+    fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, lastCard: card }));
   }
 }
 
