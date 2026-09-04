@@ -624,6 +624,10 @@ function buildContextCard(username, workDir) {
     return s.name;
   });
 
+  // Illustrate is stored as a flag in workDir, not in agent-tokens — check separately
+  const illustrateFlagPath = path.join(workDir, 'contexts', 'illustrate', '.enabled');
+  if (fs.existsSync(illustrateFlagPath)) serviceLabels.push('🎨 иллюстрации');
+
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
   const PINNED_CONTEXTS = [
