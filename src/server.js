@@ -37,7 +37,7 @@ function trackProjectUsage(workDir, projectName) {
   try { fs.writeFileSync(file, JSON.stringify(usage)); } catch {}
 }
 
-async function classifyMessage(message, sessions, apiKey) {
+async function classifyMessage(message, sessions, _apiKey, openrouterKey) {
   // Build a compact description of each session
   const sessionDescriptions = sessions.map((s, i) => {
     const lastMsg = s.lastUserMessage ? `\n   Последнее: "${s.lastUserMessage.slice(0, 100)}"` : '';
@@ -58,15 +58,16 @@ ${sessionDescriptions}
 - Если сообщение может относиться к нескольким диалогам или ни к одному — напиши "ambiguous"
 - Не пиши ничего лишнего, только ID или "ambiguous"`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  if (!openrouterKey) throw new Error('OPENROUTER_API_KEY not configured');
+
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
+      'Authorization': `Bearer ${openrouterKey}`,
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'google/gemini-2.0-flash-lite-001',
       max_tokens: 64,
       messages: [{ role: 'user', content: prompt }],
     }),
@@ -75,10 +76,10 @@ ${sessionDescriptions}
 
   if (!res.ok) {
     const errBody = await res.text().catch(() => '');
-    throw new Error(`Anthropic API ${res.status}: ${errBody.slice(0, 300)}`);
+    throw new Error(`OpenRouter API ${res.status}: ${errBody.slice(0, 300)}`);
   }
   const data = await res.json();
-  const answer = data.content?.[0]?.text?.trim() || 'ambiguous';
+  const answer = data.choices?.[0]?.message?.content?.trim() || 'ambiguous';
 
   if (answer === 'ambiguous') return { sessionId: null, confidence: 'low' };
 
@@ -1954,7 +1955,7 @@ function show(id, type, msg) {
         return json(res, 400, { error: 'missing fields' });
 
       try {
-        const result = await classifyMessage(message, sessionList, secrets.ANTHROPIC_API_KEY);
+        const result = await classifyMessage(message, sessionList, secrets.ANTHROPIC_API_KEY, secrets.OPENROUTER_API_KEY);
         return json(res, 200, result);
       } catch (e) {
         console.error('[classify] error:', e.message);
