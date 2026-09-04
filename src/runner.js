@@ -713,6 +713,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     task = sess?.lastUserMessage || task;
   }
 
+  // Persist chatId early — needed by OAuth callbacks (e.g. HH, GDrive) that fire
+  // after a quick-answer early-return and never reach the Claude path below.
+  try {
+    const tDir = path.join(os.homedir(), 'agent-tokens', String(user.username));
+    fs.mkdirSync(tDir, { recursive: true });
+    fs.writeFileSync(path.join(tDir, '.chatid'), String(chatId), { mode: 0o600 });
+    const oldChatDir = path.join(os.homedir(), 'agent-tokens', String(user.id));
+    if (fs.existsSync(oldChatDir)) {
+      fs.writeFileSync(path.join(oldChatDir, '.username'), String(user.username), { mode: 0o600 });
+    }
+  } catch { /* non-critical */ }
+
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
   const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.ANTHROPIC_API_KEY);
@@ -759,18 +771,6 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const thinkingStart = Date.now();
 
   const userTokens = loadUserTokens(user.username, user.id);
-
-  // Store chatId in username folder (for nalog expiry notifier)
-  // Also mark any existing chatId folder with .username so migration can identify its owner
-  try {
-    const tDir = path.join(os.homedir(), 'agent-tokens', String(user.username));
-    fs.mkdirSync(tDir, { recursive: true });
-    fs.writeFileSync(path.join(tDir, '.chatid'), String(chatId), { mode: 0o600 });
-    const oldChatDir = path.join(os.homedir(), 'agent-tokens', String(user.id));
-    if (fs.existsSync(oldChatDir)) {
-      fs.writeFileSync(path.join(oldChatDir, '.username'), String(user.username), { mode: 0o600 });
-    }
-  } catch { /* non-critical */ }
 
   // Expired nalog token — tell user immediately, don't waste Claude on it
   const needsNalog = /nalog|налог|нпд|lknpd|самозан|чек|фнс/i.test(task);
