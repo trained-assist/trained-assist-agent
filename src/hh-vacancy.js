@@ -90,7 +90,7 @@ async function generateVacancyFromMessages(workDir, messages, apiKey) {
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-4-5',
       max_tokens: 4096,
       system: VACANCY_PROMPT,
       messages: [{ role: 'user', content: userMessage }],
@@ -217,7 +217,7 @@ function mdToHtml(md) {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/g, m => `<ul>${m}</ul>`)
+    .replace(/(<li>[^]*?<\/li>\n?)(\n*<li>[^]*?<\/li>\n?)*/g, m => `<ul>${m}</ul>`)
     .split(/\n\n+/).map(p => {
       const trimmed = p.trim();
       if (!trimmed) return '';
@@ -450,6 +450,7 @@ async function publishToHH(workDir, userId) {
   const state = readVacancyState(workDir);
   const draft = state?.draft;
   if (!draft) throw new Error('Нет готового черновика вакансии.');
+  if (state.hh_vacancy_id) throw new Error(`Черновик уже опубликован на HH (id: ${state.hh_vacancy_id}). Открой его на hh.ru для редактирования.`);
 
   const areaId = resolveAreaId(draft.area_name);
 
