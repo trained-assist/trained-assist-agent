@@ -884,9 +884,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       if (snippet) {
-        // Content available — update on change or every ~10s to show we're alive
-        const newText = `⏳ ${snippet}`;
-        if (newText === lastSent && secs % 10 !== 0) return;
+        // Show text + current tool activity (always updating so user sees seconds ticking)
+        const activitySuffix = lastActivity ? `\n\n${lastActivity} (${secs}с)` : ` (${secs}с)`;
+        const newText = `⏳ ${snippet}${activitySuffix}`;
+        if (newText === lastSent) return;
         lastSent = newText;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
       } else {
@@ -1049,8 +1050,18 @@ function formatToolActivity(name, input = {}) {
       return `🔍 ${(input.query || '').slice(0, 60)}`;
     case 'Agent':
       return `🤖 Запускаю агента…`;
-    default:
-      return `🔧 ${name}`;
+    default: {
+      // MCP tool names: strip "mcp__<server>__" prefix for display
+      const shortName = name.replace(/^mcp__[^_]+__/, '');
+      switch (shortName) {
+        case 'illustrate_generate':  return `🎨 Генерирую иллюстрацию…`;
+        case 'illustrate_refine':    return `🎨 Дорабатываю иллюстрацию…`;
+        case 'illustrate_preview_prompt': return `🖊 Готовлю промпт…`;
+        case 'image_label':          return `🏷 Добавляю подписи на изображение…`;
+        case 'image_label_adjust':   return `🏷 Корректирую подписи…`;
+        default:                     return `🔧 ${shortName}`;
+      }
+    }
   }
 }
 
