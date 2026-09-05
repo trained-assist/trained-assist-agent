@@ -1161,6 +1161,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }, STREAM_INTERVAL_MS);
   }
 
+  let firstJsonEventSeen = false;
   proc.stdout.on('data', chunk => {
     lineBuffer += chunk.toString();
     const lines = lineBuffer.split('\n');
@@ -1170,6 +1171,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
+        firstJsonEventSeen = true;
         if (event.type === 'result') {
           claudeResult = typeof event.result === 'string' ? event.result : null;
           claudeUsage = event.usage || null;
@@ -1191,7 +1193,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           scheduleStream();
         }
       } catch {
-        // Non-JSON line (e.g. startup messages) — treat as plain text
+        if (!firstJsonEventSeen) {
+          console.warn(`[${taskId}] pre-JSON stdout:`, line);
+          continue;
+        }
+        // Non-JSON line after stream started — treat as plain text
         fullOutput.text += line + '\n';
         scheduleStream();
       }
