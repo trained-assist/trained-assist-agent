@@ -37,7 +37,7 @@ function createSession(workDir, { task, id: providedId }) {
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
 
-  const meta = { id, topic, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic };
+  const meta = { id, topic, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
 
   const sessions = loadIndex(workDir);
   sessions.unshift(meta);
@@ -74,6 +74,7 @@ function appendUserMessage(workDir, id, content) {
       sessions[idx].lastAt = now;
       sessions[idx].messageCount = full.messageCount;
       sessions[idx].lastUserMessage = content.slice(0, 120);
+      sessions[idx].lastMessageRole = 'user';
     }
     saveIndex(workDir, sessions);
   } catch (e) {
@@ -96,7 +97,12 @@ function appendReply(workDir, id, reply) {
     // Update index
     const sessions = loadIndex(workDir);
     const idx = sessions.findIndex(s => s.id === id);
-    if (idx >= 0) { sessions[idx].lastAt = now; sessions[idx].messageCount = full.messageCount; }
+    if (idx >= 0) {
+      sessions[idx].lastAt = now;
+      sessions[idx].messageCount = full.messageCount;
+      sessions[idx].lastMessageRole = 'assistant';
+      sessions[idx].lastAssistantSnippet = reply.slice(0, 120);
+    }
     saveIndex(workDir, sessions);
   } catch (e) {
     console.error('[session-store] appendReply error:', e.message);
