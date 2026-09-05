@@ -624,11 +624,11 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
         return [
           `✅ Черновик вакансии сохранён на HeadHunter!`,
           '',
-          `🆔 ID вакансии: ${hhId}`,
-          `🔗 Редактировать: https://hh.ru/employer/vacancy/${hhId}/edit`,
+          `🆔 Draft ID: ${hhId}`,
+          `🔗 Черновики: https://hh.ru/employer/vacancies/drafts`,
           areaNote,
           '',
-          'Проверь черновик на hh.ru и опубликуй когда будешь готов.',
+          'Черновик НЕ опубликован — он ждёт тебя на hh.ru. Проверь и нажми «Опубликовать» когда будешь готов.',
         ].filter(Boolean).join('\n');
       }).catch(e => {
         console.error('[vacancy] HH publish error (→ Claude):', e.message);
@@ -664,11 +664,11 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
       return [
         `✅ Черновик вакансии сохранён на HeadHunter!`,
         '',
-        `🆔 ID вакансии: ${hhId}`,
-        `🔗 Редактировать: https://hh.ru/employer/vacancy/${hhId}/edit`,
+        `🆔 Draft ID: ${hhId}`,
+        `🔗 Черновики: https://hh.ru/employer/vacancies/drafts`,
         areaNote,
         '',
-        'Проверь черновик на hh.ru и опубликуй когда будешь готов.',
+        'Черновик НЕ опубликован — он ждёт тебя на hh.ru. Проверь и нажми «Опубликовать» когда будешь готов.',
       ].filter(Boolean).join('\n');
     }).catch(e => {
       console.error('[vacancy] HH publish error (→ Claude):', e.message);

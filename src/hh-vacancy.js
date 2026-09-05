@@ -542,17 +542,17 @@ async function publishToHH(workDir, userId) {
   const state = readVacancyState(workDir);
   const draft = state?.draft;
   if (!draft) throw new Error('Нет готового черновика вакансии.');
-  if (state.hh_vacancy_id) throw new Error(`Черновик уже опубликован на HH (id: ${state.hh_vacancy_id}). Открой его на hh.ru для редактирования.`);
+  if (state.hh_vacancy_id) throw new Error(`Черновик вакансии уже создан на HH (draft_id: ${state.hh_vacancy_id}). Открой https://hh.ru/employer/vacancies/drafts для редактирования и публикации.`);
 
   const areaId = resolveAreaId(draft.area_name);
   const professionalRoleId = await resolveProfessionalRoleId(draft.professional_role_name, token);
 
+  // POST /vacancies/drafts — creates a draft, does NOT publish
+  // (POST /vacancies publishes immediately; POST /vacancies/drafts/{id}/publish publishes from draft)
   const payload = {
     name: draft.name,
     description: mdToHtml(draft.description_md || ''),
-    area: { id: areaId || '113' }, // fallback to Russia/remote if unknown city
-    type: { id: 'open' },
-    billing_type: { id: 'standard' },
+    areas: [{ id: areaId || '113' }], // array, not single object
     experience: { id: draft.experience || 'noExperience' },
     employment: { id: draft.employment || 'full' },
     schedule: { id: draft.schedule || 'fullDay' },
@@ -574,8 +574,9 @@ async function publishToHH(workDir, userId) {
     payload.key_skills = draft.key_skills.slice(0, 30).map(name => ({ name }));
   }
 
-  const result = await hhPost(`/vacancies?employer_id=${token.employer_id}`, token, payload);
-  const hhId = result.id || result.vacancy_id;
+  // Draft endpoint returns { draft_id, url, ... }
+  const result = await hhPost('/vacancies/drafts', token, payload);
+  const hhId = result.draft_id || result.id;
 
   if (hhId) {
     writeVacancyState(workDir, { ...state, hh_vacancy_id: String(hhId), status: 'hh_draft' });
