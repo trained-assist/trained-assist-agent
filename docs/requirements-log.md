@@ -31,6 +31,14 @@
 | ✅ реализовано | **WEEEK_SESSION_PROFILES** | `flexi,flexi-consult` в systemd-сервисе — авторефреш каждые ~6ч |
 | 🔵 планируется | **Расширенное тестирование Weeek** | Тест-флоу на базе текстов SD1: создание задач через natural language ("на вторник", "на завтра"), отправка визиток, голосовых. Тестировать разные формулировки, пытаться сломать систему. Отложено до стабилизации базового флоу. |
 
+## EFI QR — быстрые QR-коды Школы Ефимовой
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| 🟡 в работе | **MCP skill 35-efi-qr.js** | Инструменты: list_merchants, set_merchant, quick_invoice_qr, quick_contact_qr, quick_redirect_qr, list_contact_submissions, list_presets. Спек: `docs/specs/efi-qr-mcp-skill-spec.md` |
+| 🔵 планируется | **Multi-merchant API в efi-qr-redirect** | Добавить `/api/merchants` CRUD, поле `merchantId` в preset_qr/contact_qr/contact_submissions, фильтрацию по merchantId. Без этого list_merchants и set_merchant не работают. |
+| 🔵 планируется | **Env vars на VM** | EFI_QR_URL + EFI_QR_TOKEN добавить в secrets.env на GCP и RU VM. |
+
 ## MCP Skills
 
 | Статус | Требование | Описание |
