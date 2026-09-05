@@ -506,13 +506,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     if (!match.test(task)) continue;
     console.log('[quick-answer] matched service=%s uid=%s', service || 'null', userId);
     if (service && userId) {
-      try {
-        const link = generateConnectLink(userId, service);
-        return `Данные для входа — по ссылке:\n${link}\n\n${hint}${TRUST_FOOTER}`;
-      } catch (e) {
-        console.error('[quick-answer] generateConnectLink failed:', e.message);
-        return hint;
-      }
+      return { __connectLink: true, service, hint };
     }
     return hint;
   }
@@ -563,7 +557,18 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false) {
   const sync = getQuickAnswer(task, userId, workDir, sessionExists);
-  if (sync !== null) return sync;
+  if (sync !== null) {
+    if (sync && typeof sync === 'object' && sync.__connectLink) {
+      try {
+        const link = await generateConnectLink(userId, sync.service);
+        return `Данные для входа — по ссылке:\n${link}\n\n${sync.hint}${TRUST_FOOTER}`;
+      } catch (e) {
+        console.error('[quick-answer] generateConnectLink failed:', e.message);
+        return sync.hint;
+      }
+    }
+    return sync;
+  }
 
   // Vacancy generation — triggered when collecting mode is done ("всё" set status → "generating")
   if (workDir && openrouterKey) {
