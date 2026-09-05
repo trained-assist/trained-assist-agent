@@ -776,14 +776,12 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   // Never attempt pinChatMessage again — it would fail and spam the chat.
   if (state?.noPin) {
     const cardWithHint = card + NO_PIN_HINT;
-    if (state.lastCard === cardWithHint) return;
     if (state?.msgId) {
       const edited = await tgEdit(token, chatId, state.msgId, cardWithHint).catch(() => null);
-      if (edited?.ok) {
+      if (edited?.ok || edited?.description?.includes('message is not modified')) {
         fs.writeFileSync(pinFile, JSON.stringify({ ...state, lastCard: cardWithHint }));
         return;
       }
-      console.error(`[pin] edit failed (no-pin mode) msgId=${state.msgId} chat=${chatId}:`, JSON.stringify(edited));
     }
     // Previous message was deleted — send a new one (still no pin attempt).
     const msg = await tgSend(token, chatId, cardWithHint);
@@ -793,16 +791,12 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   }
 
   if (state?.msgId) {
-    // Nothing changed — skip entirely to avoid Telegram "message is not modified" error.
-    if (state.lastCard === card) return;
-
     const edited = await tgEdit(token, chatId, state.msgId, card).catch(() => null);
-    if (edited?.ok) {
+    if (edited?.ok || edited?.description?.includes('message is not modified')) {
       fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, chatId, lastCard: card }));
       return;
     }
-    // Edit failed — log and fall through to create new.
-    console.error(`[pin] edit failed msgId=${state.msgId} chat=${chatId}:`, JSON.stringify(edited));
+    // Edit failed (message deleted) — fall through to create new.
   }
 
   // No existing pin (or edit failed) — send new card message and try to pin it.
