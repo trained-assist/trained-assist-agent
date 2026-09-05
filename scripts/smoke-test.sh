@@ -17,12 +17,12 @@ echo "=== Smoke Tests: trained-assist-agent ==="
 echo "URL: $AGENT_URL"
 echo ""
 
-# 1. Health check — unauthenticated should return 401
-echo "[1] Health endpoint returns 401 without auth"
+# 1. Health check — auth-free endpoint, should return 200 without auth
+echo "[1] Health endpoint returns 200 without auth (auth-free per API docs)"
 STATUS=$(_curl -o /dev/null -w "%{http_code}" "$AGENT_URL/health")
-[ "$STATUS" = "401" ] && ok "401 without auth" || fail "Expected 401, got $STATUS"
+[ "$STATUS" = "200" ] && ok "200 without auth" || fail "Expected 200, got $STATUS"
 
-# 2. Health check — authenticated should return 200
+# 2. Health check — authenticated should also return 200
 echo "[2] Health endpoint returns 200 with auth"
 BODY=$(_curl -w "\n%{http_code}" -H "Authorization: Bearer $AGENT_SECRET" "$AGENT_URL/health")
 STATUS=$(echo "$BODY" | tail -1)
@@ -30,7 +30,7 @@ STATUS=$(echo "$BODY" | tail -1)
 
 # 3. Health response contains status:alive
 echo "[3] Health response has status:alive"
-HEALTH=$(_curl -H "Authorization: Bearer $AGENT_SECRET" "$AGENT_URL/health")
+HEALTH=$(_curl "$AGENT_URL/health")
 echo "$HEALTH" | grep -q '"status":"alive"' && ok "status:alive present" || fail "status:alive missing in: $HEALTH"
 
 # 4. /run requires POST

@@ -32,9 +32,9 @@ beforeEach(() => {
   delete process.env.AGENT_SESSION_FILE;
   mod = loadModule();
   handlers = {
-    store: mod.tools.store_artifact.handler,
-    query: mod.tools.query_artifacts.handler,
-    summary: mod.tools.get_knowledge_summary.handler,
+    store: mod.tools.agent_store_artifact.handler,
+    query: mod.tools.agent_query_artifacts.handler,
+    summary: mod.tools.agent_knowledge_summary.handler,
   };
 });
 
@@ -187,19 +187,19 @@ describe('user isolation', () => {
     // Store as Alice
     process.env.AGENT_USER_ID = 'alice';
     const aliceMod = loadModule();
-    await aliceMod.tools.store_artifact.handler({ type: 'contact', content: 'Alice secret' });
+    await aliceMod.tools.agent_store_artifact.handler({ type: 'contact', content: 'Alice secret' });
 
     // Query as Bob
     process.env.AGENT_USER_ID = 'bob';
     const bobMod = loadModule();
-    const result = await bobMod.tools.query_artifacts.handler({ query: 'Alice secret' });
+    const result = await bobMod.tools.agent_query_artifacts.handler({ query: 'Alice secret' });
     expect(result.found).toBe(0);
   });
 
   it('each user has independent artifact count', async () => {
     const anyMod = loadModule();
-    const store = anyMod.tools.store_artifact.handler;
-    const summary = anyMod.tools.get_knowledge_summary.handler;
+    const store = anyMod.tools.agent_store_artifact.handler;
+    const summary = anyMod.tools.agent_knowledge_summary.handler;
 
     process.env.AGENT_USER_ID = 'alice';
     await store({ type: 'config', content: 'alice-config' });

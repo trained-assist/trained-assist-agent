@@ -1063,12 +1063,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // present — without it Claude reads the last session message as the current request.
   const artifactsSection = [
     'Инструменты хранилища знаний (trained-skills MCP):',
-    '- store_artifact(type, content, metadata) — сохрани важную информацию о пользователе/проекте',
-    '- query_artifacts(query, type) — найди ранее сохранённое',
-    '- get_knowledge_summary() — сводка всего что сохранено',
+    '- agent_store_artifact(type, content, metadata) — сохрани важный факт о пользователе (контакт, решение, ключ, ссылку)',
+    '- agent_query_artifacts(query, type) — найди ранее сохранённое',
+    '- agent_knowledge_summary() — сводка всего что сохранено',
     '',
-    'При старте новой задачи вызови get_knowledge_summary() чтобы вспомнить контекст.',
-    'При получении новой важной инфы (контакт, ключ, решение) — сразу вызови store_artifact().',
+    'При старте новой задачи вызови agent_knowledge_summary() чтобы вспомнить контекст.',
+    'При получении новой важной инфы (контакт, ключ, решение) — сразу вызови agent_store_artifact().',
   ].join('\n');
   let baseContext = [notesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
