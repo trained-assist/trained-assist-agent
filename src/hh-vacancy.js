@@ -397,10 +397,11 @@ function generateVacancyLandingHtml(draft, vacancyId, username, publicUrl) {
       ${conditionTags.length ? `<div class="cond-tags">${conditionTags.map(t => `<span class="cond-tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
     </div>
 
+    ${companyHtml ? `<div class="card"><h2 class="card-title">О компании</h2><div class="card-body">${companyHtml}</div></div>` : ''}
+
     ${sectionCards}
 
     ${skillsHtml ? `<div class="card"><h2 class="card-title">Ключевые навыки</h2><div class="skills-wrap">${skillsHtml}</div></div>` : ''}
-    ${companyHtml ? `<div class="card"><h2 class="card-title">О компании</h2><div class="card-body">${companyHtml}</div></div>` : ''}
     ${hiringStages ? `<div class="card hiring-main-card"><h2 class="card-title">Процесс рассмотрения</h2><ol class="hiring-stages">${hiringStages.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
   </main>
 
