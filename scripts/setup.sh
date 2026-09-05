@@ -23,6 +23,25 @@ sudo systemctl enable "$SERVICE"
 sudo systemctl start "$SERVICE"
 sudo systemctl status "$SERVICE" --no-pager
 
+echo "==> Registering PostToolUse artifact hook in ~/.claude/settings.json..."
+node -e "
+const fs = require('fs');
+const os = require('os');
+const p = os.homedir() + '/.claude/settings.json';
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
+settings.hooks = settings.hooks || {};
+settings.hooks.PostToolUse = settings.hooks.PostToolUse || [];
+const hookCmd = 'node $REPO_DIR/src/hooks/post-tool-use-artifacts.js';
+if (!settings.hooks.PostToolUse.some(h => h.hooks?.[0]?.command === hookCmd)) {
+  settings.hooks.PostToolUse.push({ matcher: '*', hooks: [{ type: 'command', command: hookCmd }] });
+  fs.writeFileSync(p, JSON.stringify(settings, null, 2));
+  console.log('  Hook registered: ' + hookCmd);
+} else {
+  console.log('  Hook already registered, skipping.');
+}
+"
+
 echo "==> Setup complete. Add secrets to GCP Secret Manager:"
 echo "  TELEGRAM_BOT_TOKEN"
 echo "  ANTHROPIC_API_KEY"
