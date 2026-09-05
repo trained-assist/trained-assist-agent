@@ -127,11 +127,13 @@ module.exports = {
   tools: {
     publish_page: {
       description:
-        'Publish a document (HTML, Markdown, or text) as a shareable web link. ' +
-        'The page is served from the agent VM under the profile\'s custom domain. ' +
-        'Use for: reports, invoices, articles, plans, candidate reviews — anything that should open in a browser. ' +
-        'With password → share as url?password=X. Without → public link anyone can open. ' +
-        'Same slug = update in place (same URL).',
+        'Publish content as a shareable link and return the URL. ' +
+        'MUST use this instead of sending long text in Telegram whenever the reply is: ' +
+        'a report, analysis, candidate review, table, invoice, proposal, summary with sections — ' +
+        'or ANY reply longer than ~800 characters. ' +
+        'After publishing: reply to user with only the link + 1-sentence summary of what\'s inside. ' +
+        'Public by default. For sensitive content add password and include it in the link (url?password=X). ' +
+        'Same slug = update in place, same URL.',
       inputSchema: {
         type: 'object',
         required: ['content', 'slug'],
