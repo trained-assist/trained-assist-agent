@@ -382,6 +382,33 @@ Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_D
 ### Adding a new endpoint
 Add route handling in `src/server.js` in the request handler chain (method + pathname check pattern).
 
+### ZeroCreds — credential collection forms
+
+[zerocreds.ru](https://zerocreds.ru) is an **external hosted SaaS service** — do not install or run it locally on the VMs. The agent talks to it via the public API.
+
+**How it works:**
+1. Agent calls `generateConnectLink(userId, service)` in `src/user-tokens.js`
+2. That POSTs to `https://zerocreds.ru/api/session/create` → gets a form URL
+3. Bot sends the URL to the user; user fills it in their browser
+4. ZeroCreds saves the credentials to `~/agent-tokens/{userId}/{service}` on the VM (via `local_file` destination)
+
+**Required env vars (already set on both VMs):**
+- `ZEROCREDS_ADMIN_TOKEN` — integrator token for `/api/session/create`
+- `ZEROCREDS_URL` — **not set in secrets.env**, defaults to `https://zerocreds.ru` in code. Override only to point at a different instance.
+
+**Form schemas** — defined in `src/user-tokens.js → SERVICE_FORM_SCHEMA`. Each field has a `level` that shows a UX icon in the ZeroCreds form:
+- `secret` 🔒 — API keys, passwords (AI never sees)
+- `pii` 👤 — emails, logins (AI may use for tasks)
+- `attribute` 📋 — public config: domain, URL (AI uses openly)
+- `credential` ⏱ — session cookies (current session only)
+
+**Services NOT on ZeroCreds** (use OAuth or Playwright flows instead):
+- `nalog` — Playwright + Госуслуги 2FA → `/connect/nalog`
+- `hh` — HeadHunter OAuth → `/connect/hh/start`
+- `gdrive` — Google OAuth → `/connect/gdrive/start`
+
+**Adding a new service to ZeroCreds:** add an entry to `SERVICE_FORM_SCHEMA` in `src/user-tokens.js` with `title`, `description`, and `fields` (each with `name`, `label`, `type`, `level`, `required`). That's it — `generateConnectLink` will automatically route it through ZeroCreds.
+
 ### Quick answers — prefer instant replies over calling Claude
 
 **Rule: if a response can be determined without calling Claude, make it a quick answer.**

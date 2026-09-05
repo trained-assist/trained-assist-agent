@@ -74,7 +74,7 @@
       { "name": "HH_PLATFORM_URL",          "value": "https://platform.recruiter-assistant.ru" },
       { "name": "VACANCY_REMOTE_STORE_URL", "value": "https://platform.recruiter-assistant.ru", "description": "RU VM URL — vacancy pages are forwarded here from GCP for storage and serving" },
       { "name": "VM_NAME",                  "value": "gcp-main" },
-      { "name": "ZEROCREDS_URL",            "value": "http://localhost:3456", "description": "Local zerocreds-server (runs on same VM, not exposed publicly)" }
+      { "name": "ZEROCREDS_URL",            "description": "ZeroCreds hosted service URL. Default in code: https://zerocreds.ru (public SaaS, no local install needed). Override only to point at a different instance." }
     ],
     "ru": [
       { "name": "NODE_ENV",           "value": "production" },
@@ -85,7 +85,7 @@
       { "name": "ANTHROPIC_BASE_URL", "value": "https://136-65-7-197.sslip.io/anthropic-proxy" },
       { "name": "SECRETS_SOURCE",     "value": "env" },
       { "name": "VM_NAME",            "value": "ru-vm" },
-      { "name": "ZEROCREDS_URL",      "value": "http://localhost:3456", "description": "Local zerocreds-server (already running on RU VM)" }
+      { "name": "ZEROCREDS_URL",      "description": "ZeroCreds hosted service URL. Default in code: https://zerocreds.ru (public SaaS, no local install needed). Override only to point at a different instance." }
     ]
   },
 
