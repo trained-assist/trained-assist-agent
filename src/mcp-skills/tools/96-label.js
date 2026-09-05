@@ -68,8 +68,8 @@ function postJson(url, headers, body) {
 // ── Claude Vision pass ────────────────────────────────────────────────────────
 
 async function detectPositionsViaVision(imageBuffer, structures, imageDescription) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set — Vision pass unavailable');
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set — Vision pass unavailable');
 
   const base64 = imageBuffer.toString('base64');
   const structureList = structures.map((s, i) => `${i + 1}. ${s}`).join('\n');
@@ -91,15 +91,15 @@ async function detectPositionsViaVision(imageBuffer, structures, imageDescriptio
   ].join('\n');
 
   const res = await postJson(
-    'https://api.anthropic.com/v1/messages',
-    { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    'https://openrouter.ai/api/v1/chat/completions',
+    { 'Authorization': `Bearer ${apiKey}` },
     {
-      model: 'claude-haiku-4-5-20251001',
+      model: 'anthropic/claude-haiku-4-5',
       max_tokens: 1024,
       messages: [{
         role: 'user',
         content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } },
           { type: 'text', text: prompt },
         ],
       }],
@@ -108,7 +108,7 @@ async function detectPositionsViaVision(imageBuffer, structures, imageDescriptio
 
   if (res.status !== 200) throw new Error(`Vision API error ${res.status}: ${JSON.stringify(res.data)}`);
 
-  const text = res.data?.content?.[0]?.text || '';
+  const text = res.data?.choices?.[0]?.message?.content || '';
   const match = text.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Vision response not parseable: ${text.slice(0, 200)}`);
   return JSON.parse(match[0]);
