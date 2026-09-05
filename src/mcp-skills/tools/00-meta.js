@@ -118,6 +118,12 @@ const SKILLS = [
     requires: 'HH токен (тот же что для hh-recruiting).',
   },
   {
+    id: 'getcourse-discovery',
+    name: 'GetCourse — Discovery (расширенный доступ к API)',
+    description: 'Fallback для GC операций не покрытых gc_* скилами: вебинары, воронки/CRM-сделки, платежи, офферы, уведомления, любые L1/L2 запросы. gc_discover показывает доступные endpoints; gc_api_call выполняет любой.',
+    requires: 'GetCourse подключён через gc_connect (L1: API ключ; L2: логин+пароль для сессии).',
+  },
+  {
     id: 'api-from-website',
     name: 'API из сайта (DRAFT)',
     description: 'Если есть логин+пароль к сайту — можно использовать его как API. Сохраняем credentials, делаем HTTP-запросы с Basic/Bearer авторизацией, исследуем доступные endpoints. Фаза 2 (TODO): автодискавери через Playwright — логин в браузере, захват XHR, каталог endpoints.',
