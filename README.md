@@ -548,6 +548,209 @@ The real session store is `src/session-store.js`. There used to be a dead file `
 
 When adding HH-related code, the helpers (`hhApiRequest`, `hhApiPost`) are at the bottom of `server.js`, not in a separate `hh-core.js` — this is a known tech debt, not a bug.
 
+---
+
+## Testing & Debugging Guide
+
+### How to send a message as a user (from agent session)
+
+Claude Code runs inside the agent session with env vars injected from `runner.js`:
+
+| Env var | Value | What it is |
+|---------|-------|------------|
+| `AGENT_USER_ID` | `"alice"` | Profile name (= `username`) — owns files and tokens |
+| `AGENT_CHAT_ID` | `"123456789"` | Telegram **chat ID** where output streams to |
+| `AGENT_BOT_TOKEN` | `"7xxx:AAA..."` | Bot token used to call Telegram API |
+
+**Send a message to the user's Telegram chat from a script:**
+
+```bash
+# from agent session (Claude subprocess) — env vars already set
+curl -s -X POST "https://api.telegram.org/bot${AGENT_BOT_TOKEN}/sendMessage" \
+  -H 'Content-Type: application/json' \
+  -d "{\"chat_id\": ${AGENT_CHAT_ID}, \"text\": \"hello from agent\"}"
+```
+
+**From the VM shell (bypass agent):**
+
+```bash
+BOT_TOKEN=$(grep BOT_TOKEN ~/secrets.env | cut -d= -f2)
+CHAT_ID=$(cat ~/agent-tokens/alice/.chatid)
+
+curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+  -H 'Content-Type: application/json' \
+  -d "{\"chat_id\": ${CHAT_ID}, \"text\": \"test message\"}"
+```
+
+**Edit an existing message** (agent streams output this way):
+
+```bash
+curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+  -H 'Content-Type: application/json' \
+  -d "{\"chat_id\": ${CHAT_ID}, \"message_id\": 42, \"text\": \"updated text\"}"
+```
+
+**Send a file:**
+
+```bash
+curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+  -F chat_id="${CHAT_ID}" \
+  -F document=@/path/to/file.pdf
+```
+
+---
+
+### How to find which Telegram chat(s) a profile uses
+
+Each profile has a `.chatid` file written when the first task runs:
+
+```bash
+# on the VM
+cat ~/agent-tokens/<username>/.chatid         # e.g. cat ~/agent-tokens/alice/.chatid → 123456789
+```
+
+The file is updated on every `/run` call — it always holds the **most recent** chat ID that sent a task.
+
+> **Many-chats-one-profile:** A profile may be shared across multiple chats (configured in the bot via `CHAT_MAPPINGS`). The `.chatid` file only stores the last one. To find all chats for a profile, check the bot's `CHAT_MAPPINGS` env var in the Cloudflare Worker — the agent server itself has no list.
+
+**List all profiles and their last-seen chat IDs:**
+
+```bash
+for d in ~/agent-tokens/*/; do
+  username=$(basename "$d")
+  chatid=$(cat "$d/.chatid" 2>/dev/null || echo "—")
+  echo "$username → $chatid"
+done
+```
+
+**Find which profile owns a given chat ID:**
+
+```bash
+grep -r "^123456789$" ~/agent-tokens/*/.chatid 2>/dev/null
+```
+
+---
+
+### Where profile state lives on disk
+
+```
+~/agent-tokens/<username>/
+  .chatid                 ← last Telegram chat ID (numeric string)
+  hh                      ← HH OAuth token (JSON)
+  gdrive                  ← GDrive service account path (JSON)
+  gdrive-catalog.json     ← cached GDrive folder listing
+  nalog                   ← nalog.ru auth token (JSON, expires ~1h)
+  weeek                   ← Weeek API token (plain text)
+  github                  ← GitHub personal access token (plain text)
+  getcourse/config.json   ← GetCourse API key + session cookies
+
+~/agent-data/sessions/<username>/
+  sessions.json           ← session index (50 most recent)
+  sessions/
+    s-<id>.json           ← full session with messages
+  current-session.json    ← pointer to active session
+  .pin_state.json         ← pinned context card state (msgId + chatId)
+  profile.json            ← user profile (about, preferences)
+  requirements-log.md     ← per-user requirements log
+```
+
+---
+
+### How to simulate a POST /run call (test as a specific user)
+
+```bash
+# on the VM or locally (needs AGENT_SECRET)
+AGENT_SECRET=$(grep AGENT_SECRET ~/secrets.env | cut -d= -f2)
+
+curl -s -X POST http://localhost:3000/run \
+  -H "Authorization: Bearer ${AGENT_SECRET}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "userId": 123456789,
+    "username": "alice",
+    "task": "привет, что умеешь?",
+    "context": "",
+    "initialMsgId": 0
+  }'
+# → 202 {"taskId":"alice-1234567890"}
+# Output streams to Telegram chat 123456789
+```
+
+To redirect output somewhere else (e.g. your own chat) during testing — just change `userId` to your chat ID. The `username` controls which files/tokens Claude sees; `userId` controls where the reply goes.
+
+---
+
+### Telegram API reference (what the agent uses)
+
+All calls go to `https://api.telegram.org/bot<TOKEN>/<method>`.
+
+| Method | When used |
+|--------|-----------|
+| `sendMessage` | New message (initial "thinking…" + quick answers) |
+| `editMessageText` | Stream Claude output into existing message |
+| `pinChatMessage` | Pin the context card |
+| `sendDocument` | Send a file to the user |
+| `sendPhoto` | Send an image |
+
+**sendMessage minimal:**
+
+```json
+POST /bot<TOKEN>/sendMessage
+{
+  "chat_id": 123456789,
+  "text": "message text",
+  "parse_mode": "Markdown"    // optional — enables *bold*, _italic_, `code`
+}
+```
+
+**Inline keyboard button:**
+
+```json
+{
+  "chat_id": 123456789,
+  "text": "Choose an option",
+  "reply_markup": {
+    "inline_keyboard": [[
+      { "text": "Option A", "callback_data": "prefix|value" }
+    ]]
+  }
+}
+```
+
+> Callback data is handled in the bot (Cloudflare Worker). If you add a new `callback_data` prefix in `runner.js`, also register it in `KNOWN_CALLBACK_PREFIXES` in `trained-assist-tg-bot/tests/callbacks.test.js`.
+
+**Get your own chat ID** (useful when testing):
+1. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` after sending any message to the bot
+2. Look for `message.chat.id` in the response
+
+---
+
+### Checking what's connected for a profile
+
+```bash
+# List token files for a profile
+ls ~/agent-tokens/<username>/
+
+# Check HH token validity
+node -e "
+const t = JSON.parse(require('fs').readFileSync(require('os').homedir()+'/agent-tokens/alice/hh','utf8'));
+console.log('expires:', t.expires_in, '| access_token:', t.access_token?.slice(0,20)+'...');
+"
+
+# Check nalog token
+node -e "
+const t = JSON.parse(require('fs').readFileSync(require('os').homedir()+'/agent-tokens/alice/nalog','utf8'));
+console.log('expires:', t.expires, '| has_token:', !!t.auth_token);
+"
+
+# Hit /capabilities to see what the bot router sees
+AGENT_SECRET=$(grep AGENT_SECRET ~/secrets.env | cut -d= -f2)
+curl -s -H "Authorization: Bearer ${AGENT_SECRET}" \
+  "http://localhost:3000/capabilities?userId=alice"
+```
+
+---
+
 ### Git workflow — PR-first
 **Never push directly to `main`.** All changes go through a feature branch + PR:
 
