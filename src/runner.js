@@ -1380,17 +1380,28 @@ async function tgSend(token, chatId, text, extra = {}) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text, ...extra }),
+    signal: AbortSignal.timeout(10_000),
   });
   return res.json();
 }
 
-async function tgEdit(token, chatId, messageId, text) {
-  const res = await fetch(`${TG_API}/bot${token}/editMessageText`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
-  });
-  return res.json();
+async function tgEdit(token, chatId, messageId, text, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    const res = await fetch(`${TG_API}/bot${token}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await res.json();
+    if (res.status === 429) {
+      const wait = (data.parameters?.retry_after || 5) * 1000;
+      console.warn(`[tg] 429 rate limit on editMessageText, retry after ${wait}ms (attempt ${i + 1}/${retries})`);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+    return data;
+  }
 }
 
 module.exports = {
