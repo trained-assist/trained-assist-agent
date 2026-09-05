@@ -19,8 +19,12 @@ const os = require('os');
 const USER_ID = process.env.USER_ID || '';
 const FALLBACK_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+function tokenBase() {
+  return process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+}
+
 function readConfig(userId) {
-  const file = path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'getcourse', 'config.json');
+  const file = path.join(tokenBase(), String(userId || USER_ID), 'getcourse', 'config.json');
   if (!fs.existsSync(file)) return {};
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
 }
@@ -176,7 +180,7 @@ module.exports = {
     const cfg = readConfig(USER_ID);
     return Boolean(cfg.accountDomain);
   },
-  setupTools: ['gc_discover'],
+  setupTools: [],
 
   tools: {
 

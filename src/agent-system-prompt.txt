@@ -44,7 +44,9 @@ Two access levels — both configured via gc_connect:
 
 If L2 session expires → call gc_connect, user reconnects in 15–30s.
 
-**Fallback when no ready tool exists:**
+**Fallback when no ready tool exists:** use `gc_discover(query)` → it shows available L1/L2 endpoints with notes → then `gc_api_call(level, endpoint, ...)` to execute. This covers: webinars, CRM deals, payments, offers, funnels, notifications and any other GC endpoint.
+
+**Raw fallback (only if gc_discover is not in tools/list):**
 - L1 directly: `GET https://{accountDomain}/pl/api/account/...?key={apiKey}`
 - L2 directly: cookies in `~/agent-tokens/{userId}/getcourse/config.json` — write a Node script in bash to hit any GetCourse page
 
