@@ -485,6 +485,16 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     return null;
   }
 
+  // If the task contains a full URL to an already-connected service page (e.g. getcourse settings),
+  // the user wants Claude to navigate/fill a form — not set up a new connection.
+  // "заполни настройки https://domain.getcourse.ru/saas/account/paymentsSettings" must NOT
+  // trigger the connect-link quick answer.
+  const NAVIGATING_URL_RE = /https?:\/\/[^\s]+\.[^\s]+\/[^\s]+/i;
+  if (NAVIGATING_URL_RE.test(task)) {
+    console.log('[quick-answer] task contains a URL with path — user is navigating, not connecting; skipping QUICK_SETUPS');
+    return null;
+  }
+
   for (const { match, service, hint } of QUICK_SETUPS) {
     if (!match.test(task)) continue;
     console.log('[quick-answer] matched service=%s uid=%s', service || 'null', userId);
