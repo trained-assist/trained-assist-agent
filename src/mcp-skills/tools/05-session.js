@@ -43,5 +43,34 @@ module.exports = {
         };
       },
     },
+
+    session_extend_timeout: {
+      description:
+        'Extend the current Claude session timeout by 15 minutes. ' +
+        'Call this at the START of a long batch operation (inn_enrich_batch, expo_pipeline_run, etc.) ' +
+        'to prevent the 15-min hard limit from killing the task mid-run. ' +
+        'Max 8 extensions (2 hours total runtime). ' +
+        'Returns extensionsLeft — stop extending when it reaches 0.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const taskId = process.env.AGENT_TASK_ID;
+        const port   = process.env.PORT || '3000';
+        const secret = process.env.AGENT_SECRET || '';
+
+        if (!taskId) return { ok: false, error: 'AGENT_TASK_ID not set — not running inside agent session' };
+        if (!secret) return { ok: false, error: 'AGENT_SECRET not available' };
+
+        try {
+          const res = await fetch(`http://localhost:${port}/tasks/${encodeURIComponent(taskId)}/extend-timeout`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(5000),
+          });
+          return await res.json();
+        } catch (err) {
+          return { ok: false, error: `Failed to reach agent server: ${err.message}` };
+        }
+      },
+    },
   },
 };

@@ -1770,6 +1770,15 @@ function show(id, type, msg) {
       });
     }
 
+    // POST /tasks/:taskId/extend-timeout — called by session_extend_timeout MCP tool
+    // Allows Claude to extend its own 15-min session (up to 8 × 15 min = 2h total)
+    if (req.method === 'POST' && /^\/tasks\/[^/]+\/extend-timeout$/.test(url.pathname)) {
+      const taskId = url.pathname.split('/')[2];
+      const { extendTaskTimeout } = require('./runner');
+      const result = extendTaskTimeout(taskId);
+      return json(res, result.ok ? 200 : 404, result);
+    }
+
     // GET /projects?username=xxx — list project subdirs sorted by session frequency
     if (req.method === 'GET' && url.pathname === '/projects') {
       const username = url.searchParams.get('username');
