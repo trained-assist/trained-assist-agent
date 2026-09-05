@@ -494,6 +494,12 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     return null;
   }
 
+  const NAVIGATING_URL_RE = /https?:\/\/[^\s]+\.[^\s]+\/[^\s]+/i;
+  if (NAVIGATING_URL_RE.test(task)) {
+    console.log('[quick-answer] task contains a URL with path — user is navigating, not connecting; skipping QUICK_SETUPS');
+    return null;
+  }
+
   for (const { match, service, hint } of QUICK_SETUPS) {
     if (!match.test(task)) continue;
     console.log('[quick-answer] matched service=%s uid=%s', service || 'null', userId);
