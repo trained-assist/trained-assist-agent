@@ -4,7 +4,7 @@ const path = require('path');
 
 module.exports = {
   tools: {
-    store_artifact: {
+    agent_store_artifact: {
       description:
         'Сохрани важную информацию о пользователе или задаче — контакт, решение, настройку, ссылку. ' +
         'Данные доступны в следующих сессиях. ' +
@@ -33,7 +33,7 @@ module.exports = {
       },
     },
 
-    query_artifacts: {
+    agent_query_artifacts: {
       description:
         'Найди ранее сохранённые знания о пользователе или проекте. ' +
         'Используй при старте сессии и при любом вопросе где может быть контекст из прошлого.',
@@ -79,7 +79,7 @@ module.exports = {
       },
     },
 
-    get_knowledge_summary: {
+    agent_knowledge_summary: {
       description:
         'Покажи сводку всех сохранённых знаний о пользователе. ' +
         'Используй при старте новой задачи чтобы вспомнить контекст.',
