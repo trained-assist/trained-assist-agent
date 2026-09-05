@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHash } = require('crypto');
+const { marked } = require('marked');
 
 const USER_ID = process.env.USER_ID || '';
 const AGENT_DATA_DIR = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
@@ -86,17 +87,23 @@ img{max-width:100%;border-radius:8px}
 
   if (format === 'html') return source; // serve as-is
 
-  // For markdown/text: escape and wrap in pre with prose styling
-  const escaped = source.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const rawHref = '?raw';
+  let body;
+  if (format === 'markdown') {
+    body = `<article>${marked.parse(source)}</article>`;
+  } else {
+    // plain text — preserve whitespace
+    const escaped = source.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    body = `<article><pre style="white-space:pre-wrap;background:none;border:none;padding:0;font-family:inherit;font-size:1em;line-height:1.7">${escaped}</pre></article>`;
+  }
+
   return `<!DOCTYPE html><html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapedTitle}</title>${styles}</head><body>
 <div class="toolbar">
-  <a href="${rawHref}">raw</a>
+  <a href="?raw">raw</a>
   <button onclick="window.print()">print</button>
 </div>
-<article><pre style="white-space:pre-wrap;background:none;border:none;padding:0;font-family:inherit;font-size:1em;line-height:1.7">${escaped}</pre></article>
+${body}
 </body></html>`;
 }
 
