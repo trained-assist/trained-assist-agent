@@ -35,11 +35,11 @@ function savePendingTask(taskId, params) {
   try {
     fs.mkdirSync(PENDING_DIR, { recursive: true });
     fs.writeFileSync(path.join(PENDING_DIR, `${taskId}.json`), JSON.stringify(params), { mode: 0o600 });
-  } catch { /* non-critical */ }
+  } catch (e) { console.warn('[runner] savePendingTask:', e.message); }
 }
 
 function clearPendingTask(taskId) {
-  try { fs.unlinkSync(path.join(PENDING_DIR, `${taskId}.json`)); } catch { /* non-critical */ }
+  try { fs.unlinkSync(path.join(PENDING_DIR, `${taskId}.json`)); } catch (e) { console.warn('[runner] clearPendingTask:', e.message); }
 }
 
 function getPendingTasks() {
@@ -47,9 +47,9 @@ function getPendingTasks() {
     if (!fs.existsSync(PENDING_DIR)) return [];
     return fs.readdirSync(PENDING_DIR)
       .filter(f => f.endsWith('.json'))
-      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')); } catch { return null; } })
+      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')); } catch (e) { console.warn('[runner] getPendingTasks parse:', e.message); return null; } })
       .filter(Boolean);
-  } catch { return []; }
+  } catch (e) { console.warn('[runner] getPendingTasks:', e.message); return []; }
 }
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
@@ -258,7 +258,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
       fs.writeFileSync(flagPath, '1');
       return '📌 Контекст-карточка выключена. Чтобы включить — /context_on';
     }
-    try { fs.unlinkSync(flagPath); } catch {}
+    try { fs.unlinkSync(flagPath); } catch (e) { console.warn('[runner] unlinkSync context flag:', e.message); }
     return '📌 Контекст-карточка включена. Буду показывать статус после каждой задачи.';
   }
 
@@ -340,7 +340,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
         return `${icon} ${link}${date ? ' — ' + date : ''}`;
       });
       return ['📂 Пошаренные файлы:', '', ...lines2].join('\n');
-    } catch {}
+    } catch (e) { console.warn('[runner] gdrive catalog parse:', e.message); }
     return '📂 Пока нет пошаренных файлов. Поделись файлом через Google Drive — пришлю уведомление.';
   }
 
@@ -380,7 +380,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
           'Как только пошаришь — пришлю уведомление и смогу читать файл.',
         ].join('\n');
       }
-    } catch {}
+    } catch (e) { console.warn('[runner] gdrive SA config parse:', e.message); }
     // SA email asked explicitly — give a helpful "not configured" message instead of routing to Claude
     if (GDRIVE_SA_EMAIL_INTENT.test(task)) {
       return 'Google Drive не настроен. Напиши «подключи Google Drive» — помогу настроить за пару минут.';
@@ -476,7 +476,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
               const data = JSON.parse(require('fs').readFileSync(require('path').join(dir, f), 'utf8'));
               const arr = Array.isArray(data) ? data : (data[key] || data.companies || data.results || []);
               return arr.length;
-            } catch { return null; }
+            } catch (e) { console.warn('[runner] expo count parse:', e.message); return null; }
           }
           const c = count('companies.json', 'companies');
           const e = count('enriched.json', 'companies');
@@ -772,7 +772,7 @@ function buildContextCard(username, workDir) {
   const gcConfig = path.join(os.homedir(), 'agent-tokens', String(username), 'getcourse', 'config.json');
   let gcDomain = null;
   if (fs.existsSync(gcConfig)) {
-    try { gcDomain = JSON.parse(fs.readFileSync(gcConfig, 'utf8')).accountDomain || null; } catch {}
+    try { gcDomain = JSON.parse(fs.readFileSync(gcConfig, 'utf8')).accountDomain || null; } catch (e) { console.warn('[runner] gcConfig parse:', e.message); }
   }
 
   const serviceLabels = services.map(s => {
@@ -799,7 +799,7 @@ function buildContextCard(username, workDir) {
           const v = typeof d.value === 'string' ? d.value : JSON.stringify(d.value);
           lines.push(`${label} ${v.slice(0, 80)}`);
         }
-      } catch {}
+      } catch (e) { console.warn('[runner] pinned context parse:', e.message); }
     }
   }
 
@@ -818,7 +818,7 @@ const NO_PIN_HINT = '\n\n💡 Дай мне права Admin в группе —
 async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
   const pinFile = path.join(workDir, '.pin_state.json');
   let state = null;
-  try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch {}
+  try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch (e) { console.warn('[runner] pin state parse:', e.message); }
 
   // Discard state from a different chat (many-chats-one-profile scenario).
   if (state?.chatId && state.chatId !== chatId) {
@@ -959,7 +959,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (fs.existsSync(oldChatDir)) {
       fs.writeFileSync(path.join(oldChatDir, '.username'), String(user.username), { mode: 0o600 });
     }
-  } catch { /* non-critical */ }
+  } catch (e) { console.warn('[runner] persist chatId:', e.message); }
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
@@ -1197,7 +1197,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const killTimer = setTimeout(() => {
         timedOut = true;
         proc.kill('SIGTERM');
-        setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) { console.warn('[runner] SIGKILL:', e.message); } }, 5000);
         reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
       }, CLAUDE_TIMEOUT_MS);
 

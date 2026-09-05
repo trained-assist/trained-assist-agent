@@ -18,7 +18,13 @@ function loadIndex(workDir) {
     const p = sessionsPath(workDir);
     if (!fs.existsSync(p)) return [];
     return JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch { return []; }
+  } catch (e) {
+    try {
+      const raw = fs.readFileSync(sessionsPath(workDir), 'utf8').slice(0, 200);
+      console.warn('[session-store] loadIndex corrupted:', e.message, '| content:', raw);
+    } catch { console.warn('[session-store] loadIndex:', e.message); }
+    return [];
+  }
 }
 
 function atomicWrite(fp, data) {
@@ -120,7 +126,7 @@ function getSession(workDir, id) {
     const fp = sessionFilePath(workDir, id);
     if (!fs.existsSync(fp)) return null;
     return JSON.parse(fs.readFileSync(fp, 'utf8'));
-  } catch { return null; }
+  } catch (e) { console.warn('[session-store] getSession:', e.message); return null; }
 }
 
 /** Build context string from a previous session (for Claude prompt prefix) */
@@ -149,7 +155,7 @@ function getCurrentSessionId(workDir) {
     const { id, lastAt } = JSON.parse(fs.readFileSync(fp, 'utf8'));
     if (Date.now() - lastAt > CURRENT_SESSION_TTL_MS) return null;
     return id;
-  } catch { return null; }
+  } catch (e) { console.warn('[session-store] getCurrentSessionId:', e.message); return null; }
 }
 
 function setCurrentSessionId(workDir, id) {
@@ -172,7 +178,7 @@ function archiveSessions(workDir, sessionIds) {
   if (archived > 0) {
     saveIndex(workDir, remaining);
     for (const id of idSet) {
-      try { fs.unlinkSync(sessionFilePath(workDir, id)); } catch { /* already gone */ }
+      try { fs.unlinkSync(sessionFilePath(workDir, id)); } catch (e) { console.warn('[session-store] archiveSessions unlink:', e.message); }
     }
   }
   return archived;
