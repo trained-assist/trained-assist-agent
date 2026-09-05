@@ -1,0 +1,32 @@
+name: Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: 'Tests to run (all / 01-health / 02-vacancy-publish)'
+        required: false
+        default: 'all'
+      expected_commit:
+        description: 'Expected git commit SHA (optional, for deploy verification)'
+        required: false
+        default: ''
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run health check
+        if: ${{ inputs.tests == 'all' || inputs.tests == '01-health' }}
+        run: bash scripts/smoke-tests/01-health.sh
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+
+      - name: Run vacancy publish test
+        if: ${{ inputs.tests == 'all' || inputs.tests == '02-vacancy-publish' }}
+        run: bash scripts/smoke-tests/02-vacancy-publish.sh
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TEST_CHAT_ID: '5492935208'
