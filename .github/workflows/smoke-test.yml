@@ -22,7 +22,6 @@ jobs:
         if: ${{ inputs.tests == 'all' || inputs.tests == '01-health' }}
         run: bash scripts/smoke-tests/01-health.sh
         env:
-          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
           EXPECTED_COMMIT: ${{ inputs.expected_commit }}
 
       - name: Run vacancy publish test

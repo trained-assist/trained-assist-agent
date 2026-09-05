@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # Smoke test 1: verify both VMs are up and running the expected git commit.
-# Usage: AGENT_SECRET=xxx EXPECTED_COMMIT=abc1234 bash scripts/smoke-tests/01-health.sh
+# /health is auth-free (moved before auth gate in server.js)
+# Usage: EXPECTED_COMMIT=abc1234 bash scripts/smoke-tests/01-health.sh
 set -euo pipefail
 
-AGENT_SECRET="${AGENT_SECRET:?AGENT_SECRET required}"
 EXPECTED="${EXPECTED_COMMIT:-}"
 
 check_vm() {
   local name="$1" url="$2"
-  local http_code raw
-  raw=$(curl -s --max-time 10 -w "\n__HTTP_CODE__:%{http_code}" \
-    -H "Authorization: Bearer $AGENT_SECRET" "$url" 2>&1) || true
+  local http_code raw body
+  raw=$(curl -s --max-time 10 -w "\n__HTTP_CODE__:%{http_code}" "$url" 2>&1) || true
   http_code=$(echo "$raw" | grep '__HTTP_CODE__:' | cut -d: -f2)
-  local body
   body=$(echo "$raw" | grep -v '__HTTP_CODE__:')
 
   if [[ "$http_code" != "200" ]]; then

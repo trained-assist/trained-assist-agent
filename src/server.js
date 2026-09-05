@@ -1623,6 +1623,11 @@ function show(id, type, msg) {
       return;
     }
 
+    // GET /health — no auth, liveness check for smoke tests and monitoring
+    if (req.method === 'GET' && url.pathname === '/health') {
+      return json(res, 200, { status: 'alive', uptime: process.uptime(), vm: VM_NAME, commit: GIT_COMMIT });
+    }
+
     // Auth: all endpoints require Bearer token
     const auth = req.headers['authorization'] || '';
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
@@ -1644,10 +1649,6 @@ function show(id, type, msg) {
       fs.writeFileSync(path.join(draftsDir, `${vacancyId}.html`), html, 'utf8');
       const pageUrl = `https://platform.recruiter-assistant.ru/vacancy/${username}/${vacancyId}`;
       return json(res, 200, { ok: true, url: pageUrl });
-    }
-
-    if (req.method === 'GET' && url.pathname === '/health') {
-      return json(res, 200, { status: 'alive', uptime: process.uptime(), vm: VM_NAME, commit: GIT_COMMIT });
     }
 
     // GET /capabilities?userId=XXX — list services with tokens on this machine
