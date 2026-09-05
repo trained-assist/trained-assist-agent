@@ -1281,7 +1281,7 @@ async function main() {
       try {
         const message = await new Promise((resolve, reject) => {
           const reqBody = JSON.stringify({
-            model: 'deepseek/deepseek-v4-flash-0731',
+            model: 'openai/gpt-4o-mini',
             messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMsg }],
             temperature: 0.7,
             max_tokens: 800,
@@ -1527,7 +1527,7 @@ function show(id, type, msg) {
       try {
         const style = await new Promise((resolve, reject) => {
           const reqBody4 = JSON.stringify({
-            model: 'deepseek/deepseek-v4-flash-0731',
+            model: 'openai/gpt-4o-mini',
             messages: [{ role: 'system', content: systemPrompt4 }, { role: 'user', content: userMsg4 }],
             temperature: 0.3,
             max_tokens: 600,
