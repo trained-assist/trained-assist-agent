@@ -75,16 +75,6 @@ const SERVICE_FORM_SCHEMA = {
       { name: 'password', label: 'Пароль (необязательно)',           type: 'password', level: 'secret', required: false },
     ],
   },
-  getcourse: {
-    title: 'Подключить GetCourse',
-    description: 'Данные не попадают в чат — форма отправляет их напрямую на сервер.',
-    fields: [
-      { name: 'domain',   label: 'Домен аккаунта',              type: 'text',     level: 'attribute', placeholder: 'myschool.getcourse.ru', required: true },
-      { name: 'apiKey',   label: 'API ключ (необязательно)',     type: 'password', level: 'secret',    required: false },
-      { name: 'login',    label: 'Логин (необязательно)',        type: 'email',    level: 'pii',       required: false },
-      { name: 'password', label: 'Пароль (необязательно)',       type: 'password', level: 'secret',    required: false },
-    ],
-  },
 };
 
 const LOG_FILES = new Set(['.secrets_log', 'gdrive-seen', 'gdrive-catalog', 'gdrive-catalog.json', '.chatid']); // internal state files, not credentials
