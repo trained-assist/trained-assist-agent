@@ -56,7 +56,7 @@ describe('appendUserMessage', () => {
 });
 
 describe('appendReply', () => {
-  it('caps stored reply at 2000 chars to prevent file bloat', () => {
+  it('stores full reply without truncation', () => {
     const id = createSession(tmpDir, { task: 'task' });
     const longReply = 'x'.repeat(5000);
     appendReply(tmpDir, id, longReply);
@@ -64,7 +64,7 @@ describe('appendReply', () => {
     const session = getSession(tmpDir, id);
     const reply = session.messages.find(m => m.role === 'assistant');
     expect(reply).toBeDefined();
-    expect(reply.content.length).toBe(2000);
+    expect(reply.content.length).toBe(5000);
   });
 
   it('adds assistant message with correct role', () => {

@@ -49,7 +49,7 @@ function createSession(workDir, { task, id: providedId }) {
   fs.mkdirSync(dir, { recursive: true });
   const full = {
     ...meta,
-    messages: [{ role: 'user', content: task.slice(0, 2000), at: now }],
+    messages: [{ role: 'user', content: task, at: now }],
   };
   atomicWrite(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));
 
@@ -63,7 +63,7 @@ function appendUserMessage(workDir, id, content) {
     if (!fs.existsSync(fp)) return;
     const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
     const now = Date.now();
-    full.messages.push({ role: 'user', content: content.slice(0, 2000), at: now });
+    full.messages.push({ role: 'user', content, at: now });
     full.lastAt = now;
     full.messageCount = full.messages.length;
     atomicWrite(fp, JSON.stringify(full, null, 2));
@@ -89,7 +89,7 @@ function appendReply(workDir, id, reply) {
     if (!fs.existsSync(fp)) return;
     const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
     const now = Date.now();
-    full.messages.push({ role: 'assistant', content: reply.slice(0, 2000), at: now });
+    full.messages.push({ role: 'assistant', content: reply, at: now });
     full.lastAt = now;
     full.messageCount = full.messages.length;
     atomicWrite(fp, JSON.stringify(full, null, 2));
