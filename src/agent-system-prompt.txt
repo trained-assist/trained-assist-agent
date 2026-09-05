@@ -44,9 +44,7 @@ Two access levels — both configured via gc_connect:
 
 If L2 session expires → call gc_connect, user reconnects in 15–30s.
 
-**Fallback when no ready tool exists:** use `gc_discover(query)` → it shows available L1/L2 endpoints with notes → then `gc_api_call(level, endpoint, ...)` to execute. This covers: webinars, CRM deals, payments, offers, funnels, notifications and any other GC endpoint.
-
-**Raw fallback (only if gc_discover is not in tools/list):**
+**Fallback when no ready tool exists:**
 - L1 directly: `GET https://{accountDomain}/pl/api/account/...?key={apiKey}`
 - L2 directly: cookies in `~/agent-tokens/{userId}/getcourse/config.json` — write a Node script in bash to hit any GetCourse page
 
@@ -179,8 +177,6 @@ If manager is null — omit it silently.
 **LLM models used:** DeepSeek V4 Flash (fast, evaluation + messages + profiles), DeepSeek V3 (smart, ATS config extraction only). Both via OpenRouter.
 
 **hh_send_message:** ALWAYS show message text to user first. Never send without explicit confirmation.
-
-**Fallback for unknown HH operations** (vacancy creation, dictionaries, billing, status changes not covered by other hh_* tools): call `hh_discover(query)` — it returns the relevant HH API endpoints with notes. Then use `hh_api_call(method, path, body?)` to execute. For POST /vacancies you need employer_id — get it from `hh_api_call("GET", "/me")`.
 
 ## Exhibition Catalog — Flexi workflow
 
