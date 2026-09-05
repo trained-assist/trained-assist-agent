@@ -39,7 +39,9 @@ function trackProjectUsage(workDir, projectName) {
 
 const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 // Matches assistant replies that signal task completion — session should not be reused
-const CLASSIFY_DONE_RE = /готово|сделан|убрал|удалил|завершен|выполнен|done|completed|всё\s+готово|всё\s+сделано/i;
+// Active forms: убрал, удалил, сделал, etc.
+// Passive short forms: убран/убрана/убраны, удалён/удалена, очищен, заполнен, etc.
+const CLASSIFY_DONE_RE = /готово|сделан|убрал|убран|удалил|удалён|завершен|выполнен|очищен|заполнен|исправлен|опубликован|done|completed|всё\s+готово|всё\s+сделано/i;
 
 async function classifyMessage(message, sessions, anthropicKey, openrouterKey) {
   // Filter out sessions that are too old or ended with a completion reply
@@ -1967,9 +1969,11 @@ function show(id, type, msg) {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, label, value } = payload;
+      const userId = payload.userId || url.searchParams.get('userId');
+      const label = payload.label || url.searchParams.get('label');
+      const { value } = payload;
       if (!userId || !label || !value) return json(res, 400, { error: 'missing fields' });
-      if (!/^[a-zA-Z0-9_]{1,64}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 

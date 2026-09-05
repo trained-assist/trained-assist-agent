@@ -272,6 +272,7 @@ function getSecretsLog(userId) {
 
 async function generateConnectLink(userId, service) {
   const schema = SERVICE_FORM_SCHEMA[service];
+  const agentSecret = process.env.AGENT_SECRET || '';
 
   if (ZEROCREDS_URL && ZEROCREDS_ADMIN_TOKEN && schema) {
     try {
@@ -280,11 +281,14 @@ async function generateConnectLink(userId, service) {
         description: schema.description,
         fields: schema.fields,
         destination: {
-          type: 'local_file',
-          uid: String(userId),
-          filename: service,
+          type: 'http_post',
+          url: `${AGENT_PUBLIC_URL}/tokens?userId=${encodeURIComponent(userId)}&label=${encodeURIComponent(service)}`,
+          headers: { 'Authorization': `Bearer ${agentSecret}` },
+          body: { value: '{fields_json}' },
         },
         ttl_minutes: 30,
+        uid: String(userId),
+        service,
       };
       const resp = await fetch(`${ZEROCREDS_URL}/api/session/create`, {
         method: 'POST',
@@ -296,8 +300,8 @@ async function generateConnectLink(userId, service) {
         signal: AbortSignal.timeout(5000),
       });
       if (!resp.ok) throw new Error(`zerocreds HTTP ${resp.status}: ${await resp.text()}`);
-      const { url } = await resp.json();
-      console.log('[user-tokens] zerocreds link generated for service=%s uid=%s', service, userId);
+      const { url, reused } = await resp.json();
+      console.log('[user-tokens] zerocreds link for service=%s uid=%s reused=%s', service, userId, !!reused);
       return url;
     } catch (e) {
       console.warn('[user-tokens] zerocreds unavailable (%s), falling back to legacy', e.message);
@@ -312,16 +316,6 @@ async function generateConnectLink(userId, service) {
     JSON.stringify({ uid: String(userId), service, expires: Date.now() + 30 * 60 * 1000 }),
     { mode: 0o600 }
   );
-  try {
-    const now = Date.now();
-    for (const f of fs.readdirSync(CONNECT_PENDING_DIR)) {
-      if (!f.endsWith('.json')) continue;
-      try {
-        const d = JSON.parse(fs.readFileSync(path.join(CONNECT_PENDING_DIR, f), 'utf8'));
-        if (d.expires < now) fs.unlinkSync(path.join(CONNECT_PENDING_DIR, f));
-      } catch (e) { console.warn('[user-tokens] cleanup pending token:', e.message); }
-    }
-  } catch (e) { console.warn('[user-tokens] cleanup pending dir:', e.message); }
   return `${AGENT_PUBLIC_URL}/connect/${service}?t=${token}`;
 }
 
