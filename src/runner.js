@@ -1262,7 +1262,6 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           secrets,
           continuationCount: nextCount,
         });
->>>>>>> 08aab34 (feat(runner): auto-resume after 15-min timeout (up to 10 rounds = 2.5h))
       } else {
         const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
