@@ -118,7 +118,7 @@ function getSession(workDir, id) {
 }
 
 /** Build context string from a previous session (for Claude prompt prefix) */
-function buildContext(workDir, sessionId) {
+function buildContext(workDir, sessionId, limit = 500) {
   const session = getSession(workDir, sessionId);
   if (!session) return null;
 
@@ -127,7 +127,7 @@ function buildContext(workDir, sessionId) {
 
   for (const msg of session.messages.slice(-6)) { // last 6 messages for context
     const prefix = msg.role === 'user' ? 'Пользователь' : 'Клод';
-    lines.push(`${prefix}: ${msg.content.slice(0, 500)}`);
+    lines.push(`${prefix}: ${msg.content.slice(0, limit)}`);
   }
 
   return lines.join('\n');
