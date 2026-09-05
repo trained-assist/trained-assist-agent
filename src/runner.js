@@ -147,7 +147,7 @@ const QUICK_SETUPS = [
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
-async function getQuickAnswer(task, userId, workDir, sessionExists = false) {
+function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   // Vacancy creation flow — intercept before other intents so collecting mode takes priority
   if (workDir) {
     const vs = readVacancyState(workDir);
@@ -506,13 +506,7 @@ async function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     if (!match.test(task)) continue;
     console.log('[quick-answer] matched service=%s uid=%s', service || 'null', userId);
     if (service && userId) {
-      try {
-        const link = await generateConnectLink(userId, service);
-        return `Данные для входа — по ссылке:\n${link}\n\n${hint}${TRUST_FOOTER}`;
-      } catch (e) {
-        console.error('[quick-answer] generateConnectLink failed:', e.message);
-        return hint;
-      }
+      return { __connectLink: true, service, hint };
     }
     return hint;
   }
@@ -562,8 +556,19 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false) {
-  const sync = await getQuickAnswer(task, userId, workDir, sessionExists);
-  if (sync !== null) return sync;
+  const sync = getQuickAnswer(task, userId, workDir, sessionExists);
+  if (sync !== null) {
+    if (sync && typeof sync === 'object' && sync.__connectLink) {
+      try {
+        const link = await generateConnectLink(userId, sync.service);
+        return `Данные для входа — по ссылке:\n${link}\n\n${sync.hint}${TRUST_FOOTER}`;
+      } catch (e) {
+        console.error('[quick-answer] generateConnectLink failed:', e.message);
+        return sync.hint;
+      }
+    }
+    return sync;
+  }
 
   // Vacancy generation — triggered when collecting mode is done ("всё" set status → "generating")
   if (workDir && openrouterKey) {
