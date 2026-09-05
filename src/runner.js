@@ -892,7 +892,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // forceClaude (user tapped "вдумчивее") gets a wider context window so long data like
   // requisites or HH descriptions aren't truncated in the session history.
+  // 8 messages = 4 user turns + 4 replies — enough to cover typical "think harder" scenarios.
   const ctxLimit = forceClaude ? 1500 : 500;
+  const ctxMsgCount = forceClaude ? 8 : 6;
 
   if (sessionId) {
     // Explicit session ID from bot — always honor it, create if needed
@@ -900,7 +902,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     const existing = sessions.getSession(user.workDir, sessionId);
     if (existing) {
       sessionExists = true;
-      const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit);
+      const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
       if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
   } else {
@@ -909,13 +911,13 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
       sessionExists = true;
-      const fromSession = sessions.buildContext(user.workDir, currentId, ctxLimit);
+      const fromSession = sessions.buildContext(user.workDir, currentId, ctxLimit, ctxMsgCount);
       if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
   }
 
   if (contextFromSession && !sessionExists) {
-    const sourceCtx = sessions.buildContext(user.workDir, contextFromSession, ctxLimit);
+    const sourceCtx = sessions.buildContext(user.workDir, contextFromSession, ctxLimit, ctxMsgCount);
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
