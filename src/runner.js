@@ -1136,6 +1136,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       ...(user.username ? { AGENT_USER_HANDLE: user.username }   : {}),
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
       AGENT_TASK_ID: taskId,
+      CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
     },
   });
 
