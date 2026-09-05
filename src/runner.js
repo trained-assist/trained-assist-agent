@@ -504,6 +504,45 @@ function getQuickAnswer(task, userId, workDir) {
   return null;
 }
 
+// Classify whether user wants to publish/generate the vacancy landing page.
+// Only called when regex misses AND a vacancy draft exists. Fast DeepSeek call.
+async function classifyVacancyPublishIntent(task, workDir, anthropicKey) {
+  const orKey = process.env.OPENROUTER_API_KEY;
+  if (!orKey) return false;
+  const vs = readVacancyState(workDir);
+  if (!vs?.draft) return false; // no draft — nothing to publish
+
+  try {
+    const body = JSON.stringify({
+      model: 'deepseek/deepseek-v4-flash-0731',
+      messages: [
+        {
+          role: 'system',
+          content: 'You classify recruiter bot messages. Answer with a single word: YES or NO.',
+        },
+        {
+          role: 'user',
+          content: `Does this message ask to publish, generate, create, or rebuild the vacancy landing page (страница вакансии / лендинг)?\n\nMessage: "${task}"\n\nYES or NO:`,
+        },
+      ],
+      max_tokens: 5,
+      temperature: 0,
+    });
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await res.json();
+    const answer = data.choices?.[0]?.message?.content?.trim().toUpperCase() || '';
+    return answer.startsWith('YES');
+  } catch (e) {
+    console.warn('[classifyVacancyPublishIntent] error:', e.message);
+    return false;
+  }
+}
+
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
 async function runQuickAnswer(task, userId, workDir, apiKey = null) {
   const sync = getQuickAnswer(task, userId, workDir);
@@ -522,32 +561,37 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
     }
   }
 
-  // Publish vacancy landing page — triggered when draft is ready and user says "публикуй страницу"
-  if (workDir && userId && VACANCY_PUBLISH_PAGE_INTENT.test(task)) {
-    const vs = readVacancyState(workDir);
-    if (vs?.draft) {
-      const r = await publishVacancyPage(workDir, vs.draft, vs.vacancy_id, userId).then(url => {
-        const missing = getMissingFields(vs.draft);
-        const missingNote = missing.length
-          ? `\n\n📋 Уточни, чтобы дополнить страницу:\n${missing.join('\n')}`
-          : '';
-        return [
-          '🌐 Страница вакансии опубликована!',
-          '',
-          url,
-          missingNote,
-          '',
-          'Когда рекрутер даст правки — скажи что изменить, пересоздам страницу.',
-          'Готово публиковать на HH? Скажи «опубликуй черновик на HH».',
-        ].join('\n');
-      }).catch(e => {
-        console.error('[vacancy] publish page error:', e.message);
-        return `⚠️ Ошибка при публикации страницы: ${e.message}`;
-      });
-      if (r) return r;
-    }
-    if (!vs?.draft) {
-      return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
+  // Publish vacancy landing page — regex fast-path OR Haiku fallback when draft exists
+  if (workDir && userId) {
+    const wantsPage = VACANCY_PUBLISH_PAGE_INTENT.test(task)
+      || await classifyVacancyPublishIntent(task, workDir, apiKey);
+
+    if (wantsPage) {
+      const vs = readVacancyState(workDir);
+      if (vs?.draft) {
+        const r = await publishVacancyPage(workDir, vs.draft, vs.vacancy_id, userId).then(url => {
+          const missing = getMissingFields(vs.draft);
+          const missingNote = missing.length
+            ? `\n\n📋 Уточни, чтобы дополнить страницу:\n${missing.join('\n')}`
+            : '';
+          return [
+            '🌐 Страница вакансии опубликована!',
+            '',
+            url,
+            missingNote,
+            '',
+            'Когда рекрутер даст правки — скажи что изменить, пересоздам страницу.',
+            'Готово публиковать на HH? Скажи «опубликуй черновик на HH».',
+          ].join('\n');
+        }).catch(e => {
+          console.error('[vacancy] publish page error:', e.message);
+          return `⚠️ Ошибка при публикации страницы: ${e.message}`;
+        });
+        if (r) return r;
+      }
+      if (!readVacancyState(workDir)?.draft) {
+        return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
+      }
     }
   }
 
