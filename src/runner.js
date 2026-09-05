@@ -1235,18 +1235,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         else await tgSend(BOT_TOKEN, chatId, tgMsg);
 
         const continuationTask = `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 15-минутный таймаут. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
-        setImmediate(() => runTask({
+        runTask({
           taskId: `${user.username}-${Date.now()}`,
           user,
           task: continuationTask,
           context: '',
           sessionId: activeSessionId,
           forceClaude: true,
-          initialMsgId: null,
+          initialMsgId: msgId,
           pinnedMsgId,
           secrets,
           continuationCount: nextCount,
-        }));
+        });
       } else {
         const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
