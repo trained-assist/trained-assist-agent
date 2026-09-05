@@ -22,8 +22,9 @@ const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancySt
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
-const CLAUDE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min hard limit — batch INN enrichment takes 10-15 min for 300 companies
-const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times (2.5 h total)
+const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
+const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
+const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
 
 // ── Pending-task journal — survives process restart ──────────────────────────
 const PENDING_DIR = path.join(
@@ -1091,7 +1092,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     'При старте новой задачи вызови agent_knowledge_summary() чтобы вспомнить контекст.',
     'При получении новой важной инфы (контакт, ключ, решение) — сразу вызови agent_store_artifact().',
   ].join('\n');
-  let baseContext = [notesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
+  const timeoutSection = `[Системное ограничение: у тебя 40 минут на задачу. На 38-й минуте ты получишь SIGTERM — это сигнал «заверши текущий шаг и выведи итоги». При длинных задачах сохраняй промежуточные результаты в файлы, чтобы можно было продолжить позже.]`;
+  let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
@@ -1232,16 +1234,29 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {
+      // 38 min: graceful SIGTERM + warn user. Claude Code handles SIGTERM by finishing current step and exiting.
+      const warnTimer = setTimeout(() => {
+        console.log(`[${taskId}] timeout warning — sending SIGTERM, 2 min left`);
+        try { proc.kill('SIGTERM'); } catch {}
+        const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
+        tgSend(BOT_TOKEN, chatId,
+          `⚠️ Клод работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
+          `Получил сигнал завершить текущий шаг и вывести итоги.`
+        ).catch(() => {});
+      }, WARN_TIMEOUT_MS);
+
+      // 40 min: hard kill (SIGTERM already sent at 38 min, SIGKILL now)
       sessionState.killFn = () => {
         timedOut = true;
-        proc.kill('SIGTERM');
-        setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) { console.warn('[runner] SIGKILL:', e.message); } }, 5000);
+        clearTimeout(warnTimer);
+        try { proc.kill('SIGKILL'); } catch (e) { console.warn('[runner] SIGKILL:', e.message); }
         reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
       };
       sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
 
       proc.on('close', (code) => {
         clearTimeout(sessionState.killTimer);
+        clearTimeout(warnTimer);
         if (code !== 0) {
           console.error(`[${taskId}] claude exited with code ${code}`);
           exitCode = code;
@@ -1250,6 +1265,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       });
       proc.on('error', (err) => {
         clearTimeout(sessionState.killTimer);
+        clearTimeout(warnTimer);
         reject(err);
       });
     });
