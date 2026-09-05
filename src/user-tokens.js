@@ -7,6 +7,86 @@ const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'ag
 const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
 const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
 
+const ZEROCREDS_URL = (process.env.ZEROCREDS_URL || '').replace(/\/$/, '');
+const ZEROCREDS_ADMIN_TOKEN = process.env.ZEROCREDS_ADMIN_TOKEN || '';
+
+// Form schemas for services migrated to ZeroCreds.
+// Services absent from this map (nalog, hh, gdrive) fall back to the legacy /connect/:service path.
+const SERVICE_FORM_SCHEMA = {
+  github: {
+    title: 'Подключить GitHub',
+    description: 'github.com/settings/tokens → Generate new token (classic) → repo, read:org',
+    fields: [
+      { name: 'value', label: 'GitHub Token', type: 'password',
+        placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', required: true },
+    ],
+  },
+  figma: {
+    title: 'Подключить Figma',
+    description: 'Figma → Account Settings → Personal Access Tokens → Create new token',
+    fields: [
+      { name: 'value', label: 'Figma Token', type: 'password', required: true },
+    ],
+  },
+  notion: {
+    title: 'Подключить Notion',
+    description: 'notion.so/my-integrations → New integration → Copy token',
+    fields: [
+      { name: 'value', label: 'Notion Token', type: 'password',
+        placeholder: 'secret_...', required: true },
+    ],
+  },
+  linear: {
+    title: 'Подключить Linear',
+    description: 'Linear → Settings → API → Personal API keys → Create key',
+    fields: [
+      { name: 'value', label: 'Linear API Key', type: 'password', required: true },
+    ],
+  },
+  dadata: {
+    title: 'Подключить DaData',
+    description: 'dadata.ru → Profile → API Keys',
+    fields: [
+      { name: 'value', label: 'DaData API Key', type: 'password', required: true },
+    ],
+  },
+  'tilda-session': {
+    title: 'Подключить Tilda (cookie)',
+    description: 'Откройте tilda.cc в браузере → F12 → Application → Cookies → скопируйте всю строку',
+    fields: [
+      { name: 'value', label: 'Cookie строка', type: 'textarea',
+        placeholder: 'tilda_uid=...; tilda_hash=...', required: true },
+    ],
+  },
+  'tilda-creds': {
+    title: 'Подключить Tilda (логин)',
+    description: 'Введите логин и пароль от вашего аккаунта Tilda.',
+    fields: [
+      { name: 'email',    label: 'Email',   type: 'email',    required: true },
+      { name: 'password', label: 'Пароль',  type: 'password', required: true },
+    ],
+  },
+  weeek: {
+    title: 'Подключить Weeek CRM',
+    description: 'Weeek → Settings → Integrations → API → Generate token. Логин+пароль необязательны — нужны только для добавления комментариев к сделкам.',
+    fields: [
+      { name: 'value',    label: 'API токен',                        type: 'password', placeholder: 'Вставьте API токен', required: true },
+      { name: 'email',    label: 'Email / логин (необязательно)',    type: 'email',    required: false },
+      { name: 'password', label: 'Пароль (необязательно)',           type: 'password', required: false },
+    ],
+  },
+  getcourse: {
+    title: 'Подключить GetCourse',
+    description: 'Данные не попадают в чат — форма отправляет их напрямую на сервер.',
+    fields: [
+      { name: 'domain',   label: 'Домен аккаунта',              type: 'text',     placeholder: 'myschool.getcourse.ru', required: true },
+      { name: 'apiKey',   label: 'API ключ (необязательно)',     type: 'password', required: false },
+      { name: 'login',    label: 'Логин (необязательно)',        type: 'email',    required: false },
+      { name: 'password', label: 'Пароль (необязательно)',       type: 'password', required: false },
+    ],
+  },
+};
+
 const LOG_FILES = new Set(['.secrets_log', 'gdrive-seen', 'gdrive-catalog', 'gdrive-catalog.json', '.chatid']); // internal state files, not credentials
 
 const SERVICE_DISPLAY = {
@@ -26,6 +106,16 @@ const SERVICE_DISPLAY = {
 
 function tokensDir(userId) {
   return path.join(TOKENS_ROOT, String(userId));
+}
+
+// Parses zerocreds JSON format {"value": "..."} with fallback to plain string (legacy).
+function readTokenValue(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed.value ?? raw;
+  } catch {
+    return raw;
+  }
 }
 
 function appendSecretsLog(userId, services) {
@@ -95,12 +185,23 @@ function loadUserTokens(userId, legacyChatId) {
     catch (e) { console.warn('[user-tokens] readFileSync race:', e.message); continue; } // file deleted between readdirSync and readFileSync — skip
     const label = file.toLowerCase();
     accessed.push(label);
-    if (label === 'github') { extra.GH_TOKEN = val; extra.GITHUB_TOKEN = val; }
-    else if (label === 'figma') extra.FIGMA_TOKEN = val;
-    else if (label === 'notion') extra.NOTION_TOKEN = val;
-    else if (label === 'linear') extra.LINEAR_API_KEY = val;
-    else if (label === 'weeek') extra.WEEEK_API_TOKEN = val;
-    else if (label === 'dadata') extra.DADATA_API_TOKEN = val;
+    if (label === 'github') {
+      const tok = readTokenValue(val);
+      extra.GH_TOKEN = tok; extra.GITHUB_TOKEN = tok;
+    }
+    else if (label === 'figma') extra.FIGMA_TOKEN = readTokenValue(val);
+    else if (label === 'notion') extra.NOTION_TOKEN = readTokenValue(val);
+    else if (label === 'linear') extra.LINEAR_API_KEY = readTokenValue(val);
+    else if (label === 'dadata') extra.DADATA_API_TOKEN = readTokenValue(val);
+    else if (label === 'weeek') {
+      // Supports both plain string (legacy) and zerocreds JSON {value, email?, password?}
+      extra.WEEEK_API_TOKEN = readTokenValue(val);
+      try {
+        const parsed = JSON.parse(val);
+        if (parsed.email)    extra.WEEEK_L2_EMAIL    = parsed.email;
+        if (parsed.password) extra.WEEEK_L2_PASSWORD = parsed.password;
+      } catch { /* plain string — no L2 in this file */ }
+    }
     else if (label === 'gdrive') extra.GDRIVE_SA_JSON = val;
     else if (label === 'nalog') {
       try {
@@ -169,7 +270,41 @@ function getSecretsLog(userId) {
   return lines.slice(-20).reverse();
 }
 
-function generateConnectLink(userId, service) {
+async function generateConnectLink(userId, service) {
+  const schema = SERVICE_FORM_SCHEMA[service];
+
+  if (ZEROCREDS_URL && ZEROCREDS_ADMIN_TOKEN && schema) {
+    try {
+      const body = {
+        title: schema.title,
+        description: schema.description,
+        fields: schema.fields,
+        destination: {
+          type: 'local_file',
+          uid: String(userId),
+          filename: service,
+        },
+        ttl_minutes: 30,
+      };
+      const resp = await fetch(`${ZEROCREDS_URL}/api/session/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${ZEROCREDS_ADMIN_TOKEN}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) throw new Error(`zerocreds HTTP ${resp.status}: ${await resp.text()}`);
+      const { url } = await resp.json();
+      console.log('[user-tokens] zerocreds link generated for service=%s uid=%s', service, userId);
+      return url;
+    } catch (e) {
+      console.warn('[user-tokens] zerocreds unavailable (%s), falling back to legacy', e.message);
+    }
+  }
+
+  // Legacy path: local connect-pending token + /connect/:service on this server
   const token = crypto.randomBytes(16).toString('hex');
   fs.mkdirSync(CONNECT_PENDING_DIR, { recursive: true });
   fs.writeFileSync(
@@ -196,5 +331,7 @@ module.exports = {
   revokeService,
   getSecretsLog,
   generateConnectLink,
+  readTokenValue,
   SERVICE_DISPLAY,
+  SERVICE_FORM_SCHEMA,
 };

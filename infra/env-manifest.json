@@ -47,7 +47,8 @@
       { "name": "FAL_KEY",           "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "fal.ai API key for FLUX image generation" },
       { "name": "IDEOGRAM_API_KEY",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Ideogram API key for text-in-image illustration" },
       { "name": "RECRAFT_API_KEY",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Recraft v3 API key for vector-style illustration" },
-      { "name": "OPENROUTER_API_KEY", "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "OpenRouter API key for /classify (Gemini Flash Lite)" }
+      { "name": "OPENROUTER_API_KEY",      "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "OpenRouter API key for /classify (Gemini Flash Lite)" },
+      { "name": "ZEROCREDS_ADMIN_TOKEN",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Shared admin token for zerocreds-server /api/session/create (read by user-tokens.js via process.env)" }
     ]
   },
 
@@ -72,7 +73,8 @@
       { "name": "AGENT_PUBLIC_URL","value": "https://recruiter-assistant.ru" },
       { "name": "HH_PLATFORM_URL",          "value": "https://platform.recruiter-assistant.ru" },
       { "name": "VACANCY_REMOTE_STORE_URL", "value": "https://platform.recruiter-assistant.ru", "description": "RU VM URL — vacancy pages are forwarded here from GCP for storage and serving" },
-      { "name": "VM_NAME",                  "value": "gcp-main" }
+      { "name": "VM_NAME",                  "value": "gcp-main" },
+      { "name": "ZEROCREDS_URL",            "value": "http://localhost:3456", "description": "Local zerocreds-server (runs on same VM, not exposed publicly)" }
     ],
     "ru": [
       { "name": "NODE_ENV",           "value": "production" },
@@ -82,7 +84,8 @@
       { "name": "TELEGRAM_API_URL",   "value": "https://136-65-7-197.sslip.io/tg-proxy" },
       { "name": "ANTHROPIC_BASE_URL", "value": "https://136-65-7-197.sslip.io/anthropic-proxy" },
       { "name": "SECRETS_SOURCE",     "value": "env" },
-      { "name": "VM_NAME",            "value": "ru-vm" }
+      { "name": "VM_NAME",            "value": "ru-vm" },
+      { "name": "ZEROCREDS_URL",      "value": "http://localhost:3456", "description": "Local zerocreds-server (already running on RU VM)" }
     ]
   },
 
