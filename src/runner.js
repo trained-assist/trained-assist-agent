@@ -143,7 +143,7 @@ const QUICK_SETUPS = [
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
-function getQuickAnswer(task, userId, workDir) {
+function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   // Vacancy creation flow — intercept before other intents so collecting mode takes priority
   if (workDir) {
     const vs = readVacancyState(workDir);
@@ -336,7 +336,7 @@ function getQuickAnswer(task, userId, workDir) {
 
   // "можешь читать гугл шит", "умеешь работать с csv/таблицами"
   if (GDRIVE_CAPABILITY_INTENT.test(task)) {
-    if (!userId) return null;
+    if (!userId || sessionExists) return null;
     const gdriveFile3 = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
     const connected = fs.existsSync(gdriveFile3);
     return connected
@@ -396,8 +396,8 @@ function getQuickAnswer(task, userId, workDir) {
       return 'Готово! Скил генерации иллюстраций включён.\n\nТеперь могу рисовать медицинские схемы, анатомические диаграммы и инфографику.\nИспользую DALL-E 3 (основной) и Ideogram (альтернатива, лучше с подписями).\n\nОпиши что нарисовать — и начнём!';
     }
 
-    // ILLUSTRATE_CAPABILITY_INTENT — pure capability question (no draw command)
-    if (ILLUSTRATE_DRAW_COMMAND.test(task)) return null;
+    // ILLUSTRATE_CAPABILITY_INTENT — pure capability question (no draw command); skip in active session
+    if (sessionExists || ILLUSTRATE_DRAW_COMMAND.test(task)) return null;
     if (illustrateEnabled) {
       return 'Да, скил иллюстраций включён.\n\nПросто опиши что нарисовать — голосом или текстом. Например:\n• «нарисуй как работают потовые железы в коже»\n• «схема слоёв эпидермиса в разрезе»\n• «инфографика про уход за кожей»\n\nСтили: медицинская схема, flat design, детальная анатомия, инфографика.\nПосле картинки могу наложить подписи по-русски отдельным инструментом.';
     }
@@ -405,17 +405,17 @@ function getQuickAnswer(task, userId, workDir) {
   }
 
   // Capability question about exhibition participants — check before INN (expo+INN combo questions → expo answer)
-  if (EXPO_CAPABILITY_INTENT.test(task)) {
+  if (EXPO_CAPABILITY_INTENT.test(task) && !sessionExists) {
     return 'Да, умею собирать участников выставок.\n\nДай мне ссылку на сайт выставки — зайду, найду страницу участников и верну список компаний в CSV.\n\nДальше могу обогатить по ИНН: директор, выручка, сайт — скидывай сразу с таким запросом, если нужно.\n\nПришли URL сайта выставки.';
   }
 
   // Capability question about INN enrichment — answer immediately without calling Claude
-  if (INN_CAPABILITY_INTENT.test(task)) {
+  if (INN_CAPABILITY_INTENT.test(task) && !sessionExists) {
     return 'Да, есть скил INN Enrichment.\n\nНаходит для списка компаний (300–1000 шт): ИНН, ОГРН, директора, выручку и прибыль.\n\nИсточники: БФО ФНС (бесплатно), ЕГРЮЛ, DaData, Checko — всё уже настроено, ключи у платформы.\n\nЧасть запросов платные (DaData, Checko), но не переживайте — мы предоставляем пакет ощутимого размера, чтобы получить результат. Если понадобится больше — докупим вместе.\n\nПришли JSON-файл, CSV или ссылку на Google Sheet со списком компаний — и запущу.';
   }
 
   // Capability question about GetCourse
-  if (GC_CAPABILITY_INTENT.test(task)) {
+  if (GC_CAPABILITY_INTENT.test(task) && !sessionExists) {
     return [
       'Вот что умею в GetCourse:\n',
       '📋 Курсы (L2 — через сессию):',
@@ -544,8 +544,8 @@ async function classifyVacancyPublishIntent(task, workDir, anthropicKey) {
 }
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir, apiKey = null) {
-  const sync = getQuickAnswer(task, userId, workDir);
+async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExists = false) {
+  const sync = getQuickAnswer(task, userId, workDir, sessionExists);
   if (sync !== null) return sync;
 
   // Vacancy generation — triggered when collecting mode is done ("всё" set status → "generating")
@@ -889,7 +889,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.ANTHROPIC_API_KEY);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.ANTHROPIC_API_KEY, sessionExists);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
