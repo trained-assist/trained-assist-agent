@@ -33,7 +33,8 @@ jobs:
 
           # Fetch body safely via gh CLI (avoids injection from PR body content).
           BODY=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json body -q '.body // ""')
-          SESSION_ID=$(echo "$BODY" | grep -oP '(?<=<!-- csm-session: )[\w-]+(?= -->)' || true)
+          # Strict hex UUID pattern — avoids matching placeholder words like "UUID" or "SESSION_ID".
+          SESSION_ID=$(echo "$BODY" | grep -oP '(?<=<!-- csm-session: )[0-9a-f]{8}[0-9a-f-]+(?= -->)' || true)
 
           echo "session_id=$SESSION_ID" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER"   >> "$GITHUB_OUTPUT"
@@ -84,15 +85,16 @@ jobs:
             --arg msg     "$CALLBACK_MSG" \
             '{type: $type, sessionId: $sid, message: $msg}')
 
+          # curl -e (bash -e) exits on non-zero curl exit; use || to handle timeout/connect errors.
           HTTP_CODE=$(curl -sS --max-time 10 \
             -o /tmp/relay_response.json \
             -w "%{http_code}" \
             -X POST "https://csm-relay.skillset-apply.workers.dev/node/$RELAY_NODE_ID/enqueue" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
+            -d "$PAYLOAD") || HTTP_CODE="000"
 
-          echo "Relay HTTP $HTTP_CODE — $(cat /tmp/relay_response.json)"
-          [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || {
+          RELAY_BODY=$(cat /tmp/relay_response.json 2>/dev/null || echo "(no response)")
+          echo "Relay HTTP $HTTP_CODE — $RELAY_BODY"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
             echo "::warning::Relay returned $HTTP_CODE — session may not wake up."
-            exit 0  # don't fail CI; this is best-effort notification
-          }
+          fi
