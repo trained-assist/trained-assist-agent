@@ -111,24 +111,6 @@ const SKILLS = [
     description: 'Полный цикл работы с откликами на hh.ru: список вакансий, откликов, LLM-оценка резюме (ATS-скоринг с нокаутами и весами), генерация первого сообщения, отправка, перевод в статусы, bulk-отказ для здоровья аккаунта, профиль кандидата для заказчика.',
     requires: 'hh_set_token — получи access token на hh.ru (Настройки → API) или через OAuth и передай сюда. Для LLM-функций нужен OPENROUTER_API_KEY в env.',
   },
-  {
-    id: 'hh-discovery',
-    name: 'HeadHunter — Discovery (расширенный доступ к API)',
-    description: 'Fallback для операций с HH которые не покрыты основным hh-recruiting скилом: создание вакансий, справочники (города, профроли, валюты), биллинг, произвольные API-запросы. hh_discover показывает доступные endpoints; hh_api_call выполняет любой из них.',
-    requires: 'HH токен (тот же что для hh-recruiting).',
-  },
-  {
-    id: 'getcourse-discovery',
-    name: 'GetCourse — Discovery (расширенный доступ к API)',
-    description: 'Fallback для GC операций не покрытых gc_* скилами: вебинары, воронки/CRM-сделки, платежи, офферы, уведомления, любые L1/L2 запросы. gc_discover показывает доступные endpoints; gc_api_call выполняет любой.',
-    requires: 'GetCourse подключён через gc_connect (L1: API ключ; L2: логин+пароль для сессии).',
-  },
-  {
-    id: 'api-from-website',
-    name: 'API из сайта (DRAFT)',
-    description: 'Если есть логин+пароль к сайту — можно использовать его как API. Сохраняем credentials, делаем HTTP-запросы с Basic/Bearer авторизацией, исследуем доступные endpoints. Фаза 2 (TODO): автодискавери через Playwright — логин в браузере, захват XHR, каталог endpoints.',
-    requires: 'website_credentials_save(url, login, password) — credentials хранятся plain-text (mode 0o600). Только для внутренних/не-критичных сайтов.',
-  },
 ];
 
 module.exports = {
