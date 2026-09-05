@@ -1,0 +1,98 @@
+name: Claude PR Callback
+
+# Wakes up the Claude session that created the PR whenever CI finishes or new commits push.
+# The session ID is embedded in the PR body as: <!-- csm-session: UUID -->
+
+on:
+  workflow_run:
+    # List explicit workflow names to avoid triggering on ourselves (infinite loop).
+    workflows: ["CI + Deploy", "Smoke Test"]
+    types: [completed]
+  pull_request:
+    types: [synchronize]
+
+jobs:
+  notify-claude:
+    runs-on: ubuntu-latest
+    # Skip runs that have no PR context (direct pushes handled by workflow_run on merge).
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0] != null)
+    permissions:
+      pull-requests: read
+
+    steps:
+      - name: Extract session ID from PR body
+        id: session
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+          else
+            PR_NUMBER="${{ github.event.workflow_run.pull_requests[0].number }}"
+          fi
+
+          # Fetch body safely via gh CLI (avoids injection from PR body content).
+          BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body // ""')
+          SESSION_ID=$(echo "$BODY" | grep -oP '(?<=<!-- csm-session: )[\w-]+(?= -->)' || true)
+
+          echo "session_id=$SESSION_ID" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER"   >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Skip if no session ID
+        if: steps.session.outputs.session_id == '' || steps.session.outputs.session_id == 'SESSION_ID'
+        run: |
+          echo "No valid csm-session comment in PR body — skipping callback."
+
+      - name: Build callback message
+        id: message
+        if: steps.session.outputs.session_id != '' && steps.session.outputs.session_id != 'SESSION_ID'
+        run: |
+          PR_NUMBER="${{ steps.session.outputs.pr_number }}"
+          RELAY_NODE_ID="${{ vars.RELAY_NODE_ID }}"
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            STATUS="${{ github.event.workflow_run.conclusion }}"
+            WORKFLOW="${{ github.event.workflow_run.name }}"
+            RUN_URL="${{ github.event.workflow_run.html_url }}"
+
+            MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable -q '.mergeable' 2>/dev/null || echo "UNKNOWN")
+
+            MSG="[CI CALLBACK] Workflow: $WORKFLOW | Status: $STATUS | URL: $RUN_URL"
+            if [ "$MERGEABLE" = "CONFLICTING" ]; then
+              MSG="$MSG | ⚠️ MERGE CONFLICT — нужно rebase: git fetch origin && git rebase origin/main && git push --force-with-lease"
+            fi
+          else
+            # pull_request: synchronize — new commits pushed to the branch
+            RUN_URL="${{ github.server_url }}/${{ github.repository }}/pull/$PR_NUMBER"
+            MSG="[CI CALLBACK] Новые коммиты добавлены в PR #$PR_NUMBER. Жди новых результатов CI. URL: $RUN_URL"
+          fi
+
+          echo "CALLBACK_MSG=$MSG" >> "$GITHUB_ENV"
+          echo "RELAY_NODE_ID=$RELAY_NODE_ID" >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Send callback to Claude session via relay
+        if: steps.session.outputs.session_id != '' && steps.session.outputs.session_id != 'SESSION_ID' && env.CALLBACK_MSG != ''
+        run: |
+          SESSION_ID="${{ steps.session.outputs.session_id }}"
+          PAYLOAD=$(jq -n \
+            --arg type    "resume" \
+            --arg sid     "$SESSION_ID" \
+            --arg msg     "$CALLBACK_MSG" \
+            '{type: $type, sessionId: $sid, message: $msg}')
+
+          HTTP_CODE=$(curl -sS --max-time 10 \
+            -o /tmp/relay_response.json \
+            -w "%{http_code}" \
+            -X POST "https://csm-relay.skillset-apply.workers.dev/node/$RELAY_NODE_ID/enqueue" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "Relay HTTP $HTTP_CODE — $(cat /tmp/relay_response.json)"
+          [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || {
+            echo "::warning::Relay returned $HTTP_CODE — session may not wake up."
+            exit 0  # don't fail CI; this is best-effort notification
+          }

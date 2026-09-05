@@ -765,3 +765,82 @@ gh pr merge --squash --delete-branch  # after CI is green
 CI runs on every PR (`npm ci` → syntax check → unit tests). Deploy to GCP + RU VMs only fires on merge to `main`.
 
 GitHub branch protection is not available on this private repo (free plan) — enforce this rule manually.
+
+---
+
+## PR Session Lifecycle — обязательные правила для Claude
+
+Когда Claude создаёт PR — CI может упасть, появиться merge conflict, или PR зависнет без внимания. Чтобы этого не происходило, каждый PR должен включать session ID, чтобы сессия могла получать callback-ы и самостоятельно реагировать.
+
+### Шаг 1. Получи свой session ID
+
+```bash
+MY_SESSION=$(curl -s "http://localhost:3000/api/sessions/my-id?path=$(pwd)" | jq -r '.sessionId // empty')
+echo "Session: $MY_SESSION"
+```
+
+### Шаг 2. Создай PR с session ID в теле
+
+Используй `gh pr create` с телом из шаблона (`.github/PULL_REQUEST_TEMPLATE.md`), вставив session ID:
+
+```bash
+gh pr create --title "feat: ..." --body "$(cat <<EOF
+## Описание
+
+Краткое описание изменения.
+
+## Тип изменения
+
+- [x] feat
+
+<!-- csm-session: $MY_SESSION -->
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+```
+
+> CI автоматически проверит наличие `<!-- csm-session: UUID -->` в теле. Без него — job упадёт с инструкцией.
+
+### Шаг 3. Поставь self-alarm (страховка)
+
+Если callback не придёт (relay недоступен, или PR создан без триггера) — сессия всё равно проснётся:
+
+```bash
+curl -s -X POST "http://localhost:3000/api/sessions/$MY_SESSION/alarm" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Проверь PR: CI статус, конфликты, review", "check_after_ms": 1800000}'
+```
+
+### При получении `[CI CALLBACK]`
+
+Callback приходит в формате:
+
+```
+[CI CALLBACK] Workflow: CI + Deploy | Status: failure | URL: https://github.com/...
+```
+
+| Status | Что делать |
+|--------|-----------|
+| `success` | Убедись что PR готов к мержу. Отмени alarm если ставил. |
+| `failure` | Прочитай логи по URL. Исправь ошибки, запушь, жди следующий callback. |
+| `cancelled` | Не критично — CI перезапустится. Ничего делать не нужно. |
+| `⚠️ MERGE CONFLICT` | `git fetch origin && git rebase origin/main && git push --force-with-lease` |
+| `new_commits` | Новые коммиты в ветке — жди новых результатов CI. |
+
+### Если CI падает 3+ раз с одной ошибкой
+
+Не продолжай цикл бесконечно. Напиши комментарий в PR и попроси human review:
+
+```bash
+gh pr comment $PR_NUMBER --body "🚨 CI падает 3 раза подряд с ошибкой: <описание>. Нужен human review."
+```
+
+### Где жаловаться на проблемы
+
+| Проблема | Куда |
+|----------|------|
+| Relay не отвечает | `curl https://csm-relay.skillset-apply.workers.dev/health` — если 5xx, это инфра. Поставь alarm как страховку. |
+| Session Manager не найден | `curl -s "http://localhost:3000/api/sessions/my-id?path=$(pwd)"` — если 404, сессия не зарегистрирована |
+| PR завис без CI | Проверь Actions вкладку в GitHub — возможно CI не запустился из-за draft PR или syntax error в workflow |
+| Merge conflict после push | `git fetch origin main && git rebase origin/main` — всегда rebase, не merge |
