@@ -596,7 +596,9 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
           ].join('\n');
         }).catch(e => {
           console.error('[vacancy] publish page error (→ Claude):', e.message);
-          return null; // API error — let Claude handle it
+          const vsE = readVacancyState(workDir);
+          if (vsE) writeVacancyState(workDir, { ...vsE, api_error: e.message });
+          return null; // let Claude see the error in its context and handle it
         });
         if (r) return r;
       }
@@ -623,8 +625,10 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
           'Проверь черновик на hh.ru и опубликуй когда будешь готов.',
         ].filter(Boolean).join('\n');
       }).catch(e => {
-        console.error('[vacancy] HH publish error:', e.message);
-        return null; // API error — let Claude handle it
+        console.error('[vacancy] HH publish error (→ Claude):', e.message);
+        const vsE = readVacancyState(workDir);
+        if (vsE) writeVacancyState(workDir, { ...vsE, api_error: e.message });
+        return null; // let Claude see the error in its context and handle it
       });
       if (rp) return rp;
     }
@@ -661,8 +665,10 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
         'Проверь черновик на hh.ru и опубликуй когда будешь готов.',
       ].filter(Boolean).join('\n');
     }).catch(e => {
-      console.error('[vacancy] HH publish error:', e.message);
-      return `⚠️ Ошибка при публикации на HH: ${e.message}`;
+      console.error('[vacancy] HH publish error (→ Claude):', e.message);
+      const vsE = readVacancyState(workDir);
+      if (vsE) writeVacancyState(workDir, { ...vsE, api_error: e.message });
+      return null; // let Claude see the error in its context and handle it
     });
     if (r2) return r2;
   }
@@ -1011,13 +1017,30 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     ? `[AGENT NOTES — твои собственные заметки о логике/решениях для этого юзера]\n${agentNotes}`
     : '';
 
+  // If a quick-answer API call just failed, inject the error so Claude knows what happened.
+  // The error is written to vacancy state before returning null; read it once here and clear it.
+  let vacancyApiErrorSection = '';
+  if (user.workDir) {
+    const vsErr = readVacancyState(user.workDir);
+    if (vsErr?.api_error) {
+      const draftPath = path.join(user.workDir, 'contexts', 'hh', 'vacancy_draft.json');
+      vacancyApiErrorSection = [
+        '[⚠️ ОШИБКА HH API — предыдущая быстрая попытка упала]',
+        `Ошибка: ${vsErr.api_error}`,
+        `Черновик вакансии: ${draftPath}`,
+        'Прочитай черновик, исправь причину ошибки и опубликуй через HH API самостоятельно.',
+      ].join('\n');
+      writeVacancyState(user.workDir, { ...vsErr, api_error: null });
+    }
+  }
+
   // Skills are now available via trained-skills MCP (tools/list → list_skills).
   // No prompt injection needed — Claude discovers and calls tools directly.
   //
   // Context ordering: notes → requirements log → session history → current user message.
   // "Пользователь:" prefix on the current task is critical when session context is
   // present — without it Claude reads the last session message as the current request.
-  let baseContext = [notesSection, reqLogSection].filter(Boolean).join('\n\n');
+  let baseContext = [notesSection, reqLogSection, vacancyApiErrorSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
