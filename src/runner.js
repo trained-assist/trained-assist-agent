@@ -595,8 +595,8 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
             'Готово публиковать на HH? Скажи «опубликуй черновик на HH».',
           ].join('\n');
         }).catch(e => {
-          console.error('[vacancy] publish page error:', e.message);
-          return `⚠️ Ошибка при публикации страницы: ${e.message}`;
+          console.error('[vacancy] publish page error (→ Claude):', e.message);
+          return null; // API error — let Claude handle it
         });
         if (r) return r;
       }
@@ -624,7 +624,7 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
         ].filter(Boolean).join('\n');
       }).catch(e => {
         console.error('[vacancy] HH publish error:', e.message);
-        return `⚠️ Ошибка при публикации на HH: ${e.message}`;
+        return null; // API error — let Claude handle it
       });
       if (rp) return rp;
     }

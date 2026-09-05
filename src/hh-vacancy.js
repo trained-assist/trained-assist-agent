@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { readHhToken, hhPost } = require('./hh-utils');
+const { readHhToken, hhFetch, hhPost } = require('./hh-utils');
 
 const STATE_SKILL = 'hh';
 const STATE_KEY = 'vacancy_draft';
@@ -73,6 +73,7 @@ const VACANCY_PROMPT = `Ты HR-эксперт. Получи материалы 
 - hiring_stages: массив этапов отбора (строки, например ["Скрининг резюме", "Техническое интервью", "Финальное интервью", "Оффер"]) или null если не упомянуто в материалах
 - response_letter_required: нужно ли сопроводительное письмо? (true/false)
 - contacts: { email, phone, telegram } — если упомянуты в материалах
+- professional_role_name: профессиональная роль для HeadHunter (строка — выбери наиболее подходящее: "Менеджер по продажам", "Менеджер по работе с клиентами", "Финансовый консультант", "Разработчик", "Аналитик", "HR-менеджер", "Маркетолог", "Дизайнер", "Руководитель проекта", "Бухгалтер", "Юрист", "Менеджер")
 
 Верни ТОЛЬКО валидный JSON без markdown-оберток и без пояснений.`;
 
@@ -511,6 +512,26 @@ function resolveAreaId(areaName) {
   return HH_AREA_MAP[key] || null;
 }
 
+// Fetch professional role ID from HH API by name. Falls back to generic "Менеджер" (id 25).
+async function resolveProfessionalRoleId(roleName, token) {
+  try {
+    const data = await hhFetch('/professional_roles', token);
+    const categories = data?.categories || [];
+    const allRoles = categories.flatMap(c => c.roles || []);
+    if (!roleName) return '25';
+    const norm = roleName.toLowerCase().trim();
+    const exact = allRoles.find(r => r.name.toLowerCase() === norm);
+    if (exact) return String(exact.id);
+    const starts = allRoles.find(r => r.name.toLowerCase().startsWith(norm) || norm.startsWith(r.name.toLowerCase()));
+    if (starts) return String(starts.id);
+    const contains = allRoles.find(r => r.name.toLowerCase().includes(norm) || norm.includes(r.name.toLowerCase()));
+    if (contains) return String(contains.id);
+  } catch (e) {
+    console.warn('[vacancy] professional_roles lookup failed:', e.message);
+  }
+  return '25'; // fallback: Менеджер
+}
+
 // ── Publish vacancy as draft to HH ────────────────────────────────────────────
 
 async function publishToHH(workDir, userId) {
@@ -524,6 +545,7 @@ async function publishToHH(workDir, userId) {
   if (state.hh_vacancy_id) throw new Error(`Черновик уже опубликован на HH (id: ${state.hh_vacancy_id}). Открой его на hh.ru для редактирования.`);
 
   const areaId = resolveAreaId(draft.area_name);
+  const professionalRoleId = await resolveProfessionalRoleId(draft.professional_role_name, token);
 
   const payload = {
     name: draft.name,
@@ -536,6 +558,7 @@ async function publishToHH(workDir, userId) {
     schedule: { id: draft.schedule || 'fullDay' },
     response_letter_required: !!draft.response_letter_required,
     accept_temporary: false,
+    professional_roles: [{ id: professionalRoleId }],
   };
 
   if (draft.salary_from || draft.salary_to) {
