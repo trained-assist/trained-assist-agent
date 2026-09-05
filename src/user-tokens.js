@@ -7,7 +7,7 @@ const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'ag
 const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
 const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
 
-const ZEROCREDS_URL = (process.env.ZEROCREDS_URL || '').replace(/\/$/, '');
+const ZEROCREDS_URL = (process.env.ZEROCREDS_URL || 'https://zerocreds.ru').replace(/\/$/, '');
 const ZEROCREDS_ADMIN_TOKEN = process.env.ZEROCREDS_ADMIN_TOKEN || '';
 
 // Form schemas for services migrated to ZeroCreds.
