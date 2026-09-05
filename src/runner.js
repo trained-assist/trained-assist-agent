@@ -88,7 +88,7 @@ const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|созд
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
-const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|создай.{0,20}страниц.{0,20}вакансии|опубликуй.{0,20}лендинг|создай.{0,20}лендинг|страниц.{0,20}готов/i;
+const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|опубликуй.{0,20}(?:страниц|лендинг)|создай.{0,20}(?:страниц.{0,20}вакансии|лендинг)|сгенерир.{0,20}страниц|сделай.{0,20}страниц.{0,20}вакансии|страниц.{0,30}(?:вакансии.{0,30})?(?:сгенерир|создай|опубликуй|сделай)|страниц.{0,20}готов/i;
 const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const CONTEXT_OFF_INTENT    = /^\/context_off$|выключи.{0,15}контекст|скрой.{0,15}контекст|отключи.{0,15}(?:статус|контекст|карточк)/i;
@@ -525,7 +525,7 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
   // Publish vacancy landing page — triggered when draft is ready and user says "публикуй страницу"
   if (workDir && userId && VACANCY_PUBLISH_PAGE_INTENT.test(task)) {
     const vs = readVacancyState(workDir);
-    if (vs?.status === 'draft_ready' && vs.draft) {
+    if (vs?.draft) {
       const r = await publishVacancyPage(workDir, vs.draft, vs.vacancy_id, userId).then(url => {
         const missing = getMissingFields(vs.draft);
         const missingNote = missing.length
