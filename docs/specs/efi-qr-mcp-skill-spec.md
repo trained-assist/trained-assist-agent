@@ -1,127 +1,24 @@
 # EFI QR — MCP Skill Spec
 
-**Статус:** планируется  
+**Статус:** в работе  
 **Репо MCP:** `trained-assist-agent` → `src/mcp-skills/tools/35-efi-qr.js`  
-**Репо сервиса:** `efi-qr-redirect` → `qr.efimova.school`
+**Репо сервиса:** `efi-qr-redirect` → `qr.efimova.school`  
+**Область:** один пользователь (Москва), одни реквизиты
 
 ---
 
-## Что делает скилл
+## Сценарий использования
 
-Telegram-бот получает сообщение вида:
+Бот получает сообщение:
 
-> "Сделай счёт на 45 000 р. — консультация, для Маши из Москвы"
+> "Сделай счёт на 45 000 р. — консультация"
 
 Агент:
-1. Проверяет активного мерчанта (из context store — `efi-qr/active_merchant.json`)
+1. Читает сохранённый профиль продавца из context store (`efi-qr/profile.json`)
 2. Вызывает `efi_quick_invoice_qr({ amount: 45000, product_name: "Консультация" })`
-3. MCP-инструмент делает `POST /api/preset` с банковскими реквизитами мерчанта
-4. Отвечает ссылкой `qr.efimova.school/p/abc123`
-5. Покупатель сканирует → вводит свой ИНН → скачивает PDF-инвойс
-
----
-
-## Что нужно добавить в efi-qr-redirect
-
-### 1. Коллекция `merchants` в Firestore
-
-```json
-{
-  "id": "msk-main",
-  "name": "Москва — основной",
-  "city": "Москва",
-  "sellerName": "ИП Иванова И.И.",
-  "sellerInn": "771234567890",
-  "sellerKpp": "",
-  "sellerType": "ИП",
-  "sellerAddress": "г. Москва, ул. Примерная, д. 1",
-  "sellerBank": "Сбербанк России",
-  "sellerBik": "044525225",
-  "sellerAccount": "40802810xxxxxxxxxxxxxxx",
-  "sellerKorAccount": "30101810400000000225",
-  "archived": false,
-  "createdAt": "<Timestamp>",
-  "updatedAt": "<Timestamp>"
-}
-```
-
-### 2. Поле `merchantId` на существующих документах
-
-Добавить `merchantId: string` в:
-- `preset_qr` — инвойсные QR
-- `contact_qr` — формы контакта
-- `contact_submissions` — отправленные контакты (для фильтрации по мерчанту)
-
-При создании через MCP `merchantId` всегда передаётся. Старые записи без `merchantId` — глобальные.
-
-### 3. Новые API-эндпоинты
-
-#### `GET /api/merchants`
-Список всех активных мерчантов.
-
-```json
-[
-  { "id": "doc-id", "name": "Москва", "city": "Москва", "sellerName": "ИП Иванова", ... }
-]
-```
-
-Auth: Bearer token (тот же `AUTH_TOKEN`).
-
-#### `POST /api/merchants`
-Создать/обновить профиль мерчанта. Тело: все поля из схемы выше.
-Возвращает: `{ id, name, city, ... }`.
-
-#### `PATCH /api/merchants/:id`
-Обновить поля мерчанта. Те же allowed-поля что в POST.
-
-#### `GET /api/merchants/:id`
-Получить профиль одного мерчанта по Firestore ID.
-
-#### `GET /api/preset?merchantId=<id>` (расширение существующего)
-Добавить фильтр `merchantId` к `where('archived','==',false)`.
-
-#### `GET /api/contact?merchantId=<id>` (расширение существующего)
-Аналогично.
-
-#### `GET /api/contact_submissions?merchantId=<id>&limit=<n>`
-Новый эндпоинт. Читает из `contact_submissions`, фильтрует по `shortId` форм данного мерчанта.
-
-> **Упрощение:** вместо фильтра по `shortId` форм — добавить `merchantId` прямо в `contact_submissions` при сабмите. Тогда фильтр простой: `where('merchantId','==', id)`.
-
-### 4. Изменение `POST /api/contact` — сохранять `merchantId`
-
-Сейчас: `db.collection('contact_qr').add({ shortId, title, sellerName, ... })`  
-После: добавить `merchantId: body.merchantId || null`
-
-### 5. Изменение `POST /c/:id/submit` — сохранять `merchantId`
-
-При сабмите контакт-формы — подтягивать `merchantId` из родительской contact_qr записи и сохранять в submission.
-
-```js
-// При submit: найти contact_qr по shortId → взять merchantId → записать в submission
-const parentSnap = await db.collection('contact_qr')
-  .where('shortId', '==', sid).limit(1).get();
-const merchantId = parentSnap.docs[0]?.data()?.merchantId || null;
-await db.collection('contact_submissions').add({ ..., merchantId });
-```
-
----
-
-## ENV переменные для MCP
-
-На VM в `secrets.env` добавить:
-
-```
-EFI_QR_URL=https://qr.efimova.school
-EFI_QR_TOKEN=u7lH6Wc1GlA1Pm9hDygmvNb_F1bqgSXH
-```
-
-И в `infra/env-manifest.json`:
-
-```json
-{ "name": "EFI_QR_URL",   "required": false, "description": "EFI QR service base URL" },
-{ "name": "EFI_QR_TOKEN", "required": false, "description": "EFI QR Bearer token (AUTH_TOKEN from Cloud Function)" }
-```
+3. MCP делает `POST /api/preset` с реквизитами продавца
+4. Отвечает ссылкой: `qr.efimova.school/p/abc123`
+5. Покупатель открывает → вводит свой ИНН → скачивает PDF-инвойс
 
 ---
 
@@ -129,31 +26,77 @@ EFI_QR_TOKEN=u7lH6Wc1GlA1Pm9hDygmvNb_F1bqgSXH
 
 | Tool | Описание |
 |------|----------|
-| `efi_status` | Статус соединения и активный мерчант. Всегда доступен. |
-| `efi_list_merchants` | Список мерчантов. Нужен API `GET /api/merchants`. |
-| `efi_set_merchant(id)` | Выбрать активного мерчанта (через `GET /api/merchants/:id`). Запоминается в context store. |
-| `efi_quick_invoice_qr(amount, product_name)` | Создать инвойсный QR с реквизитами мерчанта. `POST /api/preset`. |
-| `efi_quick_contact_qr(title?)` | Создать форму контакта. `POST /api/contact`. |
-| `efi_quick_redirect_qr(name, url)` | Создать редирект QR. `POST /api/qr`. |
-| `efi_list_presets` | Список инвойсных QR мерчанта. `GET /api/preset?merchantId=`. |
-| `efi_list_contact_submissions(limit?)` | Новые контакты с форм мерчанта. `GET /api/contact_submissions?merchantId=`. |
+| `efi_status` | Статус соединения и сохранённый профиль. Всегда доступен. |
+| `efi_set_profile(...)` | Сохранить реквизиты продавца. Один раз. Всегда доступен. |
+| `efi_quick_invoice_qr(amount, product_name)` | Создать инвойсный QR → ссылка покупателю |
+| `efi_quick_contact_qr(title?)` | Создать форму контакта |
+| `efi_quick_redirect_qr(name, url)` | Создать редирект-QR |
+| `efi_list_presets` | Список всех инвойсных QR |
 
 ---
 
-## Порядок реализации
+## Что нужно добавить в efi-qr-redirect
 
-1. **[efi-qr-redirect]** Добавить `/api/merchants` CRUD — без этого `efi_list_merchants` и `efi_set_merchant` не работают
-2. **[efi-qr-redirect]** Добавить `merchantId` в `preset_qr`, `contact_qr`, `contact_submissions`
-3. **[efi-qr-redirect]** Расширить фильтрацию `GET /api/preset` и `GET /api/contact` по `merchantId`
-4. **[efi-qr-redirect]** Добавить `GET /api/contact_submissions?merchantId=`
-5. **[trained-assist-agent]** Добавить `EFI_QR_URL` + `EFI_QR_TOKEN` в env-manifest и secrets на VM
-6. **[trained-assist-agent]** Создать первого мерчанта через API, вызвать `efi_set_merchant` из бота
-7. Smoke test: "Сделай счёт на 3000 р." → бот возвращает ссылку → открываем → проверяем
+Существующих эндпоинтов **достаточно** — `POST /api/preset`, `POST /api/contact`, `POST /api/qr` уже есть.
+
+Нужно только одно:
+
+### `GET /api/contact_submissions` (новый эндпоинт, опционально)
+
+Чтобы агент мог читать кто оставил контакты через форму. Сейчас submissions только в Firestore.
+
+```js
+// GET /api/contact_submissions?limit=20
+if (method === 'GET' && path === '/api/contact_submissions') {
+  if (!checkAuth(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const limit = parseInt(req.query.limit || '20', 10);
+  const snap = await db.collection('contact_submissions')
+    .orderBy('createdAt', 'desc').limit(limit).get();
+  return res.json(snap.docs.map(d => ({
+    id: d.id,
+    name: d.data().name,
+    phone: d.data().phone,
+    telegram: d.data().telegram,
+    whatsapp: d.data().whatsapp,
+    email: d.data().email,
+    instagram: d.data().instagram,
+    createdAt: d.data().createdAt?.toDate?.()?.toISOString?.() ?? '',
+  })));
+}
+```
+
+Это **не блокирует** запуск скилла — без него `efi_quick_invoice_qr` и остальные работают.
 
 ---
 
-## Что пока НЕ нужно
+## ENV переменные на VM
 
-- Отдельная авторизация per-merchant (один shared `AUTH_TOKEN` достаточно — доступ только у агента)
-- UI для управления мерчантами (агент делает всё через MCP)
-- Вебхук о новых контактах (опционально — можно добавить в v2)
+В `secrets.env` на GCP и RU VM:
+
+```
+EFI_QR_URL=https://qr.efimova.school
+EFI_QR_TOKEN=u7lH6Wc1GlA1Pm9hDygmvNb_F1bqgSXH
+```
+
+Добавлены в `infra/env-manifest.json`.
+
+---
+
+## Setup (первый запуск)
+
+```
+efi_status                → покажет "No profile"
+efi_set_profile({
+  sellerName: "ИП Иванова И.И.",
+  sellerInn: "771234567890",
+  sellerType: "ИП",
+  sellerBank: "Сбербанк",
+  sellerBik: "044525225",
+  sellerAccount: "40802810...",
+  sellerKorAccount: "30101810...",
+  sellerAddress: "г. Москва, ...",
+  city: "Москва"
+})
+efi_status                → покажет сохранённый профиль, "Ready"
+efi_quick_invoice_qr({ amount: 3000, product_name: "Тест" })  → ссылка
+```
