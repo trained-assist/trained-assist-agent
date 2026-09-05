@@ -93,29 +93,8 @@ ${sessionDescriptions}
     }
     const data = await res.json();
     answer = data.choices?.[0]?.message?.content?.trim() || 'ambiguous';
-  } else if (anthropicKey) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': anthropicKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 64,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      throw new Error(`Anthropic API ${res.status}: ${errBody.slice(0, 300)}`);
-    }
-    const data = await res.json();
-    answer = data.content?.[0]?.text?.trim() || 'ambiguous';
   } else {
-    throw new Error('No API key configured for classify (OPENROUTER_API_KEY or ANTHROPIC_API_KEY required)');
+    throw new Error('No API key configured for classify (OPENROUTER_API_KEY required)');
   }
 
   if (answer === 'ambiguous') return { sessionId: null, confidence: 'low' };

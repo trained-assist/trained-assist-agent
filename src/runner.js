@@ -523,8 +523,8 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
 
 // Classify whether user wants to publish/generate the vacancy landing page.
 // Only called when regex misses AND a vacancy draft exists. Fast DeepSeek call.
-async function classifyVacancyPublishIntent(task, workDir, anthropicKey) {
-  const orKey = process.env.OPENROUTER_API_KEY;
+async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
+  const orKey = openrouterKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return false;
   const vs = readVacancyState(workDir);
   if (!vs?.draft) return false; // no draft — nothing to publish
@@ -561,15 +561,15 @@ async function classifyVacancyPublishIntent(task, workDir, anthropicKey) {
 }
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExists = false) {
+async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false) {
   const sync = getQuickAnswer(task, userId, workDir, sessionExists);
   if (sync !== null) return sync;
 
   // Vacancy generation — triggered when collecting mode is done ("всё" set status → "generating")
-  if (workDir && apiKey) {
+  if (workDir && openrouterKey) {
     const vs = readVacancyState(workDir);
     if (vs?.status === 'generating' && vs.messages?.length > 0) {
-      const r = await generateVacancyFromMessages(workDir, vs.messages, apiKey).catch(e => {
+      const r = await generateVacancyFromMessages(workDir, vs.messages, openrouterKey).catch(e => {
         console.error('[vacancy] generation error:', e.message);
         writeVacancyState(workDir, { ...vs, status: 'collecting' }); // rollback so user can retry
         return '⚠️ Ошибка при генерации вакансии. Попробуй ещё раз — скажи «всё» когда будешь готов.';
@@ -583,7 +583,7 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
   const hhConnected = hhTokenPath && fs.existsSync(hhTokenPath);
   if (workDir && userId && hhConnected) {
     const wantsPage = VACANCY_PUBLISH_PAGE_INTENT.test(task)
-      || await classifyVacancyPublishIntent(task, workDir, apiKey);
+      || await classifyVacancyPublishIntent(task, workDir, openrouterKey);
 
     if (wantsPage) {
       const vs = readVacancyState(workDir);
@@ -984,7 +984,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.ANTHROPIC_API_KEY, sessionExists);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
