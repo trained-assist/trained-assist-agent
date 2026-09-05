@@ -1969,9 +1969,11 @@ function show(id, type, msg) {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, label, value } = payload;
+      const userId = payload.userId || url.searchParams.get('userId');
+      const label = payload.label || url.searchParams.get('label');
+      const { value } = payload;
       if (!userId || !label || !value) return json(res, 400, { error: 'missing fields' });
-      if (!/^[a-zA-Z0-9_]{1,64}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 
