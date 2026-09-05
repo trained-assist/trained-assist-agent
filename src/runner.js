@@ -23,6 +23,7 @@ const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min hard limit — batch INN enrichment takes 10-15 min for 300 companies
+const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times (2.5 h total)
 
 // ── Pending-task journal — survives process restart ──────────────────────────
 const PENDING_DIR = path.join(
@@ -882,7 +883,7 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   }
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0 }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
@@ -1215,7 +1216,46 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     });
   } catch (err) {
     console.error(`[${taskId}] claude process error:`, err.message);
-    if (timedOut) fullOutput.text += `\n\n⏱ Задача прервана по таймауту (${CLAUDE_TIMEOUT_MS / 60000} мин).`;
+    if (timedOut) {
+      const nextCount = continuationCount + 1;
+      const partialText = fullOutput.text.trim();
+
+      // Save partial progress so the next run sees what was done
+      if (activeSessionId && partialText) {
+        sessions.appendReply(user.workDir, activeSessionId, `[прервано таймаутом]\n${partialText}`);
+        setCurrentSessionId(user.workDir, activeSessionId);
+      }
+
+      if (continuationCount < MAX_CONTINUATIONS) {
+        const statusLine = `⏱ Прервал по 15-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
+        const tgMsg = partialText.length > 20
+          ? `🧠 ${partialText.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
+          : statusLine;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
+        else await tgSend(BOT_TOKEN, chatId, tgMsg);
+
+        const continuationTask = `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 15-минутный таймаут. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
+        setImmediate(() => runTask({
+          taskId: `${user.username}-${Date.now()}`,
+          user,
+          task: continuationTask,
+          context: '',
+          sessionId: activeSessionId,
+          forceClaude: true,
+          initialMsgId: null,
+          pinnedMsgId,
+          secrets,
+          continuationCount: nextCount,
+        }));
+      } else {
+        const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
+        else await tgSend(BOT_TOKEN, chatId, limitMsg);
+      }
+      clearInterval(streamTimer);
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      return;
+    }
   } finally {
     clearInterval(streamTimer);
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
