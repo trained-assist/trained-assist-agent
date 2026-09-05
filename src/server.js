@@ -39,7 +39,9 @@ function trackProjectUsage(workDir, projectName) {
 
 const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 // Matches assistant replies that signal task completion — session should not be reused
-const CLASSIFY_DONE_RE = /готово|сделан|убрал|удалил|завершен|выполнен|done|completed|всё\s+готово|всё\s+сделано/i;
+// Active forms: убрал, удалил, сделал, etc.
+// Passive short forms: убран/убрана/убраны, удалён/удалена, очищен, заполнен, etc.
+const CLASSIFY_DONE_RE = /готово|сделан|убрал|убран|удалил|удалён|завершен|выполнен|очищен|заполнен|исправлен|опубликован|done|completed|всё\s+готово|всё\s+сделано/i;
 
 async function classifyMessage(message, sessions, anthropicKey, openrouterKey) {
   // Filter out sessions that are too old or ended with a completion reply
