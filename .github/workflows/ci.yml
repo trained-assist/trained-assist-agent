@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Check for csm-session comment
         run: |
-          BODY=$(gh pr view "${{ github.event.pull_request.number }}" --json body -q '.body // ""')
+          BODY=$(gh pr view "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --json body -q '.body // ""')
 
           # Only enforce for Claude-authored PRs (body contains Claude Code attribution).
           if ! echo "$BODY" | grep -q "Generated with \[Claude Code\]"; then
