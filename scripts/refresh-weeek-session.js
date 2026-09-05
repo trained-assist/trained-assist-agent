@@ -76,14 +76,18 @@ async function captureViaPlaywright(profiles) {
   let creds = null;
   let credsProfile = null;
   for (const profile of profiles) {
-    const loginFile = path.join(os.homedir(), 'agent-tokens', profile, 'weeek-login');
-    try {
-      const raw = JSON.parse(fs.readFileSync(loginFile, 'utf8'));
-      if (raw.email && raw.password) { creds = raw; credsProfile = profile; break; }
-    } catch { /* no creds for this profile */ }
+    // Check weeek-login first (legacy), then fall back to weeek JSON (zerocreds format)
+    for (const filename of ['weeek-login', 'weeek']) {
+      const file = path.join(os.homedir(), 'agent-tokens', profile, filename);
+      try {
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (raw.email && raw.password) { creds = raw; credsProfile = profile; break; }
+      } catch { /* not found or no creds */ }
+    }
+    if (creds) break;
   }
   if (!creds) {
-    throw new Error(`weeek-login не найден ни в одном профиле (${profiles.join(', ')}) — добавьте логин/пароль через /connect/weeek`);
+    throw new Error(`weeek L2 creds not found for profiles (${profiles.join(', ')}) — добавьте логин/пароль через /connect/weeek`);
   }
   console.log('[refresh-weeek/pw] Using credentials from profile=%s', credsProfile);
 
