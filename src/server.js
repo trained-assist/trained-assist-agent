@@ -132,7 +132,7 @@ function scheduleNalogExpiryChecks(secrets) {
   const CHECK_INTERVAL_MS = 5 * 60 * 1000;
   const NOTIFY_WINDOW_MS  = 10 * 60 * 1000; // notify if expired within last 10 min
 
-  function check() {
+  async function check() {
     if (!fs.existsSync(AGENT_TOKENS_DIR)) return;
     const now = Date.now();
     for (const username of fs.readdirSync(AGENT_TOKENS_DIR)) {
@@ -156,7 +156,7 @@ function scheduleNalogExpiryChecks(secrets) {
       if (!chatId || !/^-?\d+$/.test(chatId)) continue;
 
       let connectUrl;
-      try { connectUrl = generateConnectLink(username, 'nalog'); } catch (e) {
+      try { connectUrl = await generateConnectLink(username, 'nalog'); } catch (e) {
         console.error('[nalog-expiry] generateConnectLink failed:', e.message); continue;
       }
       const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
