@@ -32,7 +32,7 @@ function appendSecretsLog(userId, services) {
   try {
     const line = `${new Date().toISOString()}\t${services.join(',')}\n`;
     fs.appendFileSync(path.join(tokensDir(userId), '.secrets_log'), line, { mode: 0o600 });
-  } catch { /* non-critical */ }
+  } catch (e) { console.warn('[user-tokens] appendSecretsLog:', e.message); }
 }
 
 function loadUserTokens(userId, legacyChatId) {
@@ -51,7 +51,7 @@ function loadUserTokens(userId, legacyChatId) {
       for (const name of fs.readdirSync(TOKENS_ROOT)) {
         if (/^-?\d+$/.test(name) && name !== String(legacyChatId)) candidates.push(name);
       }
-    } catch { /* no tokens root yet */ }
+    } catch (e) { console.warn('[user-tokens] readdir TOKENS_ROOT:', e.message); }
 
     for (const candidate of candidates) {
       const legacyDir = path.join(TOKENS_ROOT, candidate);
@@ -77,7 +77,7 @@ function loadUserTokens(userId, legacyChatId) {
               fs.copyFileSync(src, dst);
             }
           }
-        } catch { /* skip */ }
+        } catch (e) { console.warn('[user-tokens] migrate file:', e.message); }
       }
       console.log(`[user-tokens] migrated tokens from chatId=${candidate} → username=${userId}`);
       break; // stop after first successful migration
@@ -92,7 +92,7 @@ function loadUserTokens(userId, legacyChatId) {
     if (LOG_FILES.has(file)) continue;
     let val;
     try { val = fs.readFileSync(path.join(dir, file), 'utf8').trim(); }
-    catch { continue; } // file deleted between readdirSync and readFileSync — skip
+    catch (e) { console.warn('[user-tokens] readFileSync race:', e.message); continue; } // file deleted between readdirSync and readFileSync — skip
     const label = file.toLowerCase();
     accessed.push(label);
     if (label === 'github') { extra.GH_TOKEN = val; extra.GITHUB_TOKEN = val; }
@@ -125,7 +125,7 @@ function listConnectedServices(userId) {
   return files.map(f => {
     const name = SERVICE_DISPLAY[f.toLowerCase()] || f;
     let mtime = new Date(0);
-    try { mtime = fs.statSync(path.join(dir, f)).mtime; } catch {} // race: file deleted between readdirSync and statSync
+    try { mtime = fs.statSync(path.join(dir, f)).mtime; } catch (e) { console.warn('[user-tokens] statSync race:', e.message); } // race: file deleted between readdirSync and statSync
     return { file: f, name, mtime };
   });
 }
@@ -157,7 +157,7 @@ function revokeService(userId, serviceName) {
     } else {
       fs.unlinkSync(filePath);
     }
-  } catch { return 'not_found'; }
+  } catch (e) { console.warn('[user-tokens] revokeService unlink:', e.message); return 'not_found'; }
   appendSecretsLog(userId, [`revoke:${key}`]);
   return key;
 }
@@ -184,9 +184,9 @@ function generateConnectLink(userId, service) {
       try {
         const d = JSON.parse(fs.readFileSync(path.join(CONNECT_PENDING_DIR, f), 'utf8'));
         if (d.expires < now) fs.unlinkSync(path.join(CONNECT_PENDING_DIR, f));
-      } catch {}
+      } catch (e) { console.warn('[user-tokens] cleanup pending token:', e.message); }
     }
-  } catch {}
+  } catch (e) { console.warn('[user-tokens] cleanup pending dir:', e.message); }
   return `${AGENT_PUBLIC_URL}/connect/${service}?t=${token}`;
 }
 
