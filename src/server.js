@@ -81,7 +81,7 @@ ${sessionDescriptions}
         'Authorization': `Bearer ${openrouterKey}`,
       },
       body: JSON.stringify({
-        model: 'deepseek/deepseek-v4-flash-0731',
+        model: 'openai/gpt-4o-mini',
         max_tokens: 64,
         messages: [{ role: 'user', content: prompt }],
       }),
