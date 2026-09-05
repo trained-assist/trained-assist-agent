@@ -37,9 +37,23 @@ function trackProjectUsage(workDir, projectName) {
   try { fs.writeFileSync(file, JSON.stringify(usage)); } catch {}
 }
 
+const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
+// Matches assistant replies that signal task completion — session should not be reused
+const CLASSIFY_DONE_RE = /готово|сделан|убрал|удалил|завершен|выполнен|done|completed|всё\s+готово|всё\s+сделано/i;
+
 async function classifyMessage(message, sessions, anthropicKey, openrouterKey) {
+  // Filter out sessions that are too old or ended with a completion reply
+  const now = Date.now();
+  const activeSessions = sessions.filter(s => {
+    if (s.lastAt && now - s.lastAt > CLASSIFY_MAX_AGE_MS) return false;
+    if (s.lastMessageRole === 'assistant' && s.lastAssistantSnippet && CLASSIFY_DONE_RE.test(s.lastAssistantSnippet)) return false;
+    return true;
+  });
+
+  if (activeSessions.length === 0) return { sessionId: null, confidence: 'low' };
+
   // Build a compact description of each session
-  const sessionDescriptions = sessions.map((s, i) => {
+  const sessionDescriptions = activeSessions.map((s, i) => {
     const lastMsg = s.lastUserMessage ? `\n   Последнее: "${s.lastUserMessage.slice(0, 100)}"` : '';
     return `${i + 1}. ID: ${s.id}\n   Тема: "${s.topic}"${lastMsg}`;
   }).join('\n\n');
@@ -106,8 +120,8 @@ ${sessionDescriptions}
 
   if (answer === 'ambiguous') return { sessionId: null, confidence: 'low' };
 
-  // Check that the returned ID actually exists in the provided list
-  const match = sessions.find(s => s.id === answer);
+  // Check that the returned ID actually exists in the active (non-filtered) list
+  const match = activeSessions.find(s => s.id === answer);
   if (!match) return { sessionId: null, confidence: 'low' };
 
   return { sessionId: match.id, confidence: 'high' };
