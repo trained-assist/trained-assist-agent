@@ -124,16 +124,16 @@ function getSession(workDir, id) {
 }
 
 /** Build context string from a previous session (for Claude prompt prefix) */
-function buildContext(workDir, sessionId) {
+function buildContext(workDir, sessionId, limit = 500, msgCount = 6) {
   const session = getSession(workDir, sessionId);
   if (!session) return null;
 
   const date = new Date(session.createdAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
   const lines = [`[Продолжение сессии от ${date}]\nТема: "${session.topic}"\n`];
 
-  for (const msg of session.messages.slice(-6)) { // last 6 messages for context
+  for (const msg of session.messages.slice(-msgCount)) {
     const prefix = msg.role === 'user' ? 'Пользователь' : 'Клод';
-    lines.push(`${prefix}: ${msg.content.slice(0, 500)}`);
+    lines.push(`${prefix}: ${msg.content.slice(0, limit)}`);
   }
 
   return lines.join('\n');

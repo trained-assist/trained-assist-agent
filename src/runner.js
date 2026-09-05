@@ -896,13 +896,19 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let sessionContext = context;
   let sessionExists = false; // true when continuing an existing session (not creating)
 
+  // forceClaude (user tapped "вдумчивее") gets a wider context window so long data like
+  // requisites or HH descriptions aren't truncated in the session history.
+  // 8 messages = 4 user turns + 4 replies — enough to cover typical "think harder" scenarios.
+  const ctxLimit = forceClaude ? 1500 : 500;
+  const ctxMsgCount = forceClaude ? 8 : 6;
+
   if (sessionId) {
     // Explicit session ID from bot — always honor it, create if needed
     activeSessionId = sessionId;
     const existing = sessions.getSession(user.workDir, sessionId);
     if (existing) {
       sessionExists = true;
-      const fromSession = sessions.buildContext(user.workDir, sessionId);
+      const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
       if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
   } else {
@@ -911,20 +917,29 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
       sessionExists = true;
-      const fromSession = sessions.buildContext(user.workDir, currentId);
+      const fromSession = sessions.buildContext(user.workDir, currentId, ctxLimit, ctxMsgCount);
       if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
   }
 
   if (contextFromSession && !sessionExists) {
-    const sourceCtx = sessions.buildContext(user.workDir, contextFromSession);
+    const sourceCtx = sessions.buildContext(user.workDir, contextFromSession, ctxLimit, ctxMsgCount);
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
-  // When forceClaude=true (user tapped the expand button), recover task from session if not provided
-  if (forceClaude && !task && activeSessionId && sessionExists) {
+  // When forceClaude=true (user tapped "вдумчивее"), enrich the task with context about
+  // the previous response being unsatisfactory — so Claude knows to give a better answer.
+  if (forceClaude && activeSessionId && sessionExists) {
     const sess = sessions.getSession(user.workDir, activeSessionId);
-    task = sess?.lastUserMessage || task;
+    if (!task) task = sess?.lastUserMessage || '';
+    if (task && sess) {
+      const msgs = sess.messages || [];
+      const lastAssistantMsg = [...msgs].reverse().find(m => m.role === 'assistant');
+      if (lastAssistantMsg) {
+        const prevReply = lastAssistantMsg.content.slice(0, 800);
+        task = `[Пользователь нажал «вдумчивее» — предыдущий ответ его не устроил.\nПредыдущий ответ был: "${prevReply}".\nЗадача: "${task}"]`;
+      }
+    }
   }
 
   // Persist chatId early — needed by OAuth callbacks (e.g. HH, GDrive) that fire
