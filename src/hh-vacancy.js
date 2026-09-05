@@ -559,6 +559,7 @@ async function publishToHH(workDir, userId) {
     response_letter_required: !!draft.response_letter_required,
     accept_temporary: false,
     professional_roles: [{ id: professionalRoleId }],
+    status: 'draft', // CRITICAL: save as draft, do NOT publish
   };
 
   if (draft.salary_from || draft.salary_to) {
