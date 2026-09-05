@@ -970,6 +970,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
   }
 
+  // If vacancy messages were collected but not yet generated, inject them so Claude can generate the vacancy.
+  // vacancy-state.messages live in a separate file, not in session history — Claude wouldn't see them otherwise.
+  if (forceClaude && user.workDir) {
+    try {
+      const vs = readVacancyState(user.workDir);
+      if (vs?.messages?.length > 0 && ['generating', 'collecting'].includes(vs.status)) {
+        const blocks = vs.messages.map((m, i) => `[Блок ${i + 1}]: ${m.slice(0, 500)}`).join('\n\n');
+        task = `[Материалы вакансии, собранные пользователем:\n${blocks}]\n\n${task}`;
+      }
+    } catch { /* vacancy-state.json may not exist */ }
+  }
+
   // Persist chatId early — needed by OAuth callbacks (e.g. HH, GDrive) that fire
   // after a quick-answer early-return and never reach the Claude path below.
   try {
