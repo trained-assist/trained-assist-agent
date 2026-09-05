@@ -27,6 +27,12 @@ jobs:
 
           echo "Claude-authored PR detected — checking for csm-session comment..."
 
+          # Allow explicit opt-out for PRs where Session Manager is unavailable (e.g. local dev).
+          if echo "$BODY" | grep -q "<!-- csm-session-skip -->"; then
+            echo "⚠️  csm-session-skip marker found — skipping check (no callback will fire for this PR)."
+            exit 0
+          fi
+
           if echo "$BODY" | grep -qP '<!-- csm-session: [0-9a-fA-F\-]{8,} -->'; then
             echo "✅ csm-session comment found."
           else
