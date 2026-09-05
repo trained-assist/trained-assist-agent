@@ -81,7 +81,7 @@ ${sessionDescriptions}
         'Authorization': `Bearer ${openrouterKey}`,
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-lite-001',
+        model: 'google/gemini-flash-1.5-8b',
         max_tokens: 64,
         messages: [{ role: 'user', content: prompt }],
       }),
