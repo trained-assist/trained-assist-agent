@@ -5,7 +5,7 @@ const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
-const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks } = require('./runner');
+const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions } = require('./session-store');
@@ -2244,12 +2244,29 @@ function show(id, type, msg) {
   scheduleHhBackgroundScoring();
   resumePendingTasks(secrets).catch(err => console.error('[resume] startup error:', err.message));
 
-  const shutdown = () => {
-    server.close(() => process.exit(0));
+  // Deploys restart this service frequently (every few minutes during an
+  // active PR streak) — without draining, each restart silently kills
+  // whatever Claude Code task is mid-flight for a real user. Give active
+  // tasks real time to finish and deliver their Telegram reply before
+  // exiting; only tasks still running past DRAIN_TIMEOUT_MS fall back to
+  // resumePendingTasks() on the next startup. Keep this comfortably under
+  // systemd's TimeoutStopSec (set to 120s in the unit files) so systemd
+  // doesn't SIGKILL us mid-drain.
+  const DRAIN_TIMEOUT_MS = 90_000;
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    server.close(); // stop accepting new HTTP connections; existing tasks keep running
+    const active = getActiveTaskCount();
+    if (active > 0) {
+      console.log(`[shutdown] draining ${active} active task(s), up to ${DRAIN_TIMEOUT_MS / 1000}s...`);
+      const drained = await waitForIdle(DRAIN_TIMEOUT_MS);
+      console.log(drained ? '[shutdown] all tasks drained' : '[shutdown] drain timeout — remaining tasks will resume on next startup');
+    }
     // Close any open Playwright browsers so Node exits cleanly
     try { require('./nalog-login').closeAll(); } catch {}
-    // Force-exit after 10s if something still hangs
-    setTimeout(() => process.exit(0), 10_000).unref();
+    process.exit(0);
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT',  shutdown);

@@ -653,6 +653,28 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
 const userQueues = new Map();
 
 /**
+ * Resolves once every currently-queued/running task has settled, or after
+ * `timeoutMs`, whichever comes first. Used by the graceful-shutdown handler
+ * so a deploy restart doesn't kill an in-flight Claude Code session — tasks
+ * still running past the timeout fall back to the on-startup resume path
+ * (see server.js resumePendingTasks) instead of being silently dropped.
+ *
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>} true if all tasks drained, false if timed out
+ */
+function waitForIdle(timeoutMs) {
+  const pending = Array.from(userQueues.values());
+  if (pending.length === 0) return Promise.resolve(true);
+  const drained = Promise.allSettled(pending).then(() => true);
+  const timedOut = new Promise(resolve => setTimeout(() => resolve(false), timeoutMs));
+  return Promise.race([drained, timedOut]);
+}
+
+function getActiveTaskCount() {
+  return userQueues.size;
+}
+
+/**
  * Runs `claude --dangerously-skip-permissions` for a task,
  * streams output to Telegram by editing a "thinking" message.
  * Tasks for the same user are serialised — each waits for the previous to finish.
@@ -1232,6 +1254,7 @@ async function tgEdit(token, chatId, messageId, text) {
 
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask,
+  waitForIdle, getActiveTaskCount,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };

@@ -9,6 +9,9 @@ WorkingDirectory=/home/vova/trained-assist-agent
 ExecStart=/usr/bin/node src/server.js
 Restart=always
 RestartSec=5
+# Give server.js's graceful-shutdown drain (up to 90s, see src/server.js) room to
+# finish before systemd SIGKILLs the process on stop/restart (e.g. from deploy.sh).
+TimeoutStopSec=120
 
 Environment=NODE_ENV=production
 Environment=PORT=8080
