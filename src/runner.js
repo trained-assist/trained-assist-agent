@@ -562,7 +562,9 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
   }
 
   // Publish vacancy landing page — regex fast-path OR Haiku fallback when draft exists
-  if (workDir && userId) {
+  const hhTokenPath = userId ? path.join(os.homedir(), 'agent-tokens', String(userId), 'hh') : null;
+  const hhConnected = hhTokenPath && fs.existsSync(hhTokenPath);
+  if (workDir && userId && hhConnected) {
     const wantsPage = VACANCY_PUBLISH_PAGE_INTENT.test(task)
       || await classifyVacancyPublishIntent(task, workDir, apiKey);
 
@@ -596,7 +598,7 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
   }
 
   // Publish vacancy as HH draft
-  if (workDir && userId && VACANCY_HH_PUBLISH_INTENT.test(task)) {
+  if (workDir && userId && hhConnected && VACANCY_HH_PUBLISH_INTENT.test(task)) {
     const vs2 = readVacancyState(workDir);
     if (!vs2?.draft) {
       return '⚠️ Нет готового черновика вакансии. Сначала создай вакансию — скажи «новая вакансия».';
@@ -619,7 +621,7 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
     if (r2) return r2;
   }
 
-  if (userId && workDir) {
+  if (userId && workDir && hhConnected) {
     if (HH_MY_VACANCIES_INTENT.test(task)) {
       const r = await hhMyVacancies(userId, workDir).catch(() => null);
       if (r) return r;
