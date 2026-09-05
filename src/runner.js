@@ -17,7 +17,7 @@ const {
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
 const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, readActiveVacancy } = require('./hh-quick');
-const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH } = require('./hh-vacancy');
+const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('./hh-vacancy');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -527,12 +527,15 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null) {
     const vs = readVacancyState(workDir);
     if (vs?.status === 'draft_ready' && vs.draft) {
       const r = await publishVacancyPage(workDir, vs.draft, vs.vacancy_id, userId).then(url => {
+        const missing = getMissingFields(vs.draft);
+        const missingNote = missing.length
+          ? `\n\n📋 Уточни, чтобы дополнить страницу:\n${missing.join('\n')}`
+          : '';
         return [
           '🌐 Страница вакансии опубликована!',
           '',
           url,
-          '',
-          'Отправь эту ссылку рекрутеру для ревью. Кандидаты смогут откликнуться прямо со страницы.',
+          missingNote,
           '',
           'Когда рекрутер даст правки — скажи что изменить, пересоздам страницу.',
           'Готово публиковать на HH? Скажи «опубликуй черновик на HH».',
