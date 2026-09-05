@@ -713,6 +713,26 @@ async function runQuickAnswer(task, userId, workDir, apiKey = null, sessionExist
 // Prevents concurrent Claude processes for the same user (OOM risk on small VMs).
 const userQueues = new Map();
 
+// Active task timer state — allows Claude to extend its own session via MCP tool.
+// Map<taskId, { killFn, killTimer, extendCount, proc }>
+const activeTimers = new Map();
+
+/**
+ * Extend the timeout for a running task by another CLAUDE_TIMEOUT_MS.
+ * Called from server.js POST /tasks/:taskId/extend-timeout which the
+ * session_extend_timeout MCP tool invokes.
+ */
+function extendTaskTimeout(taskId) {
+  const s = activeTimers.get(taskId);
+  if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
+  if (s.extendCount >= 8) return { ok: false, error: 'max 8 extensions (2h total) reached' };
+  clearTimeout(s.killTimer);
+  s.extendCount++;
+  s.killTimer = setTimeout(s.killFn, CLAUDE_TIMEOUT_MS);
+  console.log(`[${taskId}] timeout extended (${s.extendCount}/8)`);
+  return { ok: true, extendCount: s.extendCount, extensionsLeft: 8 - s.extendCount, newDeadlineMins: 15 };
+}
+
 /**
  * Resolves once every currently-queued/running task has settled, or after
  * `timeoutMs`, whichever comes first. Used by the graceful-shutdown handler
@@ -1113,6 +1133,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       ...(user.name     ? { AGENT_USER_NAME: user.name }         : {}),
       ...(user.username ? { AGENT_USER_HANDLE: user.username }   : {}),
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
+      AGENT_TASK_ID: taskId,
     },
   });
 
@@ -1207,17 +1228,20 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
   let timedOut = false;
+  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc };
+  activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {
-      const killTimer = setTimeout(() => {
+      sessionState.killFn = () => {
         timedOut = true;
         proc.kill('SIGTERM');
         setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) { console.warn('[runner] SIGKILL:', e.message); } }, 5000);
         reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
-      }, CLAUDE_TIMEOUT_MS);
+      };
+      sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
 
       proc.on('close', (code) => {
-        clearTimeout(killTimer);
+        clearTimeout(sessionState.killTimer);
         if (code !== 0) {
           console.error(`[${taskId}] claude exited with code ${code}`);
           exitCode = code;
@@ -1225,7 +1249,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         resolve(code);
       });
       proc.on('error', (err) => {
-        clearTimeout(killTimer);
+        clearTimeout(sessionState.killTimer);
         reject(err);
       });
     });
@@ -1269,9 +1293,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       }
       clearInterval(streamTimer);
       if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      activeTimers.delete(taskId);
       return;
     }
   } finally {
+    activeTimers.delete(taskId);
     clearInterval(streamTimer);
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   }
@@ -1406,7 +1432,7 @@ async function tgEdit(token, chatId, messageId, text, retries = 3) {
 
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask,
-  waitForIdle, getActiveTaskCount,
+  waitForIdle, getActiveTaskCount, extendTaskTimeout,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };

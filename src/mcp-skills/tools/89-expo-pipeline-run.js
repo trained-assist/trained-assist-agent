@@ -69,10 +69,11 @@ For hands-free completion without user interaction, create a cron:
         batch_size:    { type: 'number', description: 'Компаний за батч ИНН (default 20)', default: 20 },
         max_batches:   { type: 'number', description: 'Макс. батчей за один вызов (default 2)', default: 2 },
         production_okved: { type: 'array', items: { type: 'string' }, description: 'ОКВЭД-префиксы производства для t:1/nt:1. Default: ["13.","14."] (текстиль). Для цветов: ["01.","16.","20.","22.","23.","25.","26.","27.","28.","32."]' },
+        auto_cron: { type: 'boolean', description: 'Если true и осталось >5 батчей — автоматически создать крон-задачу на каждые 10 минут для продолжения. По умолчанию false.', default: false },
       },
     },
 
-    handler: async ({ expo_url, event_key, expo_title, catalog_base = '', favicon_emoji = '🌸', batch_size = 20, max_batches = 2, production_okved }, ctx) => {
+    handler: async ({ expo_url, event_key, expo_title, catalog_base = '', favicon_emoji = '🌸', batch_size = 20, max_batches = 2, production_okved, auto_cron = false }, ctx) => {
       const workDir = ctx?.workDir || process.cwd();
       const expoId  = slugify(expo_url);
       const expoDir = path.join(workDir, 'expo-pipeline', expoId);
@@ -165,23 +166,38 @@ For hands-free completion without user interaction, create a cron:
         const batchesLeft = Math.ceil(enrichRemaining / batch_size);
         const offerCron   = batchesLeft > 5;
 
+        let cronResult = null;
+        if (auto_cron && offerCron) {
+          try {
+            const cronTool = require('./04-cron.js').tools.cron_create;
+            const cronPrompt = `expo_pipeline_run для ${expo_url} с event_key=${event_key} и expo_title="${expo_title}" пока next_action != "done". Продолжай обогащение батчами.`;
+            cronResult = await cronTool.handler({ schedule: 'every 10 minutes', prompt: cronPrompt }, ctx);
+            stepLog(`🕐 Крон создан: ${cronResult?.id || 'ok'}`);
+          } catch (e) {
+            stepLog(`⚠️ Не удалось создать крон: ${e.message}`);
+          }
+        }
+
         const msg = [
           `⏳ Обработано ${enrichDone} из ${enrichTotal} компаний`,
           `Осталось: ${enrichRemaining} (≈ ${batchesLeft} батчей по ${batch_size})`,
           lastBuiltPath ? `🏗️ Частичный сайт обновлён: ${lastBuiltPath}` : '',
           '',
-          offerCron
-            ? '💡 Хочешь автодобивание без участия? Напиши "активируй крон для этой выставки" — запущу задачу каждые 10 минут.'
-            : '▶️ Напиши "продолжить" — обработаю следующий батч.',
+          cronResult
+            ? `✅ Крон-задача создана — пайплайн продолжится автоматически каждые 10 минут.`
+            : offerCron
+              ? '💡 Хочешь автодобивание без участия? Напиши "активируй крон для этой выставки" — запущу задачу каждые 10 минут.'
+              : '▶️ Напиши "продолжить" — обработаю следующий батч.',
         ].filter(Boolean).join('\n');
 
         return {
           ok: true,
-          next_action:  'call_again',
+          next_action:  cronResult ? 'cron_scheduled' : 'call_again',
           step:         'inn_enrich_batch',
           progress:     { done: enrichDone, total: enrichTotal, remaining: enrichRemaining, pct: Math.round(enrichDone / enrichTotal * 100) },
           partial_site: lastBuiltPath,
           message:      msg,
+          cron_id:      cronResult?.id || null,
           cron_prompt:  offerCron ? `Продолжай вызывать expo_pipeline_run для ${expo_url} с event_key=${event_key} и expo_title="${expo_title}" пока next_action != "done". Вызывай каждые 10 минут.` : null,
           expo_id:      expoId,
           log,

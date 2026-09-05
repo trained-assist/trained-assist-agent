@@ -1,6 +1,6 @@
 'use strict';
 
-// Scrape company website pages to find INN
+// Scrape company website pages to find INN and logo
 
 const PAGES = ['/', '/contacts/', '/contact/', '/kontakty/', '/rekvizity/',
                 '/requisites/', '/company/contacts/', '/about/contacts/', '/about/'];
@@ -48,6 +48,27 @@ function extractInn(html) {
   return any ? any[1] : null;
 }
 
+function resolveUrl(href, base) {
+  if (!href || href.startsWith('data:')) return null;
+  try { return new URL(href, base).href; } catch { return null; }
+}
+
+function extractLogoUrl(html, baseUrl) {
+  // og:image (content before or after property attr)
+  const ogA = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+  const ogB = html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+  const ogHref = (ogA || ogB)?.[1];
+  if (ogHref) return resolveUrl(ogHref, baseUrl);
+
+  // <link rel="icon"> / rel="shortcut icon"
+  const icA = html.match(/<link[^>]+rel=["'][^"']*icon[^"']*["'][^>]+href=["']([^"']+)["']/i);
+  const icB = html.match(/<link[^>]+href=["']([^"']+)["'][^>]+rel=["'][^"']*icon[^"']*["']/i);
+  const icHref = (icA || icB)?.[1];
+  if (icHref) return resolveUrl(icHref, baseUrl);
+
+  return null;
+}
+
 function normalizeBase(website) {
   if (!website) return null;
   let url = website.trim();
@@ -56,24 +77,32 @@ function normalizeBase(website) {
 }
 
 /**
- * Try to find INN on the company's website by checking common pages.
- * Returns INN string or null.
+ * Try to find INN and logo on the company's website by checking common pages.
+ * Returns { inn: string|null, logo_url: string|null }.
  */
 async function findInnOnSite(website, cache) {
   const base = normalizeBase(website);
-  if (!base) return null;
+  if (!base) return { inn: null, logo_url: null };
+
+  let logo_url = null;
 
   // fetch pages with light parallelism (4 at a time)
   const BATCH = 4;
   for (let i = 0; i < PAGES.length; i += BATCH) {
     const batch = PAGES.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(p => fetchPage(base + p, cache)));
-    for (const html of results) {
+    const htmlPages = await Promise.all(batch.map(p => fetchPage(base + p, cache)));
+
+    // extract logo from homepage (first page, path "/")
+    if (i === 0 && htmlPages[0]) {
+      logo_url = extractLogoUrl(htmlPages[0], base);
+    }
+
+    for (const html of htmlPages) {
       const inn = extractInn(html);
-      if (inn) return inn;
+      if (inn) return { inn, logo_url };
     }
   }
-  return null;
+  return { inn: null, logo_url };
 }
 
 module.exports = { findInnOnSite };

@@ -73,11 +73,13 @@ async function enrich(exhibitors, config = {}, onProgress = null) {
     const variants = queryVariants(company);
     let result = null;
 
-    // Phase 1a: find INN on company website
+    // Phase 1a: find INN and logo on company website
+    let siteLogo = null;
     if (company.website) {
       const t0 = Date.now();
       try {
-        const siteInn = await findInnOnSite(company.website, cache);
+        const { inn: siteInn, logo_url } = await findInnOnSite(company.website, cache);
+        siteLogo = logo_url || null;
         trackCall('site', !!siteInn, Date.now() - t0, { company: company.name });
         if (siteInn) variants.unshift({ query: siteInn, label: 'site_inn' });
       } catch { trackCall('site', false, Date.now() - t0, { company: company.name }); }
@@ -138,6 +140,7 @@ async function enrich(exhibitors, config = {}, onProgress = null) {
     if (result.inn) stats.with_inn++;
     if (result.revenue_mln != null) stats.with_revenue++;
 
+    if (siteLogo && !result.logo_url) result.logo_url = siteLogo;
     enriched[id] = result;
     done++;
     if (onProgress) onProgress({ done, total: russian.length, company, result });
