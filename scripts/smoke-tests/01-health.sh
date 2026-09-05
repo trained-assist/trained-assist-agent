@@ -8,14 +8,24 @@ EXPECTED="${EXPECTED_COMMIT:-}"
 
 check_vm() {
   local name="$1" url="$2"
+  local http_code raw
+  raw=$(curl -s --max-time 10 -w "\n__HTTP_CODE__:%{http_code}" \
+    -H "Authorization: Bearer $AGENT_SECRET" "$url" 2>&1) || true
+  http_code=$(echo "$raw" | grep '__HTTP_CODE__:' | cut -d: -f2)
   local body
-  body=$(curl -sf --max-time 10 -H "Authorization: Bearer $AGENT_SECRET" "$url") \
-    || { echo "❌ $name unreachable: $url"; return 1; }
-  local commit
+  body=$(echo "$raw" | grep -v '__HTTP_CODE__:')
+
+  if [[ "$http_code" != "200" ]]; then
+    echo "❌ $name — HTTP ${http_code:-0} at $url"
+    echo "   Response: $(echo "$body" | head -1)"
+    return 1
+  fi
+
+  local commit vm
   commit=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('commit','?'))" 2>/dev/null || echo "?")
-  local vm
   vm=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('vm','?'))" 2>/dev/null || echo "?")
   echo "✅ $name ($vm) — commit: $commit"
+
   if [[ -n "$EXPECTED" && "$commit" != "$EXPECTED"* ]]; then
     echo "❌ $name commit mismatch: expected $EXPECTED, got $commit"
     return 1
