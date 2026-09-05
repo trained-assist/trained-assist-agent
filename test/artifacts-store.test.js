@@ -11,11 +11,13 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 
-// We need to reset the module so DATA_DIR picks up the updated env var
+// We need to reset the module so DATA_DIR picks up the updated env var.
+// Both 90-artifacts.js and artifacts-store.js must be cleared together.
 function loadModule() {
-  // Clear require cache so DATA_DIR is re-evaluated each test suite setup
-  const modulePath = require.resolve('../src/mcp-skills/tools/90-artifacts.js');
-  delete require.cache[modulePath];
+  const storePath = require.resolve('../src/artifacts-store.js');
+  const toolPath = require.resolve('../src/mcp-skills/tools/90-artifacts.js');
+  delete require.cache[storePath];
+  delete require.cache[toolPath];
   return require('../src/mcp-skills/tools/90-artifacts.js');
 }
 
