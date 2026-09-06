@@ -8,10 +8,10 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const crypto = require('crypto');
+
+const { generateConnectLink: generateConnectLinkZC } = require('../../user-tokens');
 
 const USER_ID = process.env.USER_ID || '';
-const AGENT_PUBLIC_URL = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
 
 // ── Playwright helper ────────────────────────────────────────────────────
 // Shared browser launch + cookie injection to avoid copy-paste across tools.
@@ -179,23 +179,8 @@ function parseCreatedId(result) {
 
 // ── Connect pending token ─────────────────────────────────────────────────
 
-function generateConnectLink(userId) {
-  const token = crypto.randomBytes(16).toString('hex');
-  const dir = path.join(os.homedir(), 'connect-pending');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, `${token}.json`),
-    JSON.stringify({ uid: String(userId), service: 'getcourse', expires: Date.now() + 30 * 60 * 1000 })
-  );
-  // Clean expired tokens
-  try {
-    const now = Date.now();
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith('.json')) continue;
-      try { const d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); if (d.expires < now) fs.unlinkSync(path.join(dir, f)); } catch {}
-    }
-  } catch {}
-  return `${AGENT_PUBLIC_URL}/connect/getcourse?t=${token}`;
+async function generateConnectLink(userId) {
+  return generateConnectLinkZC(String(userId), 'getcourse');
 }
 
 // ── Tools ─────────────────────────────────────────────────────────────────
@@ -231,7 +216,7 @@ module.exports = {
       handler: async (_, ctx) => {
         const userId = ctx?.userId || USER_ID;
         if (!userId) return { error: 'No user ID in context' };
-        const url = generateConnectLink(String(userId));
+        const url = await generateConnectLink(String(userId));
         return {
           url,
           message: `Открой ссылку для подключения GetCourse:\n${url}\n\nФорма имеет 3 секции:\n• Домен аккаунта (обязательно)\n• API ключ — L1 (управление учениками)\n• Логин + Пароль — L2 (создание курсов через браузерную сессию)\n\nЛюбая комбинация полей допустима. Ссылка одноразовая, действует 30 минут.`,
