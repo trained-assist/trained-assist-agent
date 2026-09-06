@@ -35,6 +35,8 @@ jobs:
 
           if echo "$BODY" | grep -qP '<!-- csm-session: [\w\-]{8,} -->'; then
             echo "✅ csm-session comment found."
+          elif echo "$BODY" | grep -qP 'https://claude\.ai/code/session_\w+'; then
+            echo "✅ csm-session found via claude.ai URL."
           else
             echo "❌ Claude-authored PR is missing a valid <!-- csm-session: UUID --> comment."
             echo ""
