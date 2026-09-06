@@ -6,7 +6,7 @@
 //
 // Env vars (читает из ~/secrets.env автоматически через --env-file, или вручную):
 //   HH_WATCH_TOKEN    — HH OAuth access_token (отдельный от recruiting-токена)
-//   ANTHROPIC_API_KEY — для Haiku duplicate-check
+//   OPENAI_API_KEY    — для GPT-4o-mini duplicate-check (или GIGACHAT_TOKEN для GigaChat)
 //   TELEGRAM_BOT_TOKEN + ALERT_CHAT_ID — куда слать алерты
 
 'use strict';
@@ -52,7 +52,8 @@ function getHhToken() {
 const HH_TOKEN = getHhToken();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALERT_CHAT_ID = process.env.ALERT_CHAT_ID || process.env.OPERATOR_CHAT_ID;
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+const GIGACHAT_TOKEN = process.env.GIGACHAT_TOKEN;
 
 // --- HTTP helpers ---
 
@@ -150,35 +151,59 @@ async function fetchEmployerNewVacancies(employerId, sinceDate) {
     }));
 }
 
-// --- LLM duplicate check (Claude Haiku) ---
+// --- LLM duplicate check ---
+// Приоритет: OPENAI_API_KEY → GIGACHAT_TOKEN → текстовая эвристика
 
-async function isDuplicate(oldTitle, newTitle) {
-  if (!ANTHROPIC_KEY) {
-    // Fallback: простая текстовая эвристика
-    const normalize = s => s.toLowerCase().replace(/[^а-яёa-z0-9\s]/gi, '').trim();
-    const a = normalize(oldTitle), b = normalize(newTitle);
-    const wordsA = new Set(a.split(/\s+/));
-    const wordsB = b.split(/\s+/);
-    const overlap = wordsB.filter(w => w.length > 3 && wordsA.has(w)).length;
-    return overlap >= 2;
-  }
+const DEDUP_PROMPT = (oldTitle, newTitle) =>
+  `Один работодатель закрыл вакансию и открыл новую. Это та же самая позиция (повторный найм)?\n\nСтарая: "${oldTitle}"\nНовая: "${newTitle}"\n\nОтветь одним словом: ДА или НЕТ`;
 
+async function isDuplicateOpenAI(oldTitle, newTitle) {
   const body = await httpsPost(
-    'api.anthropic.com',
-    '/v1/messages',
-    { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    'api.openai.com',
+    '/v1/chat/completions',
+    { 'Authorization': `Bearer ${OPENAI_KEY}`, 'content-type': 'application/json' },
     {
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 10,
-      messages: [{
-        role: 'user',
-        content: `Один работодатель закрыл вакансию и открыл новую. Это та же самая позиция (повторный найм)?\n\nСтарая: "${oldTitle}"\nНовая: "${newTitle}"\n\nОтветь одним словом: ДА или НЕТ`,
-      }],
+      model: 'gpt-4o-mini',
+      max_tokens: 5,
+      messages: [{ role: 'user', content: DEDUP_PROMPT(oldTitle, newTitle) }],
     }
   );
-
-  const text = (body.content?.[0]?.text || '').trim().toUpperCase();
+  const text = (body.choices?.[0]?.message?.content || '').trim().toUpperCase();
   return text.startsWith('ДА');
+}
+
+async function isDuplicateGigaChat(oldTitle, newTitle) {
+  // GigaChat API (Sber): Bearer auth, OpenAI-compatible chat endpoint
+  const body = await httpsPost(
+    'gigachat.devices.sberbank.ru',
+    '/api/v1/chat/completions',
+    { 'Authorization': `Bearer ${GIGACHAT_TOKEN}`, 'content-type': 'application/json' },
+    {
+      model: 'GigaChat',
+      max_tokens: 5,
+      messages: [{ role: 'user', content: DEDUP_PROMPT(oldTitle, newTitle) }],
+    }
+  );
+  const text = (body.choices?.[0]?.message?.content || '').trim().toUpperCase();
+  return text.startsWith('ДА');
+}
+
+function isDuplicateHeuristic(oldTitle, newTitle) {
+  const normalize = s => s.toLowerCase().replace(/[^а-яёa-z0-9\s]/gi, '').trim();
+  const wordsA = new Set(normalize(oldTitle).split(/\s+/));
+  const wordsB = normalize(newTitle).split(/\s+/);
+  const overlap = wordsB.filter(w => w.length > 3 && wordsA.has(w)).length;
+  return overlap >= 2;
+}
+
+async function isDuplicate(oldTitle, newTitle) {
+  try {
+    if (OPENAI_KEY)     return await isDuplicateOpenAI(oldTitle, newTitle);
+    if (GIGACHAT_TOKEN) return await isDuplicateGigaChat(oldTitle, newTitle);
+  } catch (e) {
+    console.error('  LLM dedup error, falling back to heuristic:', e.message);
+  }
+  return isDuplicateHeuristic(oldTitle, newTitle);
 }
 
 // --- Telegram alert ---
