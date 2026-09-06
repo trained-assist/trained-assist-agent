@@ -18,14 +18,14 @@ const SERVICE_FORM_SCHEMA = {
     description: 'github.com/settings/tokens → Generate new token (classic) → repo, read:org',
     fields: [
       { name: 'value', label: 'GitHub Token', type: 'password',
-        placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', required: true },
+        placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', required: true, level: 'secret' },
     ],
   },
   figma: {
     title: 'Подключить Figma',
     description: 'Figma → Account Settings → Personal Access Tokens → Create new token',
     fields: [
-      { name: 'value', label: 'Figma Token', type: 'password', required: true },
+      { name: 'value', label: 'Figma Token', type: 'password', required: true, level: 'secret' },
     ],
   },
   notion: {
@@ -33,21 +33,21 @@ const SERVICE_FORM_SCHEMA = {
     description: 'notion.so/my-integrations → New integration → Copy token',
     fields: [
       { name: 'value', label: 'Notion Token', type: 'password',
-        placeholder: 'secret_...', required: true },
+        placeholder: 'secret_...', required: true, level: 'secret' },
     ],
   },
   linear: {
     title: 'Подключить Linear',
     description: 'Linear → Settings → API → Personal API keys → Create key',
     fields: [
-      { name: 'value', label: 'Linear API Key', type: 'password', required: true },
+      { name: 'value', label: 'Linear API Key', type: 'password', required: true, level: 'secret' },
     ],
   },
   dadata: {
     title: 'Подключить DaData',
     description: 'dadata.ru → Profile → API Keys',
     fields: [
-      { name: 'value', label: 'DaData API Key', type: 'password', required: true },
+      { name: 'value', label: 'DaData API Key', type: 'password', required: true, level: 'secret' },
     ],
   },
   'tilda-session': {
@@ -55,34 +55,34 @@ const SERVICE_FORM_SCHEMA = {
     description: 'Откройте tilda.cc в браузере → F12 → Application → Cookies → скопируйте всю строку',
     fields: [
       { name: 'value', label: 'Cookie строка', type: 'textarea',
-        placeholder: 'tilda_uid=...; tilda_hash=...', required: true },
+        placeholder: 'tilda_uid=...; tilda_hash=...', required: true, level: 'secret' },
     ],
   },
   'tilda-creds': {
     title: 'Подключить Tilda (логин)',
     description: 'Введите логин и пароль от вашего аккаунта Tilda.',
     fields: [
-      { name: 'email',    label: 'Email',   type: 'email',    required: true },
-      { name: 'password', label: 'Пароль',  type: 'password', required: true },
+      { name: 'email',    label: 'Email',   type: 'email',    required: true,  level: 'pii' },
+      { name: 'password', label: 'Пароль',  type: 'password', required: true,  level: 'secret' },
     ],
   },
   weeek: {
     title: 'Подключить Weeek CRM',
     description: 'Weeek → Settings → Integrations → API → Generate token. Логин+пароль необязательны — нужны только для добавления комментариев к сделкам.',
     fields: [
-      { name: 'value',    label: 'API токен',                        type: 'password', placeholder: 'Вставьте API токен', required: true },
-      { name: 'email',    label: 'Email / логин (необязательно)',    type: 'email',    required: false },
-      { name: 'password', label: 'Пароль (необязательно)',           type: 'password', required: false },
+      { name: 'value',    label: 'API токен',                        type: 'password', placeholder: 'Вставьте API токен', required: true,  level: 'secret' },
+      { name: 'email',    label: 'Email / логин (необязательно)',    type: 'email',    required: false, level: 'pii' },
+      { name: 'password', label: 'Пароль (необязательно)',           type: 'password', required: false, level: 'secret' },
     ],
   },
   getcourse: {
     title: 'Подключить GetCourse',
     description: 'Данные не попадают в чат — форма отправляет их напрямую на сервер.',
     fields: [
-      { name: 'domain',   label: 'Домен аккаунта',              type: 'text',     placeholder: 'myschool.getcourse.ru', required: true },
-      { name: 'apiKey',   label: 'API ключ (необязательно)',     type: 'password', required: false },
-      { name: 'login',    label: 'Логин (необязательно)',        type: 'email',    required: false },
-      { name: 'password', label: 'Пароль (необязательно)',       type: 'password', required: false },
+      { name: 'domain',   label: 'Домен аккаунта',              type: 'text',     placeholder: 'myschool.getcourse.ru', required: true,  level: 'pii' },
+      { name: 'apiKey',   label: 'API ключ (необязательно)',     type: 'password', required: false, level: 'secret' },
+      { name: 'login',    label: 'Логин (необязательно)',        type: 'email',    required: false, level: 'pii' },
+      { name: 'password', label: 'Пароль (необязательно)',       type: 'password', required: false, level: 'secret' },
     ],
   },
 };
