@@ -1279,7 +1279,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   try {
     await new Promise((resolve, reject) => {
       // 38 min: graceful SIGTERM + warn user. Claude Code handles SIGTERM by finishing current step and exiting.
+      // timedOut is set here so that if Claude exits voluntarily after SIGTERM, the close handler still
+      // triggers auto-continuation (not just when SIGKILL fires at 40 min).
       const warnTimer = setTimeout(() => {
+        timedOut = true;
         console.log(`[${taskId}] timeout warning — sending SIGTERM, 2 min left`);
         try { proc.kill('SIGTERM'); } catch {}
         const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
@@ -1305,7 +1308,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           console.error(`[${taskId}] claude exited with code ${code}`);
           exitCode = code;
         }
-        resolve(code);
+        // If SIGTERM already fired (timedOut=true), reject so the catch block runs auto-continuation
+        if (timedOut) {
+          reject(new Error(`claude exited after SIGTERM (code ${code})`));
+        } else {
+          resolve(code);
+        }
       });
       proc.on('error', (err) => {
         clearTimeout(sessionState.killTimer);
@@ -1326,14 +1334,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       }
 
       if (continuationCount < MAX_CONTINUATIONS) {
-        const statusLine = `⏱ Прервал по 15-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
+        const statusLine = `⏱ Прервал по 40-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
         const tgMsg = partialText.length > 20
           ? `🧠 ${partialText.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
           : statusLine;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
         else await tgSend(BOT_TOKEN, chatId, tgMsg);
 
-        const continuationTask = `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 15-минутный таймаут. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
+        const continuationTask = `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
         runTask({
           taskId: `${user.username}-${Date.now()}`,
           user,
