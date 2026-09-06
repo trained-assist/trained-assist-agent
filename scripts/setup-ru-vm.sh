@@ -61,3 +61,16 @@ echo "    and fill in the Environment= secrets, then:"
 echo "      systemctl daemon-reload"
 echo "      systemctl start $SERVICE"
 echo "      systemctl status $SERVICE"
+
+echo ""
+echo "==> Setting up HH vacancy watcher cron..."
+# Copy HH token from GCP VM (recruiter profile) for crawling
+# Run this ONCE manually after setup:
+#   ssh vova@136.65.7.197 "cat ~/agent-tokens/recruiter/hh" > ~/agent-tokens/hh-watch/hh
+#   chmod 600 ~/agent-tokens/hh-watch/hh
+#
+# Then add to crontab (crontab -e):
+#   0 7 * * * cd /home/vova/trained-assist-agent && node scripts/hh-vacancy-watch.js >> /home/vova/hh-watch/watch.log 2>&1
+echo "    Copy HH token: ssh vova@136.65.7.197 'cat ~/agent-tokens/recruiter/hh' > ~/agent-tokens/hh-watch/hh && chmod 600 ~/agent-tokens/hh-watch/hh"
+echo "    Add cron: 0 7 * * * cd /home/vova/trained-assist-agent && node scripts/hh-vacancy-watch.js >> ~/hh-watch/watch.log 2>&1"
+echo "    Set ALERT_CHAT_ID in ~/secrets.env (your Telegram chat ID for alerts)"
