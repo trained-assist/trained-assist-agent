@@ -8,7 +8,7 @@ const https = require('https');
 
 const USER_ID = process.env.USER_ID || '';
 
-// ── Context store (mirrors 03-context.js logic) ────────────────────────────
+// ── Context store (mirrors 03-context-store.js logic) ────────────────────────────
 
 function contextPath(skill, key) {
   return path.join(process.cwd(), 'contexts', skill, `${key}.json`);

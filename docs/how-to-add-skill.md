@@ -8,17 +8,50 @@ A skill = one `.js` file in `src/mcp-skills/tools/`. The registry picks it up au
 src/mcp-skills/tools/NN-name.js
 ```
 
-`NN` controls load order (alphabetical sort). Use gaps between existing numbers:
+`NN` controls load order (alphabetical sort). Use gaps between existing numbers.
+
+> **⚠️ Collision rule: every `NN` must be unique.** Two files with the same number break the naming convention — the sort order is still deterministic, but the intent becomes ambiguous and hard to audit. Always check the table below before picking a number.
+
+### Taken numbers (as of 2026-09-06)
+
+| NN | File | Description |
+|----|------|-------------|
+| 00 | `00-meta.js` | list_skills catalog — always loads first |
+| 01 | `01-session-history.js` | load_full_context — reads session history |
+| 03 | `03-context-store.js` | context_get/context_set — per-skill key-value store |
+| 04 | `04-cron.js` | cron / scheduled tasks |
+| 05 | `05-session.js` | session tools |
+| 10 | `10-nalog.js` | nalog.ru НПД |
+| 20 | `20-tilda.js` | Tilda |
+| 21 | `21-browser-session.js` | browser session |
+| 30 | `30-weeek.js` | Weeek CRM |
+| 40 | `40-company.js` | company lookup |
+| 50 | `50-gdrive.js` | Google Drive |
+| 60 | `60-github.js` | GitHub |
+| 70 | `70-inn-enrichment.js` | INN enrichment (router) |
+| 71 | `71-dadata.js` | DaData |
+| 72 | `72-checko.js` | Checko |
+| 80 | `80-getcourse.js` | GetCourse |
+| 81 | `81-gc-discovery.js` | GetCourse discovery |
+| 84 | `84-artifacts.js` | artifact publishing |
+| 85 | `85-expo.js` | Expo |
+| 86 | `86-expo-flexi.js` | Expo Flexi |
+| 87 | `87-expo-pipeline.js` | Expo pipeline |
+| 88 | `88-expo-catalog.js` | Expo catalog |
+| 89 | `89-expo-pipeline-run.js` | Expo pipeline run |
+| 90 | `90-hh.js` | HeadHunter |
+| 91 | `91-hh-discovery.js` | HH discovery |
+| 92 | `92-flexi-sales.js` | Flexi sales |
+| 95 | `95-illustrate.js` | illustrations |
+| 96 | `96-label.js` | labels |
+| 98 | `98-api-from-website.js` | site connector |
+
+Free gaps: `02`, `06–09`, `11–19`, `22–29`, `31–39`, `41–49`, `51–59`, `61–69`, `73–79`, `82–83`, `93–94`, `97`, `99`.
+
+**Example — pick a free number from the gaps above:**
 
 ```
-00-meta.js        ← list_skills, always load first
-05-session.js
-10-nalog.js
-20-tilda.js
-...
-85-expo.js
-86-expo-flexi.js
-90-mynewskill.js  ← your skill here
+93-mynewskill.js  ← your skill here
 ```
 
 ## Module structure

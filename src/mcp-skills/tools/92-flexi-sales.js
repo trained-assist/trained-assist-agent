@@ -18,7 +18,7 @@ const HEALTH_URL = NOTES_API.replace('/api/site-predeal-notes', '/health');
 
 const FETCH_TIMEOUT_MS = 8000;
 
-// ── Context store (mirrors 03-context.js) ────────────────────────────────────
+// ── Context store (mirrors 03-context-store.js) ────────────────────────────────────
 
 function contextPath(skill, key) {
   return path.join(process.cwd(), 'contexts', skill, `${key}.json`);
