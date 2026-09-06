@@ -13,8 +13,8 @@ const require = createRequire(import.meta.url);
 // (contextPath calls process.cwd() at call time, not at module load — no cache bust
 //  is actually needed, but clearing makes isolation explicit.)
 function tools() {
-  delete require.cache[require.resolve('../../src/mcp-skills/tools/03-context.js')];
-  return require('../../src/mcp-skills/tools/03-context.js').tools;
+  delete require.cache[require.resolve('../../src/mcp-skills/tools/03-context-store.js')];
+  return require('../../src/mcp-skills/tools/03-context-store.js').tools;
 }
 
 let workDir;

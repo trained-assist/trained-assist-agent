@@ -1,5 +1,5 @@
 /**
- * Unit tests for the 90-artifacts.js MCP tool module.
+ * Unit tests for the 84-artifacts.js MCP tool module.
  * Tests store_artifact, query_artifacts, get_knowledge_summary with per-user isolation.
  */
 
@@ -12,13 +12,13 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
 // We need to reset the module so DATA_DIR picks up the updated env var.
-// Both 90-artifacts.js and artifacts-store.js must be cleared together.
+// Both 84-artifacts.js and artifacts-store.js must be cleared together.
 function loadModule() {
   const storePath = require.resolve('../src/artifacts-store.js');
-  const toolPath = require.resolve('../src/mcp-skills/tools/90-artifacts.js');
+  const toolPath = require.resolve('../src/mcp-skills/tools/84-artifacts.js');
   delete require.cache[storePath];
   delete require.cache[toolPath];
-  return require('../src/mcp-skills/tools/90-artifacts.js');
+  return require('../src/mcp-skills/tools/84-artifacts.js');
 }
 
 let tmpDir;
