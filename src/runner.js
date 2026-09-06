@@ -1207,23 +1207,30 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (streamTimer) return;
     outputStarted = true;
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    let streamEditInProgress = false;
     streamTimer = setInterval(async () => {
-      const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
-      const secs = Math.round((Date.now() - thinkingStart) / 1000);
-      if (snippet) {
-        // Show text + current tool activity (always updating so user sees seconds ticking)
-        const activitySuffix = lastActivity ? `\n\n${lastActivity} (${secs}с)` : ` (${secs}с)`;
-        const newText = `⏳ ${snippet}${activitySuffix}`;
-        if (newText === lastSent) return;
-        lastSent = newText;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
-      } else {
-        // No text yet (e.g. Claude running tools) — show activity + elapsed
-        const label = lastActivity || 'Думаю…';
-        const newText = `⏳ ${label} (${secs}с)`;
-        if (newText === lastSent) return;
-        lastSent = newText;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
+      if (streamEditInProgress) return;
+      streamEditInProgress = true;
+      try {
+        const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
+        const secs = Math.round((Date.now() - thinkingStart) / 1000);
+        if (snippet) {
+          // Show text + current tool activity (always updating so user sees seconds ticking)
+          const activitySuffix = lastActivity ? `\n\n${lastActivity} (${secs}с)` : ` (${secs}с)`;
+          const newText = `⏳ ${snippet}${activitySuffix}`;
+          if (newText === lastSent) return;
+          lastSent = newText;
+          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
+        } else {
+          // No text yet (e.g. Claude running tools) — show activity + elapsed
+          const label = lastActivity || 'Думаю…';
+          const newText = `⏳ ${label} (${secs}с)`;
+          if (newText === lastSent) return;
+          lastSent = newText;
+          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
+        }
+      } finally {
+        streamEditInProgress = false;
       }
     }, STREAM_INTERVAL_MS);
   }

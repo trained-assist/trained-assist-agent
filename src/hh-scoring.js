@@ -50,6 +50,7 @@ function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
         } catch (e) { reject(e); }
       });
     });
+    req.setTimeout(20_000, () => req.destroy(new Error('openrouter timeout')));
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -95,6 +96,7 @@ function gcGetToken(credentials) {
         } catch (e) { reject(e); }
       });
     });
+    req.setTimeout(15_000, () => req.destroy(new Error('GigaChat auth timeout')));
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -126,6 +128,7 @@ async function gcCall(credentials, messages, maxTokens = 2000, temperature = 0.1
         } catch (e) { reject(e); }
       });
     });
+    req.setTimeout(30_000, () => req.destroy(new Error('GigaChat API timeout')));
     req.on('error', reject);
     req.write(body);
     req.end();
