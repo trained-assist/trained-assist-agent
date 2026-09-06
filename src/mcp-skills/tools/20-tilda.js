@@ -128,13 +128,8 @@ async function listAllProjects(cookieHeader) {
 
 // ── Context helper ────────────────────────────────────────────────────────────
 
-// When session expires, guide user through remote browser login flow
-const REAUTH_INSTRUCTIONS = [
-  'Сессия Tilda истекла. Нужно залогиниться через удалённый браузер:',
-  '1. Вызови browser_session_url — получишь ссылку на браузер',
-  '2. Открой ссылку, залогинься на tilda.ru',
-  '3. Скажи "готово" — я захвачу сессию через browser_session_capture_cookies',
-].join('\n');
+// When session expires, guide user to re-connect via ZeroCreds form
+const REAUTH_INSTRUCTIONS = 'Сессия Tilda истекла. Скажи «подключи тильду» — получишь ссылку для повторного входа (email + пароль через защищённую форму).';
 
 async function withAuth(userId, fn) {
   const config = readConfig(userId);

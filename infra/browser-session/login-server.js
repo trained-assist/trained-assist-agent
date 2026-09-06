@@ -16,8 +16,11 @@ const PORT = 9090;
 const BODY_LIMIT = 65536; // 64 KB
 
 const TOKEN_RE  = /^[0-9a-f]{24}$/;
-const UID_RE    = /^\d{1,20}$/;
+const UID_RE    = /^[a-zA-Z0-9_-]{1,50}$/;
 const DOMAIN_RE = /^[a-zA-Z0-9.-]{1,253}$/;
+
+// Map domain → token filename so MCP skills can read them by their expected label
+const DOMAIN_TO_LABEL = { 'tilda.ru': 'tilda-session' };
 
 function loadPending(token) {
   if (!TOKEN_RE.test(token)) return null;
@@ -56,8 +59,8 @@ http.createServer((req, res) => {
         uid = pending.uid; // always from trusted pending file, not request body
       }
 
-      // Validate uid if still coming from request body (no-token fallback path)
-      if (uid && !UID_RE.test(String(uid))) {
+      // Validate uid only when it comes from the request body (pending token is already trusted)
+      if (!pending && uid && !UID_RE.test(String(uid))) {
         res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'invalid uid' })); return;
       }
 
@@ -76,7 +79,7 @@ http.createServer((req, res) => {
             data.cookies_captured = false;
             data.cookies_error = 'invalid domain in pending token';
           } else {
-            const label  = domain.replace(/\./g, '-') + '-session';
+            const label  = DOMAIN_TO_LABEL[domain] || domain.replace(/\./g, '-') + '-session';
             const outDir  = uid
               ? path.join(os.homedir(), 'agent-tokens', String(uid))
               : path.join(os.homedir(), 'browser-session');
