@@ -2284,6 +2284,53 @@ function show(id, type, msg) {
       return json(res, 200, { ok: true });
     }
 
+    // POST /playwright-fetch — run headless Playwright on this VM and return page content.
+    // Used by the ru_browser_fetch MCP skill so GCP sessions can fetch RU-geo-blocked pages.
+    if (req.method === 'POST' && url.pathname === '/playwright-fetch') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'bad json' }); }
+
+      const { url: targetUrl, selector, waitFor, script, screenshot } = body || {};
+      if (!targetUrl || typeof targetUrl !== 'string') return json(res, 400, { error: 'url required' });
+
+      const { chromium } = require('playwright');
+      let browser;
+      try {
+        browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+        const context = await browser.newContext({
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        });
+        const page = await context.newPage();
+        await page.goto(targetUrl, { waitUntil: waitFor || 'domcontentloaded', timeout: 30000 });
+
+        const title = await page.title();
+        let text = null, scriptResult = null, screenshotB64 = null;
+
+        if (script) {
+          scriptResult = await page.evaluate(script);
+        }
+        if (screenshot) {
+          const buf = await page.screenshot({ type: 'png', fullPage: false });
+          screenshotB64 = buf.toString('base64');
+        }
+        if (selector) {
+          const el = await page.$(selector);
+          text = el ? await el.innerText() : null;
+        } else if (!screenshot) {
+          text = await page.innerText('body');
+        }
+
+        console.log(`[playwright-fetch] ok url=${targetUrl} title="${title}"`);
+        return json(res, 200, { ok: true, url: targetUrl, title, text, scriptResult, screenshot: screenshotB64 });
+      } catch (e) {
+        console.error('[playwright-fetch] error:', e.message);
+        return json(res, 500, { error: 'playwright_failed', message: e.message });
+      } finally {
+        if (browser) await browser.close().catch(() => {});
+      }
+    }
+
     json(res, 404, { error: 'not found' });
     } catch (err) {
       console.error('[request-handler] unhandled error:', err);
