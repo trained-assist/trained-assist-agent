@@ -2032,6 +2032,37 @@ function show(id, type, msg) {
       const storedValue = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
       fs.writeFileSync(path.join(tokensDir, label), storedValue, { mode: 0o600 });
       console.log(`[tokens] saved label="${label}" for userId=${userId}`);
+
+      // tilda-creds: trigger async Playwright login and notify user
+      if (label === 'tilda-creds') {
+        let creds;
+        try { creds = JSON.parse(storedValue); } catch { /* not JSON — skip */ }
+        if (creds && creds.email && creds.password) {
+          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          const tildaChatId = readChatId(String(userId));
+          if (tildaChatId && secrets.BOT_TOKEN) {
+            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+              method: 'POST', signal: AbortSignal.timeout(8000),
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: tildaChatId, text: '⏳ Данные получены — вхожу в Tilda...' }),
+            }).catch(() => {});
+          }
+          const { startTildaLogin } = require('./tilda-login');
+          startTildaLogin(String(userId), creds.email, creds.password).then(result => {
+            const chatId2 = readChatId(String(userId));
+            if (!chatId2 || !secrets.BOT_TOKEN) return;
+            const text = result.status === 'ok'
+              ? `✅ Tilda подключена! Сессия сохранена (${result.cookiesCount} cookies). Можно работать.`
+              : `❌ Не удалось войти в Tilda: ${result.error}\n\nПроверь email/пароль и повтори: «подключи тильду»`;
+            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+              method: 'POST', signal: AbortSignal.timeout(8000),
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId2, text }),
+            }).catch(() => {});
+          }).catch(e => console.error('[tokens/tilda-creds] login async failed:', e.message));
+        }
+      }
+
       return json(res, 200, { ok: true });
     }
 
@@ -2328,6 +2359,75 @@ function show(id, type, msg) {
         return json(res, 500, { error: 'playwright_failed', message: e.message });
       } finally {
         if (browser) await browser.close().catch(() => {});
+      }
+    }
+
+    // POST /report — create GitHub issue from user bug report / feature request
+    if (req.method === 'POST' && url.pathname === '/report') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'bad json' }); }
+
+      const { username, description, sessionId } = body || {};
+      if (!username || !description) return json(res, 400, { error: 'username and description required' });
+
+      const ghToken = secrets.GITHUB_BUG_REPORT_TOKEN;
+      if (!ghToken) return json(res, 503, { error: 'bug reporting not configured (GITHUB_BUG_REPORT_TOKEN missing)' });
+
+      // Collect session context (last 8 messages)
+      let contextLines = [];
+      try {
+        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+        const workDir = path.join(dataDir, 'sessions', username);
+        if (sessionId) {
+          const sessionFile = path.join(workDir, 'sessions', `${sessionId}.json`);
+          if (fs.existsSync(sessionFile)) {
+            const session = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+            const messages = (session.messages || []).slice(-8);
+            contextLines = messages.map(m => {
+              const role = m.role === 'user' ? '👤 User' : '🤖 Claude';
+              const text = (m.content || '').slice(0, 400);
+              return `**${role}:** ${text}${(m.content || '').length > 400 ? '…' : ''}`;
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('[report] failed to load session context:', e.message);
+      }
+
+      const now = new Date().toISOString();
+      const contextSection = contextLines.length
+        ? `## Session context\n\n${contextLines.join('\n\n')}`
+        : '## Session context\n\n_No session context available_';
+
+      const issueBody = `## User report\n\n**User:** \`${username}\`  \n**Time:** ${now}  \n**Session:** \`${sessionId || 'unknown'}\`\n\n${description}\n\n---\n\n${contextSection}`;
+
+      const title = description.length > 80 ? description.slice(0, 77) + '…' : description;
+
+      try {
+        const ghRes = await fetch('https://api.github.com/repos/trained-assist/trained-assist-agent/issues', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${ghToken}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'trained-assist-agent',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+          body: JSON.stringify({ title, body: issueBody, labels: ['user-report'] }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!ghRes.ok) {
+          const err = await ghRes.json().catch(() => ({}));
+          console.error('[report] GitHub API error:', ghRes.status, err.message);
+          return json(res, 502, { error: `GitHub API error: ${err.message || ghRes.statusText}` });
+        }
+        const issue = await ghRes.json();
+        console.log(`[report] Issue created: #${issue.number} by ${username}`);
+        return json(res, 200, { number: issue.number, url: issue.html_url });
+      } catch (e) {
+        console.error('[report] error creating issue:', e.message);
+        return json(res, 500, { error: e.message });
       }
     }
 
