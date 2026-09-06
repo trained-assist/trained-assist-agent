@@ -11,7 +11,7 @@ const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId } = require('./session-store');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
-const { nalogFormHtml } = require('./connect-forms/nalog');
+const { nalogFormHtml, nalogCodeFormHtml } = require('./connect-forms/nalog');
 const { getcourseFormHtml } = require('./connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connect-forms/gdrive');
 const { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml } = require('./connect-forms/hh');
@@ -157,8 +157,43 @@ function scheduleNalogExpiryChecks(secrets) {
       try { chatId = fs.readFileSync(chatIdFile, 'utf8').trim(); } catch { continue; }
       if (!chatId || !/^-?\d+$/.test(chatId)) continue;
 
+      // If nalog-creds are saved, auto re-login without user interaction
+      const nalogCredsFile = path.join(AGENT_TOKENS_DIR, username, 'nalog-creds');
+      if (fs.existsSync(nalogCredsFile)) {
+        let creds;
+        try { creds = JSON.parse(fs.readFileSync(nalogCredsFile, 'utf8')); } catch {}
+        if (creds && creds.login && creds.password) {
+          console.log('[nalog-expiry] nalog-creds found for %s — auto re-login', username);
+          const tgBase2 = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          fetch(`${tgBase2}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: 'POST', signal: AbortSignal.timeout(8000),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: '🔄 Токен Налог.ру истёк — обновляю автоматически...' }),
+          }).catch(() => {});
+          startNalogLogin(username, creds.login, creds.password).then(result => {
+            const AGENT_PUB = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+            let text;
+            if (result.status === 'ok') {
+              text = `✅ Налог.ру — токен обновлён автоматически. Действует до ${result.expires ? new Date(result.expires).toLocaleString('ru-RU') : '?'}.`;
+            } else if (result.status === 'need_code') {
+              const codeUrl = `${AGENT_PUB}/connect/nalog/code?sessionId=${result.sessionId}`;
+              text = `📱 Нужен код из SMS для Госуслуг:\n\n👉 ${codeUrl}\n\nСсылка действительна 25 минут.`;
+            } else {
+              text = `❌ Не удалось обновить токен Налог.ру: ${result.error}\n\nСкажите «подключи налог» чтобы обновить данные.`;
+            }
+            fetch(`${tgBase2}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+              method: 'POST', signal: AbortSignal.timeout(8000),
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text }),
+            }).catch(() => {});
+          }).catch(e => console.error('[nalog-expiry] auto re-login failed:', e.message));
+          continue;
+        }
+      }
+
+      // No saved creds — send ZeroCreds link to re-connect
       let connectUrl;
-      try { connectUrl = await generateConnectLink(username, 'nalog'); } catch (e) {
+      try { connectUrl = await generateConnectLink(username, 'nalog-creds'); } catch (e) {
         console.error('[nalog-expiry] generateConnectLink failed:', e.message); continue;
       }
       const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
@@ -168,7 +203,7 @@ function scheduleNalogExpiryChecks(secrets) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: `⚠️ Токен Налог.ру истёк. Хотите войти заново?\n\n👉 ${connectUrl}\n\nСсылка действительна 30 минут.`,
+          text: `⚠️ Токен Налог.ру истёк. Войдите заново:\n\n👉 ${connectUrl}\n\nСсылка действительна 30 минут.`,
         }),
       }).catch(e => console.error('[nalog-expiry] tg notify failed:', e.message));
       console.log('[nalog-expiry] notified username=%s chatId=%s about expired token', username, chatId);
@@ -334,6 +369,19 @@ async function main() {
   const server = http.createServer(async (req, res) => {
     try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
+
+    // ── GET /connect/nalog/code?sessionId=XXX — 2FA code entry page ─────────
+    if (req.method === 'GET' && url.pathname === '/connect/nalog/code') {
+      const sessionId = url.searchParams.get('sessionId') || '';
+      if (!/^[a-f0-9]{32}$/.test(sessionId)) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' })
+          .end('<p>Неверная ссылка. Запросите новую через Telegram.</p>');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        .end(nalogCodeFormHtml(sessionId));
+      return;
+    }
 
     // ── POST /connect/nalog/code — confirm 2FA code (no AGENT_SECRET needed) ──
     if (req.method === 'POST' && url.pathname === '/connect/nalog/code') {
@@ -2255,6 +2303,42 @@ function show(id, type, msg) {
               tgSend(chatId2, result.status === 'ok' ? svcAction.ok(result) : svcAction.err(result));
             }
           }).catch(e => console.error(`[tokens/${label}] action failed:`, e.message));
+        }
+      }
+
+      // nalog-creds: trigger async Playwright login to Госуслуги (3-state: ok/need_code/error)
+      if (label === 'nalog-creds') {
+        let creds;
+        try { creds = JSON.parse(storedValue); } catch { /* not JSON — skip */ }
+        if (creds && creds.login && creds.password) {
+          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          const nalogChatId = readChatId(String(userId));
+          if (nalogChatId && secrets.BOT_TOKEN) {
+            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+              method: 'POST', signal: AbortSignal.timeout(8000),
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: nalogChatId, text: '⏳ Данные получены — вхожу в Госуслуги...' }),
+            }).catch(() => {});
+          }
+          startNalogLogin(String(userId), creds.login, creds.password).then(result => {
+            const chatId2 = readChatId(String(userId));
+            if (!chatId2 || !secrets.BOT_TOKEN) return;
+            const AGENT_PUB = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+            let text;
+            if (result.status === 'ok') {
+              text = `✅ Налог.ру подключён! Токен действует до ${result.expires ? new Date(result.expires).toLocaleString('ru-RU') : '?'}.`;
+            } else if (result.status === 'need_code') {
+              const codeUrl = `${AGENT_PUB}/connect/nalog/code?sessionId=${result.sessionId}`;
+              text = `📱 Введите код из SMS / приложения Госуслуги:\n\n👉 ${codeUrl}\n\nСсылка действительна 25 минут.`;
+            } else {
+              text = `❌ Не удалось войти в Госуслуги: ${result.error}\n\nПроверьте логин/пароль и повторите: «подключи налог»`;
+            }
+            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+              method: 'POST', signal: AbortSignal.timeout(8000),
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId2, text }),
+            }).catch(() => {});
+          }).catch(e => console.error('[tokens/nalog-creds] login async failed:', e.message));
         }
       }
 
