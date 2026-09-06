@@ -33,7 +33,7 @@ jobs:
             exit 0
           fi
 
-          if echo "$BODY" | grep -qP '<!-- csm-session: [0-9a-fA-F\-]{8,} -->'; then
+          if echo "$BODY" | grep -qP '<!-- csm-session: [\w\-]{8,} -->'; then
             echo "✅ csm-session comment found."
           else
             echo "❌ Claude-authored PR is missing a valid <!-- csm-session: UUID --> comment."

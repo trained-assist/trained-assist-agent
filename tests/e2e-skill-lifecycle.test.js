@@ -26,7 +26,7 @@ import { tmpdir, homedir } from 'os';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { startMockServer, stopMockServer, setScenario } = require('./mock-getcourse-server.js');
+const { startMockServer, stopMockServer, setScenario } = require('./helpers/mock-getcourse-server.js');
 const { connectFormHtml } = require('../src/connect-forms/generic.js');
 const { getcourseFormHtml } = require('../src/connect-forms/getcourse.js');
 const { loginCredsFormHtml } = require('../src/connect-forms/login-creds.js');
