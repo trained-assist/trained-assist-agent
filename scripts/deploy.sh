@@ -89,6 +89,23 @@ sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
 echo "==> Service journal (last 20 lines)..."
 sudo journalctl -u "$SERVICE" --no-pager -n 20 || true
 
+echo "==> Applying nginx config (GCP only)..."
+NGINX_CONF_SRC="$REPO_DIR/infra/nginx/relay.conf"
+NGINX_CONF_DST="/etc/nginx/sites-enabled/relay"
+if [ -f "$NGINX_CONF_SRC" ] && command -v nginx >/dev/null 2>&1; then
+  if ! diff -q "$NGINX_CONF_SRC" "$NGINX_CONF_DST" >/dev/null 2>&1; then
+    sudo cp "$NGINX_CONF_SRC" "$NGINX_CONF_DST"
+    if sudo nginx -t 2>/dev/null; then
+      sudo systemctl reload nginx
+      echo "  nginx reloaded"
+    else
+      echo "  ⚠️  nginx config test failed — not reloading"
+    fi
+  else
+    echo "  nginx config unchanged"
+  fi
+fi
+
 echo "==> Running smoke tests..."
 AGENT_SECRET=$(gcloud secrets versions access latest --secret=AGENT_SECRET --project=alesa-personal-assistent 2>/dev/null || echo "$AGENT_SECRET")
 if [ -z "$AGENT_SECRET" ]; then
