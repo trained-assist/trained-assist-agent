@@ -19,6 +19,7 @@ const { initLog, readLog } = require('./requirements-log');
 const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, readActiveVacancy } = require('./hh-quick');
 const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('./hh-vacancy');
 const { loadUserSiteIntents } = require('./user-sites');
+const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -66,6 +67,7 @@ const SECRETS_LIST_INTENT   = /^\/secrets_list$|список.{0,15}подклю�
 const SECRETS_LOG_INTENT    = /^\/secrets_log$|история.{0,15}доступ|лог.{0,15}секрет|обращени.{0,15}секрет/i;
 const REVOKE_INTENT         = /отзов|revoke|удал.{0,10}доступ|отключ.{0,10}сервис|убер.{0,10}доступ/i;
 const REVOKE_SERVICE_RE     = /(github|гитхаб|weeek|вик|nalog|налог|нпд|самозан|figma|фигма|notion|linear|tilda|тильда|gdrive|гугл|google|dadata)/i;
+const REVOKE_CONFIRM_RE     = /^да[,.]?\s*(удал|отключ|подтвер|confirm)|^confirm$|^yes$/i;
 // "на какой email шарить", "почта SA", "дай адрес google" — always read from disk, never hallucinate
 const GDRIVE_SA_EMAIL_INTENT  = /(?:почт|email|e-mail|адрес).{0,40}(?:сервис|service|sa\b)|(?:сервис|service|sa\b).{0,40}(?:почт|email|e-mail|аккаун)|дай.{0,30}(?:почт|email|адрес).{0,30}(?:гугл|google|drive|аккаун)|на\s+(?:какой|что|какую).{0,30}(?:шар|поделить|пошар)|куда.{0,20}(?:шар|поделить|пошар)/i;
 // "пошарить таблицу тебе", "поделиться файлом", "как дать доступ к гугл" — needs SA email answer
@@ -322,6 +324,35 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     const svcMatch = task.match(REVOKE_SERVICE_RE);
     if (!svcMatch) return 'Укажи сервис для отзыва, например: «отзови доступ к GitHub»';
     if (!userId) return 'Не удалось определить пользователя.';
+
+    const isGdrive = /gdrive|гугл|google/i.test(svcMatch[1]);
+
+    if (isGdrive && workDir) {
+      const pendingFile = path.join(workDir, '.revoke_gdrive_pending.json');
+      if (REVOKE_CONFIRM_RE.test(task)) {
+        // Confirmed — check pending file
+        let pending = null;
+        try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { /* no pending */ }
+        const isValid = pending && pending.expiresAt > Date.now();
+        if (!isValid) return '⚠️ Подтверждение устарело. Напиши «отключи Google Drive» ещё раз.';
+        try { fs.unlinkSync(pendingFile); } catch { /* ignore */ }
+        // Delete GCP SA first, then local file
+        const saResult = await deleteGdriveSA(userId).catch(e => ({ deleted: false, reason: e.message }));
+        const revokeResult = revokeService(userId, 'gdrive');
+        const saMsg = saResult.deleted ? '' : `\n_SA из GCP не удалён: ${saResult.reason}_`;
+        if (revokeResult === 'not_found') return `Сервис Google Drive не был подключён.${saMsg}`;
+        return `✅ Google Drive отключён. Сервис-аккаунт удалён из GCP.${saMsg}`;
+      } else {
+        // First request — ask for confirmation, write pending file
+        const gdriveFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+        if (!fs.existsSync(gdriveFile)) return 'Google Drive не был подключён.';
+        try {
+          fs.writeFileSync(pendingFile, JSON.stringify({ service: 'gdrive', expiresAt: Date.now() + 5 * 60 * 1000 }), { mode: 0o600 });
+        } catch { /* non-critical */ }
+        return '⚠️ Это удалит подключение Google Drive и сервис-аккаунт из GCP.\n\nПодтвердить? Напиши «да, удали»';
+      }
+    }
+
     const result = revokeService(userId, svcMatch[1]);
     if (result === null) return `Не распознал сервис «${svcMatch[1]}». Доступные: GitHub, Weeek, Налог.ру, Figma, Tilda, Google Drive.`;
     if (result === 'not_found') return `Сервис «${svcMatch[1]}» не был подключён.`;

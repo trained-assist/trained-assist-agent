@@ -162,11 +162,39 @@ const MIME_READABLE = {
   'text/html': null, 'text/markdown': null,
 };
 
+// ── SA lifecycle helpers (used by runner.js revoke flow) ─────────────────────
+
+// Reads the SA email for a user without loading the full SA JSON into scope.
+function getSaEmail(userId) {
+  const sa = parseSaJson(userId);
+  return sa ? sa.client_email : null;
+}
+
+// Deletes the GCP Service Account for a user. Best-effort — errors are logged
+// but don't fail the revoke (the local token file is the source of truth).
+async function deleteServiceAccount(userId) {
+  const saEmail = getSaEmail(userId);
+  if (!saEmail) return { deleted: false, reason: 'no_sa_configured' };
+  let adcToken;
+  try { adcToken = await getAdcToken(); }
+  catch (e) { return { deleted: false, reason: `adc_error: ${e.message}` }; }
+  const url = `https://iam.googleapis.com/v1/projects/${GCP_PROJECT}/serviceAccounts/${encodeURIComponent(saEmail)}`;
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${adcToken}` },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (res.ok || res.status === 404) return { deleted: true };
+  const err = await res.json().catch(() => ({}));
+  return { deleted: false, reason: `gcp_${res.status}: ${err.error?.message || res.statusText}` };
+}
+
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 module.exports = {
   isReady: () => !!parseSaJson(USER_ID),
   setupTools: ['gdrive_setup', 'gdrive_status'],
+  deleteServiceAccount,
 
   tools: {
 
