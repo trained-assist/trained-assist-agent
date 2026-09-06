@@ -59,6 +59,7 @@ function getPendingTasks() {
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
 
+const STALE_PR_ALARM_INTENT = /Проверь PR #\d+: CI статус, конфликты/;
 const SETUP_INTENT          = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
 const INN_CAPABILITY_INTENT  = /(?:скил|skill|умееш|можешь|есть.{0,30}возможн|есть.{0,30}функц|есть.{0,30}инструм|что.{0,20}умееш).{0,80}(?:инн|огрн|компани|директор|выручк|реквизит)/i;
 // Only capability/question words, NOT action verbs (собери/собрать/найди → those are tasks, go to Claude)
@@ -162,6 +163,12 @@ const QUICK_SETUPS = [
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
 function getQuickAnswer(task, userId, workDir, sessionExists = false) {
+  // Stale PR alarm — fires repeatedly from csm-relay after PR is already merged
+  if (STALE_PR_ALARM_INTENT.test(task)) {
+    const prNum = task.match(/#(\d+)/)?.[1];
+    return `✅ PR #${prNum} уже смёрджен. Этот alarm устарел — можно его удалить.`;
+  }
+
   // Vacancy creation flow — intercept before other intents so collecting mode takes priority
   if (workDir) {
     const vs = readVacancyState(workDir);
