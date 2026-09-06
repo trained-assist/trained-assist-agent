@@ -48,7 +48,8 @@
       { "name": "IDEOGRAM_API_KEY",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Ideogram API key for text-in-image illustration" },
       { "name": "RECRAFT_API_KEY",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Recraft v3 API key for vector-style illustration" },
       { "name": "OPENROUTER_API_KEY",      "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "OpenRouter API key for /classify (Gemini Flash Lite)" },
-      { "name": "ZEROCREDS_ADMIN_TOKEN",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Shared admin token for zerocreds-server /api/session/create (read by user-tokens.js via process.env)" }
+      { "name": "ZEROCREDS_ADMIN_TOKEN",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Shared admin token for zerocreds-server /api/session/create (read by user-tokens.js via process.env)" },
+      { "name": "GITHUB_BUG_REPORT_TOKEN", "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "GitHub PAT for creating issues in trained-assist repos (NOT exposed to Claude Code)" }
     ]
   },
 
