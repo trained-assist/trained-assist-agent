@@ -73,6 +73,8 @@ const GDRIVE_SA_EMAIL_INTENT  = /(?:почт|email|e-mail|адрес).{0,40}(?:�
 const GDRIVE_SHARE_INTENT     = /(?:пошар[иьюшт]|поделить|шар[иьюшт]|дать?\s+доступ).{0,50}(?:гугл|google|таблиц|докс|docs|sheets|файл|документ)|(?:гугл|google|таблиц|докс|docs|sheets|файл|документ).{0,50}(?:пошар[иьюшт]|поделить|шар[иьюшт]|дать?\s+доступ)/i;
 // "мои файлы гугл", "что мне пошарено", "список документов"
 const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие).{0,20}(?:файл|документ|гугл|google|пошарен)|(?:что|какие).{0,30}(?:пошарено|пошарил|открыл)|gdrive.{0,20}(?:файл|документ|список)/i;
+// "пошарил", "дал доступ", "открыл доступ", "готово" after gdrive setup — user confirming they shared
+const GDRIVE_SHARED_CONFIRM_INTENT = /^(?:пошарил|поделился|расшарил|дал\s+доступ|открыл\s+доступ|готово|ок|сделал|расшарен|добавил)\.?$/i;
 // "можешь читать гугл шит", "умеешь работать с гугл таблицами"
 const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
@@ -329,11 +331,19 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   }
 
   // "мои файлы гугл", "что мне пошарено", "список документов" — LIST before SHARE (пошаренные matches both)
+  // User confirms they shared after gdrive setup — pass to Claude to call gdrive_list_files
+  if (GDRIVE_SHARED_CONFIRM_INTENT.test(task) && userId) {
+    const gdriveFile4 = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
+    if (fs.existsSync(gdriveFile4)) {
+      return null; // gdrive configured — let Claude call gdrive_list_files to verify access
+    }
+  }
+
   if (GDRIVE_LIST_INTENT.test(task) && userId) {
     const catalogPath2 = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-catalog.json');
     try {
       const catalog2 = JSON.parse(fs.readFileSync(catalogPath2, 'utf8'));
-      if (!catalog2.length) return '📂 Пока нет пошаренных файлов. Поделись файлом — пришлю уведомление и запишу в список.';
+      if (!catalog2.length) return '📂 Пока нет пошаренных файлов. Поделись папкой/файлом Drive с SA email — потом напиши мне, я проверю доступ.';
       const MIME_ICON2 = {
         'application/vnd.google-apps.spreadsheet':  '📊',
         'application/vnd.google-apps.document':     '📄',
@@ -348,7 +358,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
       });
       return ['📂 Пошаренные файлы:', '', ...lines2].join('\n');
     } catch (e) { console.warn('[runner] gdrive catalog parse:', e.message); }
-    return '📂 Пока нет пошаренных файлов. Поделись файлом через Google Drive — пришлю уведомление.';
+    return null; // no catalog yet — let Claude call gdrive_list_files to check live
   }
 
   // "можешь читать гугл шит", "умеешь работать с csv/таблицами"
@@ -365,7 +375,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
           '📤 Загружать CSV/данные в Google Sheets (создавать новые листы)',
           '📂 Следить за папкой — уведомление когда добавляют новый файл',
           '',
-          'Google Drive уже подключён. Пошари файл — и пришли мне ссылку или скажи «прочитай [название]».',
+          'Google Drive уже подключён. Пошари папку/файл с SA email — потом напиши мне, я сам найду и прочитаю.',
         ].join('\n')
       : null; // not configured — let Claude call gdrive_setup automatically
   }
@@ -384,7 +394,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
           `\`${sa2.client_email}\``,
           '3. Нажми «Отправить»',
           '',
-          'Как только пошаришь — пришлю уведомление и смогу читать файл.',
+          'После шаринга напиши мне — я сам проверю доступ. Ссылку слать не нужно.',
         ].join('\n');
       }
     } catch (e) { console.warn('[runner] gdrive SA config parse:', e.message); }

@@ -171,7 +171,7 @@ module.exports = {
   tools: {
 
     gdrive_setup: {
-      description: 'First-time setup: creates a dedicated Google Service Account for this user, stores the credentials, and returns the SA email to share Drive folders with. Run this once before using other gdrive tools.',
+      description: 'First-time setup: creates a dedicated Google Service Account for this user, stores the credentials, and returns the SA email to share Drive folders with. Run this once before using other gdrive tools. IMPORTANT: when the result contains reply_to_user, send that text verbatim to the user — do NOT paraphrase or add instructions like "send me a link". After sharing, the user just needs to send any message and you will call gdrive_list_files automatically.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -187,7 +187,8 @@ module.exports = {
           return {
             status: 'already_configured',
             sa_email: existing.client_email,
-            message: `SA уже настроен. Поделись папкой Drive с: ${existing.client_email}`,
+            message: `SA уже настроен. Email: ${existing.client_email}`,
+            reply_to_user: `🧠 Google Drive уже подключён!\n\nEmail сервис-аккаунта: \`${existing.client_email}\`\n\nРасшарь нужные папки с этим email → после этого напиши любое сообщение, я сам проверю доступ. Ссылку слать не нужно.`,
           };
         }
 
@@ -287,7 +288,7 @@ module.exports = {
         return {
           status: 'created',
           sa_email: saJson.client_email,
-          next_step: `Поделись нужными папками Google Drive с этим email:\n${saJson.client_email}\n\nВ Drive: правый клик на папке → Поделиться → добавь email выше → роль "Читатель" или "Редактор".\n\nПосле этого вызови gdrive_list_files чтобы убедиться что всё работает.`,
+          reply_to_user: `🧠 Готово! Расшарь нужные папки/файлы с этим email:\n\`${saJson.client_email}\`\n\nКак расшарить: правый клик на папке → Поделиться → добавь email → роль "Читатель" (или "Редактор" если нужна запись).\n\nПосле шаринга просто напиши мне — я сам проверю доступ. Никакую ссылку слать не нужно.`,
         };
       },
     },
