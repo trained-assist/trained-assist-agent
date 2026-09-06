@@ -2,14 +2,14 @@
 # Smoke test 2: verify the Telegram bot token is valid and optionally
 # send a test message to the tes-recruiter chat.
 # Requires: BOT_TOKEN
-# Optional: TEST_CHAT_ID (default: 5492935208) — if the bot hasn't interacted
-#           with this chat yet, sendMessage will fail with "chat not found".
+# Optional: TEST_CHAT_ID — if the bot hasn't interacted with this chat yet,
+#           sendMessage will fail with "chat not found".
 #           In that case the test warns but does NOT fail — the bot token check
 #           is the primary assertion.
 set -euo pipefail
 
 BOT_TOKEN="${BOT_TOKEN:?BOT_TOKEN required}"
-CHAT_ID="${TEST_CHAT_ID:-5492935208}"
+CHAT_ID="${TEST_CHAT_ID:-}"
 API="https://api.telegram.org/bot$BOT_TOKEN"
 
 echo "→ Verifying bot token with getMe..."

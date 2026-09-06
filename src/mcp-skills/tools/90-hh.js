@@ -92,8 +92,8 @@ function hhRequest(method, apiPath, accessToken, body) {
       method,
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        'User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
-        'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+        'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+        'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
         ...(bodyStr
           ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) }
           : {}),
