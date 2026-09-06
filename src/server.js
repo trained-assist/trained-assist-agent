@@ -164,6 +164,7 @@ function scheduleNalogExpiryChecks(secrets) {
       const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
       fetch(`${tgBase}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
+        signal: AbortSignal.timeout(8000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
@@ -191,6 +192,7 @@ async function fetchAllHhNegotiations(vacancyId, accessToken) {
       items = items.concat(data.items || []);
       totalPages = data.pages ?? 1;
       page++;
+      if (page >= 50) { console.warn(`[hh] fetchAllHhNegotiations: hit 50-page cap for state=${state}`); break; }
     } while (page < totalPages);
     return items.map(item => ({ ...item, _state: state }));
   }));
@@ -279,6 +281,11 @@ async function resumePendingTasks(secrets) {
   const pending = getPendingTasks();
   const cutoff = Date.now() - 15 * 60 * 1000;
   const toResume = pending.filter(t => t.startedAt && t.startedAt > cutoff && t.username && t.userId && t.task);
+  // Clean up stale files that are too old to resume — prevents slow startup after many crashes.
+  const { clearPendingTask: _clearStale } = require('./runner');
+  for (const t of pending) {
+    if (!toResume.includes(t) && t.taskId) _clearStale(t.taskId);
+  }
   if (toResume.length === 0) return;
 
   console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
@@ -294,6 +301,7 @@ async function resumePendingTasks(secrets) {
     if (p.initialMsgId && secrets.BOT_TOKEN) {
       fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
         method: 'POST',
+        signal: AbortSignal.timeout(8000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: p.userId, message_id: p.initialMsgId, text: '🔄 Перезапускаю после сбоя…' }),
       }).catch(() => {});
@@ -481,6 +489,7 @@ async function main() {
         const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
         fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
           method: 'POST',
+          signal: AbortSignal.timeout(8000),
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             chat_id: notifyChatId,
@@ -667,6 +676,7 @@ async function main() {
         const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
         fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
           method: 'POST',
+          signal: AbortSignal.timeout(8000),
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             chat_id: hhChatId,
@@ -898,6 +908,7 @@ async function main() {
             const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
             fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
               method: 'POST',
+              signal: AbortSignal.timeout(8000),
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 chat_id: lcChatId,
@@ -978,6 +989,7 @@ async function main() {
             notifyText += '\nУправление: /secrets_list';
             fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
               method: 'POST',
+              signal: AbortSignal.timeout(8000),
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ chat_id: wkChatId, text: notifyText }),
             }).catch(e => console.error('[connect] tg notify failed:', e.message));
@@ -1079,6 +1091,7 @@ async function main() {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
           fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
             method: 'POST',
+            signal: AbortSignal.timeout(8000),
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               chat_id: svcChatId,
@@ -1987,6 +2000,7 @@ function show(id, type, msg) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
           fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
             method: 'POST',
+            signal: AbortSignal.timeout(8000),
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: chatId, text: notifLines }),
           }).catch(e => console.error('[apply] tg notify error:', e.message));
