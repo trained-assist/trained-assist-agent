@@ -546,7 +546,7 @@ The real session store is `src/session-store.js`. There used to be a dead file `
 - Lines 1040+: Remaining API routes (auth-gated)
 - Lines 2800+: `hhApiRequest`, `tgNotifyNalog`, `generateReviewPageHtml` helpers
 
-When adding HH-related code, the helpers (`hhApiRequest`, `hhApiPost`) are at the bottom of `server.js`, not in a separate `hh-core.js` — this is a known tech debt, not a bug.
+When adding HH-related code, the helpers (`hhApiRequest`, `hhApiPost`) are at the bottom of `server.js`.
 
 ---
 
