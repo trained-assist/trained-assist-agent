@@ -382,6 +382,17 @@ Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_D
 ### Adding a new endpoint
 Add route handling in `src/server.js` in the request handler chain (method + pathname check pattern).
 
+### src/ module map
+
+| Module / path | Description |
+|---------------|-------------|
+| `src/connect-forms/` | HTML templates for `/connect/*` endpoints (nalog, gdrive, hh, getcourse, weeek, generic site). Each file exports a function that returns an HTML string. |
+| `src/hooks/post-tool-use-artifacts.js` | Global `PostToolUse` Claude Code hook. Registered in `~/.claude/settings.json` via `runner.js`. Intercepts every tool-use response and stores extractable artifacts via `artifacts-store.js`. Skips sessions where `AGENT_USER_ID` is not set. |
+| `src/inn-pipeline/` | Multi-source pipeline for company lookup by INN. Sources: `sources/dadata.js`, `sources/checko.js`, `sources/egrul.js`, `sources/bfo.js`, `sources/site-scraper.js`. Helpers in `lib/`: cache, matcher, usage-log, variants. |
+| `src/site-connector.js` | Generic website connector: Playwright login → BFS crawl → Claude Haiku analysis → intent generation. Used by `POST /connect/site` and `src/user-sites.js`. |
+| `src/user-sites.js` | Stores and loads connected-site settings per profile. Reads intents from the crawl results; used by `runner.js` to inject site-specific quick answers. |
+| `scripts/refresh-weeek-session.js` | Refreshes `WEEEK_APP_COOKIE` in the Cloudflare Worker secret. Flow: capture cookies from Chrome via CDP → headless Playwright fallback → CF REST API update → Telegram alert on failure. Run manually or via `weeek-session-refresh.service`. |
+
 ### Quick answers — prefer instant replies over calling Claude
 
 **Rule: if a response can be determined without calling Claude, make it a quick answer.**
@@ -641,6 +652,7 @@ grep -r "^123456789$" ~/agent-tokens/*/.chatid 2>/dev/null
   gdrive-catalog.json     ← cached GDrive folder listing
   nalog                   ← nalog.ru auth token (JSON, expires ~1h)
   weeek                   ← Weeek API token (plain text)
+  weeek-login             ← Weeek session token (written by server.js /connect/weeek)
   github                  ← GitHub personal access token (plain text)
   getcourse/config.json   ← GetCourse API key + session cookies
 
@@ -652,6 +664,12 @@ grep -r "^123456789$" ~/agent-tokens/*/.chatid 2>/dev/null
   .pin_state.json         ← pinned context card state (msgId + chatId)
   profile.json            ← user profile (about, preferences)
   requirements-log.md     ← per-user requirements log
+  contexts/               ← key-value state for MCP skills (03-context-store.js)
+    <skill>/
+      <key>.json
+
+~/agent-data/system-flags/
+  claude_auth.json        ← auth error flag set by auth-flag.js
 ```
 
 ---
