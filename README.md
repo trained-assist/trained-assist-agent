@@ -158,6 +158,43 @@ Asks Claude Haiku which existing session a new message belongs to.
 Both VMs run `assist-agent.service` on port 8080, reverse-proxied via nginx on 443.
 Identity visible in `/health` response: `vm` field (e.g. `"vm":"gcp-main"`) + `commit` (git SHA).
 
+### Browser Session Infrastructure
+
+**GCP VM only.** A persistent headless Chrome instance accessible via noVNC — used for sites that require manual login (CAPTCHA, IP-binding, hardware tokens) that can't be automated headlessly.
+
+**Architecture:**
+
+```
+Xvfb :99 (virtual display)
+  └── Chrome --remote-debugging-port=9224  (CDP for Playwright/scripts)
+        └── x11vnc :5900  (VNC server on the virtual display)
+              └── websockify :6080  (WebSocket proxy)
+                    └── nginx /browser/  (noVNC web UI, public HTTPS)
+```
+
+**Systemd services** (`infra/systemd/`):
+
+| Service | Description |
+|---------|-------------|
+| `xvfb-browser.service` | Virtual display `:99` (1280×900, 24-bit) |
+| `chrome-browser.service` | Chrome on display `:99`, CDP on port 9224, opens Tilda login by default |
+| `vnc-browser.service` | x11vnc on VNC port 5900 (no password, localhost only) |
+| `novnc-browser.service` | websockify proxies VNC → WebSocket on port 6080 |
+| `wm-browser.service` | Minimal window manager for Chrome window management |
+| `ntp-hider.service` | Hides the Chrome NTP tab that opens on startup |
+| `login-server.service` | HTTP server on 127.0.0.1:9090 — validates pending tokens and triggers login scripts |
+
+**Setup:** `infra/browser-session/setup.sh` — installs packages (`xvfb x11vnc novnc websockify`), copies scripts to `~/browser-session/`, enables and starts systemd services.
+
+**MCP skill:** `src/mcp-skills/tools/21-browser-session.js` — exposes the browser session to Claude. Lets the user open a noVNC link, log in manually (handles CAPTCHAs), then captures cookies via CDP for use by other skills (Tilda, etc.). Generates short-lived pending tokens stored in `~/browser-session/pending/` (30-min TTL). The noVNC URL is set via `BROWSER_SESSION_URL` env var (default: `https://136-65-7-197.sslip.io/browser/`).
+
+**nginx endpoints** (`infra/nginx/relay.conf`, GCP VM only):
+
+| Path | What it does |
+|------|-------------|
+| `/browser/` | Serves noVNC web UI (redirects to `tilda-login.html`) |
+| `/browser-login` | Proxies to `login-server.service` on port 9090 |
+
 ### Secrets Architecture
 
 | Secret | Required | GCP Secret Manager | GCP `secrets.env` | RU `secrets.env` | Notes |
