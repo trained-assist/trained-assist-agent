@@ -122,45 +122,73 @@ async function fetchVacanciesPage(params) {
   return data;
 }
 
+// Collect items from one paginated query (up to 2000 results)
+async function collectPages(baseParams, seen, all) {
+  let page = 0;
+  while (true) {
+    const data = await fetchVacanciesPage({ ...baseParams, page: String(page) });
+    if (!Array.isArray(data.items) || data.items.length === 0) break;
+
+    for (const v of data.items) {
+      const id = parseInt(v.id);
+      const empId = parseInt(v.employer?.id);
+      if (seen.has(id) || !empId) continue;
+      seen.add(id);
+      all.push({
+        id,
+        employer_id: empId,
+        employer_name: v.employer?.name || '',
+        title: v.name || '',
+        published_at: (v.published_at || '').slice(0, 10),
+      });
+    }
+
+    const totalPages = data.pages || 0;
+    if (page >= totalPages - 1) break;
+    page++;
+    await sleep(HH_DELAY_MS);
+  }
+}
+
+// Generate date windows over last 30 days (3-day chunks)
+function dateWindows() {
+  const windows = [];
+  const now = new Date();
+  for (let daysBack = 0; daysBack < 30; daysBack += 3) {
+    const to = new Date(now - daysBack * 86400000);
+    const from = new Date(now - (daysBack + 3) * 86400000);
+    windows.push({
+      date_from: from.toISOString().slice(0, 10),
+      date_to: to.toISOString().slice(0, 10),
+    });
+  }
+  return windows;
+}
+
 async function fetchAllRemoteVacancies() {
   // HH API caps at 2000 results per query (20 pages × 100).
-  // Split by professional_role (~304 roles, avg ~130 remote vacancies each).
+  // Strategy: split by professional_role; if role > 2000, further split by 3-day date windows.
   const seen = new Set();
   const all = [];
-  const perPage = 100;
 
   const roleIds = await fetchRoleIds();
   console.log(`  Splitting by ${roleIds.length} professional roles...`);
 
   for (let i = 0; i < roleIds.length; i++) {
     const roleId = roleIds[i];
-    let page = 0;
 
-    while (true) {
-      const data = await fetchVacanciesPage({ professional_role: roleId, page: String(page) });
-      if (!Array.isArray(data.items) || data.items.length === 0) break;
+    // Probe: how many vacancies does this role have?
+    const probe = await fetchVacanciesPage({ professional_role: roleId, per_page: '1' });
+    const found = probe.found || 0;
 
-      for (const v of data.items) {
-        const id = parseInt(v.id);
-        if (seen.has(id)) continue;
-        seen.add(id);
-        all.push({
-          id,
-          employer_id: parseInt(v.employer?.id),
-          employer_name: v.employer?.name || '',
-          title: v.name || '',
-          published_at: (v.published_at || '').slice(0, 10),
-        });
+    if (found <= 2000) {
+      await collectPages({ professional_role: roleId }, seen, all);
+    } else {
+      // Too large — split by 3-day date windows
+      for (const window of dateWindows()) {
+        await collectPages({ professional_role: roleId, ...window }, seen, all);
+        await sleep(HH_DELAY_MS);
       }
-
-      const totalPages = data.pages || 0;
-      if (totalPages > 19) {
-        // Этот role тоже превышает лимит — логируем, но не ломаемся
-        console.warn(`  role ${roleId}: found=${data.found} > 2000, some may be missed`);
-      }
-      if (page >= totalPages - 1) break;
-      page++;
-      await sleep(HH_DELAY_MS);
     }
 
     if (i % 50 === 0) console.log(`  roles processed: ${i}/${roleIds.length} — unique vacancies: ${all.length}`);
