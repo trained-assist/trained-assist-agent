@@ -107,31 +107,66 @@ async function hhGet(apiPath) {
   return body;
 }
 
+async function fetchRoleIds() {
+  const data = await hhGet('/professional_roles');
+  const ids = [];
+  for (const cat of data.categories || []) {
+    for (const role of cat.roles || []) ids.push(role.id);
+  }
+  return ids;
+}
+
+async function fetchVacanciesPage(params) {
+  const qs = new URLSearchParams({ schedule: 'remote', per_page: '100', ...params }).toString();
+  const data = await hhGet(`/vacancies?${qs}`);
+  return data;
+}
+
 async function fetchAllRemoteVacancies() {
+  // HH API caps at 2000 results per query (20 pages × 100).
+  // Split by professional_role (~304 roles, avg ~130 remote vacancies each).
+  const seen = new Set();
   const all = [];
-  let page = 0;
   const perPage = 100;
 
-  while (true) {
-    const data = await hhGet(`/vacancies?schedule=remote&per_page=${perPage}&page=${page}&order_by=publication_time`);
-    if (!Array.isArray(data.items) || data.items.length === 0) break;
+  const roleIds = await fetchRoleIds();
+  console.log(`  Splitting by ${roleIds.length} professional roles...`);
 
-    for (const v of data.items) {
-      all.push({
-        id: parseInt(v.id),
-        employer_id: parseInt(v.employer?.id),
-        employer_name: v.employer?.name || '',
-        title: v.name || '',
-        published_at: (v.published_at || '').slice(0, 10),
-      });
+  for (let i = 0; i < roleIds.length; i++) {
+    const roleId = roleIds[i];
+    let page = 0;
+
+    while (true) {
+      const data = await fetchVacanciesPage({ professional_role: roleId, page: String(page) });
+      if (!Array.isArray(data.items) || data.items.length === 0) break;
+
+      for (const v of data.items) {
+        const id = parseInt(v.id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        all.push({
+          id,
+          employer_id: parseInt(v.employer?.id),
+          employer_name: v.employer?.name || '',
+          title: v.name || '',
+          published_at: (v.published_at || '').slice(0, 10),
+        });
+      }
+
+      const totalPages = data.pages || 0;
+      if (totalPages > 19) {
+        // Этот role тоже превышает лимит — логируем, но не ломаемся
+        console.warn(`  role ${roleId}: found=${data.found} > 2000, some may be missed`);
+      }
+      if (page >= totalPages - 1) break;
+      page++;
+      await sleep(HH_DELAY_MS);
     }
 
-    const totalPages = data.pages || 0;
-    if (page % 50 === 0) console.log(`  page ${page}/${totalPages} — collected ${all.length}/${data.found}`);
-    if (page >= totalPages - 1) break;
-    page++;
+    if (i % 50 === 0) console.log(`  roles processed: ${i}/${roleIds.length} — unique vacancies: ${all.length}`);
     await sleep(HH_DELAY_MS);
   }
+
   return all;
 }
 
