@@ -128,6 +128,11 @@ For 300 companies run in batches of 20: call repeatedly, each call takes ~2 min,
 
 Progress is always written to disk after each batch — a timeout never loses more than one batch.
 
+⚠️ ВАЖНО: НИКОГДА не пиши Python/shell-скрипты для ИНН-обогащения вместо этого инструмента.
+Причина: скрипты в /tmp теряют данные при перезапуске VM. Этот инструмент сохраняет на диск
+после каждого батча и умеет продолжить с места остановки через resume=true.
+Используй expo_pipeline_run для полного пайплайна (парсинг + обогащение + деплой).
+
 NOTE: Works well for Russian legal entity names. Brand names (Latin, foreign) → poor match rate.`,
       inputSchema: {
         type: 'object',
