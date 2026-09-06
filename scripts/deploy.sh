@@ -31,14 +31,28 @@ else
 fi
 UNIT_SRC="$REPO_DIR/systemd/${SERVICE}${UNIT_VARIANT}.service"
 UNIT_DST="/etc/systemd/system/${SERVICE}.service"
+NOTIFY_SRC="$REPO_DIR/systemd/assist-agent-notify-failure.service"
+NOTIFY_DST="/etc/systemd/system/assist-agent-notify-failure.service"
+CHANGED=0
 if [ -f "$UNIT_SRC" ]; then
   if ! diff -q "$UNIT_SRC" "$UNIT_DST" >/dev/null 2>&1; then
     sudo cp "$UNIT_SRC" "$UNIT_DST"
-    sudo systemctl daemon-reload
-    echo "  Unit file updated and daemon reloaded"
+    CHANGED=1
+    echo "  Unit file updated"
   else
     echo "  Unit file unchanged"
   fi
+fi
+if [ -f "$NOTIFY_SRC" ]; then
+  if ! diff -q "$NOTIFY_SRC" "$NOTIFY_DST" >/dev/null 2>&1; then
+    sudo cp "$NOTIFY_SRC" "$NOTIFY_DST"
+    CHANGED=1
+    echo "  Notify-failure unit updated"
+  fi
+fi
+if [ "$CHANGED" = "1" ]; then
+  sudo systemctl daemon-reload
+  echo "  daemon reloaded"
 fi
 
 echo "==> Stopping legacy conflicting services (alesa-agent, trained-assist-agent)..."

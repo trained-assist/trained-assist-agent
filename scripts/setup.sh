@@ -18,6 +18,7 @@ mkdir -p "$HOME/agent-data/sessions"
 
 echo "==> Installing systemd service..."
 sudo cp "$REPO_DIR/systemd/assist-agent.service" "/etc/systemd/system/$SERVICE.service"
+sudo cp "$REPO_DIR/systemd/assist-agent-notify-failure.service" "/etc/systemd/system/assist-agent-notify-failure.service"
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE"
 sudo systemctl start "$SERVICE"

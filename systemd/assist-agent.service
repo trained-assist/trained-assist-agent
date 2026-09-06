@@ -2,15 +2,28 @@
 Description=Trained Assist Agent — Claude Code session runner
 After=network-online.target
 Wants=network-online.target
+OnFailure=assist-agent-notify-failure.service
 
 [Service]
 Type=simple
 User=vova
 WorkingDirectory=/home/vova/trained-assist-agent
-ExecStartPre=/bin/sh -c 'fuser -k 8080/tcp 2>/dev/null; true'
+# Kill any process still holding port 8080 before we try to bind.
+# Uses lsof (more reliable than fuser across distros); sleep 1 gives the
+# kernel time to release the socket before the new server calls listen().
+ExecStartPre=/bin/bash -c 'pids=$(lsof -ti tcp:8080 2>/dev/null); [ -n "$pids" ] && { echo "[pre-start] killing PIDs on :8080: $pids"; kill -9 $pids 2>/dev/null; }; sleep 1; true'
 ExecStart=/usr/bin/node src/server.js
+# Kill the entire cgroup (main process + all spawned Claude Code children)
+# on stop/restart, not just the main PID.
+KillMode=control-group
 Restart=always
-RestartSec=5
+# Wait 15s between restarts — enough for TCP sockets to clear and prevents
+# a rapid-fire death spiral (we hit restart count 3331 on 2026-08-29).
+RestartSec=15
+# Stop retrying after 10 failures in 5 minutes — surface the problem
+# instead of looping silently. Operator must restart manually after this.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 # Give server.js's graceful-shutdown drain (up to 90s, see src/server.js) room to
 # finish before systemd SIGKILLs the process on stop/restart (e.g. from deploy.sh).
 TimeoutStopSec=120
