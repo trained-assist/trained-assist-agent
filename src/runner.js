@@ -124,8 +124,8 @@ const QUICK_SETUPS = [
   // { match: /google.?drive|гугл.?диск|gdrive/i, service: null, hint: '...' },
   {
     match: /tilda|тильда/i,
-    service: null,
-    hint: 'Нужен удалённый браузер — скажи мне "подключи Tilda".',
+    service: 'tilda-creds',
+    hint: 'Email и пароль не попадут в чат — введёшь через защищённую форму, я войду автоматически.',
   },
   {
     match: /nalog|налог|нпд|самозан/i,
