@@ -365,7 +365,7 @@ npm run check  # syntax check all src files
 | `NODE_ENV` | — | Set to `production` in systemd |
 | `AGENT_PUBLIC_URL` | `https://recruiter-assistant.ru` | Public base URL for connect-links. RU VM: `https://platform.recruiter-assistant.ru` |
 
-Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_DATA_DIR=/home/vova/alesa-data` explicitly.
+Note: on first deploy after this change, `deploy.sh` automatically migrates `~/alesa-data` → `~/agent-data` if the old directory exists.
 
 ## Claude Code Instructions
 
@@ -476,13 +476,13 @@ Then the current task is appended as `Пользователь: <task>`. Without
 **1. Never hardcode data directory path.**
 ```js
 // ❌ Wrong — breaks on path change
-const workDir = path.join(os.homedir(), 'alesa-data', 'sessions', username);
+const workDir = path.join(os.homedir(), 'agent-data', 'sessions', username);
 
 // ✅ Right
 const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
 const workDir = path.join(dataDir, 'sessions', username);
 ```
-The systemd service sets `AGENT_DATA_DIR=/home/vova/alesa-data`. On local dev this differs from the default. Always use the env var.
+The systemd service sets `AGENT_DATA_DIR=/home/vova/agent-data`. On local dev this defaults to the same value. Always use the env var.
 
 **2. Quick answers that touch state still need null-guard on `workDir`.**
 ```js

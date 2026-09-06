@@ -15,7 +15,7 @@ TimeoutStopSec=120
 
 Environment=NODE_ENV=production
 Environment=PORT=8080
-Environment=AGENT_DATA_DIR=/home/vova/alesa-data
+Environment=AGENT_DATA_DIR=/home/vova/agent-data
 Environment=VM_NAME=ru-vm
 
 # Non-GCP: load secrets from env vars instead of GCP Secret Manager
