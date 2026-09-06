@@ -1979,7 +1979,9 @@ function show(id, type, msg) {
 
       const tokensDir = path.join(process.env.HOME || '/home/vova', 'agent-tokens', String(userId));
       fs.mkdirSync(tokensDir, { recursive: true });
-      fs.writeFileSync(path.join(tokensDir, label), String(value), { mode: 0o600 });
+      // Serialize value safely: ZeroCreds may send {fields_json} as an object (not a string)
+      const storedValue = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
+      fs.writeFileSync(path.join(tokensDir, label), storedValue, { mode: 0o600 });
       console.log(`[tokens] saved label="${label}" for userId=${userId}`);
       return json(res, 200, { ok: true });
     }
