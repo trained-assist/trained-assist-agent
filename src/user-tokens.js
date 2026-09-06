@@ -102,6 +102,7 @@ const SERVICE_DISPLAY = {
   dadata:          'DaData',
   gdrive:          'Google Drive',
   hh:              'HeadHunter',
+  site:            'Сайт (авто-логин)',
 };
 
 function tokensDir(userId) {

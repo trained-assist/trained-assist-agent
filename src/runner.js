@@ -18,6 +18,7 @@ const {
 const { initLog, readLog } = require('./requirements-log');
 const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, readActiveVacancy } = require('./hh-quick');
 const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('./hh-vacancy');
+const { loadUserSiteIntents } = require('./user-sites');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -140,6 +141,11 @@ const QUICK_SETUPS = [
     match: /head.?hunter|\bhh\b|хантер/i,
     service: 'hh',
     hint: 'Войдёшь через hh.ru как работодатель — страница защищена, токен не проходит через чат.',
+  },
+  {
+    match: /подключи.{0,20}сайт|добавь.{0,20}сайт|connect.{0,15}site|подключить.{0,20}сайт/i,
+    service: 'site',
+    hint: 'Введи адрес сайта, логин и пароль — я автоматически зайду и изучу его.',
   },
 ];
 
@@ -491,13 +497,33 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     }
   }
 
+  // Check user-connected sites (custom intents generated during crawl)
+  if (userId) {
+    try {
+      const siteIntents = loadUserSiteIntents(userId);
+      for (const intent of siteIntents) {
+        try {
+          if (new RegExp(intent.pattern, 'i').test(task)) {
+            console.log('[quick-answer] matched site intent=%j site=%s', intent.pattern, intent.slug);
+            return intent.response;
+          }
+        } catch (e) {
+          console.warn('[quick-answer] invalid site intent regex:', intent.pattern, e.message);
+        }
+      }
+    } catch (e) {
+      console.warn('[quick-answer] loadUserSiteIntents failed:', e.message);
+    }
+  }
+
   if (!SETUP_INTENT.test(task)) {
     console.log('[quick-answer] no setup intent, task=%j', task.slice(0, 120));
     return null;
   }
 
   const NAVIGATING_URL_RE = /https?:\/\/[^\s]+\.[^\s]+\/[^\s]+/i;
-  if (NAVIGATING_URL_RE.test(task)) {
+  const SITE_CONNECT_RE = /подключи.{0,20}сайт|добавь.{0,20}сайт|connect.{0,15}site|подключить.{0,20}сайт/i;
+  if (NAVIGATING_URL_RE.test(task) && !SITE_CONNECT_RE.test(task)) {
     console.log('[quick-answer] task contains a URL with path — user is navigating, not connecting; skipping QUICK_SETUPS');
     return null;
   }

@@ -988,6 +988,41 @@ async function main() {
         res.writeHead(405).end(); return;
       }
 
+      // ── site — generic Playwright login + crawl ───────────────────────────────
+      if (service === 'site') {
+        if (req.method === 'GET') {
+          const t = url.searchParams.get('t') || '';
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(siteFormHtml(t));
+          return;
+        }
+
+        if (req.method === 'POST') {
+          let payload;
+          try { payload = JSON.parse(await readBody(req)); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
+          const { t, url: siteUrl, login, password } = payload;
+          if (!t || !siteUrl || !login || !password) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
+          if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
+
+          const pendingFileSite = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+          let pendingSite;
+          try { pendingSite = JSON.parse(fs.readFileSync(pendingFileSite, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
+          if (pendingSite.expires < Date.now()) { try { fs.unlinkSync(pendingFileSite); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          if (pendingSite.service !== 'site') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
+          if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pendingSite.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
+          try { fs.unlinkSync(pendingFileSite); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; }
+
+          const siteResult = await connectSite(pendingSite.uid, { url: siteUrl, login, password });
+          if (siteResult.error) {
+            res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: siteResult.error }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(siteResult));
+          return;
+        }
+
+        res.writeHead(405).end(); return;
+      }
+
       const SERVICE_META = {
         github: { name: 'GitHub', placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', hint: 'github.com/settings/tokens → Generate new token (classic) → scopes: <b>repo</b>, <b>read:org</b>' },
       };
@@ -1979,7 +2014,9 @@ function show(id, type, msg) {
 
       const tokensDir = path.join(process.env.HOME || '/home/vova', 'agent-tokens', String(userId));
       fs.mkdirSync(tokensDir, { recursive: true });
-      fs.writeFileSync(path.join(tokensDir, label), String(value), { mode: 0o600 });
+      // Serialize value safely: ZeroCreds may send {fields_json} as an object (not a string)
+      const storedValue = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
+      fs.writeFileSync(path.join(tokensDir, label), storedValue, { mode: 0o600 });
       console.log(`[tokens] saved label="${label}" for userId=${userId}`);
       return json(res, 200, { ok: true });
     }
