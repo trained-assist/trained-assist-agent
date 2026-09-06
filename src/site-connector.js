@@ -54,12 +54,20 @@ async function connectSite(username, { url, login, password }) {
       locale: 'ru-RU',
     });
 
-    // Intercept XHR/fetch calls to discover API endpoints
+    // Intercept XHR/fetch calls — only keep same-domain API calls (skip analytics/CDN)
+    let siteHost;
+    try { siteHost = new URL(normalizedUrl).hostname; } catch { siteHost = ''; }
+
     context.on('request', req => {
-      if (['xhr', 'fetch'].includes(req.resourceType())) {
-        const ep = { url: req.url(), method: req.method() };
-        if (!apiEndpoints.some(e => e.url === ep.url)) apiEndpoints.push(ep);
-      }
+      if (!['xhr', 'fetch'].includes(req.resourceType())) return;
+      const reqUrl = req.url();
+      // Keep only same-origin requests
+      try {
+        const h = new URL(reqUrl).hostname;
+        if (h !== siteHost) return;
+      } catch { return; }
+      const ep = { url: reqUrl, method: req.method() };
+      if (!apiEndpoints.some(e => e.url === ep.url)) apiEndpoints.push(ep);
     });
 
     page = await context.newPage();
@@ -115,9 +123,38 @@ async function connectSite(username, { url, login, password }) {
 // ── Login ────────────────────────────────────────────────────────────────────
 
 async function tryLogin(page, login, password, originalUrl) {
-  // Try login form on current page
-  let filled = await fillLoginForm(page, login, password);
-  if (filled) return waitForLoginSuccess(page, originalUrl);
+  // Detect bot protection (Cloudflare, etc.) — wait for JS to settle first
+  await page.waitForTimeout(1000);
+  const botBlocked = await page.evaluate(() => {
+    const title = document.title.toLowerCase();
+    const body = document.body?.textContent?.toLowerCase() || '';
+    return title.includes('just a moment') || title.includes('checking your browser') ||
+      body.includes('performing security verification') ||
+      body.includes('security service to protect against malicious bots') ||
+      !!document.querySelector('#challenge-form, .cf-browser-verification, #cf-challenge-running');
+  }).catch(() => false);
+  if (botBlocked) {
+    return { success: false, error: 'Сайт защищён от ботов (Cloudflare/DDoS-Guard). Автоматический вход невозможен — используй ручное подключение через куки.' };
+  }
+
+  // Try login form on current page (may need extra wait for SPA render)
+  let pwVisible = await page.$('input[type="password"]');
+  if (!pwVisible) {
+    await page.waitForTimeout(1500);
+    pwVisible = await page.$('input[type="password"]');
+  }
+
+  if (pwVisible) {
+    const filled = await fillLoginForm(page, login, password);
+    if (filled) return waitForLoginSuccess(page, originalUrl);
+  }
+
+  // Check for multi-step login: email-only field → click Continue → password appears
+  const emailOnlyField = await page.$('input[type="email"], input[name*="email"], input[name*="login"]');
+  if (emailOnlyField && !pwVisible) {
+    const multiStep = await tryMultiStepLogin(page, login, password);
+    if (multiStep.attempted) return waitForLoginSuccess(page, originalUrl);
+  }
 
   // Follow obvious login links
   try {
@@ -127,8 +164,8 @@ async function tryLogin(page, login, password, originalUrl) {
     ].join(','));
     if (loginLink) {
       await loginLink.click();
-      await page.waitForLoadState('domcontentloaded', { timeout: 6000 }).catch(() => {});
-      filled = await fillLoginForm(page, login, password);
+      await page.waitForTimeout(1500);
+      const filled = await fillLoginForm(page, login, password);
       if (filled) return waitForLoginSuccess(page, originalUrl);
     }
   } catch (e) {
@@ -136,6 +173,41 @@ async function tryLogin(page, login, password, originalUrl) {
   }
 
   return { success: false, error: 'Форма входа не найдена. Укажи прямую ссылку на страницу логина.' };
+}
+
+// Multi-step login: email first → submit → password appears
+async function tryMultiStepLogin(page, login, password) {
+  try {
+    const emailInput = await page.$('input[type="email"], input[name*="email"], input[name*="login"]');
+    if (!emailInput) return { attempted: false };
+
+    await emailInput.fill(login);
+    await page.waitForTimeout(200);
+
+    const continueBtn = await page.$([
+      'button[type="submit"]', 'input[type="submit"]',
+      'button:has-text("Continue")', 'button:has-text("Next")',
+      'button:has-text("Продолжить")', 'button:has-text("Далее")',
+    ].join(','));
+
+    if (continueBtn) {
+      await continueBtn.click();
+      // Wait for password field to appear
+      await page.waitForSelector('input[type="password"]', { timeout: 5000 }).catch(() => {});
+      const pwInput = await page.$('input[type="password"]');
+      if (pwInput) {
+        await pwInput.fill(password);
+        await page.waitForTimeout(200);
+        const submitBtn = await page.$('button[type="submit"], input[type="submit"]');
+        if (submitBtn) await submitBtn.click();
+        else await pwInput.press('Enter');
+        return { attempted: true };
+      }
+    }
+  } catch (e) {
+    console.warn('[site-connector] multi-step login:', e.message);
+  }
+  return { attempted: false };
 }
 
 async function fillLoginForm(page, login, password) {
@@ -153,22 +225,24 @@ async function fillLoginForm(page, login, password) {
     let loginInput = null;
     for (const sel of loginSelectors) {
       loginInput = await page.$(sel);
-      if (loginInput) break;
+      if (loginInput && loginInput !== pwInput) break;
+      loginInput = null;
     }
 
     if (loginInput) {
       await loginInput.fill(login);
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(200);
     }
 
     await pwInput.fill(password);
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(200);
 
-    // Submit
+    // Submit — try multiple patterns
     const submitBtn = await page.$([
       'button[type="submit"]', 'input[type="submit"]',
-      'button:has-text("Log in")', 'button:has-text("Sign in")',
-      'button:has-text("Login")', 'button:has-text("Войти")', 'button:has-text("Вход")',
+      'button:has-text("Log in")', 'button:has-text("Sign in")', 'button:has-text("Login")',
+      'button:has-text("Continue")', 'button:has-text("Войти")', 'button:has-text("Вход")',
+      'button:has-text("Sign In")',
     ].join(','));
 
     if (submitBtn) {
@@ -185,45 +259,67 @@ async function fillLoginForm(page, login, password) {
 }
 
 async function waitForLoginSuccess(page, originalUrl) {
+  // Wait for any of: URL change, password field disappears, network settles
   try {
-    // Wait up to 8s for URL to change away from a login-looking page
-    await page.waitForFunction(
-      (orig) => {
-        const cur = location.href;
-        if (cur === orig) return false;
-        const isLoginPage = /login|signin|sign-in|\/auth\//i.test(new URL(cur).pathname);
-        return !isLoginPage;
-      },
-      originalUrl,
-      { timeout: 8000 }
-    );
+    await Promise.race([
+      // Signal 1: URL changed to a non-login page
+      page.waitForFunction(
+        (orig) => {
+          const cur = location.href;
+          if (cur === orig) return false;
+          return !/login|signin|sign-in|\/auth\//i.test(new URL(cur).pathname);
+        },
+        originalUrl,
+        { timeout: 10000 }
+      ),
+      // Signal 2: password input disappeared (logged in, page transitioned)
+      page.waitForFunction(
+        () => !document.querySelector('input[type="password"]'),
+        { timeout: 10000 }
+      ).then(async () => {
+        await page.waitForTimeout(800); // let SPA settle
+      }),
+    ]);
     return { success: true };
   } catch {
-    // URL didn't change — check for visible error messages
+    // Timeout — check for visible error messages
     try {
       const errText = await page.evaluate(() => {
-        const el = document.querySelector(
-          '.error, .alert-danger, .flash-error, [class*="error-msg"], [class*="alert--error"]'
-        );
+        const el = document.querySelector([
+          '.error', '.alert-danger', '.flash-error', '[class*="error-msg"]',
+          '[class*="alert--error"]', '[role="alert"]', '.notification-error',
+        ].join(','));
         return el?.textContent?.trim()?.slice(0, 200) || null;
       });
       if (errText) return { success: false, error: `Ошибка входа: ${errText}` };
     } catch {}
-    // No error visible — SPA probably stayed on same URL but is logged in
+    // No clear error — assume SPA stayed on same URL post-login (e.g. modal dismissed)
     return { success: true };
   }
 }
 
 // ── Background crawl + analysis ──────────────────────────────────────────────
 
+// Common app routes to probe after login (SPA apps often don't link to these from the root)
+const COMMON_APP_ROUTES = [
+  '/dashboard', '/home', '/app', '/workspace', '/projects', '/tasks', '/profile',
+  '/settings', '/account', '/admin', '/api', '/users', '/reports', '/analytics',
+];
+
 async function runBackgroundCrawl(browser, context, page, username, slug, config, startUrl, apiEndpoints) {
   const pages = [];
   const forms = [];
   const baseHost = (() => { try { return new URL(startUrl).hostname; } catch { return ''; } })();
+  const baseOrigin = (() => { try { return new URL(startUrl).origin; } catch { return ''; } })();
+
+  // Probe common SPA routes to discover app structure (best-effort, ignore 404s)
+  const extraUrls = COMMON_APP_ROUTES.map(r => baseOrigin + r);
 
   try {
     const visited = new Set([startUrl]);
-    const queue = [{ url: startUrl, depth: 0 }];
+    // Seed with common routes so crawl discovers them even if not linked
+    for (const u of extraUrls) visited.add(u); // mark as seen but queue them at depth 1
+    const queue = [{ url: startUrl, depth: 0 }, ...extraUrls.map(u => ({ url: u, depth: 1 }))];
     const crawlStart = Date.now();
 
     while (queue.length > 0 && visited.size <= MAX_PAGES && Date.now() - crawlStart < CRAWL_TOTAL_MS) {
@@ -262,6 +358,8 @@ async function runBackgroundCrawl(browser, context, page, username, slug, config
         console.warn(`[site-connector] crawl error ${curUrl}:`, e.message);
       }
 
+      // Skip dead pages (no title = 404 or redirect away from site)
+      if (!title && depth > 0) continue;
       pages.push({ url: curUrl, title, depth });
       forms.push(...pageForms);
 
