@@ -100,8 +100,10 @@ const CONTEXT_OFF_INTENT    = /^\/context_off$|выключи.{0,15}контек
 const CONTEXT_ON_INTENT     = /^\/context_on$|включи.{0,15}контекст|покажи.{0,15}контекст|включи.{0,15}(?:статус|карточк)/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
-const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|компани|квалиф)|критери.{0,20}(?:целев|отбор|компани|выставк)|целев.{0,20}(?:критери|требовани|компани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
+// Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
+const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|квалиф)|критери.{0,20}(?:целев|отбор|выставк)|целев.{0,20}(?:критери|требовани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
 const EXPO_STATUS_INTENT    = /статус.{0,20}(?:пайплайн|pipeline|выставк|обработк)|pipeline.{0,10}статус|сколько.{0,15}целевых|сколько.{0,15}компаний.{0,20}(?:выставк|обработан|pipeline)|expo.{0,10}статус/i;
+const EXPO_SITE_CONFIG_INTENT = /фильтр.{0,20}(?:сайт|каталог|выставк|диапазон)|сайт.{0,20}фильтр|диапазон.{0,20}(?:выручк|сайт)|настройк.{0,20}(?:сайт|каталог)|какие.{0,10}диапазон|revenue.*filter|site.*filter/i;
 // Checks whether a service is connected ("github подключен?", "статус nalog") — NOT imperative "подключи"
 const SERVICE_STATUS_INTENT = /(?:подключён|подключен|connected|активен|добавлен|работает|есть ли|подключён ли).{0,30}(?:github|weeek|вик|nalog|налог|нпд|figma|фигма|tilda|тильда|gdrive|getcourse|геткурс)|(?:github|weeek|вик|nalog|налог|нпд|figma|фигма|tilda|тильда|gdrive|getcourse|геткурс).{0,20}(?:подключён|подключен|connected|активен|добавлен|работает|статус|status)/i;
 const SERVICE_STATUS_RE     = /(github|weeek|вик|nalog|налог|нпд|figma|фигма|tilda|тильда|gdrive|getcourse|геткурс)/i;
@@ -458,13 +460,25 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   }
 
   // Expo pipeline — target criteria (quick read from disk, no LLM)
-  if (EXPO_CRITERIA_INTENT.test(task) && workDir) {
+  // Length guard: long messages are instructions, not criteria lookup requests
+  if (EXPO_CRITERIA_INTENT.test(task) && task.length < 200 && workDir) {
     try {
       const { formatCriteriaText, readCriteria } = require('./mcp-skills/tools/87-expo-pipeline.js');
       const criteria = readCriteria(workDir);
       return formatCriteriaText(criteria);
     } catch (e) {
       console.error('[quick-answer] expo criteria error:', e.message);
+    }
+  }
+
+  // Expo pipeline — site config / filter ranges
+  if (EXPO_SITE_CONFIG_INTENT.test(task) && task.length < 200 && workDir) {
+    try {
+      const { formatSiteConfigText, readSiteConfig } = require('./mcp-skills/tools/87-expo-pipeline.js');
+      const config = readSiteConfig(workDir);
+      return formatSiteConfigText(config);
+    } catch (e) {
+      console.error('[quick-answer] expo site-config error:', e.message);
     }
   }
 
