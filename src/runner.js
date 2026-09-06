@@ -1010,7 +1010,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         const blocks = vs.messages.map((m, i) => `[Блок ${i + 1}]: ${m.slice(0, 500)}`).join('\n\n');
         task = `[Материалы вакансии, собранные пользователем:\n${blocks}]\n\n${task}`;
       }
-    } catch { /* vacancy-state.json may not exist */ }
+    } catch (e) { if (e.code !== 'ENOENT') console.warn('[runner] readVacancyState:', e.message); }
   }
 
   // Persist chatId early — needed by OAuth callbacks (e.g. HH, GDrive) that fire
