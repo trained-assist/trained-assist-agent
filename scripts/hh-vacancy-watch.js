@@ -142,6 +142,17 @@ async function collectPages(baseParams, seen, all) {
         employer_name: v.employer?.name || '',
         title: v.name || '',
         published_at: (v.published_at || '').slice(0, 10),
+        created_at: (v.created_at || '').slice(0, 10),
+        area_id: v.area?.id || null,
+        area_name: v.area?.name || '',
+        salary_from: v.salary?.from ?? null,
+        salary_to: v.salary?.to ?? null,
+        salary_currency: v.salary?.currency || null,
+        salary_gross: v.salary?.gross ? 1 : 0,
+        experience_id: v.experience?.id || null,
+        employment_form: v.employment_form?.id || null,
+        snippet_req: (v.snippet?.requirement || '').slice(0, 500),
+        snippet_resp: (v.snippet?.responsibility || '').slice(0, 500),
       });
     }
 
@@ -210,6 +221,10 @@ async function fetchEmployerNewVacancies(employerId, sinceDate) {
       id: parseInt(v.id),
       title: v.name || '',
       published_at: (v.published_at || '').slice(0, 10),
+      area_name: v.area?.name || '',
+      salary_from: v.salary?.from ?? null,
+      salary_to: v.salary?.to ?? null,
+      salary_currency: v.salary?.currency || null,
       url: v.alternate_url || `https://hh.ru/vacancy/${v.id}`,
     }));
 }
@@ -217,10 +232,13 @@ async function fetchEmployerNewVacancies(employerId, sinceDate) {
 // --- LLM duplicate check ---
 // Приоритет: OPENAI_API_KEY → GIGACHAT_TOKEN → текстовая эвристика
 
-const DEDUP_PROMPT = (oldTitle, newTitle) =>
-  `Один работодатель закрыл вакансию и открыл новую. Это та же самая позиция (повторный найм)?\n\nСтарая: "${oldTitle}"\nНовая: "${newTitle}"\n\nОтветь одним словом: ДА или НЕТ`;
+const DEDUP_PROMPT = (oldTitle, newTitle, oldSnippet = '', newSnippet = '') => {
+  const oldCtx = oldSnippet ? `\nТребования: ${oldSnippet.slice(0, 200)}` : '';
+  const newCtx = newSnippet ? `\nТребования: ${newSnippet.slice(0, 200)}` : '';
+  return `Один работодатель закрыл вакансию и открыл новую. Это та же самая позиция (повторный найм на ту же роль)?\n\nСтарая: "${oldTitle}"${oldCtx}\nНовая: "${newTitle}"${newCtx}\n\nОтветь одним словом: ДА или НЕТ`;
+};
 
-async function isDuplicateOpenAI(oldTitle, newTitle) {
+async function isDuplicateOpenAI(oldTitle, newTitle, oldSnippet, newSnippet) {
   const body = await httpsPost(
     'api.openai.com',
     '/v1/chat/completions',
@@ -228,15 +246,14 @@ async function isDuplicateOpenAI(oldTitle, newTitle) {
     {
       model: 'gpt-4o-mini',
       max_tokens: 5,
-      messages: [{ role: 'user', content: DEDUP_PROMPT(oldTitle, newTitle) }],
+      messages: [{ role: 'user', content: DEDUP_PROMPT(oldTitle, newTitle, oldSnippet, newSnippet) }],
     }
   );
   const text = (body.choices?.[0]?.message?.content || '').trim().toUpperCase();
   return text.startsWith('ДА');
 }
 
-async function isDuplicateGigaChat(oldTitle, newTitle) {
-  // GigaChat API (Sber): Bearer auth, OpenAI-compatible chat endpoint
+async function isDuplicateGigaChat(oldTitle, newTitle, oldSnippet, newSnippet) {
   const body = await httpsPost(
     'gigachat.devices.sberbank.ru',
     '/api/v1/chat/completions',
@@ -244,7 +261,7 @@ async function isDuplicateGigaChat(oldTitle, newTitle) {
     {
       model: 'GigaChat',
       max_tokens: 5,
-      messages: [{ role: 'user', content: DEDUP_PROMPT(oldTitle, newTitle) }],
+      messages: [{ role: 'user', content: DEDUP_PROMPT(oldTitle, newTitle, oldSnippet, newSnippet) }],
     }
   );
   const text = (body.choices?.[0]?.message?.content || '').trim().toUpperCase();
@@ -259,10 +276,10 @@ function isDuplicateHeuristic(oldTitle, newTitle) {
   return overlap >= 2;
 }
 
-async function isDuplicate(oldTitle, newTitle) {
+async function isDuplicate(oldTitle, newTitle, oldSnippet = '', newSnippet = '') {
   try {
-    if (OPENAI_KEY)     return await isDuplicateOpenAI(oldTitle, newTitle);
-    if (GIGACHAT_TOKEN) return await isDuplicateGigaChat(oldTitle, newTitle);
+    if (OPENAI_KEY)     return await isDuplicateOpenAI(oldTitle, newTitle, oldSnippet, newSnippet);
+    if (GIGACHAT_TOKEN) return await isDuplicateGigaChat(oldTitle, newTitle, oldSnippet, newSnippet);
   } catch (e) {
     console.error('  LLM dedup error, falling back to heuristic:', e.message);
   }
@@ -295,14 +312,25 @@ function initDb() {
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS vacancies (
-      id           INTEGER PRIMARY KEY,
-      employer_id  INTEGER NOT NULL,
-      employer_name TEXT NOT NULL DEFAULT '',
-      title        TEXT NOT NULL,
-      published_at TEXT NOT NULL,
-      first_seen   TEXT NOT NULL,
-      last_seen    TEXT NOT NULL,
-      archived_at  TEXT
+      id              INTEGER PRIMARY KEY,
+      employer_id     INTEGER NOT NULL,
+      employer_name   TEXT NOT NULL DEFAULT '',
+      title           TEXT NOT NULL,
+      published_at    TEXT NOT NULL,
+      created_at      TEXT,
+      area_id         INTEGER,
+      area_name       TEXT,
+      salary_from     INTEGER,
+      salary_to       INTEGER,
+      salary_currency TEXT,
+      salary_gross    INTEGER,
+      experience_id   TEXT,
+      employment_form TEXT,
+      snippet_req     TEXT,
+      snippet_resp    TEXT,
+      first_seen      TEXT NOT NULL,
+      last_seen       TEXT NOT NULL,
+      archived_at     TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_vac_emp     ON vacancies(employer_id);
     CREATE INDEX IF NOT EXISTS idx_vac_arch    ON vacancies(archived_at) WHERE archived_at IS NOT NULL;
@@ -347,9 +375,24 @@ async function main() {
   console.log(`    Fetched: ${vacancies.length}`);
 
   const upsert = db.prepare(`
-    INSERT INTO vacancies (id, employer_id, employer_name, title, published_at, first_seen, last_seen)
-    VALUES (@id, @employer_id, @employer_name, @title, @published_at, @today, @today)
-    ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, employer_name = excluded.employer_name
+    INSERT INTO vacancies (
+      id, employer_id, employer_name, title, published_at, created_at,
+      area_id, area_name, salary_from, salary_to, salary_currency, salary_gross,
+      experience_id, employment_form, snippet_req, snippet_resp,
+      first_seen, last_seen
+    ) VALUES (
+      @id, @employer_id, @employer_name, @title, @published_at, @created_at,
+      @area_id, @area_name, @salary_from, @salary_to, @salary_currency, @salary_gross,
+      @experience_id, @employment_form, @snippet_req, @snippet_resp,
+      @today, @today
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      last_seen = excluded.last_seen,
+      employer_name = excluded.employer_name,
+      salary_from = excluded.salary_from,
+      salary_to = excluded.salary_to,
+      snippet_req = excluded.snippet_req,
+      snippet_resp = excluded.snippet_resp
   `);
   const upsertAll = db.transaction(rows => {
     for (const v of rows) upsert.run({ ...v, today });
@@ -405,16 +448,31 @@ async function main() {
       const candidates = newVacs.filter(v => v.id !== w.old_vacancy_id);
       if (candidates.length === 0) continue;
 
+      // Достаём snippet старой вакансии из БД для более точного сравнения
+      const oldSnippet = db.prepare('SELECT snippet_req FROM vacancies WHERE id = ?').get(w.old_vacancy_id)?.snippet_req || '';
       for (const nv of candidates) {
-        const dup = await isDuplicate(w.old_title, nv.title);
+        const dup = await isDuplicate(w.old_title, nv.title, oldSnippet, '');
         updateVerdict.run({ id: w.id, new_id: nv.id, new_title: nv.title, verdict: dup ? 'duplicate' : 'different' });
 
         if (dup && !w.alerted) {
           const days = Math.round((new Date(nv.published_at) - new Date(w.archived_at)) / 86400000);
+          // Подтянем детали старой вакансии из БД
+          const oldVac = db.prepare('SELECT * FROM vacancies WHERE id = ?').get(w.old_vacancy_id) || {};
+          const salaryStr = (v) => {
+            if (!v.salary_from && !v.salary_to) return '';
+            const from = v.salary_from ? `от ${v.salary_from.toLocaleString('ru')}` : '';
+            const to = v.salary_to ? `до ${v.salary_to.toLocaleString('ru')}` : '';
+            const gross = v.salary_gross ? ' до вычета налогов' : ' на руки';
+            return ` (${[from, to].filter(Boolean).join(' ')} ${v.salary_currency || ''}${gross})`;
+          };
+          const nvSalary = nv.salary_from || nv.salary_to
+            ? ` (${[nv.salary_from && `от ${nv.salary_from.toLocaleString('ru')}`, nv.salary_to && `до ${nv.salary_to.toLocaleString('ru')}`].filter(Boolean).join(' ')} ${nv.salary_currency || ''})`
+            : '';
           await sendAlert(
-            `🔄 *Повторный найм — ${w.employer_name}*\n\n` +
-            `❌ Закрыли: «${w.old_title}» (${w.archived_at})\n` +
-            `✅ Открыли: «${nv.title}» (+${days} дн.)\n\n` +
+            `🔄 *Повторный найм — ${w.employer_name}*\n` +
+            `📍 ${oldVac.area_name || nv.area_name || 'удалённо'}\n\n` +
+            `❌ Закрыли: «${w.old_title}»${salaryStr(oldVac)} (${w.archived_at})\n` +
+            `✅ Открыли: «${nv.title}»${nvSalary} (+${days} дн.)\n\n` +
             `👉 https://hh.ru/vacancy/${nv.id}`
           );
           markAlerted.run(w.id);
