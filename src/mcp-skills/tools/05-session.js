@@ -1,6 +1,8 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 module.exports = {
   tools: {
@@ -41,6 +43,93 @@ module.exports = {
             at: m.at ? new Date(m.at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : undefined,
           })),
         };
+      },
+    },
+
+    session_search: {
+      description:
+        'Search through all past conversation sessions using a RegExp pattern. ' +
+        'Returns matching messages with session topic and surrounding context. ' +
+        'Use when the user asks "remember when we discussed X", "find where I mentioned Y", ' +
+        '"what did you tell me about Z last time".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          pattern: {
+            type: 'string',
+            description: 'RegExp pattern to search for (e.g. "вакансия|vacancy", "nalog", "ошибка")',
+          },
+          flags: {
+            type: 'string',
+            description: 'RegExp flags (default "i" for case-insensitive). E.g. "i", "gi", ""',
+          },
+          limit: {
+            type: 'number',
+            description: 'Max number of matching messages to return (default 10, max 50)',
+          },
+          role: {
+            type: 'string',
+            enum: ['user', 'assistant', 'any'],
+            description: 'Filter by message role (default "any")',
+          },
+        },
+        required: ['pattern'],
+      },
+      handler: async ({ pattern, flags = 'i', limit = 10, role = 'any' } = {}) => {
+        const username = process.env.AGENT_USER_ID;
+        if (!username) return { error: 'AGENT_USER_ID not set' };
+
+        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+        const sessionsDir = path.join(dataDir, 'sessions', username, 'sessions');
+
+        let re;
+        try {
+          re = new RegExp(pattern, flags);
+        } catch (e) {
+          return { error: `Invalid RegExp: ${e.message}` };
+        }
+
+        let files;
+        try {
+          files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+        } catch {
+          return { matches: [], total: 0, note: 'No sessions found' };
+        }
+
+        const cap = Math.min(Math.max(1, limit), 50);
+        const matches = [];
+
+        for (const file of files) {
+          if (matches.length >= cap) break;
+          let session;
+          try {
+            session = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), 'utf8'));
+          } catch {
+            continue;
+          }
+
+          const msgs = session.messages || [];
+          for (let i = 0; i < msgs.length && matches.length < cap; i++) {
+            const m = msgs[i];
+            if (role !== 'any' && m.role !== role) continue;
+            if (!re.test(m.content)) continue;
+
+            const snippet = m.content.length > 300 ? m.content.slice(0, 300) + '…' : m.content;
+            const prev = i > 0 ? (msgs[i - 1].content.slice(0, 100) + (msgs[i - 1].content.length > 100 ? '…' : '')) : null;
+            const next = i < msgs.length - 1 ? (msgs[i + 1].content.slice(0, 100) + (msgs[i + 1].content.length > 100 ? '…' : '')) : null;
+
+            matches.push({
+              sessionId: session.id,
+              topic: session.topic || '',
+              at: m.at ? new Date(m.at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : undefined,
+              role: m.role,
+              text: snippet,
+              context: { prev, next },
+            });
+          }
+        }
+
+        return { matches, total: matches.length, searched: files.length };
       },
     },
 
