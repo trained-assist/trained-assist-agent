@@ -2028,77 +2028,60 @@ function show(id, type, msg) {
 
       const tokensDir = path.join(process.env.HOME || '/home/vova', 'agent-tokens', String(userId));
       fs.mkdirSync(tokensDir, { recursive: true });
-      // Serialize value safely: ZeroCreds may send {fields_json} as an object (not a string)
       const storedValue = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
-      // If the target path is already a directory (e.g. getcourse/ stores Playwright session),
-      // write credentials into it as credentials.json instead of trying to overwrite the dir.
+      // If the target path is a directory (e.g. getcourse/ stores a Playwright session),
+      // write new credentials inside it as credentials.json rather than overwriting the dir.
       let tokenFilePath = path.join(tokensDir, label);
       try {
-        if (fs.statSync(tokenFilePath).isDirectory()) {
-          tokenFilePath = path.join(tokenFilePath, 'credentials.json');
-        }
-      } catch { /* path doesn't exist — write flat file as normal */ }
+        if (fs.statSync(tokenFilePath).isDirectory()) tokenFilePath = path.join(tokenFilePath, 'credentials.json');
+      } catch { /* path doesn't exist yet — write flat file */ }
       fs.writeFileSync(tokenFilePath, storedValue, { mode: 0o600 });
-      console.log(`[tokens] saved label="${label}" for userId=${userId} path=${tokenFilePath}`);
+      console.log(`[tokens] saved label="${label}" userId=${userId} path=${tokenFilePath}`);
 
-      // tilda-creds: trigger async Playwright login and notify user
-      if (label === 'tilda-creds') {
-        let creds;
-        try { creds = JSON.parse(storedValue); } catch { /* not JSON — skip */ }
-        if (creds && creds.email && creds.password) {
-          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-          const tildaChatId = readChatId(String(userId));
-          if (tildaChatId && secrets.BOT_TOKEN) {
-            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-              method: 'POST', signal: AbortSignal.timeout(8000),
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: tildaChatId, text: '⏳ Данные получены — вхожу в Tilda...' }),
-            }).catch(() => {});
-          }
-          const { startTildaLogin } = require('./tilda-login');
-          startTildaLogin(String(userId), creds.email, creds.password).then(result => {
-            const chatId2 = readChatId(String(userId));
-            if (!chatId2 || !secrets.BOT_TOKEN) return;
-            const text = result.status === 'ok'
-              ? `✅ Tilda подключена! Сессия сохранена (${result.cookiesCount} cookies). Можно работать.`
-              : `❌ Не удалось войти в Tilda: ${result.error}\n\nПроверь email/пароль и повтори: «подключи тильду»`;
-            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-              method: 'POST', signal: AbortSignal.timeout(8000),
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: chatId2, text }),
-            }).catch(() => {});
-          }).catch(e => console.error('[tokens/tilda-creds] login async failed:', e.message));
-        }
-      }
+      // Dispatch service-specific post-save actions (Playwright login, notifications, etc.)
+      // Add new services here — no need to touch the handler logic below.
+      const TOKEN_SERVICE_ACTIONS = {
+        'tilda-creds': {
+          guard: (c) => c?.email && c?.password,
+          pendingMsg: '⏳ Данные получены — вхожу в Tilda...',
+          run: (uid, c) => { const { startTildaLogin } = require('./tilda-login'); return startTildaLogin(uid, c.email, c.password); },
+          ok: (r) => `✅ Tilda подключена! Сессия сохранена (${r.cookiesCount} cookies). Можно работать.`,
+          err: (r) => `❌ Не удалось войти в Tilda: ${r.error}\n\nПроверь email/пароль и повтори: «подключи тильду»`,
+        },
+        'getcourse': {
+          guard: (c) => c?.domain && (c?.login || c?.password),
+          pendingMsg: '⏳ Данные получены — вхожу в GetCourse...',
+          run: (uid, c) => {
+            const { startGetcourseLogin } = require('./getcourse-login');
+            const domain = c.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+            return startGetcourseLogin(uid, domain, c.login, c.password);
+          },
+          ok: (r) => `✅ GetCourse подключён! Сессия сохранена (${r.cookiesCount} cookies). Можно работать.`,
+          err: (r) => `❌ Не удалось войти в GetCourse: ${r.error}\n\nПроверь логин/пароль и повтори: «подключи getcourse»`,
+        },
+      };
 
-      // getcourse: trigger async Playwright login and notify user
-      if (label === 'getcourse') {
+      const svcAction = TOKEN_SERVICE_ACTIONS[label];
+      if (svcAction) {
         let creds;
-        try { creds = JSON.parse(storedValue); } catch { /* not JSON — skip */ }
-        if (creds && creds.domain && (creds.login || creds.password)) {
+        try { creds = JSON.parse(storedValue); } catch { /* not JSON — skip action */ }
+        if (creds && svcAction.guard(creds)) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-          const gcChatId = readChatId(String(userId));
-          if (gcChatId && secrets.BOT_TOKEN) {
-            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-              method: 'POST', signal: AbortSignal.timeout(8000),
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: gcChatId, text: '⏳ Данные получены — вхожу в GetCourse...' }),
-            }).catch(() => {});
-          }
-          const { startGetcourseLogin } = require('./getcourse-login');
-          const domain = creds.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
-          startGetcourseLogin(String(userId), domain, creds.login, creds.password).then(result => {
+          const tgSend = (chatId, text) => fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+            method: 'POST', signal: AbortSignal.timeout(8000),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text }),
+          }).catch(() => {});
+
+          const chatId = readChatId(String(userId));
+          if (chatId && secrets.BOT_TOKEN) tgSend(chatId, svcAction.pendingMsg);
+
+          svcAction.run(String(userId), creds).then(result => {
             const chatId2 = readChatId(String(userId));
-            if (!chatId2 || !secrets.BOT_TOKEN) return;
-            const text = result.status === 'ok'
-              ? `✅ GetCourse подключён! Сессия сохранена (${result.cookiesCount} cookies). Можно работать.`
-              : `❌ Не удалось войти в GetCourse: ${result.error}\n\nПроверь логин/пароль и повтори: «подключи getcourse»`;
-            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-              method: 'POST', signal: AbortSignal.timeout(8000),
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: chatId2, text }),
-            }).catch(() => {});
-          }).catch(e => console.error('[tokens/getcourse] login async failed:', e.message));
+            if (chatId2 && secrets.BOT_TOKEN) {
+              tgSend(chatId2, result.status === 'ok' ? svcAction.ok(result) : svcAction.err(result));
+            }
+          }).catch(e => console.error(`[tokens/${label}] action failed:`, e.message));
         }
       }
 
