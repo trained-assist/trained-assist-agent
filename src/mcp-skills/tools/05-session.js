@@ -78,9 +78,15 @@ module.exports = {
       handler: async ({ pattern, flags = 'i', limit = 10, role = 'any' } = {}) => {
         const username = process.env.AGENT_USER_ID;
         if (!username) return { error: 'AGENT_USER_ID not set' };
+        // Guard against path traversal in username (e.g. "../other-user")
+        if (!/^[a-zA-Z0-9_-]+$/.test(username)) return { error: 'Invalid username' };
 
         const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
         const sessionsDir = path.join(dataDir, 'sessions', username, 'sessions');
+        // Extra sanity: resolved path must stay inside dataDir
+        if (!sessionsDir.startsWith(path.resolve(dataDir) + path.sep)) {
+          return { error: 'Path traversal detected' };
+        }
 
         let re;
         try {
