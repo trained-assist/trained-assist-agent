@@ -1,14 +1,19 @@
 [Unit]
 Description=Trained Assist Agent — RU IP instance
 After=network.target
+OnFailure=assist-agent-notify-failure.service
 
 [Service]
 Type=simple
 User=vova
 WorkingDirectory=/home/vova/trained-assist-agent
+ExecStartPre=/bin/bash -c 'pids=$(lsof -ti tcp:8080 2>/dev/null); [ -n "$pids" ] && { echo "[pre-start] killing PIDs on :8080: $pids"; kill -9 $pids 2>/dev/null; }; sleep 1; true'
 ExecStart=/usr/bin/node src/server.js
+KillMode=control-group
 Restart=always
-RestartSec=5
+RestartSec=15
+StartLimitIntervalSec=300
+StartLimitBurst=10
 # Give server.js's graceful-shutdown drain (up to 90s, see src/server.js) room to
 # finish before systemd SIGKILLs the process on stop/restart (e.g. from deploy.sh).
 TimeoutStopSec=120

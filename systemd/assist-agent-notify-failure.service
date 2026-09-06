@@ -1,0 +1,18 @@
+[Unit]
+Description=Alert operator when assist-agent hits restart limit (StartLimitBurst)
+# Triggered via OnFailure= in assist-agent.service / assist-agent-ru.service
+
+[Service]
+Type=oneshot
+User=vova
+EnvironmentFile=-/home/vova/secrets.env
+ExecStart=/bin/bash -c '\
+  BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"; \
+  CHAT_ID="${OPERATOR_CHAT_ID:-1714048}"; \
+  VM="${VM_NAME:-unknown-vm}"; \
+  [ -z "$BOT_TOKEN" ] && exit 0; \
+  TG_BASE="${TELEGRAM_API_URL:-https://api.telegram.org}"; \
+  curl -sf -X POST "${TG_BASE}/bot${BOT_TOKEN}/sendMessage" \
+    -H "Content-Type: application/json" \
+    -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"\\u26a0\\ufe0f assist-agent на ${VM} исчерпал лимит перезапусков и остановился.\\n\\nЧто делать:\\n1. SSH в VM\\n2. sudo journalctl -u trained-assist-agent -n 50\\n3. sudo fuser -k 8080/tcp\\n4. sudo systemctl reset-failed trained-assist-agent\\n5. sudo systemctl start trained-assist-agent\"}" \
+  || true'
