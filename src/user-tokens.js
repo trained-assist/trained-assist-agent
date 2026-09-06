@@ -310,6 +310,10 @@ async function generateConnectLink(userId, service) {
   }
 
   // Legacy path: local connect-pending token + /connect/:service on this server
+  return generateLegacyConnectLink(userId, service);
+}
+
+function generateLegacyConnectLink(userId, service) {
   const token = crypto.randomBytes(16).toString('hex');
   fs.mkdirSync(CONNECT_PENDING_DIR, { recursive: true });
   fs.writeFileSync(
@@ -326,6 +330,7 @@ module.exports = {
   revokeService,
   getSecretsLog,
   generateConnectLink,
+  generateLegacyConnectLink,
   readTokenValue,
   SERVICE_DISPLAY,
   SERVICE_FORM_SCHEMA,

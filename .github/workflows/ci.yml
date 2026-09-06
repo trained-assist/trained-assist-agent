@@ -62,6 +62,12 @@ jobs:
         run: npm test
       - name: Env-sync check
         run: node scripts/check-env-sync.js
+      - name: No direct connect-pending outside user-tokens.js
+        run: |
+          if grep -rn "connect-pending" src/ --include="*.js" | grep -v "src/user-tokens.js" | grep -v "src/server.js"; then
+            echo "❌ Direct connect-pending usage found outside user-tokens.js — use generateConnectLink() or generateLegacyConnectLink() instead"
+            exit 1
+          fi
 
   merge:
     needs: [ci, session-link-check]

@@ -383,16 +383,9 @@ module.exports = {
       description: 'Generate a one-time OAuth2 link to connect HeadHunter account. Use when user asks to connect / authorize HH.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
-        const crypto = require('crypto');
-        const token = crypto.randomBytes(16).toString('hex');
-        const pendingDir = path.join(os.homedir(), 'connect-pending');
-        fs.mkdirSync(pendingDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(pendingDir, `${token}.json`),
-          JSON.stringify({ uid: USER_ID, service: 'hh', expires: Date.now() + 30 * 60 * 1000 }),
-        );
-        const base = (process.env.AGENT_PUBLIC_URL || 'https://136-65-7-197.sslip.io').replace(/\/$/, '');
-        return { link: `${base}/connect/hh?t=${token}`, note: 'Ссылка действует 30 минут.' };
+        const { generateLegacyConnectLink } = require('../../user-tokens');
+        const link = generateLegacyConnectLink(USER_ID, 'hh');
+        return { link, note: 'Ссылка действует 30 минут.' };
       },
     },
 

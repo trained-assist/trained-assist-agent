@@ -416,6 +416,14 @@ Note: existing VMs have data in `~/alesa-data` — systemd service sets `AGENT_D
 - Auth: all endpoints gated by `AGENT_SECRET` Bearer token
 - MCP skills: `src/mcp-skills/` — stdio JSON-RPC 2.0 server, auto-discovers tools from `tools/*.js`
 
+### Adding a new service to ZeroCreds — checklist
+
+When adding a new entry to `SERVICE_FORM_SCHEMA` in `src/user-tokens.js`:
+
+- [ ] No local `generateConnectLink` copy in `src/mcp-skills/tools/<service>.js` — MCP skills must use `require('../../user-tokens').generateConnectLink` (ZeroCreds) or `generateLegacyConnectLink` (OAuth / no form)
+- [ ] MCP skill handler calls the function with `await`
+- [ ] CI check passes: `grep -rn "connect-pending" src/ --include="*.js" | grep -v user-tokens.js | grep -v server.js` returns empty
+
 ### Adding a new endpoint
 Add route handling in `src/server.js` in the request handler chain (method + pathname check pattern).
 
