@@ -122,12 +122,14 @@ async function fetchVacanciesPage(params) {
   return data;
 }
 
-// Collect items from one paginated query (up to 2000 results)
+// Collect items from one paginated query (up to 2000 results). Returns total found count.
 async function collectPages(baseParams, seen, all) {
   let page = 0;
+  let found = 0;
   while (true) {
     const data = await fetchVacanciesPage({ ...baseParams, page: String(page) });
     if (!Array.isArray(data.items) || data.items.length === 0) break;
+    if (page === 0) found = data.found || 0;
 
     for (const v of data.items) {
       const id = parseInt(v.id);
@@ -148,6 +150,7 @@ async function collectPages(baseParams, seen, all) {
     page++;
     await sleep(HH_DELAY_MS);
   }
+  return found;
 }
 
 // Generate date windows over last 30 days (3-day chunks)
@@ -177,14 +180,11 @@ async function fetchAllRemoteVacancies() {
   for (let i = 0; i < roleIds.length; i++) {
     const roleId = roleIds[i];
 
-    // Probe: how many vacancies does this role have?
-    const probe = await fetchVacanciesPage({ professional_role: roleId, per_page: '1' });
-    const found = probe.found || 0;
+    // Try without date split first. collectPages returns found count from first page.
+    const found = await collectPages({ professional_role: roleId }, seen, all);
 
-    if (found <= 2000) {
-      await collectPages({ professional_role: roleId }, seen, all);
-    } else {
-      // Too large — split by 3-day date windows
+    if (found > 2000) {
+      // Role exceeded cap — re-fetch with 3-day date windows to catch missed ones
       for (const window of dateWindows()) {
         await collectPages({ professional_role: roleId, ...window }, seen, all);
         await sleep(HH_DELAY_MS);
