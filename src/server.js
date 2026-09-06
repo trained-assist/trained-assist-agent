@@ -2114,8 +2114,18 @@ function show(id, type, msg) {
       if (!message || !Array.isArray(sessionList) || sessionList.length === 0)
         return json(res, 400, { error: 'missing fields' });
 
+      // Only classify against sessions active in the last 24 hours to avoid linking
+      // new tasks to stale contexts from days ago.
+      const SESSION_CLASSIFY_TTL_MS = 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      const recentSessions = sessionList.filter(s => (now - s.lastAt) < SESSION_CLASSIFY_TTL_MS);
+
+      if (recentSessions.length === 0) {
+        return json(res, 200, { sessionId: null, confidence: 'low' });
+      }
+
       try {
-        const result = await classifyMessage(message, sessionList, secrets.ANTHROPIC_API_KEY, secrets.OPENROUTER_API_KEY);
+        const result = await classifyMessage(message, recentSessions, secrets.ANTHROPIC_API_KEY, secrets.OPENROUTER_API_KEY);
         return json(res, 200, result);
       } catch (e) {
         console.error('[classify] error:', e.message);
