@@ -50,7 +50,8 @@ function getHhToken() {
 }
 
 const HH_TOKEN = getHhToken();
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// tg_groups_monitor_bot — dedicated bot for HH watch alerts
+const BOT_TOKEN = process.env.HH_WATCH_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const ALERT_CHAT_ID = process.env.ALERT_CHAT_ID || process.env.OPERATOR_CHAT_ID;
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 const GIGACHAT_TOKEN = process.env.GIGACHAT_TOKEN;
