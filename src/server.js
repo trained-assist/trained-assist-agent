@@ -1890,21 +1890,23 @@ ${expLines || '—'}
 
 Ответ строго в JSON: {"evaluation": "...", "score": N, "tag": "PASS|REVIEW|WEAK"}`;
 
-      const anthropicKey = secrets.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
-      if (!anthropicKey) return json(res, 500, { error: 'ANTHROPIC_API_KEY not configured' });
+      const hhTokensBase2 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const orKeyFile2 = path.join(hhTokensBase2, String(username), 'openrouter');
+      const orKey2 = fs.existsSync(orKeyFile2) ? fs.readFileSync(orKeyFile2, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
+      if (!orKey2) return json(res, 500, { error: 'OpenRouter API key not configured. Add key via /settoken openrouter <key>' });
       try {
-        const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+        const aiRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
-          headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-          body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+          headers: { 'Authorization': `Bearer ${orKey2}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: 'google/gemini-2.5-flash', max_tokens: 1024, temperature: 0.1, messages: [{ role: 'user', content: prompt }] }),
           signal: AbortSignal.timeout(30_000),
         });
         if (!aiRes.ok) {
           const errText = await aiRes.text().catch(() => '');
-          return json(res, 500, { error: `Anthropic API ${aiRes.status}: ${errText.slice(0, 200)}` });
+          return json(res, 500, { error: `OpenRouter API ${aiRes.status}: ${errText.slice(0, 200)}` });
         }
         const aiData = await aiRes.json();
-        const text = aiData.content?.[0]?.text || '{}';
+        const text = aiData.choices?.[0]?.message?.content || '{}';
         let parsed;
         try {
           const jsonMatch = text.match(/\{[\s\S]*\}/);
