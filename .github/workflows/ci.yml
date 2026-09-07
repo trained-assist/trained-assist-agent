@@ -73,7 +73,10 @@ jobs:
 
   merge:
     needs: [ci, session-link-check]
-    if: github.event_name == 'pull_request'
+    if: |
+      github.event_name == 'pull_request' &&
+      needs.ci.result == 'success' &&
+      (needs.session-link-check.result == 'success' || needs.session-link-check.result == 'failure')
     runs-on: ubuntu-latest
     concurrency:
       group: merge-${{ github.event.pull_request.number }}
