@@ -8,7 +8,7 @@ const { loadSecrets } = require('./secrets');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData, archiveSessions } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId } = require('./session-store');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
 const { nalogFormHtml } = require('./connect-forms/nalog');
@@ -1676,6 +1676,84 @@ function show(id, type, msg) {
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
       res.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }));
       return;
+    }
+
+    // POST /report — create a GitHub issue from a user-submitted bug report
+    if (req.method === 'POST' && url.pathname === '/report') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, description, sessionId } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      if (!description || typeof description !== 'string' || !description.trim()) return json(res, 400, { error: 'description required' });
+
+      if (!secrets.GITHUB_ISSUES_TOKEN) return json(res, 503, { error: 'reporting not configured' });
+
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const workDir = path.join(dataDir, 'sessions', username);
+
+      // Load current session
+      let session = null;
+      try {
+        const sid = sessionId || getCurrentSessionId(workDir);
+        if (sid) session = await getSessionData(workDir, sid);
+      } catch {}
+
+      // Load recent sessions list
+      let recentSessions = [];
+      try { recentSessions = await listSessions(workDir, 5); } catch {}
+
+      // Build session section
+      let sessionSection = '';
+      if (session) {
+        const msgs = (session.messages || []).slice(-6);
+        const msgLines = msgs.map(m => {
+          const role = m.role === 'user' ? '**Пользователь:**' : '**Клод:**';
+          const text = (m.content || '').slice(0, 500);
+          return `${role} ${text}`;
+        }).join('\n\n');
+        sessionSection = `\n## Текущая сессия\n\n**Тема:** "${session.topic || '—'}" (${(session.messages || []).length} сообщений)\n**ID:** ${session.id}\n\n### Последние сообщения\n\n${msgLines}\n`;
+      }
+
+      // Build recent sessions section
+      let recentSection = '';
+      if (recentSessions.length > 0) {
+        const lines = recentSessions.map((s, i) => {
+          const date = s.lastAt ? new Date(s.lastAt).toISOString().slice(0, 10) : '—';
+          return `${i + 1}. "${s.topic || '—'}" — ${date}`;
+        }).join('\n');
+        recentSection = `\n## Последние сессии\n\n${lines}\n`;
+      }
+
+      const issueBody = `**Репорт от пользователя:** ${username}\n**Дата:** ${new Date().toISOString()}\n\n## Описание\n\n${description.trim()}${sessionSection}${recentSection}`;
+
+      const issuePayload = JSON.stringify({
+        title: `[Report] ${description.trim().slice(0, 80)}`,
+        body: issueBody,
+        labels: ['user-report'],
+      });
+
+      let ghRes;
+      try {
+        ghRes = await fetch('https://api.github.com/repos/trained-assist/trained-assist-agent/issues', {
+          method: 'POST',
+          headers: {
+            'Authorization': `token ${secrets.GITHUB_ISSUES_TOKEN}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'trained-assist-agent/1.0',
+            'Accept': 'application/vnd.github+json',
+          },
+          body: issuePayload,
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (e) {
+        return json(res, 502, { error: `github request failed: ${e.message}` });
+      }
+
+      let issueData;
+      try { issueData = await ghRes.json(); } catch { issueData = {}; }
+      if (ghRes.status >= 400) return json(res, 502, { error: issueData.message || `github returned ${ghRes.status}` });
+
+      return json(res, 200, { ok: true, url: issueData.html_url, number: issueData.number });
     }
 
     // POST /vacancy/store — receive and persist a vacancy landing page HTML from another VM

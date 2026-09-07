@@ -149,11 +149,15 @@ function loadUserTokens(userId, legacyChatId) {
       if (!fs.existsSync(legacyDir)) continue;
       const hasContent = fs.readdirSync(legacyDir).filter(f => !LOG_FILES.has(f) && !f.startsWith('.')).length > 0;
       if (!hasContent) continue;
-      // Check if this folder's .chatid username matches (skip if it belongs to someone else)
+      // Check if this folder's .username marker matches (skip if it belongs to someone else)
       const markerFile = path.join(legacyDir, '.username');
       if (fs.existsSync(markerFile)) {
         const owner = fs.readFileSync(markerFile, 'utf8').trim();
         if (owner && owner !== String(userId)) continue; // belongs to a different user
+      } else if (candidate !== String(legacyChatId)) {
+        // No ownership marker and not the exact legacyChatId for this connection — skip to avoid
+        // cross-contaminating tokens from unrelated accounts (e.g. old test sessions).
+        continue;
       }
       fs.mkdirSync(userDir, { recursive: true });
       for (const file of fs.readdirSync(legacyDir)) {
