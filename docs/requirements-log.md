@@ -4,6 +4,18 @@
 
 | Статус | Требование | Описание |
 |--------|-----------|----------|
+| ✅ реализовано | **hhFetch/hhPost timeout** (PR #373) | `hhFetch` и `hhPost` в hh-utils.js не имели таймаута — зависший HH API мог заблокировать quick answer хэндлеры. Добавлен `AbortSignal.timeout(15s)`. |
+| ✅ реализовано | **already_sent в review page** (PR #373) | В `generateReviewPageHtml` кандидатский объект не содержал поле `already_sent` → лейбл "Follow-up (уже писали)" никогда не появлялся, первое сообщение всегда генерировалось как "initial". Исправлено. |
+| 🔵 планируется | **Message quality confidence score** (#374) | 0–100% уверенность в качестве каждого сообщения. Зависит от типа (initial/followup), скора кандидата, длины истории. UI: бейдж на карточке + slider "отправить всем ≥N%". |
+| 🔵 планируется | **Network/сетевой кандидат guard** (#375) | Нет проверки `neg.type === 'employer'` — рекрутер может отправить "первое" сообщение кандидату, которого сам же пригласил через HH поиск. Также нет дедупликации по `resume_id`. |
+| 🔵 планируется | **Printable candidate report** (#376) | PDF-ready HTML с фото, скором, strengths/gaps, историей переписки. Брендинг HR Stalker. Публикация через instant-publish. |
+| 🔵 планируется | **Interview scheduling** (#377) | Слоты из Google Calendar или текстом → натуральный текст в сообщение кандидату (без внешних ссылок). Хранение статуса: offered/confirmed/rescheduled. |
+| 🔵 планируется | **HH token auto-refresh** (#378) | Access tokens живут 14 дней, refresh_token хранится но никогда не используется. Добавить `refreshHhToken()` и 401 retry в hhApiRequest/hhFetch. |
+| 🔵 планируется | **Apply Link — resume upload** (#379) | В `/apply` endpoint multipart parser намеренно пропускает поле `resume`. Раскомментировать и передать buffer в `storeApplication()`. |
+| 🔵 планируется | **CallTips Mac app integration** (#380) | `/hh/interview-prep` — отдаёт резюме+вакансию+вопросы для CallTips перед звонком. `/hh/interview-result` — сохраняет итог интервью в candidate history. |
+| 🔵 планируется | **Email integration** (#381) | Cloudflare Email Routing для `hr@recruiter-assistant.ru`. Входящие → `/email/inbound` → Telegram уведомление. MCP tool для ответа кандидату по email. |
+| 🔵 планируется | **ATS competitive analysis** (#382) | Ревью Huntflow, Potok, Ashby, Greenhouse — что умеют, чего нет у нас. Выход: `docs/ats-competitive-analysis.md`. |
+| 🔵 планируется | **Follow-up depth tracking** (#383) | Сейчас все follow-up'ы одинаковые. Нужны: счётчик (followup_1/2/3), cooldown между follow-up'ами, cap (макс 3), разная тональность по счётчику. |
 | ✅ реализовано | **Review page wiring** (PR #147) | Кнопки Send/Reject в review page делают реальные HTTP-запросы к `/hh/send` и `/hh/reject` вместо console.log |
 | ✅ реализовано | **Active vacancy context** (PR #146) | `hh_set_active_vacancy` сохраняет вакансию, `hh_batch_evaluate` читает из контекста без аргументов |
 | ✅ реализовано | **ATS Template Editor** (PR #152) | Визуальный веб-редактор для этапов подбора и ATS-конфига. 4 шаблона, сохранение в контекст. `/hh/ats-editor` |

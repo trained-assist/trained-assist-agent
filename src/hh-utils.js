@@ -46,9 +46,12 @@ async function writeHhContext(workDir, skill, key, value) {
   );
 }
 
+const HH_FETCH_TIMEOUT_MS = 15_000;
+
 // HH API via fetch (Node 18+). Respects HH_API_BASE_URL for test mocking.
 async function hhFetch(apiPath, token) {
   const res = await fetch(`${hhApiBase()}${apiPath}`, {
+    signal: AbortSignal.timeout(HH_FETCH_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${token.access_token}`,
       'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
@@ -62,6 +65,7 @@ async function hhFetch(apiPath, token) {
 async function hhPost(apiPath, token, body) {
   const res = await fetch(`${hhApiBase()}${apiPath}`, {
     method: 'POST',
+    signal: AbortSignal.timeout(HH_FETCH_TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${token.access_token}`,
       'Content-Type': 'application/json',

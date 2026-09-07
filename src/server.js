@@ -2353,6 +2353,21 @@ function show(id, type, msg) {
       }
     }
 
+    // GET /calltips-session?profile=xxx — latest Call Tips session written by agent
+    // Call Tips app polls this to prefill candidate name, resume, job, and interview plan
+    if (req.method === 'GET' && url.pathname === '/calltips-session') {
+      const profile = url.searchParams.get('profile');
+      if (!profile || !/^[a-zA-Z0-9_-]+$/.test(profile))
+        return json(res, 400, { error: 'invalid profile' });
+      const filePath = path.join(BASE_USERS_DIR, profile, 'calltips-latest.json');
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return json(res, 200, data);
+      } catch {
+        return json(res, 404, { error: 'No Call Tips session prepared. Ask the agent: "подготовь план для звонка с [имя]"' });
+      }
+    }
+
     // POST /webhooks/weeek-session — triggered by CF Worker when WEEEK_APP_COOKIE expires (401)
     // Auth: Bearer AGENT_SECRET (same as other endpoints)
     if (req.method === 'POST' && url.pathname === '/webhooks/weeek-session') {
@@ -2801,6 +2816,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       days_since_activity: daysAgo,
       resume_text: buildResumeText(neg),
       history_messages: history.messages || [],
+      already_sent: (history.messages || []).some(m => m.role === 'employer'),
       alternate_url: r.alternate_url || null,
     };
   });
