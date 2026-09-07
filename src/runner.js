@@ -1178,6 +1178,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     '',
     'При старте новой задачи вызови agent_knowledge_summary() чтобы вспомнить контекст.',
     'При получении новой важной инфы (контакт, ключ, решение) — сразу вызови agent_store_artifact().',
+    '',
+    'Публикация длинного контента (publish_page):',
+    'Если твой ответ — это отчёт, аналитика, таблица, обзор кандидата, предложение, резюме с разделами, или он длиннее ~800 символов — ОБЯЗАТЕЛЬНО используй publish_page вместо отправки текстом в Telegram.',
+    'Как: вызови publish_page(content=..., slug=..., title=...), затем ответь пользователю только ссылкой + одно предложение о содержимом.',
+    'Slug — короткий, через дефис. Например: candidate-review-ivanov, flexi-proposal-sept, analytics-week-36.',
+    'Исключение: если пользователь явно просит «напиши сюда» или «отправь текстом» — отвечай текстом.',
   ].join('\n');
   const timeoutSection = `[Системное ограничение: у тебя 40 минут на задачу. На 38-й минуте ты получишь SIGTERM — это сигнал «заверши текущий шаг и выведи итоги». При длинных задачах сохраняй промежуточные результаты в файлы, чтобы можно было продолжить позже.]`;
   let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');

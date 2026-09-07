@@ -1671,6 +1671,56 @@ function show(id, type, msg) {
       return json(res, 200, { status: 'alive', uptime: process.uptime(), vm: VM_NAME, commit: GIT_COMMIT });
     }
 
+    // GET /p/:slug — serve a published page (no auth, public)
+    const pageServeMatch = url.pathname.match(/^\/p\/([a-z0-9][a-z0-9-]{0,79})$/);
+    if (req.method === 'GET' && pageServeMatch) {
+      const slug = pageServeMatch[1];
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const pageDir = path.join(dataDir, 'pages', slug);
+      const metaFile = path.join(pageDir, 'meta.json');
+
+      if (!fs.existsSync(metaFile)) {
+        res.writeHead(404, { 'Content-Type': 'text/html' });
+        return res.end('<h1>404</h1><p>Page not found.</p>');
+      }
+
+      let meta;
+      try { meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')); } catch {
+        res.writeHead(500, { 'Content-Type': 'text/html' });
+        return res.end('<h1>500</h1><p>Corrupted page metadata.</p>');
+      }
+
+      // Serve raw source if ?raw requested (for AI agents reading markdown)
+      const wantsRaw = url.searchParams.has('raw');
+      if (wantsRaw) {
+        const rawFile = path.join(pageDir, 'source');
+        if (fs.existsSync(rawFile)) {
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end(fs.readFileSync(rawFile));
+        }
+      }
+
+      // Password check
+      if (meta.passwordHash) {
+        const pw = url.searchParams.get('password') || '';
+        const { createHash } = require('crypto');
+        const pwHash = pw ? createHash('sha256').update(pw).digest('hex') : '';
+        if (!pw || pwHash !== meta.passwordHash) {
+          const errMsg = pw ? 'Неверный пароль, попробуйте ещё раз.' : '';
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end(publishPasswordForm(slug, errMsg));
+        }
+      }
+
+      const htmlFile = path.join(pageDir, 'index.html');
+      if (!fs.existsSync(htmlFile)) {
+        res.writeHead(404, { 'Content-Type': 'text/html' });
+        return res.end('<h1>404</h1><p>Content not found.</p>');
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(fs.readFileSync(htmlFile));
+    }
+
     // Auth: all endpoints require Bearer token
     const auth = req.headers['authorization'] || '';
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
@@ -2545,6 +2595,41 @@ function show(id, type, msg) {
       }
     }
 
+    // GET /publish/pages?username=X — list published pages for a user
+    if (req.method === 'GET' && url.pathname === '/publish/pages') {
+      const username = url.searchParams.get('username') || '';
+      if (!username) return json(res, 400, { error: 'username required' });
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const indexFile = path.join(dataDir, 'publish-owners', `${username}.json`);
+      const pages = fs.existsSync(indexFile)
+        ? JSON.parse(fs.readFileSync(indexFile, 'utf8'))
+        : [];
+      return json(res, 200, { pages });
+    }
+
+    // DELETE /publish/pages — delete a page by slug
+    if (req.method === 'DELETE' && url.pathname === '/publish/pages') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, slug } = body || {};
+      if (!username || !slug) return json(res, 400, { error: 'username and slug required' });
+
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const metaFile = path.join(dataDir, 'pages', slug, 'meta.json');
+      if (!fs.existsSync(metaFile)) return json(res, 404, { error: 'page not found' });
+      const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+      if (meta.owner !== username) return json(res, 403, { error: 'not your page' });
+
+      fs.rmSync(path.join(dataDir, 'pages', slug), { recursive: true, force: true });
+
+      const indexFile = path.join(dataDir, 'publish-owners', `${username}.json`);
+      if (fs.existsSync(indexFile)) {
+        const list = JSON.parse(fs.readFileSync(indexFile, 'utf8')).filter(p => p.slug !== slug);
+        fs.writeFileSync(indexFile, JSON.stringify(list));
+      }
+      return json(res, 200, { ok: true });
+    }
+
     json(res, 404, { error: 'not found' });
     } catch (err) {
       console.error('[request-handler] unhandled error:', err);
@@ -3292,5 +3377,30 @@ function tgNotifyGetcourse(botToken, chatId, domain, level, cookiesCount) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text: lines.join('\n') }),
   }).catch(e => console.error('[getcourse] tg notify failed:', e.message));
+}
+
+// ── Instant-publish helpers ───────────────────────────────────────────────────
+
+function publishPasswordForm(slug, error) {
+  return `<!DOCTYPE html><html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Требуется пароль</title>
+<style>
+  body{font-family:-apple-system,system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f9fafb}
+  .box{background:#fff;padding:32px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1);text-align:center;max-width:360px;width:100%}
+  h2{margin:0 0 16px;font-size:18px;color:#1a1a2e}
+  input{width:100%;padding:10px 14px;border:1px solid #d1d5db;border-radius:8px;font-size:15px;margin-bottom:12px;box-sizing:border-box}
+  button{width:100%;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer}
+  button:hover{background:#1d4ed8}
+  .err{color:#dc2626;font-size:14px;margin-bottom:12px}
+</style></head><body>
+<div class="box">
+  <h2>Страница защищена паролем</h2>
+  ${error ? `<div class="err">${error}</div>` : ''}
+  <form onsubmit="location.href='?password='+encodeURIComponent(document.getElementById('pw').value);return false">
+    <input id="pw" type="password" placeholder="Введите пароль" autofocus>
+    <button type="submit">Открыть</button>
+  </form>
+</div></body></html>`;
 }
 
