@@ -2342,6 +2342,26 @@ function show(id, type, msg) {
         }
       }
 
+      // Fallback notification for unknown services (e.g. kinescope-creds, notion-login).
+      // TOKEN_SERVICE_ACTIONS handles known services above; nalog-creds is handled separately.
+      // For everything else: confirm receipt so the user knows what to do next.
+      if (!svcAction && label !== 'nalog-creds') {
+        const fbChatId = readChatId(String(userId));
+        if (fbChatId && secrets.BOT_TOKEN) {
+          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+          const displayName = label.replace(/-creds?$/i, '').replace(/-/g, ' ');
+          const serviceTitle = displayName.charAt(0).toUpperCase() + displayName.slice(1);
+          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+            method: 'POST', signal: AbortSignal.timeout(8000),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: fbChatId,
+              text: `✅ Данные для ${serviceTitle} сохранены. Напиши «войди в ${serviceTitle}» — залогинюсь автоматически.`,
+            }),
+          }).catch(() => {});
+        }
+      }
+
       return json(res, 200, { ok: true });
     }
 
