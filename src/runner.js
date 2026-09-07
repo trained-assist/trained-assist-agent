@@ -803,9 +803,8 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     }
     if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
     if (HH_REVIEW_PAGE_INTENT.test(task)) {
-      // Vacancy draft active → user likely means "publish landing page" → Claude decides
-      if (workDir && readVacancyState(workDir)?.draft) return null;
-      // Active vacancy exists → return review page; otherwise fall through to other checks
+      // Candidate review page — return immediately if active vacancy exists.
+      // Vacancy draft existing is irrelevant: user explicitly asked for candidate review, not vacancy publish.
       const av = workDir ? readActiveVacancy(workDir) : null;
       if (av) return hhReviewPage(userId);
     }
