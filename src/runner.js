@@ -100,6 +100,7 @@ const VACANCY_PREP_DRAFT_INTENT   = /подготов.{0,20}(?:черновик|
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 const CONTEXT_OFF_INTENT    = /^\/context_off$|выключи.{0,15}контекст|скрой.{0,15}контекст|отключи.{0,15}(?:статус|контекст|карточк)/i;
 const CONTEXT_ON_INTENT     = /^\/context_on$|включи.{0,15}контекст|покажи.{0,15}контекст|включи.{0,15}(?:статус|карточк)/i;
+const CALLTIPS_PREPARE_INTENT = /(?:подготов|составь|сделай|создай).{0,30}(?:план|вопросы|интервью).{0,30}(?:для|с|звонк)|подготов.{0,20}(?:к|для).{0,10}звонк|план.{0,20}(?:интервью|звонка|встречи).{0,30}(?:с|для)|call.?tips.{0,20}(?:для|с|план|prepare)/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
 // Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
@@ -558,6 +559,14 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     } catch (e) {
       console.warn('[quick-answer] loadUserSiteIntents failed:', e.message);
     }
+  }
+
+  // Call Tips — "подготовь план для звонка с [имя]"
+  // Don't return a quick answer — let Claude use calltips_prepare MCP tool.
+  // But log to help with debugging if needed.
+  if (CALLTIPS_PREPARE_INTENT.test(task)) {
+    console.log('[quick-answer] CALLTIPS_PREPARE_INTENT matched — routing to Claude (calltips_prepare tool)');
+    return null; // Claude handles via MCP tool
   }
 
   if (!SETUP_INTENT.test(task)) {
