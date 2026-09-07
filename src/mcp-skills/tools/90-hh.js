@@ -157,7 +157,11 @@ function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
-          else resolve(parsed.choices[0].message.content);
+          else {
+            const content = parsed.choices?.[0]?.message?.content;
+            if (content == null) reject(new Error(`LLM returned empty content (model: ${model})`));
+            else resolve(content);
+          }
         } catch (e) { reject(e); }
       });
     });
@@ -217,9 +221,9 @@ async function extractAtsConfig(vacancyText, apiKey) {
 }
 
 function buildAtsPrompt(config) {
-  const knockoutList = config.knockout.map(k => `  - ${k}`).join('\n');
-  const reqLines = config.required.map(c => `  - "${c.name}" (вес ${c.weight})`).join('\n');
-  const prefLines = config.preferred.map(c => `  - "${c.name}" (вес ${c.weight})`).join('\n');
+  const knockoutList = (config.knockout || []).map(k => `  - ${k}`).join('\n') || '  (не задано)';
+  const reqLines = (config.required || []).map(c => `  - "${c.name}" (вес ${c.weight})`).join('\n') || '  (не задано)';
+  const prefLines = (config.preferred || []).map(c => `  - "${c.name}" (вес ${c.weight})`).join('\n') || '  (не задано)';
 
   const filters = config.filters || {};
   const filterNotes = [];
@@ -968,6 +972,10 @@ module.exports = {
           }
           ats_config = ctx.value;
         }
+        // Guard: context_set sometimes stores value as JSON string instead of object
+        if (typeof ats_config === 'string') {
+          try { ats_config = JSON.parse(ats_config); } catch { return { error: 'ATS конфиг повреждён: не удалось распарсить JSON.' }; }
+        }
 
         try {
           const data = await hhGet(
@@ -996,7 +1004,8 @@ module.exports = {
             try {
               atsResult = await evaluateCandidate(candidateContext, ats_config, apiKey);
             } catch (e) {
-              atsResult = { score: 0, verdict: 'УТОЧНИТЬ', reasoning: `Ошибка оценки: ${e.message}`, matched: [], gaps: [] };
+              console.error(`[hh_batch_evaluate] scoring error for ${neg.id}: ${e.message}`);
+              atsResult = { score: null, verdict: null, reasoning: `Ошибка оценки: ${e.message}`, matched: [], gaps: [] };
             }
 
             const history = readCandidateHistory(USER_ID, neg.id);

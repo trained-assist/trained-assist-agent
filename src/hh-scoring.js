@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const FALLBACK_MODEL = 'google/gemini-flash-2.0';
+const FALLBACK_MODEL = 'google/gemini-2.5-flash';
 
 const CHINESE_RE = /[一-鿿㐀-䶿豈-﫿぀-ヿ]/;
 
@@ -242,7 +242,10 @@ function readAtsConfig(workDir) {
   if (!fs.existsSync(file)) return null;
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return data?.value || null;
+    let value = data?.value || null;
+    // Guard: context_set sometimes stores value as JSON string instead of object
+    if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return null; } }
+    return value;
   } catch { return null; }
 }
 

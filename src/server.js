@@ -238,8 +238,8 @@ async function runHhScoringForUser(username) {
     try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return; }
     if (!tokenData?.access_token) return;
 
-    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-    const workDir = path.join(dataDir, 'sessions', String(username));
+    // workDir must match where Claude writes context (/run handler uses BASE_USERS_DIR)
+    const workDir = path.join(BASE_USERS_DIR, String(username));
     const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
     if (!fs.existsSync(vacancyCtxFile)) return;
     let vacancy;
@@ -1952,6 +1952,14 @@ function show(id, type, msg) {
       const taskId = url.pathname.split('/')[2];
       const { extendTaskTimeout } = require('./runner');
       const result = extendTaskTimeout(taskId);
+      return json(res, result.ok ? 200 : 404, result);
+    }
+
+    // POST /tasks/:taskId/stop — user-initiated kill of a running Claude process
+    if (req.method === 'POST' && /^\/tasks\/[^/]+\/stop$/.test(url.pathname)) {
+      const taskId = url.pathname.split('/')[2];
+      const { stopTask } = require('./runner');
+      const result = stopTask(taskId);
       return json(res, result.ok ? 200 : 404, result);
     }
 
