@@ -157,7 +157,11 @@ function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
-          else resolve(parsed.choices[0].message.content);
+          else {
+            const content = parsed.choices?.[0]?.message?.content;
+            if (content == null) reject(new Error(`LLM returned empty content (model: ${model})`));
+            else resolve(content);
+          }
         } catch (e) { reject(e); }
       });
     });

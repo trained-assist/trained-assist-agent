@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const FALLBACK_MODEL = 'google/gemini-flash-2.0';
+const FALLBACK_MODEL = 'google/gemini-2.5-flash';
 
 const CHINESE_RE = /[一-鿿㐀-䶿豈-﫿぀-ヿ]/;
 
