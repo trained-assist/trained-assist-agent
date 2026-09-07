@@ -1141,7 +1141,7 @@ async function main() {
       try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return errPage('Ошибка чтения токена.'); }
 
       const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const workDir = path.join(dataDir, 'sessions', username);
+      const workDir = path.join(BASE_USERS_DIR, username);
       const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
       let vacancy = null;
       try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
