@@ -85,6 +85,14 @@ const SERVICE_FORM_SCHEMA = {
       { name: 'password', label: 'Пароль (необязательно)',       type: 'password', required: false, level: 'secret' },
     ],
   },
+  'nalog-creds': {
+    title: 'Налог.ру — войти через Госуслуги',
+    description: 'Данные не попадают в чат — форма отправляет их напрямую на сервер. Ассистент войдёт автоматически и сохранит сессию.',
+    fields: [
+      { name: 'login',    label: 'Логин Госуслуг (телефон, email или СНИЛС)', type: 'text',     required: true },
+      { name: 'password', label: 'Пароль Госуслуг',                           type: 'password', required: true },
+    ],
+  },
 };
 
 const LOG_FILES = new Set(['.secrets_log', 'gdrive-seen', 'gdrive-catalog', 'gdrive-catalog.json', '.chatid']); // internal state files, not credentials
@@ -93,6 +101,7 @@ const SERVICE_DISPLAY = {
   github:          'GitHub',
   weeek:           'Weeek CRM',
   nalog:           'Налог.ру (НПД)',
+  'nalog-creds':   'Налог.ру (Госуслуги логин)',
   figma:           'Figma',
   notion:          'Notion',
   linear:          'Linear',
