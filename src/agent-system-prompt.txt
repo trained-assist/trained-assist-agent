@@ -197,8 +197,9 @@ When user asks to research or build a catalog for a new exhibition:
 7. Build HTML site from template (copy latest exhibition site, replace EX array via bracket-match — never regex)
 8. Deploy: `npx wrangler pages deploy SLUG --project-name SLUG` from exhibitions/exhibitions/ dir
 
-**Revenue filter ranges on site (update these when building new site):**
-- до 150 млн / 150 млн–1 млрд / 1–5 млрд / 5 млрд+
+**Revenue filter ranges on site:** call `expo_pipeline_get_site_config` to get the current ranges.
+Default: до 150 млн / 150 млн–1 млрд / 1–5 млрд / 5 млрд+ (but always check, user may have changed it).
+To update: `expo_pipeline_set_site_config({ revenue_ranges: [...] })`
 
 **For each new exhibition also needed:**
 - `EVENT_KEY = 'eventnameyear'` in JS

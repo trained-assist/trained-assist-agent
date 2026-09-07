@@ -17,6 +17,35 @@ function criteriaPath(workDir) {
   return path.join(pipelineDir(workDir), 'criteria.json');
 }
 
+function siteConfigPath(workDir) {
+  return path.join(pipelineDir(workDir), 'site-config.json');
+}
+
+const DEFAULT_SITE_CONFIG = {
+  version: 1,
+  revenue_ranges: ['до 150 млн', '150 млн–1 млрд', '1–5 млрд', '5 млрд+'],
+  notes: '',
+};
+
+function readSiteConfig(workDir) {
+  const file = siteConfigPath(workDir);
+  if (!fs.existsSync(file)) return { ...DEFAULT_SITE_CONFIG };
+  try { return { ...DEFAULT_SITE_CONFIG, ...JSON.parse(fs.readFileSync(file, 'utf8')) }; }
+  catch { return { ...DEFAULT_SITE_CONFIG }; }
+}
+
+function writeSiteConfig(workDir, config) {
+  fs.mkdirSync(pipelineDir(workDir), { recursive: true });
+  fs.writeFileSync(siteConfigPath(workDir), JSON.stringify(config, null, 2));
+}
+
+function formatSiteConfigText(config) {
+  const lines = ['⚙️ Настройки каталог-сайта:'];
+  lines.push(`📊 Фильтр выручки: ${config.revenue_ranges.join(' / ')}`);
+  if (config.notes) lines.push(`\n📝 ${config.notes}`);
+  return lines.join('\n');
+}
+
 const DEFAULT_CRITERIA = {
   version: 1,
   revenue_min: null,
@@ -378,10 +407,57 @@ Use to check progress and find expo_ids for qualify/targets commands.`,
       },
     },
 
+    expo_pipeline_get_site_config: {
+      description: `Get the current exhibition catalog site configuration (revenue filter ranges etc).
+Call this before building a new site to get the correct filter values.
+Config is stored per-user in expo-pipeline/site-config.json.`,
+      inputSchema: { type: 'object', properties: {} },
+      handler: async (_, ctx) => {
+        const workDir = ctx?.workDir || process.cwd();
+        const config = readSiteConfig(workDir);
+        return {
+          config,
+          summary: formatSiteConfigText(config),
+          file: siteConfigPath(workDir),
+        };
+      },
+    },
+
+    expo_pipeline_set_site_config: {
+      description: `Update exhibition catalog site configuration (merged with current, not replaced).
+Use to change revenue filter ranges or other site settings.
+Example: { "revenue_ranges": ["до 150 млн", "150 млн–1 млрд", "1–5 млрд", "5 млрд+"] }`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          revenue_ranges: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Revenue filter dropdown values shown on the site',
+          },
+          notes: { type: 'string', description: 'Free-form notes about site config' },
+        },
+      },
+      handler: async (params, ctx) => {
+        const workDir = ctx?.workDir || process.cwd();
+        const current = readSiteConfig(workDir);
+        const merged = { ...current };
+        if (params.revenue_ranges !== undefined) merged.revenue_ranges = params.revenue_ranges;
+        if (params.notes !== undefined) merged.notes = params.notes;
+        writeSiteConfig(workDir, merged);
+        return {
+          config: merged,
+          summary: formatSiteConfigText(merged),
+        };
+      },
+    },
+
   },
 };
 
-// Export formatCriteriaText and readCriteria for quick-answer use in runner.js
+// Export for quick-answer use in runner.js
 module.exports.formatCriteriaText = formatCriteriaText;
 module.exports.readCriteria = readCriteria;
 module.exports.DEFAULT_CRITERIA = DEFAULT_CRITERIA;
+module.exports.formatSiteConfigText = formatSiteConfigText;
+module.exports.readSiteConfig = readSiteConfig;
