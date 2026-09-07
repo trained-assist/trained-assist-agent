@@ -4,12 +4,13 @@
 // runner.js maps label 'github' → GH_TOKEN env var for Claude process.
 // MCP process reads from disk directly (env vars are not forwarded to MCP).
 //
-// Token setup: github.com/settings/tokens → classic → repo + read:org scopes
-// Send via: /settoken github ghp_xxxxx
+// Token setup: call github_connect → user fills ZeroCreds form → token saved automatically.
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+const { generateConnectLink } = require('../../user-tokens');
 
 const GH_API = 'https://api.github.com';
 const USER_ID = process.env.USER_ID || '';
@@ -24,10 +25,7 @@ function getToken() {
     } catch {}
   }
   throw new Error(
-    'GitHub токен не задан.\n\n' +
-    '1. github.com/settings/tokens → Generate new token (classic)\n' +
-    '2. Scopes: repo, read:org\n' +
-    '3. /settoken github ghp_xxxxxxxxxxxxx'
+    'GitHub токен не задан. Вызови github_connect — получишь защищённую ссылку для ввода токена без отправки в чат.'
   );
 }
 
@@ -60,9 +58,23 @@ module.exports = {
     if (!USER_ID) return false;
     return fs.existsSync(path.join(os.homedir(), 'agent-tokens', USER_ID, 'github'));
   },
-  setupTools: ['github_status'],
+  setupTools: ['github_connect', 'github_status'],
 
   tools: {
+
+    github_connect: {
+      description: 'Generate a one-time secure link for the user to enter their GitHub Personal Access Token. The token is submitted directly to the server without going through the chat.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async (_, ctx) => {
+        const userId = ctx?.userId || USER_ID;
+        if (!userId) return { error: 'No user ID in context' };
+        const url = await generateConnectLink(String(userId), 'github');
+        return {
+          url,
+          message: `Открой ссылку для подключения GitHub:\n${url}\n\nВведи Personal Access Token (classic) с scope: repo, read:org.\nТокен не попадёт в чат — форма отправит его напрямую на сервер. Ссылка действует 30 минут.`,
+        };
+      },
+    },
 
     github_status: {
       description: 'Check GitHub token and show authenticated user info.',

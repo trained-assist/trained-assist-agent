@@ -54,7 +54,7 @@ const SKILLS = [
     id: 'github',
     name: 'GitHub',
     description: 'Работа с GitHub: репозитории, issues, pull requests, файлы. Читать/создавать задачи, PR, комментарии, файлы.',
-    requires: '/settoken github ghp_xxxxx — классический PAT с scope: repo, read:org',
+    requires: 'Вызови github_connect — получишь защищённую ссылку для ввода PAT. Scope: repo, read:org.',
   },
   {
     id: 'inn-enrichment',
