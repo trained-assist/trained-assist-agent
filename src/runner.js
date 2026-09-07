@@ -609,30 +609,14 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
 4. Нажми 📥 Из агента → Начать звонок`;
   }
 
-  const NAVIGATING_URL_RE = /https?:\/\/[^\s]+\.[^\s]+\/[^\s]+/i;
-  const SITE_CONNECT_RE = /подключи.{0,20}сайт|добавь.{0,20}сайт|connect.{0,15}site|подключить.{0,20}сайт/i;
-  const hasNavigatingUrl = NAVIGATING_URL_RE.test(task) && !SITE_CONNECT_RE.test(task);
-
-  // Short service-name reply (e.g. "github", "weeek") — user picks a service after bot prompts them.
-  // Check QUICK_SETUPS before SETUP_INTENT so the bare name triggers the ZeroCreds link.
-  // Guard: ≤3 words only, to avoid intercepting real tasks that mention a service name.
-  if (!hasNavigatingUrl && task.trim().split(/\s+/).length <= 2) {
-    for (const { match, service, hint } of QUICK_SETUPS) {
-      if (!match.test(task)) continue;
-      console.log('[quick-answer] short service-name match, service=%s uid=%s', service || 'null', userId);
-      if (service && userId) {
-        return { __connectLink: true, service, hint };
-      }
-      return hint;
-    }
-  }
-
   if (!SETUP_INTENT.test(task)) {
     console.log('[quick-answer] no setup intent, task=%j', task.slice(0, 120));
     return null;
   }
 
-  if (hasNavigatingUrl) {
+  const NAVIGATING_URL_RE = /https?:\/\/[^\s]+\.[^\s]+\/[^\s]+/i;
+  const SITE_CONNECT_RE = /подключи.{0,20}сайт|добавь.{0,20}сайт|connect.{0,15}site|подключить.{0,20}сайт/i;
+  if (NAVIGATING_URL_RE.test(task) && !SITE_CONNECT_RE.test(task)) {
     console.log('[quick-answer] task contains a URL with path — user is navigating, not connecting; skipping QUICK_SETUPS');
     return null;
   }
