@@ -51,8 +51,8 @@ async function hhFetch(apiPath, token) {
   const res = await fetch(`${hhApiBase()}${apiPath}`, {
     headers: {
       Authorization: `Bearer ${token.access_token}`,
-      'User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
-      'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+      'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+      'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
     },
   });
   if (!res.ok) throw new Error(`HH API ${res.status}: ${apiPath}`);
@@ -65,8 +65,8 @@ async function hhPost(apiPath, token, body) {
     headers: {
       Authorization: `Bearer ${token.access_token}`,
       'Content-Type': 'application/json',
-      'User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
-      'HH-User-Agent': 'trained-assist-agent/1.0 (ispyq.com@gmail.com)',
+      'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+      'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
     },
     body: JSON.stringify(body),
   });
