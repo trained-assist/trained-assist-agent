@@ -336,12 +336,11 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
         const isValid = pending && pending.expiresAt > Date.now();
         if (!isValid) return '⚠️ Подтверждение устарело. Напиши «отключи Google Drive» ещё раз.';
         try { fs.unlinkSync(pendingFile); } catch { /* ignore */ }
-        // Delete GCP SA first, then local file
-        const saResult = await deleteGdriveSA(userId).catch(e => ({ deleted: false, reason: e.message }));
+        // Fire-and-forget SA deletion (getQuickAnswer is sync)
+        deleteGdriveSA(userId).catch(e => console.error('[gdrive-revoke] SA delete failed:', e.message));
         const revokeResult = revokeService(userId, 'gdrive');
-        const saMsg = saResult.deleted ? '' : `\n_SA из GCP не удалён: ${saResult.reason}_`;
-        if (revokeResult === 'not_found') return `Сервис Google Drive не был подключён.${saMsg}`;
-        return `✅ Google Drive отключён. Сервис-аккаунт удалён из GCP.${saMsg}`;
+        if (revokeResult === 'not_found') return 'Сервис Google Drive не был подключён.';
+        return '✅ Google Drive отключён. Удаление сервис-аккаунта из GCP запущено.';
       } else {
         // First request — ask for confirmation, write pending file
         const gdriveFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
