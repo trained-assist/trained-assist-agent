@@ -61,7 +61,7 @@ async function loadSecrets() {
 
   return {
     BOT_TOKEN: values.TELEGRAM_BOT_TOKEN,
-    ANTHROPIC_API_KEY: values.ANTHROPIC_API_KEY,
+    ANTHROPIC_API_KEY: values.ANTHROPIC_API_KEY, // not used for direct API calls — Claude Code uses OAuth; OpenRouter for LLM calls
     AGENT_SECRET: values.AGENT_SECRET,
     DEEPGRAM_API_KEY: values.DEEPGRAM_API_KEY,
     BOT_SECRET: values.BOT_SECRET,
