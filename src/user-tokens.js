@@ -284,8 +284,8 @@ function getSecretsLog(userId) {
   return lines.slice(-20).reverse();
 }
 
-async function generateConnectLink(userId, service) {
-  const schema = SERVICE_FORM_SCHEMA[service];
+async function generateConnectLink(userId, service, inlineSchema) {
+  const schema = inlineSchema || SERVICE_FORM_SCHEMA[service];
   const agentSecret = process.env.AGENT_SECRET || '';
 
   if (ZEROCREDS_URL && ZEROCREDS_ADMIN_TOKEN && schema) {
