@@ -2018,6 +2018,10 @@ function show(id, type, msg) {
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
+      // Preflight: ZeroCreds tests reachability before showing the form to the user.
+      // Respond immediately without writing anything.
+      if (payload._zerocreds_preflight === true) return json(res, 200, { ok: true, preflight: true });
+
       const userId = payload.userId || url.searchParams.get('userId');
       const label = payload.label || url.searchParams.get('label');
       const { value } = payload;
