@@ -82,7 +82,8 @@ async function captureCookiesViaScript(domain, outputPath) {
 const tools = [
   {
     name: 'browser_session_status',
-    description: 'Check if the remote browser session (noVNC) is running on the VM. Returns status and the URL to share with the user.',
+    description: 'Check if the remote noVNC browser is running. Use only for IP-bound sites (Tilda). ' +
+      'For regular email+password sites use credentials_form_create instead.',
     inputSchema: { type: 'object', properties: {}, required: [] },
     handler: async () => {
       const running = isChromeRunning();
@@ -98,7 +99,9 @@ const tools = [
 
   {
     name: 'browser_session_url',
-    description: 'Generate a personalized login URL for a specific user. The URL contains uid+token so cookies are saved to the right user after login.',
+    description: 'Generate a noVNC browser URL for sites that REQUIRE IP-bound sessions or hardware tokens (e.g. Tilda.cc). ' +
+      'DO NOT use for regular sites with email+password login — use credentials_form_create instead, it is safer and simpler. ' +
+      'noVNC requires the user to manually type credentials in a remote browser window.',
     inputSchema: {
       type: 'object',
       properties: {
