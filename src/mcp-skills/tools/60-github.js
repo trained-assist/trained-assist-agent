@@ -4,8 +4,7 @@
 // runner.js maps label 'github' → GH_TOKEN env var for Claude process.
 // MCP process reads from disk directly (env vars are not forwarded to MCP).
 //
-// Token setup: github.com/settings/tokens → classic → repo + read:org scopes
-// Send via: /settoken github ghp_xxxxx
+// Token setup: call connect({ service: "github" }) — universal connect tool handles ZeroCreds form.
 
 const fs = require('fs');
 const path = require('path');
@@ -24,10 +23,7 @@ function getToken() {
     } catch {}
   }
   throw new Error(
-    'GitHub токен не задан.\n\n' +
-    '1. github.com/settings/tokens → Generate new token (classic)\n' +
-    '2. Scopes: repo, read:org\n' +
-    '3. /settoken github ghp_xxxxxxxxxxxxx'
+    'GitHub токен не задан. Вызови github_connect — получишь защищённую ссылку для ввода токена без отправки в чат.'
   );
 }
 
