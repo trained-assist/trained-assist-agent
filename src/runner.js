@@ -569,6 +569,22 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     return null; // Claude handles via MCP tool
   }
 
+  // Call Tips download links
+  const CALLTIPS_DOWNLOAD_INTENT = /скачать.{0,20}call.?tips|установить.{0,20}call.?tips|call.?tips.{0,20}скачать|загрузить.{0,20}call.?tips|где.{0,20}call.?tips|ссылка.{0,20}call.?tips/i;
+  if (CALLTIPS_DOWNLOAD_INTENT.test(task)) {
+    return `📥 *Call Tips — скачать*
+
+🍎 *Mac (Apple Silicon)*: https://github.com/trained-assist/call-tips/releases/latest/download/Call.Tips-0.1.0-arm64.dmg
+
+🪟 *Windows (x64)*: https://github.com/trained-assist/call-tips/releases/latest/download/Call.Tips.Setup.0.1.0.exe
+
+*Как начать:*
+1. Установи приложение
+2. Введи ключ Deepgram (транскрипция) и Agent Secret
+3. Напиши мне: "подготовь план для звонка с [имя кандидата]"
+4. Нажми 📥 Из агента → Начать звонок`;
+  }
+
   if (!SETUP_INTENT.test(task)) {
     console.log('[quick-answer] no setup intent, task=%j', task.slice(0, 120));
     return null;
