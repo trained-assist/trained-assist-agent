@@ -176,20 +176,26 @@ const tools = [
   {
     name: 'browser_session_autologin',
     description: 'Log into a site using credentials stored in the agent credential store — credentials are never passed through Claude context. ' +
-      'Requires credentials saved via the tilda-creds (or similar) connect form first. ' +
+      'Requires credentials saved via credentials_form_create (or tilda-creds connect form) first. ' +
+      'Navigates the remote browser to login_url, then fills email+password automatically. ' +
       'Returns login result or instructions if no stored credentials found.',
     inputSchema: {
       type: 'object',
       properties: {
         service: {
           type: 'string',
-          description: 'Credential store key, e.g. "tilda-creds". Defaults to "tilda-creds".',
+          description: 'Credential store key, e.g. "kinescope-creds", "tilda-creds". Defaults to "tilda-creds".',
           default: 'tilda-creds',
+        },
+        login_url: {
+          type: 'string',
+          description: 'URL of the login page to navigate to before filling credentials. ' +
+            'Required for non-Tilda services. E.g. "https://app.kinescope.io/login".',
         },
         user_id: { type: 'string', description: 'User ID (optional, defaults to current session user)' },
       },
     },
-    handler: async ({ service = 'tilda-creds', user_id } = {}) => {
+    handler: async ({ service = 'tilda-creds', login_url, user_id } = {}) => {
       const uid = user_id || USER_ID;
       if (!uid) return { error: 'No user_id' };
 
@@ -197,7 +203,7 @@ const tools = [
       if (!fs.existsSync(credsFile)) {
         return {
           error: 'no_credentials',
-          message: `No stored credentials for "${service}". Ask the user to set them up first — I will send a secure connect link.`,
+          message: `No stored credentials for "${service}". Use credentials_form_create to generate a secure link for the user to enter their credentials.`,
         };
       }
 
@@ -206,18 +212,21 @@ const tools = [
       catch { return { error: 'invalid_credentials_file', message: `Could not read credentials for "${service}".` }; }
 
       if (!creds.email || !creds.password) {
-        return { error: 'incomplete_credentials', message: `Credentials for "${service}" are incomplete. Ask the user to update them.` };
+        return { error: 'incomplete_credentials', message: `Credentials for "${service}" are incomplete (need email + password). Ask the user to update them via credentials_form_create.` };
       }
 
       if (!isChromeRunning()) return { error: 'browser_not_running' };
       const scriptPath = path.join(os.homedir(), 'browser-session', 'login.js');
       if (!fs.existsSync(scriptPath)) return { error: 'login.js not found on VM' };
 
+      const env = { ...process.env, LOGIN_EMAIL: creds.email, LOGIN_PASSWORD: creds.password };
+      if (login_url) env.LOGIN_URL = login_url;
+
       try {
         const result = execSync(`node "${scriptPath}"`, {
-          timeout: 20000,
+          timeout: 30000,
           encoding: 'utf8',
-          env: { ...process.env, LOGIN_EMAIL: creds.email, LOGIN_PASSWORD: creds.password },
+          env,
         });
         const data = JSON.parse(result.trim());
         if (data.captcha) {
@@ -225,7 +234,7 @@ const tools = [
         } else if (data.two_factor) {
           data.message = `Нужен код 2FA — введи его в браузере: ${BROWSER_SESSION_URL}`;
         } else if (data.error_on_page) {
-          data.message = 'Неверный логин или пароль — попроси пользователя обновить данные через connect-форму.';
+          data.message = `Неверный логин или пароль — попроси пользователя обновить данные через credentials_form_create с service="${service}".`;
         } else if (data.navigated) {
           data.message = 'Успешно залогинился. Теперь вызови browser_session_capture_cookies.';
         }
