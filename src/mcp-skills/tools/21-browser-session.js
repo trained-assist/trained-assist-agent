@@ -232,12 +232,16 @@ const tools = [
           env,
         });
         const data = JSON.parse(result.trim());
-        if (data.captcha) {
+        if (data.google_redirect) {
+          data.message = `Аккаунт зарегистрирован через Google — email+пароль не работает.\n\nЧтобы войти, открой браузер и залогинься через Google:\n${BROWSER_SESSION_URL}\n\nПосле входа в дашборд напиши «готово».`;
+        } else if (data.captcha) {
           data.message = `Появилась CAPTCHA — открой браузер и пройди её вручную: ${BROWSER_SESSION_URL}`;
         } else if (data.two_factor) {
           data.message = `Нужен код 2FA — введи его в браузере: ${BROWSER_SESSION_URL}`;
         } else if (data.error_on_page) {
           data.message = `Неверный логин или пароль — попроси пользователя обновить данные через credentials_form_create с service="${service}".`;
+        } else if (data.already_logged_in) {
+          data.message = 'Уже залогинен. Вызови browser_session_capture_cookies чтобы сохранить сессию.';
         } else if (data.navigated) {
           data.message = 'Успешно залогинился. Теперь вызови browser_session_capture_cookies.';
         }
