@@ -18,6 +18,14 @@ const os = require('os');
 
 const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
+function _readChatId(userId) {
+  // Support both legacy numeric dirs (chatId == userId) and named profile dirs
+  if (/^-?\d+$/.test(userId)) return userId;
+  try {
+    return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', userId, '.chatid'), 'utf8').trim() || null;
+  } catch { return null; }
+}
+
 // ── SA JWT auth ───────────────────────────────────────────────────────────────
 
 const _tokenCache = new Map();
@@ -240,10 +248,16 @@ async function _checkUser(userId, botToken) {
       ? `📂 Открыли доступ к ${label} [${name}](${link})\nОт: ${owner}\n\nСкажи что делать с файлом.`
       : `📂 Открыли доступ к ${label} «${name}»\nОт: ${owner}\n\nСкажи что делать с файлом.`;
 
+    const chatId = _readChatId(userId);
+    if (!chatId) {
+      console.warn(`[drive-watcher] no chatId for userId=${userId}, skipping notification`);
+      continue;
+    }
+
     await fetch(`${TG_BASE}/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: userId, text, parse_mode: 'Markdown', disable_web_page_preview: false }),
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: false }),
       signal: AbortSignal.timeout(8000),
     }).catch(e => console.error('[drive-watcher] TG send failed:', e.message));
   }
@@ -260,7 +274,8 @@ async function pollDriveChanges({ botToken }) {
   catch { return; }
 
   for (const userId of entries) {
-    if (!/^-?\d+$/.test(userId)) continue; // numeric Telegram IDs (groups have negative IDs)
+    // Skip hidden files and internal files — accept both numeric chat IDs (legacy) and alphanumeric profile names
+    if (userId.startsWith('.') || !/^-?[\w]+$/.test(userId)) continue;
     await _checkUser(userId, botToken).catch(e =>
       console.error(`[drive-watcher] uncaught error userId=${userId}:`, e.message)
     );

@@ -72,6 +72,8 @@ const REVOKE_CONFIRM_RE     = /^да[,.]?\s*(удал|отключ|подтве�
 const GDRIVE_SA_EMAIL_INTENT  = /(?:почт|email|e-mail|адрес).{0,40}(?:сервис|service|sa\b)|(?:сервис|service|sa\b).{0,40}(?:почт|email|e-mail|аккаун)|дай.{0,30}(?:почт|email|адрес).{0,30}(?:гугл|google|drive|аккаун)|на\s+(?:какой|что|какую).{0,30}(?:шар|поделить|пошар)|куда.{0,20}(?:шар|поделить|пошар)/i;
 // "пошарить таблицу тебе", "поделиться файлом", "как дать доступ к гугл" — needs SA email answer
 // verb forms only (пошари/пошарить/шари), not past/adj (пошаренные/пошарено — those go to LIST)
+// Past tense "пошарил/поделился" + "ты видишь/можешь" = "I already shared, can you see it?" — separate intent
+const GDRIVE_CONFIRM_INTENT   = /(?:пошарил[аи]?|поделил(?:ся|ась)|шарил[аи]?|дал[аи]?\s+доступ).{0,60}(?:видишь|можешь|проверь|посмотри|видел|открылся|доступно|работает)|(?:видишь|можешь|открылся|доступно|работает).{0,60}(?:пошарил[аи]?|поделил(?:ся|ась)|шарил[аи]?|папк|файл|документ)/i;
 const GDRIVE_SHARE_INTENT     = /(?:пошар[иьюшт]|поделить|шар[иьюшт]|дать?\s+доступ).{0,50}(?:гугл|google|таблиц|докс|docs|sheets|файл|документ)|(?:гугл|google|таблиц|докс|docs|sheets|файл|документ).{0,50}(?:пошар[иьюшт]|поделить|шар[иьюшт]|дать?\s+доступ)/i;
 // "мои файлы гугл", "что мне пошарено", "список документов"
 const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие).{0,20}(?:файл|документ|гугл|google|пошарен)|(?:что|какие).{0,30}(?:пошарено|пошарил|открыл)|gdrive.{0,20}(?:файл|документ|список)/i;
@@ -402,6 +404,9 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
         ].join('\n')
       : null; // not configured — let Claude call gdrive_setup automatically
   }
+
+  // "я пошарил папку ты видишь?" — past tense + confirmation question → let Claude call gdrive_list_files
+  if (GDRIVE_CONFIRM_INTENT.test(task)) return null;
 
   // "пошарить таблицу тебе", "как поделиться файлом", "email SA" — always read from disk, never hallucinate
   if ((GDRIVE_SHARE_INTENT.test(task) || GDRIVE_SA_EMAIL_INTENT.test(task)) && userId) {
