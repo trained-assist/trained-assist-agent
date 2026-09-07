@@ -151,11 +151,11 @@ function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
         'Content-Length': Buffer.byteLength(body),
       },
     }, (res) => {
-      let data = '';
-      res.on('data', c => (data += c));
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
       res.on('end', () => {
         try {
-          const parsed = JSON.parse(data);
+          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           if (parsed.error) reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
           else {
             const content = parsed.choices?.[0]?.message?.content;
@@ -194,7 +194,8 @@ const ATS_EXTRACT_SYSTEM = `Ты — senior технический рекрут�
 const MESSAGE_SYSTEM = `Ты — рекрутер в технической компании.
 Пиши первое сообщение кандидату на HeadHunter. Тон: профессиональный, уважительный, конкретный.
 Структура: 1) Приветствие с именем 2) 1-2 предложения что в резюме зацепило 3) Короткое описание роли 4) Конкретный вопрос для квалификации (самый важный пробел) 5) Призыв к действию.
-Длина: 4-6 предложений. Не используй шаблонные фразы. Пиши от первого лица.`;
+Длина: 4-6 предложений. Не используй шаблонные фразы. Пиши от первого лица.
+НЕЛЬЗЯ: обещать перезвонить или позвонить — только переписка в HH. Не используй слова «перезвоню», «позвоню», «свяжусь по телефону», «созвонимся».`;
 
 const PROFILE_SYSTEM = `Ты — рекрутер, составляющий профиль кандидата для показа заказчику.
 Формат: markdown. Структура: имя + текущая позиция, краткое резюме (2-3 предложения), ключевые компетенции (список), опыт работы (топ-3 места), ключевые проекты/достижения, образование, ожидания.
