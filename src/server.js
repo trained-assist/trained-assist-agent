@@ -1844,7 +1844,7 @@ function show(id, type, msg) {
     // GET /capabilities?userId=XXX — list services with tokens on this machine
     if (req.method === 'GET' && url.pathname === '/capabilities') {
       const userId = url.searchParams.get('userId') || '';
-      if (!userId || !/^[a-zA-Z0-9_]{1,64}$/.test(userId)) return json(res, 400, { error: 'invalid userId' });
+      if (!userId || !/^[a-zA-Z0-9_-]{1,64}$/.test(userId)) return json(res, 400, { error: 'invalid userId' });
       const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
       const SKIP = new Set(['.secrets_log', 'gdrive-seen', 'gdrive-catalog', 'gdrive-catalog.json']);
       let capabilities = [];
