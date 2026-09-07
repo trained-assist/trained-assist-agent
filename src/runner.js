@@ -1089,6 +1089,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   fs.mkdirSync(user.workDir, { recursive: true });
   initLog(user.workDir);
   ensureProfileLayoutSkill(user.workDir, user.username);
+  ensureSkillDir(user.workDir, 'prompts', 'Промпты и критерии, специфичные для этого профиля. Перезаписывают общие настройки из flexi-consult/.');
+  ensureSkillDir(user.workDir, 'exhibitions', 'Данные выставок. Каждая выставка — подпапка {eventKey}/ со своим README, active.json и deals/.');
 
   // Resolve session context without writing to disk yet.
   // Session creation / message appending is deferred until we know this is not a utility command.
