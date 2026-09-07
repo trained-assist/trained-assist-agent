@@ -3654,8 +3654,9 @@ ${isInn ? `ИНН компании: ${companyId}` : `ID/стенд компан�
 
   // /target_company_prompt — Flexi target company classification rules
   if (cmd === '/target_company_prompt') {
-    // Priority: misha override > flexi-consult shared > hardcoded
+    // Priority: new path > backward compat old path > flexi-consult shared > hardcoded
     const paths = [
+      path.join(workDir, 'contexts', 'prompts', 'target_company_prompt.txt'),
       path.join(workDir, 'contexts', 'target_company_prompt.txt'),
       path.join(BASE_USERS_DIR, 'flexi-consult', 'site-requirements-target.md'),
     ];
@@ -3670,6 +3671,7 @@ ${isInn ? `ИНН компании: ${companyId}` : `ID/стенд компан�
   // /company_showcase_spec — how to display/present company cards
   if (cmd === '/company_showcase_spec') {
     const paths = [
+      path.join(workDir, 'contexts', 'prompts', 'company_showcase_spec.txt'),
       path.join(workDir, 'contexts', 'company_showcase_spec.txt'),
       path.join(BASE_USERS_DIR, 'flexi-consult', 'site-requirements-display.md'),
     ];

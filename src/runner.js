@@ -1024,27 +1024,55 @@ function ensureProfileLayoutSkill(workDir, username) {
       '',
       '| Данные | Путь |',
       '|---|---|',
-      `| Обновлённые требования к целевым | \`${workDir}/contexts/target_company_prompt.txt\` |`,
-      `| Обновлённый стандарт карточки | \`${workDir}/contexts/company_showcase_spec.txt\` |`,
+      `| Обновлённые требования к целевым | \`${workDir}/contexts/prompts/target_company_prompt.txt\` |`,
+      `| Обновлённый стандарт карточки | \`${workDir}/contexts/prompts/company_showcase_spec.txt\` |`,
+      `| Данные сделки выставки | \`${workDir}/contexts/exhibitions/{eventKey}/deals/{companyId}.json\` |`,
       `| Активная выставка | \`${workDir}/contexts/flexi/active_exhibition.json\` |`,
-      `| Пользовательские настройки | \`${workDir}/contexts/<тема>/<имя>.json\` |`,
+      `| WEEEK настройки | \`${workDir}/contexts/weeek/{filename}.json\` |`,
       `| Навыки и справочники | \`${workDir}/skills/<название>.md\` |`,
       '',
       '**НИКОГДА не сохранять в** `/home/vova/users/flexi-consult/` (общие файлы)',
       '**НИКОГДА не сохранять в** токен-файлы (только чтение)',
       '',
+      '## Структура contexts/ по доменам',
+      '',
+      '```',
+      'contexts/',
+      '  prompts/         ← промпты и критерии (локальные приоритеты)',
+      '  exhibitions/     ← данные выставок',
+      '    {eventKey}/',
+      '      README.md',
+      '      active.json',
+      '      deals/',
+      '        {companyId}.json',
+      '  flexi/           ← Flexi Consulting настройки',
+      '  weeek/           ← WEEEK CRM настройки',
+      '```',
+      '',
       '## Приоритет чтения промптов',
       '',
-      `1. \`${workDir}/contexts/target_company_prompt.txt\` — если существует`,
-      '2. `/home/vova/users/flexi-consult/site-requirements-target.md` — фолбэк',
+      `1. \`${workDir}/contexts/prompts/target_company_prompt.txt\` — если существует`,
+      `2. \`${workDir}/contexts/target_company_prompt.txt\` — backward compat`,
+      '3. `/home/vova/users/flexi-consult/site-requirements-target.md` — фолбэк',
       '',
-      `1. \`${workDir}/contexts/company_showcase_spec.txt\` — если существует`,
-      '2. `/home/vova/users/flexi-consult/site-requirements-display.md` — фолбэк',
+      `1. \`${workDir}/contexts/prompts/company_showcase_spec.txt\` — если существует`,
+      `2. \`${workDir}/contexts/company_showcase_spec.txt\` — backward compat`,
+      '3. `/home/vova/users/flexi-consult/site-requirements-display.md` — фолбэк',
     ].join('\n');
     fs.writeFileSync(skillFile, content, 'utf8');
   } catch (e) {
     console.warn(`[profile-layout] skill gen failed for ${username}:`, e.message);
   }
+}
+
+function ensureSkillDir(workDir, domainPath, description) {
+  const dir = path.join(workDir, 'contexts', domainPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const readme = path.join(dir, 'README.md');
+  if (!fs.existsSync(readme)) {
+    fs.writeFileSync(readme, `# ${domainPath}\n\n${description}\n\nСоздана: ${new Date().toISOString()}\n`, 'utf8');
+  }
+  return dir;
 }
 
 async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0 }) {
@@ -1625,7 +1653,7 @@ async function tgEdit(token, chatId, messageId, text, retries = 3) {
 }
 
 module.exports = {
-  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask,
+  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   waitForIdle, getActiveTaskCount, extendTaskTimeout,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
