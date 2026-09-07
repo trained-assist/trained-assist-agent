@@ -3632,9 +3632,77 @@ ${isInn ? `ИНН компании: ${companyId}` : `ID/стенд компан�
     }
   }
 
-  // /help
+  // /help — Misha-specific help
   if (cmd === '/help') {
-    await tgSend('Привет! Создаю сделки в WEEEK.\n\n/new_deal — новая сделка\n\nОтправь текст, визитку или голосовое.');
+    await tgSend([
+      '🤖 Команды:',
+      '',
+      '/new_deal — создать новую сделку',
+      '   Отправь визитку, голосовое, текст — всё в одном потоке',
+      '',
+      '/sessions — мои диалоги',
+      '/usage — расход токенов',
+      '/secrets_list — подключённые сервисы',
+      '/secrets_log — история обращений к данным',
+      '/target_company_prompt — шаблон целевой компании',
+      '/company_showcase_spec — спецификация карточки компании',
+      '',
+      'Или просто напиши что нужно сделать.',
+    ].join('\n'));
+    return;
+  }
+
+  // /target_company_prompt — template for target company evaluation
+  if (cmd === '/target_company_prompt') {
+    const promptPath = path.join(workDir, 'contexts', 'target_company_prompt.txt');
+    let promptText;
+    if (fs.existsSync(promptPath)) {
+      promptText = fs.readFileSync(promptPath, 'utf8').trim();
+    } else {
+      promptText = [
+        '⚡️ 📋 Требования к целевым компаниям:',
+        '',
+        '💰 Выручка: от 150 млн',
+        '👥 Сотрудники: без ограничений',
+        '✅ ИНН обязателен: нет',
+        '',
+        '📝 Flexi target rule (чистое, без хардкода ОКВЭД).',
+        'ЦЕЛЕВАЯ (t:1): российский ПРОИЗВОДИТЕЛЬ И выручка 150млн–1млрд (любая прибыль) ИЛИ 1–5млрд при прибыли ≤100млн.',
+        'ПОЧТИ-ЦЕЛЕВАЯ (nt:1): российский производитель с подтверждённым производством, но выручка неизвестна/<150млн/>5млрд; исключить импорт/дистрибуцию/торговлю.',
+        'ОКВЭД-коды производства НЕ храним в требованиях — подставляются под отрасль конкретной выставки на этапе поиска (цветы: 01./16./20., текстиль: 13./14., упаковка: 17./22. и т.д.).',
+      ].join('\n');
+    }
+    await tgSend(promptText);
+    return;
+  }
+
+  // /company_showcase_spec — spec for how company info is presented
+  if (cmd === '/company_showcase_spec') {
+    const specPath = path.join(workDir, 'contexts', 'company_showcase_spec.txt');
+    let specText;
+    if (fs.existsSync(specPath)) {
+      specText = fs.readFileSync(specPath, 'utf8').trim();
+    } else {
+      specText = [
+        '🏢 *Карточка компании — формат вывода*',
+        '',
+        'При показе информации о компании использовать структуру:',
+        '',
+        '🏢 Компания: {название}',
+        '📍 Город: {город}',
+        '💰 Выручка: {выручка} ({год})',
+        '📊 Прибыль: {прибыль}',
+        '👤 Директор: {ФИО}',
+        '🔗 Сайт: {сайт}',
+        '📋 ИНН: {ИНН}',
+        '📞 Контакт: {имя} ({телефон})',
+        '💬 Из разговора: {комментарий}',
+        '',
+        'Если поле неизвестно — не показывать строку.',
+        'Форматировать как Markdown (bold для значений).',
+      ].join('\n');
+    }
+    await tgSend(specText);
     return;
   }
 
