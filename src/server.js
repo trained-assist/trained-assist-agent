@@ -25,7 +25,7 @@ const { runProactiveSearch } = require('./hh-proactive-search');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
-  path.join(process.env.HOME || '/home/vova', 'users');
+  path.join(os.homedir(), 'users');
 
 const VM_NAME = process.env.VM_NAME || 'unknown';
 let GIT_COMMIT = 'unknown';
@@ -2347,7 +2347,7 @@ ${expLines || '—'}
         }, null, null);
 
         // Notify recruiter via Telegram if chatId is known
-        const chatIdFile = path.join(process.env.HOME || '/home/vova', 'agent-tokens', applyUsername, '.chatid');
+        const chatIdFile = path.join(os.homedir(), 'agent-tokens', applyUsername, '.chatid');
         const chatId = fs.existsSync(chatIdFile) ? fs.readFileSync(chatIdFile, 'utf8').trim() : null;
         if (chatId && secrets.BOT_TOKEN) {
           const notifLines = [
@@ -2392,7 +2392,7 @@ ${expLines || '—'}
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 
-      const tokensDir = path.join(process.env.HOME || '/home/vova', 'agent-tokens', String(userId));
+      const tokensDir = path.join(os.homedir(), 'agent-tokens', String(userId));
       fs.mkdirSync(tokensDir, { recursive: true });
       const storedValue = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
       // If the target path is a directory (e.g. getcourse/ stores a Playwright session),

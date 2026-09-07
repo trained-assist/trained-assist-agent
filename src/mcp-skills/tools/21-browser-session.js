@@ -28,7 +28,8 @@ function generateLoginLink(userId, domain) {
   const expires = Date.now() + 30 * 60 * 1000; // 30 min
   fs.writeFileSync(
     path.join(PENDING_DIR, `${token}.json`),
-    JSON.stringify({ uid: String(userId), domain, expires })
+    JSON.stringify({ uid: String(userId), domain, expires }),
+    { mode: 0o600 }
   );
   // Cleanup expired tokens while we're here
   try {
@@ -91,7 +92,7 @@ const tools = [
         running,
         url: BROWSER_SESSION_URL,
         instructions: running
-          ? `Браузер запущен. Открой: ${BROWSER_SESSION_URL}\n\n⏳ После открытия подожди 10–15 секунд — страница входа загружается автоматически.\n\nЗалогинься, потом вызови browser_session_capture_cookies.`
+          ? `Браузер запущен. Открой: ${BROWSER_SESSION_URL}\n\n⏳ После открытия подожди 10–15 секунд — страница входа загружается автоматически.\n\nЗалогинься, затем используй browser_session_evaluate для взаимодействия (или browser_session_capture_cookies для Tilda).`
           : 'Браузер не запущен. Запусти сервисы: sudo systemctl start xvfb-browser chrome-browser vnc-browser novnc-browser',
       };
     },
@@ -288,9 +289,9 @@ const tools = [
         } else if (data.error_on_page) {
           data.message = `Неверный логин или пароль — попроси пользователя обновить данные через credentials_form_create с service="${service}".`;
         } else if (data.already_logged_in) {
-          data.message = 'Уже залогинен. Вызови browser_session_capture_cookies чтобы сохранить сессию.';
+          data.message = 'Уже залогинен. Используй browser_session_evaluate для взаимодействия со страницей.';
         } else if (data.navigated) {
-          data.message = 'Успешно залогинился. Теперь вызови browser_session_capture_cookies.';
+          data.message = 'Успешно залогинился. Используй browser_session_evaluate для взаимодействия со страницей. Для Tilda — вызови browser_session_capture_cookies.';
         }
         return data;
       } catch (e) {
@@ -299,43 +300,8 @@ const tools = [
     },
   },
 
-  {
-    name: 'browser_session_login',
-    description: 'Fill and submit a login form in the remote browser (already open at the login page). Use when the user provides their credentials. Returns whether login succeeded, or whether CAPTCHA/2FA appeared and the user needs to handle it via VNC.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        email:    { type: 'string', description: 'Email or username' },
-        password: { type: 'string', description: 'Password' },
-      },
-      required: ['email', 'password'],
-    },
-    handler: async ({ email, password }) => {
-      if (!isChromeRunning()) return { error: 'browser_not_running' };
-      const scriptPath = path.join(os.homedir(), 'browser-session', 'login.js');
-      if (!fs.existsSync(scriptPath)) return { error: 'login.js not found on VM' };
-      try {
-        const result = execSync(`node "${scriptPath}"`, {
-          timeout: 20000,
-          encoding: 'utf8',
-          env: { ...process.env, LOGIN_EMAIL: email, LOGIN_PASSWORD: password },
-        });
-        const data = JSON.parse(result.trim());
-        if (data.captcha) {
-          data.message = `Появилась CAPTCHA — открой браузер и пройди её вручную: ${BROWSER_SESSION_URL}`;
-        } else if (data.two_factor) {
-          data.message = `Нужен код 2FA — введи его в браузере: ${BROWSER_SESSION_URL}`;
-        } else if (data.error_on_page) {
-          data.message = 'Неверный логин или пароль — проверь данные.';
-        } else if (data.navigated) {
-          data.message = 'Успешно залогинился. Теперь вызови browser_session_capture_cookies.';
-        }
-        return data;
-      } catch (e) {
-        return { error: 'login_failed', message: e.message };
-      }
-    },
-  },
+  // browser_session_login is REMOVED — it accepted email+password directly through Claude context,
+  // violating the ZeroCreds security model. Use credentials_form_create + browser_session_autologin.
 
   {
     name: 'browser_session_navigate',
@@ -349,7 +315,12 @@ const tools = [
     },
     handler: async ({ url }) => {
       if (!isChromeRunning()) {
-        return { error: 'browser_not_running' };
+        return {
+          error: 'browser_not_running',
+          message: 'Remote browser is only available on the GCP VM. ' +
+            'This request may have been routed to the RU VM. ' +
+            'Browser tools (autologin, evaluate, navigate) require GCP routing.',
+        };
       }
       try {
         // Get first page target
@@ -367,9 +338,8 @@ const tools = [
           { timeout: 3000 });
         // Use node to send CDP command (no ws module needed — use native approach)
         const navScript = path.join(os.homedir(), 'browser-session', 'navigate.js');
-        if (fs.existsSync(navScript)) {
-          execFileSync(process.execPath, [navScript, url], { timeout: 10000 });
-        }
+        if (!fs.existsSync(navScript)) return { error: 'navigate.js not found on VM' };
+        execFileSync(process.execPath, [navScript, url], { timeout: 10000 });
         return { ok: true, navigated_to: url };
       } catch (e) {
         return { error: 'navigate_failed', message: e.message };
