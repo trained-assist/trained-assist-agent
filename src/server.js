@@ -45,7 +45,7 @@ const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 // Passive short forms: убран/убрана/убраны, удалён/удалена, очищен, заполнен, etc.
 const CLASSIFY_DONE_RE = /готово|сделан|убрал|убран|удалил|удалён|завершен|выполнен|очищен|заполнен|исправлен|опубликован|done|completed|всё\s+готово|всё\s+сделано/i;
 
-async function classifyMessage(message, sessions, anthropicKey, openrouterKey) {
+async function classifyMessage(message, sessions, openrouterKey) {
   // Filter out sessions that are too old or ended with a completion reply
   const now = Date.now();
   const activeSessions = sessions.filter(s => {
@@ -2571,7 +2571,7 @@ ${expLines || '—'}
       }
 
       try {
-        const result = await classifyMessage(message, recentSessions, secrets.ANTHROPIC_API_KEY, secrets.OPENROUTER_API_KEY);
+        const result = await classifyMessage(message, recentSessions, secrets.OPENROUTER_API_KEY);
         return json(res, 200, result);
       } catch (e) {
         console.error('[classify] error:', e.message);
@@ -2703,44 +2703,26 @@ ${recent || '(пока нет)'}
 {"next":"Если в плане есть незаданный важный вопрос — задай его. Иначе пустая строка.","dig":"ГЛАВНОЕ: один острый уточняющий вопрос к последней реплике — зацепись за конкретную деталь. Всегда заполняй если есть реплики.","why":"Если ответ размытый — попроси конкретный пример. Иначе пустая строка."}
 Язык: ${lang === 'en' ? 'English' : 'русский'}.`;
 
-      const anthropicKey = secrets.ANTHROPIC_API_KEY;
-      if (!anthropicKey) return json(res, 503, { error: 'ANTHROPIC_API_KEY not configured' });
+      const openrouterKey = secrets.OPENROUTER_API_KEY;
+      if (!openrouterKey) return json(res, 503, { error: 'OPENROUTER_API_KEY not configured' });
 
-      const reqBody = JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 300,
-        messages: [{ role: 'user', content: promptText }],
-      });
-
-      const tip = await new Promise((resolve, reject) => {
-        const hReq = require('https').request({
-          hostname: 'api.anthropic.com',
-          path: '/v1/messages',
-          method: 'POST',
-          headers: {
-            'x-api-key': anthropicKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
-            'content-length': Buffer.byteLength(reqBody),
-          },
-          timeout: 15000,
-        }, (hRes) => {
-          let data = '';
-          hRes.on('data', c => { data += c; });
-          hRes.on('end', () => {
-            try {
-              const parsed = JSON.parse(data);
-              const text = parsed.content?.[0]?.text || '{}';
-              // strip markdown code fences if present
-              const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-              resolve(JSON.parse(clean));
-            } catch { resolve({ dig: '', next: '', why: '' }); }
-          });
-        });
-        hReq.on('error', reject);
-        hReq.on('timeout', () => { hReq.destroy(); reject(new Error('timeout')); });
-        hReq.write(reqBody);
-        hReq.end();
+      const tip = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openrouterKey}`,
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.5-flash',
+          max_tokens: 300,
+          messages: [{ role: 'user', content: promptText }],
+        }),
+        signal: AbortSignal.timeout(15000),
+      }).then(async (r) => {
+        const data = await r.json();
+        const text = data.choices?.[0]?.message?.content || '{}';
+        const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+        return JSON.parse(clean);
       }).catch(() => ({ dig: '', next: '', why: '' }));
 
       return json(res, 200, tip);

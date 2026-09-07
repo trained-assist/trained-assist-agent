@@ -328,8 +328,8 @@ async function runBackgroundCrawl(browser, context, page, username, slug, config
 // ── Claude Haiku analysis ────────────────────────────────────────────────────
 
 async function analyzeAndGenerateIntents(url, pages, apiEndpoints, forms) {
-  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-  if (!ANTHROPIC_API_KEY) return defaultIntents(url);
+  const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+  if (!OPENROUTER_API_KEY) return defaultIntents(url);
 
   try {
     let hostname;
@@ -364,24 +364,23 @@ ${JSON.stringify(summary, null, 2)}
 - Навигация/поиск по сайту
 Используй в паттернах hostname или ключевые слова из названия сайта.`;
 
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
+        model: 'google/gemini-2.5-flash',
         max_tokens: 1200,
         messages: [{ role: 'user', content: prompt }],
       }),
       signal: AbortSignal.timeout(30000),
     });
 
-    if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
+    if (!res.ok) throw new Error(`OpenRouter API ${res.status}`);
     const data = await res.json();
-    const text = data.content?.[0]?.text || '';
+    const text = data.choices?.[0]?.message?.content || '';
     const match = text.match(/\[[\s\S]*\]/);
     if (match) {
       const parsed = JSON.parse(match[0]);
