@@ -124,8 +124,53 @@ const tools = [
   },
 
   {
+    name: 'browser_session_evaluate',
+    description: 'Execute JavaScript in the remote browser\'s current page using the browser\'s authenticated session. ' +
+      'Use this AFTER browser_session_autologin to interact with the site without capturing cookies: ' +
+      'click buttons, read data, call APIs (fetch() uses session cookies automatically), bulk-update records. ' +
+      'The script runs in page context with full access to auth, localStorage, DOM. ' +
+      'Return a value from the script to get it back. Async scripts are awaited (use async IIFE pattern).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        script: {
+          type: 'string',
+          description: 'JavaScript to run in the page. ' +
+            'Simple expression: "document.title". ' +
+            'Async IIFE (recommended): "(async () => { const r = await fetch(\'/api/videos\'); return r.json(); })()"',
+        },
+        navigate_to: {
+          type: 'string',
+          description: 'Optional: navigate to this URL before running the script.',
+        },
+      },
+      required: ['script'],
+    },
+    handler: async ({ script, navigate_to } = {}) => {
+      if (!isChromeRunning()) return { error: 'browser_not_running' };
+      const scriptPath = path.join(os.homedir(), 'browser-session', 'evaluate.js');
+      if (!fs.existsSync(scriptPath)) return { error: 'evaluate.js not found on VM — deploy infra/browser-session/evaluate.js' };
+
+      const env = { ...process.env, EVAL_SCRIPT: script };
+      if (navigate_to) env.EVAL_URL = navigate_to;
+
+      try {
+        const result = execSync(`node "${scriptPath}"`, {
+          timeout: 50000,
+          encoding: 'utf8',
+          env,
+        });
+        return JSON.parse(result.trim());
+      } catch (e) {
+        return { error: 'evaluate_failed', message: e.message };
+      }
+    },
+  },
+
+  {
     name: 'browser_session_capture_cookies',
-    description: 'Capture cookies for a specific domain from the remote browser session and save them as a token. Call after user has logged in via the noVNC browser.',
+    description: 'Capture cookies for Tilda.cc (IP-bound sessions) ONLY. ' +
+      'Do NOT use for regular sites after autologin — use browser_session_evaluate instead to interact with the page directly.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -178,9 +223,11 @@ const tools = [
 
   {
     name: 'browser_session_autologin',
-    description: 'Log into a site using credentials stored in the agent credential store — credentials are never passed through Claude context. ' +
-      'Requires credentials saved via credentials_form_create (or tilda-creds connect form) first. ' +
-      'Navigates the remote browser to login_url, then fills email+password automatically. ' +
+    description: 'Log into a site using stored credentials — credentials never pass through Claude context. ' +
+      'Requires credentials saved via credentials_form_create first. ' +
+      'After successful login: use browser_session_evaluate to interact with the page (call APIs, read data, automate UI) — ' +
+      'the browser is already authenticated so fetch() calls use session cookies automatically. ' +
+      'Do NOT call browser_session_capture_cookies after this unless the site is IP-bound (Tilda). ' +
       'Returns login result or instructions if no stored credentials found.',
     inputSchema: {
       type: 'object',
