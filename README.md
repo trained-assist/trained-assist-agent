@@ -814,6 +814,69 @@ curl -s -H "Authorization: Bearer ${AGENT_SECRET}" \
 
 ---
 
+### Testing browser-session skill and site login (credentials_form_create / browser_session_autologin)
+
+When debugging the connect-to-any-site flow, test directly on the VM via SSH instead of going through Telegram manually.
+
+#### Full flow for a new site
+
+```bash
+# 1. Check if credentials are saved (after user fills ZeroCreds form)
+cat ~/agent-tokens/<username>/<service-key>
+# e.g. cat ~/agent-tokens/efi/kinescope-creds
+# → {"email":"user@example.com","password":"..."}
+
+# 2. Test login.js directly
+LOGIN_EMAIL="user@example.com" \
+LOGIN_PASSWORD="secret" \
+LOGIN_URL="https://app.example.com/login" \
+timeout 30 node ~/browser-session/login.js
+# Expected outputs:
+# {"ok":true, "navigated":true} → login succeeded (URL changed)
+# {"ok":true, "already_logged_in":true} → already logged in (session alive)
+# {"ok":false, "google_redirect":true} → account uses Google OAuth, need noVNC
+# {"ok":false, "error_on_page":true} → wrong credentials
+
+# 3. Check what the browser is currently showing
+node -e "
+const P = require('/home/vova/trained-assist-agent/node_modules/playwright');
+(async () => {
+  const b = await P.chromium.connectOverCDP('http://127.0.0.1:9224');
+  const p = b.contexts()[0].pages()[0];
+  console.log('URL:', p.url());
+  console.log('Title:', await p.title());
+  b._connection.close();
+})().catch(e => console.error(e.message));
+"
+
+# 4. Test the full agent flow by calling /run from the outside
+AGENT_SECRET=$(grep AGENT_SECRET ~/secrets.env | cut -d= -f2)
+CHAT_ID=$(cat ~/agent-tokens/<username>/.chatid)
+curl -s -X POST "http://localhost:3000/run" \
+  -H "Authorization: Bearer $AGENT_SECRET" \
+  -H "Content-Type: application/json" \
+  -d "{\"userId\": $CHAT_ID, \"username\": \"<username>\", \"task\": \"войди в example.com используя <service-key>. login_url: https://app.example.com/login\", \"context\": \"\", \"initialMsgId\": 0}"
+# Output streams to user's Telegram chat. Watch logs:
+sudo journalctl -u assist-agent -f
+```
+
+#### Known login.js behaviours
+
+| Scenario | What login.js does | Result |
+|----------|--------------------|--------|
+| Site with multiple login providers (Google, VK, email+password) | Skips OAuth buttons by text; clicks the exact "Войти"/"Log in" button | Correct button clicked |
+| Already logged in (SPA redirects /login → /dashboard) | `goto` with `load` then `waitForNavigation(3s)` catches the redirect | `already_logged_in: true` |
+| Clicked "Войти" and got redirected to `accounts.google.com` | Detects `google_redirect: true` | Tells user to use noVNC |
+| SPA login (URL stays same, only content changes) | Checks `titleBefore !== titleAfter` as fallback for `navigated` | `navigated: true` |
+
+#### Common debugging mistakes
+
+- **Don't use `networkidle` for goto** — active SPAs (Kinescope, etc.) continuously poll APIs and never reach idle state. Use `load` + `waitForNavigation(3s timeout)`.
+- **Don't kill Chrome** (`pkill chrome`) — kills the persistent browser session and MCP. Just kill the stuck Claude process: `kill <PID>`.
+- **Stuck Claude process** — if `browser_session_autologin` hangs, check `ps aux | grep claude` and kill. Never reuse login.js output from a hung process.
+
+---
+
 ### Git workflow — PR-first
 **Never push directly to `main`.** All changes go through a feature branch + PR:
 
