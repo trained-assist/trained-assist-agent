@@ -70,8 +70,16 @@ echo "==> Killing any orphan node processes on port 8080..."
 sudo fuser -k 8080/tcp 2>/dev/null || true
 sleep 1
 
+echo "==> Migrating data directory (alesa-data → agent-data) if needed..."
+if [ -d "/home/vova/alesa-data" ] && [ ! -d "/home/vova/agent-data" ]; then
+  mv /home/vova/alesa-data /home/vova/agent-data
+  echo "  Migrated: alesa-data → agent-data"
+else
+  echo "  No migration needed"
+fi
+
 echo "==> Ensuring data directories exist..."
-DATA_DIR="${AGENT_DATA_DIR:-/home/vova/alesa-data}"
+DATA_DIR="${AGENT_DATA_DIR:-/home/vova/agent-data}"
 mkdir -p "$DATA_DIR/system-flags"
 chown -R vova:vova "$DATA_DIR" 2>/dev/null || true
 

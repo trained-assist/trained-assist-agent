@@ -9,7 +9,7 @@
       "domain": "recruiter-assistant.ru",
       "secrets_source": "gcp_secret_manager (falls back to secrets.env)",
       "ssh_user": "vova",
-      "data_dir": "/home/vova/alesa-data",
+      "data_dir": "/home/vova/agent-data",
       "service": "assist-agent"
     },
     "ru": {
@@ -19,7 +19,7 @@
       "domain": "platform.recruiter-assistant.ru",
       "secrets_source": "secrets.env (SECRETS_SOURCE=env)",
       "ssh_user": "vova",
-      "data_dir": "/home/vova/alesa-data",
+      "data_dir": "/home/vova/agent-data",
       "service": "assist-agent"
     }
   },
@@ -69,7 +69,7 @@
     "gcp": [
       { "name": "NODE_ENV",        "value": "production" },
       { "name": "PORT",            "value": "8080" },
-      { "name": "AGENT_DATA_DIR",  "value": "/home/vova/alesa-data" },
+      { "name": "AGENT_DATA_DIR",  "value": "/home/vova/agent-data" },
       { "name": "AGENT_PUBLIC_URL","value": "https://recruiter-assistant.ru" },
       { "name": "HH_PLATFORM_URL",          "value": "https://platform.recruiter-assistant.ru" },
       { "name": "VACANCY_REMOTE_STORE_URL", "value": "https://platform.recruiter-assistant.ru", "description": "RU VM URL — vacancy pages are forwarded here from GCP for storage and serving" },
@@ -79,7 +79,7 @@
     "ru": [
       { "name": "NODE_ENV",           "value": "production" },
       { "name": "PORT",               "value": "8080" },
-      { "name": "AGENT_DATA_DIR",     "value": "/home/vova/alesa-data" },
+      { "name": "AGENT_DATA_DIR",     "value": "/home/vova/agent-data" },
       { "name": "AGENT_PUBLIC_URL",   "value": "https://platform.recruiter-assistant.ru" },
       { "name": "TELEGRAM_API_URL",   "value": "https://136-65-7-197.sslip.io/tg-proxy" },
       { "name": "ANTHROPIC_BASE_URL", "value": "https://136-65-7-197.sslip.io/anthropic-proxy" },

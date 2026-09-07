@@ -3,7 +3,7 @@ const path = require('path');
 const os = require('os');
 
 const FLAGS_DIR = path.join(
-  process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'alesa-data'),
+  process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
   'system-flags'
 );
 const FLAG_FILE = path.join(FLAGS_DIR, 'claude_auth.json');
