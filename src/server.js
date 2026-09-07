@@ -3603,14 +3603,39 @@ async function processMishaUpdate(update, botToken, secrets) {
   const text = msg.text || msg.caption || '';
   const cmd = text.split(/\s+/)[0]?.toLowerCase();
 
-  // /start or /help
-  if (cmd === '/start' || cmd === '/help') {
+  let taskParts = [];
+  let forceNewSession = false;
+
+  // /start — check for exhibition deep link parameter
+  if (cmd === '/start') {
+    const startParam = text.split(/\s+/)[1]; // e.g. "huntingexpo2026_deal_7603045501"
+    if (startParam && startParam.includes('_deal_')) {
+      const delimIdx = startParam.indexOf('_deal_');
+      const eventKey = startParam.slice(0, delimIdx);
+      const companyId = startParam.slice(delimIdx + 6);
+      const isInn = /^\d{10,12}$/.test(companyId);
+      forceNewSession = true;
+      taskParts.push(`КОМАНДА: Создать сделку с выставки
+Выставка (eventKey): ${eventKey}
+${isInn ? `ИНН компании: ${companyId}` : `ID/стенд компании: ${companyId}`}
+
+Пользователь нажал "✈ Создать сделку" на выставочном сайте.
+${isInn
+  ? `Используй MCP tool для поиска компании по ИНН ${companyId}. Затем создай сделку в WEEEK с типом "3 Выставки". Определи источник (название выставки) по eventKey "${eventKey}".`
+  : `Компания определена по ID стенда "${companyId}" выставки "${eventKey}". Создай сделку в WEEEK с типом "3 Выставки". Источник определи по eventKey "${eventKey}".`
+}
+Сообщи пользователю ссылку на созданную сделку.`);
+    } else {
+      await tgSend('Привет! Создаю сделки в WEEEK.\n\n/new_deal — новая сделка\n\nОтправь текст, визитку или голосовое.');
+      return;
+    }
+  }
+
+  // /help
+  if (cmd === '/help') {
     await tgSend('Привет! Создаю сделки в WEEEK.\n\n/new_deal — новая сделка\n\nОтправь текст, визитку или голосовое.');
     return;
   }
-
-  let taskParts = [];
-  let forceNewSession = false;
 
   // /new_deal — clear session and start deal creation
   if (cmd === '/new_deal') {
