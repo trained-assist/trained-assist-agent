@@ -2801,6 +2801,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       days_since_activity: daysAgo,
       resume_text: buildResumeText(neg),
       history_messages: history.messages || [],
+      already_sent: (history.messages || []).some(m => m.role === 'employer'),
       alternate_url: r.alternate_url || null,
     };
   });
