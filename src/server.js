@@ -3652,55 +3652,30 @@ ${isInn ? `ИНН компании: ${companyId}` : `ID/стенд компан�
     return;
   }
 
-  // /target_company_prompt — template for target company evaluation
+  // /target_company_prompt — Flexi target company classification rules
   if (cmd === '/target_company_prompt') {
-    const promptPath = path.join(workDir, 'contexts', 'target_company_prompt.txt');
-    let promptText;
-    if (fs.existsSync(promptPath)) {
-      promptText = fs.readFileSync(promptPath, 'utf8').trim();
-    } else {
-      promptText = [
-        '⚡️ 📋 Требования к целевым компаниям:',
-        '',
-        '💰 Выручка: от 150 млн',
-        '👥 Сотрудники: без ограничений',
-        '✅ ИНН обязателен: нет',
-        '',
-        '📝 Flexi target rule (чистое, без хардкода ОКВЭД).',
-        'ЦЕЛЕВАЯ (t:1): российский ПРОИЗВОДИТЕЛЬ И выручка 150млн–1млрд (любая прибыль) ИЛИ 1–5млрд при прибыли ≤100млн.',
-        'ПОЧТИ-ЦЕЛЕВАЯ (nt:1): российский производитель с подтверждённым производством, но выручка неизвестна/<150млн/>5млрд; исключить импорт/дистрибуцию/торговлю.',
-        'ОКВЭД-коды производства НЕ храним в требованиях — подставляются под отрасль конкретной выставки на этапе поиска (цветы: 01./16./20., текстиль: 13./14., упаковка: 17./22. и т.д.).',
-      ].join('\n');
+    // Priority: misha override > flexi-consult shared > hardcoded
+    const paths = [
+      path.join(workDir, 'contexts', 'target_company_prompt.txt'),
+      path.join(BASE_USERS_DIR, 'flexi-consult', 'site-requirements-target.md'),
+    ];
+    let promptText = paths.reduce((acc, p) => acc || (fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() : null), null);
+    if (!promptText) {
+      promptText = '⚡️ Flexi target rule:\nЦЕЛЕВАЯ (t:1): российский ПРОИЗВОДИТЕЛЬ И выручка 150млн–1млрд (любая прибыль) ИЛИ 1–5млрд при прибыли ≤100млн.\nПОЧТИ-ЦЕЛЕВАЯ (nt:1): производитель РФ, но выручка неизвестна / <150 / >5 млрд.';
     }
     await tgSend(promptText);
     return;
   }
 
-  // /company_showcase_spec — spec for how company info is presented
+  // /company_showcase_spec — how to display/present company cards
   if (cmd === '/company_showcase_spec') {
-    const specPath = path.join(workDir, 'contexts', 'company_showcase_spec.txt');
-    let specText;
-    if (fs.existsSync(specPath)) {
-      specText = fs.readFileSync(specPath, 'utf8').trim();
-    } else {
-      specText = [
-        '🏢 *Карточка компании — формат вывода*',
-        '',
-        'При показе информации о компании использовать структуру:',
-        '',
-        '🏢 Компания: {название}',
-        '📍 Город: {город}',
-        '💰 Выручка: {выручка} ({год})',
-        '📊 Прибыль: {прибыль}',
-        '👤 Директор: {ФИО}',
-        '🔗 Сайт: {сайт}',
-        '📋 ИНН: {ИНН}',
-        '📞 Контакт: {имя} ({телефон})',
-        '💬 Из разговора: {комментарий}',
-        '',
-        'Если поле неизвестно — не показывать строку.',
-        'Форматировать как Markdown (bold для значений).',
-      ].join('\n');
+    const paths = [
+      path.join(workDir, 'contexts', 'company_showcase_spec.txt'),
+      path.join(BASE_USERS_DIR, 'flexi-consult', 'site-requirements-display.md'),
+    ];
+    let specText = paths.reduce((acc, p) => acc || (fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() : null), null);
+    if (!specText) {
+      specText = '🏢 Карточка компании: название, город, выручка, прибыль, директор, сайт, ИНН. Пропускать пустые поля.';
     }
     await tgSend(specText);
     return;
