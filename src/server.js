@@ -2359,7 +2359,8 @@ function show(id, type, msg) {
       const profile = url.searchParams.get('profile');
       if (!profile || !/^[a-zA-Z0-9_-]+$/.test(profile))
         return json(res, 400, { error: 'invalid profile' });
-      const filePath = path.join(BASE_USERS_DIR, profile, 'calltips-latest.json');
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const filePath = path.join(dataDir, 'sessions', profile, 'calltips-latest.json');
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
         return json(res, 200, data);
