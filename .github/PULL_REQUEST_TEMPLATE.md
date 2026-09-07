@@ -21,4 +21,6 @@
 
 <!-- csm-session: SESSION_ID -->
 
+https://claude.ai/code/session_SESSION_ID
+
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
