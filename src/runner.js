@@ -23,7 +23,7 @@ const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
-const STOP_BUTTON_AFTER_SECS = 15;
+const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
@@ -94,6 +94,7 @@ const ILLUSTRATE_ENABLE_INTENT = /включ.{0,20}(?:рисован|иллюс�
 // Matches concrete draw commands with subject content — these go to Claude even when skill is enabled
 const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|создай.{0,20}(?:иллюстр|картинк|схем)|сделай.{0,20}(?:иллюстр|картинк|схем)|покажи.{0,20}(?:схем|как устроен|анатоми))\s+\S.{5,}/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
+const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
 const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|опубликуй.{0,20}(?:страниц|лендинг)|создай.{0,20}(?:страниц.{0,20}вакансии|лендинг)|сгенерир.{0,20}страниц|сделай.{0,20}страниц.{0,20}вакансии|страниц.{0,30}(?:вакансии.{0,30})?(?:сгенерир|создай|опубликуй|сделай)|страниц.{0,20}готов/i;
@@ -838,6 +839,20 @@ function stopTask(taskId) {
   return { ok: true };
 }
 
+// Stop all running tasks for a given username (used by the /stop quick command).
+function stopUserTask(username) {
+  let stopped = false;
+  for (const [taskId, s] of activeTimers.entries()) {
+    if (taskId.startsWith(username + '-') && s.proc) {
+      s.userStopped = true;
+      try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
+      console.log(`[${taskId}] stopped by user command`);
+      stopped = true;
+    }
+  }
+  return stopped;
+}
+
 function extendTaskTimeout(taskId) {
   const s = activeTimers.get(taskId);
   if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
@@ -886,6 +901,23 @@ function getActiveTaskCount() {
  */
 function runTask(opts) {
   const userId = String(opts.user.id);
+
+  // Stop commands bypass the queue — kill the running task immediately.
+  if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
+    const username = opts.user.username;
+    const stopped = stopUserTask(username);
+    const msg = stopped ? '⛔ Задача остановлена.' : 'Нет активной задачи для остановки.';
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    if (botToken) {
+      const markup = { reply_markup: { inline_keyboard: [] } };
+      const im = opts.initialMsgId;
+      if (im) tgEdit(botToken, chatId, im, msg, markup).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+      else     tgSend(botToken, chatId, msg).catch(() => {});
+    }
+    return Promise.resolve(msg);
+  }
+
   const prev = userQueues.get(userId) ?? Promise.resolve();
   const current = prev.then(() => _runTask(opts)).catch(err => {
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
@@ -1713,7 +1745,7 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
 
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  waitForIdle, getActiveTaskCount, extendTaskTimeout, stopTask,
+  waitForIdle, getActiveTaskCount, extendTaskTimeout, stopTask, stopUserTask,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };
