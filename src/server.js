@@ -1721,6 +1721,25 @@ function show(id, type, msg) {
       return res.end(fs.readFileSync(htmlFile));
     }
 
+
+    // POST /telegram/misha — @cmr_management_bot direct webhook (no AGENT_SECRET auth)
+    if (req.method === 'POST' && url.pathname === '/telegram/misha') {
+      const mishaBotTokenFile = path.join(os.homedir(), 'agent-tokens', 'misha', 'telegram-bot-token');
+      const mishaBotToken = fs.existsSync(mishaBotTokenFile)
+        ? fs.readFileSync(mishaBotTokenFile, 'utf8').trim() : null;
+      if (!mishaBotToken) {
+        console.warn('[misha/webhook] Bot token file missing');
+        return json(res, 503, { error: 'bot not configured' });
+      }
+      let update;
+      try { update = JSON.parse(await readBody(req)); } catch { return json(res, 400, {}); }
+      json(res, 200, { ok: true });
+      processMishaUpdate(update, mishaBotToken, secrets).catch(e =>
+        console.error('[misha/webhook] error:', e.message)
+      );
+      return;
+    }
+
     // Auth: all endpoints require Bearer token
     const auth = req.headers['authorization'] || '';
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
@@ -3421,3 +3440,190 @@ function publishPasswordForm(slug, error) {
 </div></body></html>`;
 }
 
+
+
+// ── Misha bot ─────────────────────────────────────────────────────────────────
+// Direct Telegram webhook for @cmr_management_bot.
+// Handles text, voice (Deepgram transcription), photos, /new_deal command.
+
+async function processMishaUpdate(update, botToken, secrets) {
+  const msg = update.message || update.edited_message;
+  if (!msg) return;
+
+  const chatId = String(msg.chat.id);
+  const username = 'misha';
+  const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+
+  async function tgSend(text) {
+    return fetch(`${tgBase}/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
+      signal: AbortSignal.timeout(10000),
+    }).then(r => r.json()).catch(() => null);
+  }
+
+  async function tgAction(action = 'typing') {
+    return fetch(`${tgBase}/bot${botToken}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action }),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => null);
+  }
+
+  async function tgGetFile(fileId) {
+    const r = await fetch(`${tgBase}/bot${botToken}/getFile?file_id=${fileId}`,
+      { signal: AbortSignal.timeout(10000) });
+    const d = await r.json();
+    return d.result?.file_path || null;
+  }
+
+  async function downloadTgFile(filePath, dest) {
+    const url = `${tgBase}/file/bot${botToken}/${filePath}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    if (!r.ok) throw new Error(`TG file download ${r.status}`);
+    const buf = await r.arrayBuffer();
+    fs.writeFileSync(dest, Buffer.from(buf), { mode: 0o600 });
+    return dest;
+  }
+
+  async function deepgramTranscribe(audioPath) {
+    if (!secrets.DEEPGRAM_API_KEY) return null;
+    try {
+      const audio = fs.readFileSync(audioPath);
+      const r = await fetch(
+        'https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Token ${secrets.DEEPGRAM_API_KEY}`,
+            'Content-Type': 'audio/ogg',
+          },
+          body: audio,
+          signal: AbortSignal.timeout(30000),
+        }
+      );
+      if (!r.ok) return null;
+      const d = await r.json();
+      return d.results?.channels?.[0]?.alternatives?.[0]?.transcript || null;
+    } catch { return null; }
+  }
+
+  const workDir = path.join(BASE_USERS_DIR, username);
+  fs.mkdirSync(workDir, { recursive: true });
+  const uploadsDir = path.join(workDir, 'uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+
+  const text = msg.text || msg.caption || '';
+  const cmd = text.split(/\s+/)[0]?.toLowerCase();
+
+  // /start or /help
+  if (cmd === '/start' || cmd === '/help') {
+    await tgSend('Привет! Создаю сделки в WEEEK.\n\n/new_deal — новая сделка\n\nОтправь текст, визитку или голосовое.');
+    return;
+  }
+
+  let taskParts = [];
+  let forceNewSession = false;
+
+  // /new_deal — clear session and start deal creation
+  if (cmd === '/new_deal') {
+    forceNewSession = true;
+    taskParts.push('КОМАНДА: /new_deal\nНачни создание новой сделки. Попроси Мишу прислать всю информацию: визитку (фото), голосовое, текст с деталями компании. Скажи что он может присылать всё сразу, когда закончит — написать "Готово".');
+  }
+
+  // Voice message — transcribe with Deepgram
+  if (msg.voice || msg.audio) {
+    const fileId = (msg.voice || msg.audio).file_id;
+    await tgAction('typing');
+    try {
+      const tgFilePath = await tgGetFile(fileId);
+      if (tgFilePath) {
+        const ext = tgFilePath.split('.').pop() || 'ogg';
+        const localPath = path.join(uploadsDir, `voice_${Date.now()}.${ext}`);
+        await downloadTgFile(tgFilePath, localPath);
+        const transcript = await deepgramTranscribe(localPath);
+        if (transcript) {
+          taskParts.push(`[Голосовое сообщение]\n${transcript}`);
+        } else {
+          taskParts.push(`[Голосовое сообщение сохранено: ${localPath}]`);
+        }
+      }
+    } catch (e) {
+      console.error('[misha] voice download error:', e.message);
+      taskParts.push('[Голосовое сообщение — ошибка скачивания]');
+    }
+  }
+
+  // Photos — download highest resolution
+  if (msg.photo && msg.photo.length > 0) {
+    const photo = msg.photo[msg.photo.length - 1];
+    await tgAction('upload_photo');
+    try {
+      const tgFilePath = await tgGetFile(photo.file_id);
+      if (tgFilePath) {
+        const ext = tgFilePath.split('.').pop() || 'jpg';
+        const localPath = path.join(uploadsDir, `photo_${Date.now()}.${ext}`);
+        await downloadTgFile(tgFilePath, localPath);
+        taskParts.push(`[Фото сохранено: ${localPath}]`);
+        if (text) taskParts.push(`Подпись: ${text}`);
+      }
+    } catch (e) {
+      console.error('[misha] photo download error:', e.message);
+    }
+  }
+
+  // Document
+  if (msg.document) {
+    try {
+      const tgFilePath = await tgGetFile(msg.document.file_id);
+      if (tgFilePath) {
+        const fname = msg.document.file_name || `doc_${Date.now()}`;
+        const localPath = path.join(uploadsDir, fname.replace(/[^a-zA-Z0-9._-]/g, '_'));
+        await downloadTgFile(tgFilePath, localPath);
+        taskParts.push(`[Документ сохранён: ${localPath}]`);
+      }
+    } catch (e) {
+      console.error('[misha] document download error:', e.message);
+    }
+  }
+
+  // Plain text
+  if (text && cmd !== '/new_deal' && !msg.photo) {
+    taskParts.push(text);
+  }
+
+  if (taskParts.length === 0) {
+    await tgSend('Не понял формат. Попробуй /new_deal или отправь текст, голосовое или фото визитки.');
+    return;
+  }
+
+  const task = taskParts.join('\n\n');
+  const taskId = `misha-${Date.now()}`;
+
+  const sentMsg = await tgSend('⏳ Думаю…');
+  const initialMsgId = sentMsg?.result?.message_id || null;
+
+  const user = {
+    id: Number(chatId),
+    name: username,
+    username,
+    workDir,
+    cwd: workDir,
+    telegramUserId: msg.from?.id || null,
+  };
+  const mishaSecrets = { ...secrets, BOT_TOKEN: botToken };
+
+  const { runTask } = require('./runner');
+  runTask({
+    taskId,
+    user,
+    task,
+    sessionId: forceNewSession ? `misha-deal-${Date.now()}` : null,
+    forceClaude: false,
+    initialMsgId,
+    pinnedMsgId: null,
+    secrets: mishaSecrets,
+  }).catch(e => console.error(`[misha/${taskId}] runTask error:`, e.message));
+}
