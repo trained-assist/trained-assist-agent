@@ -3207,7 +3207,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   }
 
   const sorted = sortCandidates(candidates);
-  const waitingCandidates = sortCandidates(candidates.filter(c => !c.already_sent && c.verdict !== 'ОТКЛОНИТЬ'));
+  const waitingCandidates = sortCandidates(candidates.filter(c => !c.already_sent));
 
   const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
   const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
@@ -3429,8 +3429,8 @@ h1{font-size:18px}
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
 <p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''}${ageText ? ` · обновлено ${ageText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
 <div class="tabs">
-  <button class="tab-btn active" id="tab-waiting" onclick="switchTab('waiting')">Ждут ответа <span class="tab-badge" id="badge-waiting">${waitingCandidates.length}</span></button>
-  <button class="tab-btn" id="tab-all" onclick="switchTab('all')">Все диалоги <span class="tab-badge" id="badge-all">${sorted.length}</span></button>
+  <button class="tab-btn" id="tab-waiting" onclick="switchTab('waiting')">Ждут ответа <span class="tab-badge" id="badge-waiting">${waitingCandidates.length}</span></button>
+  <button class="tab-btn active" id="tab-all" onclick="switchTab('all')">Все диалоги <span class="tab-badge" id="badge-all">${sorted.length}</span></button>
 </div>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
@@ -3447,10 +3447,10 @@ h1{font-size:18px}
   <div class="tb-sep"></div>
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
-<div id="tab-waiting-container">
+<div id="tab-waiting-container" style="display:none">
   ${waitingCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Нет кандидатов, ожидающих ответа.</p>' : waitingCardsHtml.join('')}
 </div>
-<div id="tab-all-container" style="display:none">
+<div id="tab-all-container">
   ${allCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>' : ''}
   <div id="cards-container"></div>
   <div id="sentinel" style="height:1px;margin-bottom:80px"></div>
@@ -3466,7 +3466,7 @@ const HH_USER = '${esc(username)}';
 const HH_SECRET = '${esc(agentSecret)}';
 const HH_VACANCY_ID = '${esc(String(vacancyId || ''))}';
 const done = new Set();
-let activeTab = 'waiting';
+let activeTab = 'all';
 
 const CARDS_HTML_ALL = ${JSON.stringify(allCardsHtml)};
 const LAZY_BATCH = 50;
