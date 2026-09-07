@@ -850,6 +850,29 @@ function stopUserTask(username) {
       stopped = true;
     }
   }
+
+  // Fallback: kill orphaned Claude processes (e.g. from before a service restart)
+  // The mcp-config path contains the username, so we can grep the process list.
+  if (!stopped) {
+    try {
+      const { execSync } = require('child_process');
+      // Find PIDs of claude processes for this user by mcp-config path
+      const pattern = `/users/${username}/`;
+      const out = execSync(`pgrep -f "claude.*${pattern}" 2>/dev/null || true`, { encoding: 'utf8' }).trim();
+      for (const pid of out.split('\n').filter(Boolean)) {
+        try {
+          process.kill(Number(pid), 'SIGTERM');
+          console.log(`[runner] stopUserTask killed orphan PID ${pid} for ${username}`);
+          stopped = true;
+        } catch (e) {
+          console.warn(`[runner] stopUserTask orphan kill ${pid}:`, e.message);
+        }
+      }
+    } catch (e) {
+      console.warn('[runner] stopUserTask orphan search failed:', e.message);
+    }
+  }
+
   return stopped;
 }
 
