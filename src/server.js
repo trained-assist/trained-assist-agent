@@ -1955,6 +1955,14 @@ function show(id, type, msg) {
       return json(res, result.ok ? 200 : 404, result);
     }
 
+    // POST /tasks/:taskId/stop — user-initiated kill of a running Claude process
+    if (req.method === 'POST' && /^\/tasks\/[^/]+\/stop$/.test(url.pathname)) {
+      const taskId = url.pathname.split('/')[2];
+      const { stopTask } = require('./runner');
+      const result = stopTask(taskId);
+      return json(res, result.ok ? 200 : 404, result);
+    }
+
     // GET /projects?username=xxx — list project subdirs sorted by session frequency
     if (req.method === 'GET' && url.pathname === '/projects') {
       const username = url.searchParams.get('username');

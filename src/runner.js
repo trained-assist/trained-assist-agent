@@ -23,6 +23,7 @@ const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
+const STOP_BUTTON_AFTER_SECS = 15;
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
@@ -828,6 +829,15 @@ const activeTimers = new Map();
  * Called from server.js POST /tasks/:taskId/extend-timeout which the
  * session_extend_timeout MCP tool invokes.
  */
+function stopTask(taskId) {
+  const s = activeTimers.get(taskId);
+  if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
+  s.userStopped = true;
+  try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopTask SIGTERM:', e.message); }
+  console.log(`[${taskId}] stopped by user`);
+  return { ok: true };
+}
+
 function extendTaskTimeout(taskId) {
   const s = activeTimers.get(taskId);
   if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
@@ -1364,12 +1374,16 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let exitCode = 0;
 
   // Heartbeat: show elapsed seconds while Claude hasn't produced output yet
+  let stopButtonShown = false;
   if (msgId) {
     heartbeatTimer = setInterval(async () => {
       if (outputStarted) return;
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
-      await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${label} (${secs}с)`).catch(() => {});
+      const extra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
+        ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
+        : {};
+      await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${label} (${secs}с)`, extra).catch(() => {});
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -1384,20 +1398,23 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       try {
         const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
         const secs = Math.round((Date.now() - thinkingStart) / 1000);
+        const stopExtra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
+          ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
+          : {};
         if (snippet) {
           // Show text + current tool activity (always updating so user sees seconds ticking)
           const activitySuffix = lastActivity ? `\n\n${lastActivity} (${secs}с)` : ` (${secs}с)`;
           const newText = `⏳ ${snippet}${activitySuffix}`;
-          if (newText === lastSent) return;
+          if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
-          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
+          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
         } else {
           // No text yet (e.g. Claude running tools) — show activity + elapsed
           const label = lastActivity || 'Думаю…';
           const newText = `⏳ ${label} (${secs}с)`;
-          if (newText === lastSent) return;
+          if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
-          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText).catch(() => {});
+          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
         }
       } finally {
         streamEditInProgress = false;
@@ -1451,7 +1468,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
   let timedOut = false;
-  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc };
+  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false };
   activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {
@@ -1515,7 +1532,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         const tgMsg = partialText.length > 20
           ? `🧠 ${partialText.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
           : statusLine;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
         else await tgSend(BOT_TOKEN, chatId, tgMsg);
 
         const continuationTask = `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
@@ -1533,7 +1550,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         });
       } else {
         const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
         else await tgSend(BOT_TOKEN, chatId, limitMsg);
       }
       clearInterval(streamTimer);
@@ -1547,10 +1564,29 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   }
 
+  // User pressed Stop — show partial result and exit cleanly
+  if (sessionState.userStopped) {
+    const partial = fullOutput.text.trim();
+    const stoppedMsg = partial
+      ? `⛔ Остановлено\n\n${partial.slice(-MAX_MSG_LEN)}`
+      : '⛔ Остановлено. Можешь задать новый вопрос.';
+    const clearMarkup = { reply_markup: { inline_keyboard: [] } };
+    if (msgId) {
+      await tgEdit(BOT_TOKEN, chatId, msgId, stoppedMsg, clearMarkup).catch(() => tgSend(BOT_TOKEN, chatId, stoppedMsg));
+    } else {
+      await tgSend(BOT_TOKEN, chatId, stoppedMsg);
+    }
+    if (activeSessionId && partial) {
+      sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
+      setCurrentSessionId(user.workDir, activeSessionId);
+    }
+    return stoppedMsg;
+  }
+
   // If claude crashed with non-zero exit and produced almost no output — show crash error
   if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
     const crashMsg = `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
-    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
     else await tgSend(BOT_TOKEN, chatId, crashMsg);
     return crashMsg;
   }
@@ -1564,7 +1600,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     setAuthFailedFlag({ reason, error_text: result });
     const authMsg = '⚠️ Авторизация Claude Code истекла — оператор уже уведомлён, скоро починим.';
     if (msgId) {
-      await tgEdit(BOT_TOKEN, chatId, msgId, authMsg).catch(() => tgSend(BOT_TOKEN, chatId, authMsg));
+      await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg));
     } else {
       await tgSend(BOT_TOKEN, chatId, authMsg);
     }
@@ -1585,9 +1621,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
   const final = result.slice(-MAX_MSG_LEN);
 
-  // Send result
+  // Send result (clear stop button if it was shown)
   if (msgId) {
-    await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`).catch(() =>
+    await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, { reply_markup: { inline_keyboard: [] } }).catch(() =>
       tgSend(BOT_TOKEN, chatId, `🧠 ${final}`)
     );
   } else {
@@ -1656,12 +1692,12 @@ async function tgSend(token, chatId, text, extra = {}) {
   return res.json();
 }
 
-async function tgEdit(token, chatId, messageId, text, retries = 3) {
+async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
   for (let i = 0; i < retries; i++) {
     const res = await fetch(`${TG_API}/bot${token}/editMessageText`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, ...extra }),
       signal: AbortSignal.timeout(10_000),
     });
     const data = await res.json();
@@ -1677,7 +1713,7 @@ async function tgEdit(token, chatId, messageId, text, retries = 3) {
 
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  waitForIdle, getActiveTaskCount, extendTaskTimeout,
+  waitForIdle, getActiveTaskCount, extendTaskTimeout, stopTask,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };
