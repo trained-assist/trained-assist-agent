@@ -1141,7 +1141,7 @@ async function main() {
       try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return errPage('Ошибка чтения токена.'); }
 
       const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const workDir = path.join(dataDir, 'sessions', username);
+      const workDir = path.join(BASE_USERS_DIR, username);
       const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
       let vacancy = null;
       try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
@@ -3140,6 +3140,23 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .tab-btn.active{background:#fff;color:#4f46e5;border-bottom:2px solid #4f46e5}
 .tab-badge{display:inline-block;background:#e2e8f0;color:#475569;font-size:12px;font-weight:700;padding:1px 7px;border-radius:99px;margin-left:6px}
 .tab-btn.active .tab-badge{background:#ede9fe;color:#4f46e5}
+@media(max-width:640px){
+body{padding:12px 12px 100px}
+h1{font-size:18px}
+.card{padding:14px}
+.card-header{flex-direction:column;gap:8px}
+.score-wrap{flex-direction:row;align-self:flex-start}
+.footer{padding:10px 12px;flex-wrap:wrap;gap:8px}
+.counter{width:100%;font-size:13px}
+.btn-reject-all,.btn-send-all{flex:1;padding:10px 12px;font-size:13px}
+.btns{flex-wrap:wrap}
+.btn{flex:1;min-width:120px;text-align:center}
+.toolbar{gap:5px}
+.tb-btn{padding:5px 8px;font-size:12px}
+.msg-area{font-size:13px}
+.tabs{gap:2px}
+.tab-btn{padding:7px 12px;font-size:13px}
+}
 .sync-btn{background:none;border:none;color:#6366f1;font-size:13px;cursor:pointer;font-weight:500;padding:0;text-decoration:underline;text-underline-offset:2px}
 .sync-btn:hover{opacity:.75}
 .sync-btn:disabled{opacity:.5;cursor:not-allowed;text-decoration:none}

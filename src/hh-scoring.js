@@ -40,11 +40,11 @@ function llmCall(apiKey, model, messages, maxTokens = 2000, temperature = 0.1) {
         'Content-Length': Buffer.byteLength(body),
       },
     }, (res) => {
-      let data = '';
-      res.on('data', c => (data += c));
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
       res.on('end', () => {
         try {
-          const parsed = JSON.parse(data);
+          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           if (parsed.error) reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
           else resolve(parsed.choices[0].message.content);
         } catch (e) { reject(e); }
@@ -118,11 +118,11 @@ async function gcCall(credentials, messages, maxTokens = 2000, temperature = 0.1
         'Content-Length': Buffer.byteLength(body),
       },
     }, (res) => {
-      let data = '';
-      res.on('data', c => (data += c));
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
       res.on('end', () => {
         try {
-          const parsed = JSON.parse(data);
+          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           if (parsed.error) reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
           else resolve(parsed.choices[0].message.content);
         } catch (e) { reject(e); }
@@ -359,8 +359,10 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
   if (!gigachatKey && !apiKey) return 0;
 
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-  const styleFile = path.join(tokensBase, String(username), 'hh-message-style');
-  const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
+  const styleInTokens = path.join(tokensBase, String(username), 'hh-message-style');
+  const styleInWork = path.join(workDir, 'hh-message-style');
+  const styleFile = fs.existsSync(styleInTokens) ? styleInTokens : (fs.existsSync(styleInWork) ? styleInWork : null);
+  const commStyle = styleFile ? fs.readFileSync(styleFile, 'utf8').trim() : null;
 
   const vacancyCtx = atsConfig.vacancy_title && atsConfig.vacancy_context
     ? `Вакансия: ${atsConfig.vacancy_title}\n\n${atsConfig.vacancy_context}`
@@ -389,7 +391,8 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
       try {
         const history = readCandidateHistory(username, neg.id);
         const verdict = history.ats_result?.verdict || 'ОТКЛОНИТЬ';
-        const isReject = verdict === 'ОТКЛОНИТЬ';
+        // First contact (no messages yet) → always send qualifying questions, never a cold rejection
+        const isReject = verdict === 'ОТКЛОНИТЬ' && (history.messages || []).length > 0;
 
         const r = neg.resume || {};
         const firstName = r.first_name || r.last_name || 'Кандидат';
