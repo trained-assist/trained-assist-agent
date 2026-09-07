@@ -931,7 +931,9 @@ module.exports = {
     hh_batch_evaluate: {
       description:
         'Batch evaluate all candidates on a vacancy: fetch responses, skip inactive (>max_days_inactive), ' +
-        'evaluate each with ATS scoring. Returns sorted results ready for hh_draft_review_page. ' +
+        'evaluate each with ATS scoring. SKIPS candidates already scored by background process (idempotent). ' +
+        'Returns sorted results ready for hh_draft_review_page. ' +
+        'If all candidates are already scored, returns instantly with cached results. ' +
         'If vacancy_id is omitted — reads from context (set with hh_set_active_vacancy).',
       inputSchema: {
         type: 'object',
@@ -1001,18 +1003,23 @@ module.exports = {
             }
 
             const { name, text: candidateContext } = formatCandidateContext(neg);
-            let atsResult;
-            try {
-              atsResult = await evaluateCandidate(candidateContext, ats_config, apiKey);
-            } catch (e) {
-              console.error(`[hh_batch_evaluate] scoring error for ${neg.id}: ${e.message}`);
-              atsResult = { score: null, verdict: null, reasoning: `Ошибка оценки: ${e.message}`, matched: [], gaps: [] };
-            }
-
             const history = readCandidateHistory(USER_ID, neg.id);
-            if (atsResult.score != null) {
-              history.ats_result = atsResult;
-              saveCandidateHistory(USER_ID, neg.id, history);
+            let atsResult;
+
+            if (history.ats_result?.score != null) {
+              // Already scored by background process — reuse cached result
+              atsResult = history.ats_result;
+            } else {
+              try {
+                atsResult = await evaluateCandidate(candidateContext, ats_config, apiKey);
+              } catch (e) {
+                console.error(`[hh_batch_evaluate] scoring error for ${neg.id}: ${e.message}`);
+                atsResult = { score: null, verdict: null, reasoning: `Ошибка оценки: ${e.message}`, matched: [], gaps: [] };
+              }
+              if (atsResult.score != null) {
+                history.ats_result = atsResult;
+                saveCandidateHistory(USER_ID, neg.id, history);
+              }
             }
 
             results.push({
