@@ -872,6 +872,29 @@ function getActiveTaskCount() {
 }
 
 /**
+ * Kill any running Claude process for a given username.
+ * Finds all entries in activeTimers whose taskId starts with `${username}-`
+ * and sends SIGTERM. Returns how many tasks were killed.
+ */
+function killTaskByUsername(username) {
+  let killed = 0;
+  const prefix = `${username}-`;
+  for (const [taskId, state] of activeTimers.entries()) {
+    if (!taskId.startsWith(prefix)) continue;
+    try {
+      if (state.proc) {
+        state.proc.kill('SIGTERM');
+        killed++;
+        console.log(`[runner] killTaskByUsername: killed ${taskId}`);
+      }
+    } catch (e) {
+      console.warn(`[runner] killTaskByUsername error on ${taskId}:`, e.message);
+    }
+  }
+  return killed;
+}
+
+/**
  * Runs `claude --dangerously-skip-permissions` for a task,
  * streams output to Telegram by editing a "thinking" message.
  * Tasks for the same user are serialised — each waits for the previous to finish.
@@ -1713,7 +1736,7 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
 
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  waitForIdle, getActiveTaskCount, extendTaskTimeout, stopTask,
+  waitForIdle, getActiveTaskCount, extendTaskTimeout, stopTask, killTaskByUsername,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };

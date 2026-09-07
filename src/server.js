@@ -1955,12 +1955,26 @@ function show(id, type, msg) {
       return json(res, result.ok ? 200 : 404, result);
     }
 
-    // POST /tasks/:taskId/stop — user-initiated kill of a running Claude process
+    // POST /tasks/:taskId/stop — kill a specific running Claude process by taskId
     if (req.method === 'POST' && /^\/tasks\/[^/]+\/stop$/.test(url.pathname)) {
       const taskId = url.pathname.split('/')[2];
       const { stopTask } = require('./runner');
       const result = stopTask(taskId);
       return json(res, result.ok ? 200 : 404, result);
+    }
+
+    // POST /tasks/stop — kill any running Claude process for a user by username
+    // Body: { username: string }
+    if (req.method === 'POST' && url.pathname === '/tasks/stop') {
+      const body = await readBody(req);
+      let payload;
+      try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username } = payload || {};
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+      const { killTaskByUsername } = require('./runner');
+      const killed = killTaskByUsername(username);
+      return json(res, 200, { ok: true, killed });
     }
 
     // GET /projects?username=xxx — list project subdirs sorted by session frequency
