@@ -15,7 +15,22 @@ const https = require('https');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const Database = require('better-sqlite3');
+// Self-install better-sqlite3 into ~/hh-watch/ so it stays out of the main package.json
+let Database;
+{
+  const DB_NODE_MODULES = path.join(os.homedir(), 'hh-watch', 'node_modules');
+  const localPkg = path.join(DB_NODE_MODULES, 'better-sqlite3');
+  try {
+    Database = require(localPkg);
+  } catch {
+    const { execSync } = require('child_process');
+    const installDir = path.join(os.homedir(), 'hh-watch');
+    fs.mkdirSync(installDir, { recursive: true });
+    console.log('[hh-watch] Installing better-sqlite3...');
+    execSync('npm install better-sqlite3', { cwd: installDir, stdio: 'inherit' });
+    Database = require(localPkg);
+  }
+}
 
 // --- Config ---
 
