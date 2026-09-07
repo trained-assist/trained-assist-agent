@@ -20,6 +20,8 @@ const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { storeApplication } = require('./hh-vacancy');
+const { generateProactivePageHtml } = require('./hh-proactive-page');
+const { runProactiveSearch } = require('./hh-proactive-search');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -1786,6 +1788,149 @@ function show(id, type, msg) {
         console.error('[misha/webhook] error:', e.message)
       );
       return;
+    }
+
+    // ── HH Proactive Search endpoints (authenticated by HMAC token param, no Bearer) ─
+
+    function proactiveHmac(uname) {
+      const { createHmac } = require('crypto');
+      const secret = process.env.AGENT_SECRET || '';
+      return createHmac('sha256', secret).update(uname).digest('hex').slice(0, 16);
+    }
+
+    function proactiveErrPage(msg) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Проактивный поиск</title>
+<style>body{font-family:system-ui;padding:48px;text-align:center;background:#f1f5f9;color:#1e293b}</style>
+</head><body><h2>${msg}</h2></body></html>`);
+    }
+
+    function latestProactiveFile(username) {
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const dir = path.join(dataDir, 'hh', username, 'proactive');
+      if (!fs.existsSync(dir)) return null;
+      const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json')).sort();
+      if (!files.length) return null;
+      return path.join(dir, files[files.length - 1]);
+    }
+
+    // GET /hh/proactive?username=X&token=Y
+    if (req.method === 'GET' && url.pathname === '/hh/proactive') {
+      const username = url.searchParams.get('username') || '';
+      const given = url.searchParams.get('token') || '';
+      if (process.env.AGENT_SECRET && given !== proactiveHmac(username)) {
+        return proactiveErrPage('Ссылка недействительна. Запроси новую у бота.');
+      }
+      const file = latestProactiveFile(username);
+      if (!file) return proactiveErrPage('Нет данных. Попроси бота запустить поиск командой «проактивный поиск».');
+      let results;
+      try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
+      const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(generateProactivePageHtml(results, username, callbackBase, given));
+    }
+
+    // GET /api/hh/proactive/candidates?username=X&token=Y&page=1&per_page=10
+    if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
+      const username = url.searchParams.get('username') || '';
+      const given = url.searchParams.get('token') || '';
+      if (process.env.AGENT_SECRET && given !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      const file = latestProactiveFile(username);
+      if (!file) return json(res, 404, { error: 'no results yet' });
+      let results;
+      try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return json(res, 500, { error: 'read error' }); }
+      const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
+      const perPage = Math.min(50, Math.max(1, parseInt(url.searchParams.get('per_page') || '10', 10)));
+      const all = results.candidates || [];
+      const total = all.length;
+      const pages = Math.max(1, Math.ceil(total / perPage));
+      const start = (page - 1) * perPage;
+      return json(res, 200, { total, page, per_page: perPage, pages, candidates: all.slice(start, start + perPage) });
+    }
+
+    // POST /api/hh/proactive/ai-score {username, candidate_id, token}
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/ai-score') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', candidate_id = '', token: givenToken = '' } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      const file = latestProactiveFile(username);
+      if (!file) return json(res, 404, { error: 'no results yet' });
+      let results;
+      try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return json(res, 500, { error: 'read error' }); }
+      const candidate = (results.candidates || []).find(c => c.id === candidate_id);
+      if (!candidate) return json(res, 404, { error: 'candidate not found' });
+      const cfg = results.ats_config || {};
+      const knockoutList = (cfg.knockout || []).map(k => `- ${k}`).join('\n');
+      const requiredList = (cfg.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n');
+      const preferredList = (cfg.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n');
+      const expLines = (candidate.experience || []).map(e => `  ${e.position} — ${e.company} (${e.start || '?'} – ${e.end || 'н.в.'})`).join('\n');
+      const prompt = `Оцени кандидата для вакансии "${cfg.vacancy_title || 'Вакансия'}".
+
+Критерии knockout (если отсутствует — отклонить):
+${knockoutList || '—'}
+
+Обязательные критерии (с весами):
+${requiredList || '—'}
+
+Желательные критерии:
+${preferredList || '—'}
+
+Данные кандидата:
+Должность: ${candidate.title}
+Опыт: ${candidate.total_exp_years} лет
+Регион: ${candidate.area}
+Компании: ${(candidate.recent_companies || []).join(', ')}
+Опыт (должности):
+${expLines || '—'}
+Текущий score (эвристика): ${candidate.score} (${candidate.tag})
+
+Дай развёрнутую оценку (3-5 предложений): соответствует ли кандидат? Какие сигналы "за" и "против"?
+Предложи уточнённый score (число от 0 до 12) и тег (PASS/REVIEW/WEAK).
+
+Ответ строго в JSON: {"evaluation": "...", "score": N, "tag": "PASS|REVIEW|WEAK"}`;
+
+      const anthropicKey = secrets.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+      if (!anthropicKey) return json(res, 500, { error: 'ANTHROPIC_API_KEY not configured' });
+      try {
+        const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!aiRes.ok) {
+          const errText = await aiRes.text().catch(() => '');
+          return json(res, 500, { error: `Anthropic API ${aiRes.status}: ${errText.slice(0, 200)}` });
+        }
+        const aiData = await aiRes.json();
+        const text = aiData.content?.[0]?.text || '{}';
+        let parsed;
+        try {
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { evaluation: text, score: candidate.score, tag: candidate.tag };
+        } catch {
+          parsed = { evaluation: text, score: candidate.score, tag: candidate.tag };
+        }
+        return json(res, 200, parsed);
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /api/hh/proactive/search {username, token}
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/search') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', token: givenToken = '' } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      const workDir = path.join(BASE_USERS_DIR, username);
+      try {
+        const result = await runProactiveSearch(username, workDir);
+        return json(res, 200, result);
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
     }
 
     // Auth: all endpoints require Bearer token
