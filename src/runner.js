@@ -988,6 +988,65 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   }
 }
 
+function ensureProfileLayoutSkill(workDir, username) {
+  const skillsDir = path.join(workDir, 'skills');
+  const skillFile = path.join(skillsDir, 'profile-layout.md');
+  const MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  try {
+    const stat = fs.existsSync(skillFile) && fs.statSync(skillFile);
+    if (stat && (Date.now() - stat.mtimeMs) < MAX_AGE_MS) return;
+    fs.mkdirSync(skillsDir, { recursive: true });
+    const { execSync } = require('child_process');
+    const tree = execSync(
+      `find ${workDir} -maxdepth 3 -not -path "*/sessions/*" -not -path "*/.git/*" | sort`,
+      { timeout: 5000 }
+    ).toString().trim();
+    const tokenDir = path.join(os.homedir(), 'agent-tokens', username);
+    const tokens = fs.existsSync(tokenDir)
+      ? fs.readdirSync(tokenDir).filter(f => !f.startsWith('.')).join(', ')
+      : '(нет)';
+    const content = [
+      '# Карта профиля агента (auto-generated)',
+      '',
+      `> Обновлено: ${new Date().toISOString()}`,
+      '',
+      '## Рабочая директория (workDir)',
+      '',
+      '```',
+      tree,
+      '```',
+      '',
+      '## Токены и секреты (только чтение)',
+      '',
+      `\`${tokenDir}/\` — файлы: ${tokens}`,
+      '',
+      '## Правила сохранения',
+      '',
+      '| Данные | Путь |',
+      '|---|---|',
+      `| Обновлённые требования к целевым | \`${workDir}/contexts/target_company_prompt.txt\` |`,
+      `| Обновлённый стандарт карточки | \`${workDir}/contexts/company_showcase_spec.txt\` |`,
+      `| Активная выставка | \`${workDir}/contexts/flexi/active_exhibition.json\` |`,
+      `| Пользовательские настройки | \`${workDir}/contexts/<тема>/<имя>.json\` |`,
+      `| Навыки и справочники | \`${workDir}/skills/<название>.md\` |`,
+      '',
+      '**НИКОГДА не сохранять в** `/home/vova/users/flexi-consult/` (общие файлы)',
+      '**НИКОГДА не сохранять в** токен-файлы (только чтение)',
+      '',
+      '## Приоритет чтения промптов',
+      '',
+      `1. \`${workDir}/contexts/target_company_prompt.txt\` — если существует`,
+      '2. `/home/vova/users/flexi-consult/site-requirements-target.md` — фолбэк',
+      '',
+      `1. \`${workDir}/contexts/company_showcase_spec.txt\` — если существует`,
+      '2. `/home/vova/users/flexi-consult/site-requirements-display.md` — фолбэк',
+    ].join('\n');
+    fs.writeFileSync(skillFile, content, 'utf8');
+  } catch (e) {
+    console.warn(`[profile-layout] skill gen failed for ${username}:`, e.message);
+  }
+}
+
 async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0 }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
@@ -1001,6 +1060,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   fs.mkdirSync(user.workDir, { recursive: true });
   initLog(user.workDir);
+  ensureProfileLayoutSkill(user.workDir, user.username);
 
   // Resolve session context without writing to disk yet.
   // Session creation / message appending is deferred until we know this is not a utility command.
