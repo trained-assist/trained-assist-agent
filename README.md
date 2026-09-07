@@ -900,14 +900,26 @@ GitHub branch protection is not available on this private repo (free plan) — e
 
 ### Шаг 1. Получи свой session ID
 
-```bash
-MY_SESSION=$(curl -s "http://localhost:3000/api/sessions/my-id?path=$(pwd)" | jq -r '.sessionId // empty')
-echo "Session: $MY_SESSION"
+**Правило: всегда используй session ID из attribution URL в system-reminder, а не из Session Manager API.**
+
+Каждая сессия Claude Code получает attribution URL в system-reminder в формате:
 ```
+Claude-Session: https://claude.ai/code/session_01E2Lipo7mtQhPi2382Zc8Ma
+```
+
+Этот ID (`01E2Lipo7mtQhPi2382Zc8Ma`) — и есть `SESSION_ID`. Используй его напрямую.
+
+```bash
+# Опционально — Session Manager может дать доп. контекст,
+# но attribution URL из system-reminder всегда доступен:
+MY_SESSION=<ID из https://claude.ai/code/session_XXXXX в system-reminder>
+```
+
+**Если Session Manager недоступен** (curl вернул ошибку или пустой ответ) — всё равно используй ID из attribution URL. Без этого CI упадёт.
 
 ### Шаг 2. Создай PR с session ID в теле
 
-Используй `gh pr create` с телом из шаблона (`.github/PULL_REQUEST_TEMPLATE.md`), вставив session ID:
+Используй `gh pr create` с телом из шаблона (`.github/PULL_REQUEST_TEMPLATE.md`), **обязательно заменив SESSION_ID на реальный ID** (не оставляй placeholder):
 
 ```bash
 gh pr create --title "feat: ..." --body "$(cat <<EOF
@@ -921,12 +933,16 @@ gh pr create --title "feat: ..." --body "$(cat <<EOF
 
 <!-- csm-session: $MY_SESSION -->
 
+https://claude.ai/code/session_$MY_SESSION
+
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
 )"
 ```
 
-> CI автоматически проверит наличие `<!-- csm-session: UUID -->` в теле. Без него — job упадёт с инструкцией.
+> CI автоматически проверит наличие `<!-- csm-session: UUID -->` или `https://claude.ai/code/session_XXXXX` в теле. Если SESSION_ID не заменён — job упадёт.
+
+> **Важно:** Никогда не оставляй литерал `SESSION_ID` в теле PR — это placeholder. CI принимает любой буквенно-цифровой ID длиной 8+ символов вместо UUID-формата, но для обратной связи нужен реальный ID сессии.
 
 ### Шаг 3. Поставь self-alarm (страховка)
 
