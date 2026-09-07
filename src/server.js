@@ -2369,6 +2369,91 @@ function show(id, type, msg) {
       }
     }
 
+    // POST /calltips-tips — real-time coaching tip from transcript
+    // Body: { profile, transcript:[{speaker:'me'|'them',text}], candidateName, jobText, lang, plan }
+    // Returns: { dig, next, why }
+    if (req.method === 'POST' && url.pathname === '/calltips-tips') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'bad json' }); }
+
+      const { transcript = [], candidateName = '', jobText = '', lang = 'ru', plan } = body;
+      const recent = transcript.slice(-20).map(l =>
+        `${l.speaker === 'me' ? 'Я' : 'Они'}: ${l.text}`
+      ).join('\n');
+
+      // Build plan context (unasked questions only)
+      const askedSet = new Set(body.askedQuestions || []);
+      const planCtx = plan?.sections?.flatMap(s =>
+        s.questions.map((q, i) => {
+          const id = `${s.category}-${i}`;
+          const mark = askedSet.has(id) ? '[✓]' : '[ ]';
+          return `${mark} ${q.text}`;
+        })
+      ).join('\n') || '';
+
+      const promptText = `Ты — помощник интервьюера в реальном времени. Слушаешь разговор и даёшь ОДИН острый уточняющий вопрос.
+
+ПРАВИЛО: зацепись за конкретное слово или деталь из последней реплики собеседника. Не оценивай — уточняй.
+Пример: собеседник сказал "делал лапароскопию" → "А когда вы выбираете открытую операцию вместо лапароскопии?"
+Пример: сказал "работал с PostgreSQL" → "Расскажите о самой сложной проблеме с индексами в PostgreSQL."
+
+Собеседник: ${candidateName || 'собеседник'}
+Тема: ${(jobText || '').slice(0, 300) || '(не указана)'}
+
+ПЛАН (незаданные вопросы):
+${planCtx || '(без плана)'}
+
+ПОСЛЕДНИЕ РЕПЛИКИ:
+${recent || '(пока нет)'}
+
+Верни ТОЛЬКО JSON:
+{"next":"Если в плане есть незаданный важный вопрос — задай его. Иначе пустая строка.","dig":"ГЛАВНОЕ: один острый уточняющий вопрос к последней реплике — зацепись за конкретную деталь. Всегда заполняй если есть реплики.","why":"Если ответ размытый — попроси конкретный пример. Иначе пустая строка."}
+Язык: ${lang === 'en' ? 'English' : 'русский'}.`;
+
+      const anthropicKey = secrets.ANTHROPIC_API_KEY;
+      if (!anthropicKey) return json(res, 503, { error: 'ANTHROPIC_API_KEY not configured' });
+
+      const reqBody = JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: promptText }],
+      });
+
+      const tip = await new Promise((resolve, reject) => {
+        const hReq = require('https').request({
+          hostname: 'api.anthropic.com',
+          path: '/v1/messages',
+          method: 'POST',
+          headers: {
+            'x-api-key': anthropicKey,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(reqBody),
+          },
+          timeout: 15000,
+        }, (hRes) => {
+          let data = '';
+          hRes.on('data', c => { data += c; });
+          hRes.on('end', () => {
+            try {
+              const parsed = JSON.parse(data);
+              const text = parsed.content?.[0]?.text || '{}';
+              // strip markdown code fences if present
+              const clean = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+              resolve(JSON.parse(clean));
+            } catch { resolve({ dig: '', next: '', why: '' }); }
+          });
+        });
+        hReq.on('error', reject);
+        hReq.on('timeout', () => { hReq.destroy(); reject(new Error('timeout')); });
+        hReq.write(reqBody);
+        hReq.end();
+      }).catch(() => ({ dig: '', next: '', why: '' }));
+
+      return json(res, 200, tip);
+    }
+
     // POST /webhooks/weeek-session — triggered by CF Worker when WEEEK_APP_COOKIE expires (401)
     // Auth: Bearer AGENT_SECRET (same as other endpoints)
     if (req.method === 'POST' && url.pathname === '/webhooks/weeek-session') {
