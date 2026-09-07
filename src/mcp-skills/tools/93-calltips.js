@@ -55,24 +55,24 @@ async function hhGet(apiPath, token) {
   return hhRequest('GET', apiPath, token.access_token);
 }
 
-function anthropicCall(messages, maxTokens = 2000) {
+function openrouterCall(messages, maxTokens = 2000) {
   return new Promise((resolve, reject) => {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return reject(new Error('ANTHROPIC_API_KEY not set'));
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) return reject(new Error('OPENROUTER_API_KEY not set'));
     const body = JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'google/gemini-2.5-flash-lite',
       max_tokens: maxTokens,
       messages,
     });
     const req = https.request({
-      hostname: 'api.anthropic.com',
-      path: '/v1/messages',
+      hostname: 'openrouter.ai',
+      path: '/api/v1/chat/completions',
       method: 'POST',
       headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength(body),
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'X-Title': 'calltips-plan',
+        'Content-Length': Buffer.byteLength(body),
       },
       timeout: 30000,
     }, (res) => {
@@ -81,13 +81,13 @@ function anthropicCall(messages, maxTokens = 2000) {
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          const text = parsed.content?.[0]?.text || '';
+          const text = parsed.choices?.[0]?.message?.content || '';
           resolve(text);
-        } catch { reject(new Error('Anthropic parse error')); }
+        } catch { reject(new Error('OpenRouter parse error')); }
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Anthropic timeout')); });
+    req.on('timeout', () => { req.destroy(); reject(new Error('OpenRouter timeout')); });
     req.write(body);
     req.end();
   });
@@ -177,9 +177,29 @@ ${(jobText || '').slice(0, 1500)}
 Верни ТОЛЬКО JSON (без обёрток, без markdown):
 {"sections":[{"category":"technical","title":"Профессиональный опыт","questions":[{"text":"...","followUp":"..."}]},{"category":"soft","title":"Soft Skills","questions":[...]},{"category":"situational","title":"Ситуационные","questions":[...]}]}`;
 
-  const raw = await anthropicCall([{ role: 'user', content: prompt }], 2000);
+  const raw = await openrouterCall([{ role: 'user', content: prompt }], 2000);
   const clean = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
   return JSON.parse(clean);
+}
+
+// ── Load pre-generated plan from calltips-plans/ ──────────────────────────
+
+function loadPreGeneratedPlan(candidateName) {
+  const plansDir = path.join(sessionDir(), 'calltips-plans');
+  if (!fs.existsSync(plansDir)) return null;
+  const query = candidateName.toLowerCase();
+  for (const file of fs.readdirSync(plansDir)) {
+    if (!file.endsWith('.json')) continue;
+    // slug is "фамилия-имя.json" — check if query words are all present in slug
+    const slug = file.replace(/\.json$/, '');
+    const slugWords = slug.split('-').filter(Boolean);
+    const queryWords = query.split(/\s+/).filter(w => w.length > 1);
+    if (queryWords.every(qw => slugWords.some(sw => sw.startsWith(qw)))) {
+      try { return JSON.parse(fs.readFileSync(path.join(plansDir, file), 'utf8')); }
+      catch {}
+    }
+  }
+  return null;
 }
 
 // ── Module exports ─────────────────────────────────────────────────────────
@@ -213,6 +233,25 @@ module.exports = {
         required: ['candidate_name'],
       },
       handler: async ({ candidate_name, vacancy_id, duration = 30, lang = 'ru' }) => {
+        // 0. Check pre-generated plans first (fast path, no HH/LLM calls)
+        const preGen = loadPreGeneratedPlan(candidate_name);
+        if (preGen) {
+          const dir = sessionDir();
+          fs.mkdirSync(dir, { recursive: true });
+          const filePath = path.join(dir, 'calltips-latest.json');
+          fs.writeFileSync(filePath, JSON.stringify(preGen, null, 2));
+          const totalQ = preGen.plan?.sections?.reduce((n, s) => n + s.questions.length, 0) || 0;
+          return {
+            ok: true,
+            source: 'pre-generated',
+            candidateName: preGen.candidateName,
+            vacancyName: preGen.vacancyName || '',
+            totalQuestions: totalQ,
+            sections: preGen.plan?.sections?.map(s => ({ title: s.title, count: s.questions.length })),
+            message: `✅ Загружен готовый план: ${totalQ} вопросов для ${preGen.candidateName}.\nОткрой Call Tips → «📥 Из агента» и начинай.`,
+          };
+        }
+
         const token = readHhToken();
         if (!token) return { error: 'HH не подключён. Используй hh_connect.' };
 
@@ -241,7 +280,7 @@ module.exports = {
         // 3. Build resume context
         const { name: fullName, text: resumeText } = buildResumeText(neg);
 
-        // 4. Generate plan
+        // 4. Generate plan via OpenRouter (cheap model)
         const plan = await generatePlan(fullName, resumeText, jobText, duration);
 
         // 5. Write calltips-latest.json
@@ -264,6 +303,7 @@ module.exports = {
         const totalQ = plan.sections?.reduce((n, s) => n + s.questions.length, 0) || 0;
         return {
           ok: true,
+          source: 'generated',
           candidateName: fullName,
           vacancyName: vacancy?.name || vacId,
           totalQuestions: totalQ,
