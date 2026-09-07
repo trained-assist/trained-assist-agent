@@ -24,7 +24,13 @@ if (!email || !password) {
     await page.bringToFront();
 
     if (loginUrl) {
-      await page.goto(loginUrl, { waitUntil: 'networkidle', timeout: 15000 });
+      await page.goto(loginUrl, { waitUntil: 'load', timeout: 15000 }).catch(() => {});
+      // After load, wait up to 3s for any JS auth-check redirect (SPA pattern).
+      // Already-logged-in SPAs redirect from /login → /dashboard without a server response.
+      await Promise.race([
+        page.waitForNavigation({ timeout: 3000, waitUntil: 'commit' }).catch(() => {}),
+        page.waitForTimeout(3000),
+      ]);
     }
 
     const urlBefore = page.url();
