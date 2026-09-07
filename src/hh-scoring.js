@@ -359,8 +359,10 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
   if (!gigachatKey && !apiKey) return 0;
 
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-  const styleFile = path.join(tokensBase, String(username), 'hh-message-style');
-  const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
+  const styleInTokens = path.join(tokensBase, String(username), 'hh-message-style');
+  const styleInWork = path.join(workDir, 'hh-message-style');
+  const styleFile = fs.existsSync(styleInTokens) ? styleInTokens : (fs.existsSync(styleInWork) ? styleInWork : null);
+  const commStyle = styleFile ? fs.readFileSync(styleFile, 'utf8').trim() : null;
 
   const vacancyCtx = atsConfig.vacancy_title && atsConfig.vacancy_context
     ? `Вакансия: ${atsConfig.vacancy_title}\n\n${atsConfig.vacancy_context}`
