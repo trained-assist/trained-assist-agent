@@ -23,15 +23,13 @@ if (!email || !password) {
     const page = pages[0];
     await page.bringToFront();
 
-    // Navigate to login URL if specified (for non-Tilda sites)
     if (loginUrl) {
-      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      await page.waitForTimeout(1500); // let dynamic content settle
+      await page.goto(loginUrl, { waitUntil: 'networkidle', timeout: 15000 });
     }
 
     const urlBefore = page.url();
+    const titleBefore = await page.title().catch(() => '');
 
-    // If already logged in (not on login page), skip form filling
     const isLoginPage = /login|signin|sign-in|auth/i.test(urlBefore);
     if (!isLoginPage) {
       console.log(JSON.stringify({ ok: true, url_before: urlBefore, url_after: urlBefore, navigated: false, already_logged_in: true, captcha: false, two_factor: false, error_on_page: false }));
@@ -46,20 +44,41 @@ if (!email || !password) {
     // Fill password
     await page.fill('input[type="password"]', password, { timeout: 5000 });
 
-    // Submit
-    const submitSel = 'button[type="submit"], input[type="submit"], button:has-text("Log in"), button:has-text("Войти"), button:has-text("Sign in")';
-    await page.click(submitSel, { timeout: 5000 });
+    // Find the real submit button — skip OAuth provider buttons (Google, VK, SSO etc.)
+    // This handles login forms that show multiple login providers alongside email+password.
+    const submitHandle = await page.evaluateHandle(() => {
+      const oauthRe = /google|facebook|вконтакте|vk\.com|sso|единый|apple|github|microsoft/i;
+      // Prefer button[type="submit"] that isn't an OAuth button
+      const typedBtns = [...document.querySelectorAll('button[type="submit"], input[type="submit"]')];
+      const mainTyped = typedBtns.find(b => !oauthRe.test(b.textContent + (b.value || '')));
+      if (mainTyped) return mainTyped;
+      // Fallback: exact-text button (Войти, Log in, Sign in) that isn't OAuth
+      const allBtns = [...document.querySelectorAll('button')];
+      return allBtns.find(b => {
+        const t = (b.textContent || '').trim();
+        return /^(Войти|Log in|Sign in|Login|Submit|Вход)$/i.test(t) && !oauthRe.test(t);
+      }) || null;
+    });
 
-    // Wait for navigation or page change
+    if (!submitHandle || (await submitHandle.jsonValue()) === null) {
+      throw new Error('Submit button not found — could not locate a non-OAuth submit button');
+    }
+    await submitHandle.asElement().click({ timeout: 5000 });
+    await submitHandle.dispose();
+
+    // Wait for navigation or SPA route change
     await Promise.race([
       page.waitForNavigation({ timeout: 10000, waitUntil: 'commit' }).catch(() => {}),
-      page.waitForTimeout(8000),
+      page.waitForTimeout(5000),
     ]);
+    // Extra wait for SPA rendering
+    await page.waitForTimeout(2000);
 
-    const urlAfter  = page.url();
-    const pageText  = await page.innerText('body').catch(() => '');
+    const urlAfter   = page.url();
+    const titleAfter = await page.title().catch(() => '');
+    const pageText   = await page.innerText('body').catch(() => '');
 
-    // Detect Google OAuth redirect — account uses Google login, not email+password
+    // Detect Google OAuth redirect
     const googleRedirect = /accounts\.google\.com/i.test(urlAfter);
     if (googleRedirect) {
       console.log(JSON.stringify({
@@ -77,16 +96,22 @@ if (!email || !password) {
       process.exit(0);
     }
 
+    // Detect success: URL changed OR title changed (SPA apps may not change URL path)
+    const urlChanged   = urlAfter !== urlBefore;
+    const titleChanged = titleAfter !== titleBefore && !/login|signin|вход/i.test(titleAfter);
+    const navigated    = urlChanged || titleChanged;
+
     const hasCaptcha = /captcha|recaptcha|hcaptcha/i.test(pageText) ||
       (await page.$('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').catch(() => null)) !== null;
-    const has2fa     = /код|code|otp|two.factor|2fa|подтверд/i.test(pageText) && urlAfter === urlBefore;
-    const hasError   = /неверн|invalid|incorrect|wrong|error|ошибк/i.test(pageText) && urlAfter === urlBefore;
+    const has2fa     = /код|code|otp|two.factor|2fa|подтверд/i.test(pageText) && !navigated;
+    const hasError   = /неверн|invalid|incorrect|wrong|error|ошибк/i.test(pageText) && !navigated;
 
     console.log(JSON.stringify({
-      ok: !hasError && !hasCaptcha,
+      ok: navigated || (!hasError && !hasCaptcha),
       url_before: urlBefore,
       url_after:  urlAfter,
-      navigated:  urlAfter !== urlBefore,
+      title_after: titleAfter,
+      navigated,
       captcha:    hasCaptcha,
       two_factor: has2fa,
       error_on_page: hasError,
