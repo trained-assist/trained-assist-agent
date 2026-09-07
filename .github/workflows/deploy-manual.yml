@@ -46,6 +46,7 @@ jobs:
               '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
+            node scripts/register-hook.js
             bash scripts/deploy.sh
 
   deploy-ru:
@@ -82,4 +83,5 @@ jobs:
               '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
+            node scripts/register-hook.js
             AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
