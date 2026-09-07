@@ -89,6 +89,123 @@ function scoreCandidate(r, atsConfig) {
   return { score, signals, tag };
 }
 
+// AI enrichment: plus/yellow/red tags + 2-para summary for one candidate
+async function enrichCandidate(candidate, atsConfig, orKey) {
+  const knockoutStr = (atsConfig.knockout || []).map(k => `- ${k}`).join('\n') || '—';
+  const requiredStr = (atsConfig.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
+  const preferredStr = (atsConfig.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
+  const expStr = (candidate.experience || [])
+    .map(e => `${e.position} — ${e.company} (${e.start || '?'} – ${e.end || 'н.в.'})`)
+    .join('\n') || '—';
+
+  const prompt = `Оцени кандидата для вакансии "${atsConfig.vacancy_title || 'Вакансия'}".
+${atsConfig.vacancy_context ? `\nКонтекст вакансии: ${atsConfig.vacancy_context}` : ''}
+
+СТОП-ФАКТОРЫ (knockout, критичны):
+${knockoutStr}
+
+Обязательные критерии (с весами):
+${requiredStr}
+
+Желательные:
+${preferredStr}
+
+Кандидат:
+Должность: ${candidate.title}
+Опыт: ${candidate.total_exp_years} лет
+Компании: ${(candidate.recent_companies || []).join(', ')}
+Карьера:
+${expStr}
+Эвристический score: ${candidate.score} (${candidate.tag})
+
+Верни ТОЛЬКО JSON без markdown:
+{
+  "plus_tags": ["3-6 слов", ...],
+  "yellow_tags": ["3-6 слов", ...],
+  "red_tags": ["3-6 слов", ...],
+  "summary_why": "2-3 предложения: почему кандидат сильный, конкретные факты из карьеры",
+  "summary_pitch": "1-2 предложения: что конкретно сказать клиенту о кандидате"
+}
+
+Правила:
+- plus_tags (2-5 штук): сильные стороны, явно подходящие под требования
+- yellow_tags (0-3): моменты стоит уточнить на интервью, небольшие риски
+- red_tags (0-2): только явные несоответствия knockout-критериям; если много плюсов — не стоп
+- Теги КРАТКО (3-6 слов каждый)
+- summary_why — живо, как рекрутер рассказывает коллеге
+- summary_pitch — конкретные факты которые продают кандидата клиенту`;
+
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'google/gemini-2.5-flash',
+      max_tokens: 600,
+      temperature: 0.1,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+    signal: AbortSignal.timeout(25_000),
+  });
+
+  if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content || '{}';
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('no JSON in AI response');
+  return JSON.parse(match[0]);
+}
+
+// Enrich top-N candidates in parallel batches of 5
+async function enrichCandidates(candidates, atsConfig, orKey) {
+  const BATCH = 5;
+  const enriched = [...candidates];
+  for (let i = 0; i < enriched.length; i += BATCH) {
+    const batch = enriched.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      batch.map(c => enrichCandidate(c, atsConfig, orKey))
+    );
+    for (let j = 0; j < batch.length; j++) {
+      const r = results[j];
+      if (r.status === 'fulfilled') {
+        Object.assign(enriched[i + j], r.value);
+      } else {
+        console.error(`[proactive-enrich] candidate ${batch[j].id} failed:`, r.reason?.message);
+      }
+    }
+    if (i + BATCH < enriched.length) await new Promise(r => setTimeout(r, 500));
+  }
+  return enriched;
+}
+
+// Exported scoring prompt text — shown to recruiter on request
+const SCORING_PROMPT_TEXT = `Как мы подбираем кандидатов (проактивный поиск):
+
+🔍 Поисковые запросы в базе HH:
+• "private banking"
+• "приватный банкинг"
+• "wealth management"
+• "финансовый советник VIP"
+• "family office"
+• "управление капиталом состоятельных клиентов"
+
+⛔ Knockout (автоматически исключаем):
+• Общий опыт работы менее 6 лет
+
+📊 Эвристический скоринг (0–12 баллов):
+• +1.5 — опыт 6+ лет (базовый)
+• +3.0 — private banking / HNWI / UHNWI сегмент в должностях
+• +3.0 — привлечение клиентов / личная сеть / acquisition
+• +2.0 — работа с крупными/состоятельными клиентами (VIP/premium/млрд)
+• +1.0 — family office / семейный офис
+• +1.0 — ФСФР аттестат / квалифицированный инвестор
+• +0.5 — топовые компании (Альфа, Сбер, ВТБ, АТОН, Goldman, Citi…)
+• +0.5 — руководящие позиции (директор, руководитель, head of)
+
+✅ PASS ≥ 7 баллов | 🟡 REVIEW ≥ 5 | ⚫ WEAK < 5
+
+🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
+После скоринга топ-30 прогоняются через AI — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента.`;
+
 async function runProactiveSearch(username, workDir) {
   const token = readHhToken(username);
   if (!token) throw new Error(`HH токен не найден для пользователя "${username}"`);
@@ -102,6 +219,11 @@ async function runProactiveSearch(username, workDir) {
     throw new Error('ATS конфиг не найден. Сначала настрой вакансию и критерии оценки.');
   }
   if (!atsConfig) throw new Error('ATS конфиг пуст. Настрой критерии оценки кандидатов.');
+
+  // Read OpenRouter key for AI enrichment
+  const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+  const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
+  const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
 
   const allCandidates = new Map();
 
@@ -149,7 +271,20 @@ async function runProactiveSearch(username, workDir) {
   }
 
   scored.sort((a, b) => b.score - a.score);
-  const top100 = scored.slice(0, 100);
+  const top30 = scored.slice(0, 30);
+
+  // AI enrichment for top-30 (tags + summary)
+  let enriched = top30;
+  if (orKey && top30.length > 0) {
+    console.log(`[proactive-search] enriching ${top30.length} candidates with AI…`);
+    try {
+      enriched = await enrichCandidates(top30, atsConfig, orKey);
+    } catch (e) {
+      console.error('[proactive-search] enrichment failed:', e.message);
+    }
+  } else if (!orKey) {
+    console.warn('[proactive-search] no OpenRouter key — skipping AI enrichment');
+  }
 
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10);
@@ -164,22 +299,24 @@ async function runProactiveSearch(username, workDir) {
     searched_at: now.toISOString(),
     total_collected: allCandidates.size,
     total_after_knockout: scored.length,
+    ai_enriched: Boolean(orKey),
     ats_config: atsConfig,
-    candidates: top100,
+    candidates: enriched,
   };
   fs.writeFileSync(outFile, JSON.stringify(output, null, 2), 'utf8');
 
-  const pass_count = top100.filter(c => c.tag === 'PASS').length;
-  const review_count = top100.filter(c => c.tag === 'REVIEW').length;
+  const pass_count = enriched.filter(c => c.tag === 'PASS').length;
+  const review_count = enriched.filter(c => c.tag === 'REVIEW').length;
 
   return {
     file: outFile,
-    count: top100.length,
+    count: enriched.length,
     pass_count,
     review_count,
     searched_at: now.toISOString(),
     vacancy_title: output.vacancy_title,
+    ai_enriched: output.ai_enriched,
   };
 }
 
-module.exports = { runProactiveSearch };
+module.exports = { runProactiveSearch, SCORING_PROMPT_TEXT };

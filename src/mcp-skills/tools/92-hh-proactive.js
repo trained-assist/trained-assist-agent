@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
-const { runProactiveSearch } = require('../../hh-proactive-search');
+const { runProactiveSearch, SCORING_PROMPT_TEXT } = require('../../hh-proactive-search');
 
 function proactiveHmac(username) {
   const secret = process.env.AGENT_SECRET || '';
@@ -46,12 +46,18 @@ module.exports = {
             review_count: result.review_count,
             vacancy_title: result.vacancy_title,
             searched_at: result.searched_at,
-            message: `Найдено ${result.count} кандидатов (PASS: ${result.pass_count}, REVIEW: ${result.review_count}).\nСтраница с результатами: ${url}`,
+            message: `Найдено ${result.count} кандидатов (PASS: ${result.pass_count}, REVIEW: ${result.review_count}).${result.ai_enriched ? ' AI-теги и резюме добавлены.' : ''}\nСтраница с результатами: ${url}\n\nХотите узнать, по каким критериям мы отбирали и оценивали? Скажите «покажи промпт оценки кандидатов».`,
           };
         } catch (e) {
           return { error: e.message };
         }
       },
+    },
+
+    hh_proactive_scoring_prompt: {
+      description: 'Показывает промпт и логику по которой оцениваются кандидаты при проактивном поиске. Вызывай когда рекрутер спрашивает "как вы подбирали", "покажи критерии", "почему этот кандидат" и т.п.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => ({ text: SCORING_PROMPT_TEXT }),
     },
 
     hh_proactive_view: {
