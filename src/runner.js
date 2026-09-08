@@ -16,7 +16,7 @@ const {
   SERVICE_DISPLAY,
 } = require('./user-tokens');
 const { initLog, readLog } = require('./requirements-log');
-const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, readActiveVacancy } = require('./hh-quick');
+const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, readActiveVacancy } = require('./hh-quick');
 const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('./hh-vacancy');
 const { loadUserSiteIntents } = require('./user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
@@ -84,11 +84,12 @@ const GDRIVE_SHARED_CONFIRM_INTENT = /^(?:пошарил|поделился|ра
 // "можешь читать гугл шит", "умеешь работать с гугл таблицами"
 const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
+const HH_STATUS_INTENT       = /hh.{0,10}статус|статус.{0,10}hh|статус.{0,10}(?:рекрут|вакансии|оценки|скоринга)|как.{0,15}дела.{0,15}hh|что.{0,15}активн.{0,15}hh|включена.{0,15}оценка|работает.{0,15}(?:скоринг|оценка|hh)|\/hh_status/i;
 const HH_MY_VACANCIES_INTENT = /мои.{0,10}вакансии|список.{0,10}вакансий|какие.{0,10}вакансии|с чем работать|покажи.{0,15}вакансии|дай.{0,15}вакансии|мои.{0,10}активные/i;
 const HH_FUNNEL_INTENT      = /сколько откликов|статистика воронки|что новенького|воронка кандидатов|статистика.{0,15}вакансии|кандидатов по.{0,15}вакансии|обновление.{0,15}вакансии/i;
 const HH_RESPONSES_INTENT   = /новые отклики|кто откликнулся|покажи.{0,10}кандидатов|новых кандидатов|список откликов|пришли отклики|новые кандидаты/i;
 const HH_ATS_EDITOR_INTENT  = /открой.{0,10}(?:ats|редактор|конфигуратор)|ats.{0,10}(?:редактор|editor|открой|настрой)|редактор.{0,10}ats|(?:скин|дай|пришл|покажи|дай).{0,20}(?:страниц|ссылк).{0,30}(?:настройк|candidate.?flow|ats|воронк|funnel)|страниц.{0,15}(?:настройк|candidate.?flow|ats|воронк|funnel)|candidate.?flow.{0,20}(?:страниц|ссылк|настройк|редактор)/i;
-const HH_REVIEW_PAGE_INTENT = /страниц.{0,20}ревью|ревью.{0,20}кандидат|страниц.{0,20}кандидат|открой.{0,15}кандидат|ссылк.{0,20}кандидат|покажи.{0,15}ссылк|хочу.{0,20}посмотреть.{0,20}откликнувш|кандидат.{0,30}(?:с оценк|с драфт|с баллами|с ответами)|(?:оценки|оценк).{0,20}кандидат|драфты.{0,20}(?:ответ|сообщени|кандидат)/i;
+const HH_REVIEW_PAGE_INTENT = /страниц.{0,20}ревью|ревью.{0,20}кандидат|страниц.{0,20}кандидат|открой.{0,15}кандидат|ссылк.{0,20}кандидат|покажи.{0,15}ссылк|хочу.{0,20}посмотреть.{0,20}откликнувш|кандидат.{0,30}(?:с оценк|с драфт|с баллами|с ответами)|(?:оценки|оценк).{0,20}кандидат|драфты.{0,20}(?:ответ|сообщени|кандидат)|(?:список|покажи|кто).{0,30}кандидат.{0,60}(?:сообщени|написать|отправить|отказать|отклонить|драфт|ответ|нужно)|кому.{0,20}(?:написать|отправить|отказать|отклонить|сообщени)|покажи.{0,20}(?:список|всех).{0,20}кандидат/i;
 const HH_WHERE_PROMPT_INTENT = /где.{0,30}(?:промпт|конфиг|настройк|критери).{0,30}(?:ats|воронк|оценк|кандидат)|(?:промпт|конфиг|настройки).{0,30}(?:ats|воронк|оценк|кандидат)|как.{0,30}(?:посмотреть|правит|редактиров|изменить).{0,50}(?:промпт|конфиг|критери|воронк|оценк)/i;
 const HH_SHOW_ATS_CONFIG_INTENT = /(?:покажи|посмотр|какие|что за|дай|вывед).{0,30}(?:правила|критери|оценк|ats|конфиг|настройк).{0,30}(?:кандидат|воронк|оценк|скрининг|ats)|(?:правила|критери|настройки).{0,20}(?:для|по).{0,10}(?:кандидат|оценк|скрининг)|ats.{0,15}правила|что.{0,15}у меня.{0,30}(?:правила|критери|оценк|ats)/i;
 const HH_STYLE_INTENT        = /(?:обнови|загрузи|обновить|загрузить|настрой|поменяй|задай|update).{0,30}стиль|стиль.{0,30}(?:общения|переписки|сообщений|рекрут)|communication.{0,15}style|update.{0,15}style/i;
@@ -806,6 +807,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   }
 
   if (userId && workDir && hhConnected) {
+    if (HH_STATUS_INTENT.test(task)) return hhStatus(userId);
     if (HH_MY_VACANCIES_INTENT.test(task)) {
       const r = await hhMyVacancies(userId, workDir).catch(() => null);
       if (r) return r;
@@ -1016,8 +1018,21 @@ function buildContextCard(username, workDir) {
 
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
+  // HH: active vacancy + ATS config / scoring status
+  const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+  if (fs.existsSync(hhVacFile)) {
+    try {
+      const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
+      if (vac?.title) {
+        const atsFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+        const hasAts = fs.existsSync(atsFile);
+        lines.push(`💼 ${vac.title}`);
+        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
+      }
+    } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
+  }
+
   const PINNED_CONTEXTS = [
-    { skill: 'hh', key: 'active_vacancy', label: '💼' },
     { skill: 'gdrive', key: 'pinned_folder', label: '📁' },
   ];
   for (const { skill, key, label } of PINNED_CONTEXTS) {

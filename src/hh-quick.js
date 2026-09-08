@@ -221,7 +221,52 @@ function hhStylePage(userId) {
   return `✍️ Страница обновления стиля общения:\n${hhBase()}/hh/style?username=${encodeURIComponent(userId)}${tokenParam}\n\nОткрой ссылку и вставь примеры своих сообщений кандидатам — извлеку правила стиля и сохраню.`;
 }
 
+// "/hh статус" — visible state dashboard: vacancy + ATS config + background scoring
+function hhStatus(userId) {
+  const workDir = _hhWorkDir(userId);
+  const { readHhContext: _rhc } = require('./hh-utils');
+
+  // Active vacancy
+  let vacLine;
+  try {
+    const av = _rhc(workDir, 'hh', 'active_vacancy')?.value;
+    vacLine = av
+      ? `✅ Вакансия: «${av.title}» (id: ${av.id})`
+      : '❌ Вакансия не выбрана — скажи «мои вакансии»';
+  } catch { vacLine = '❌ Вакансия не выбрана'; }
+
+  // ATS config → determines if background scoring is on
+  let atsLine, scoringLine;
+  try {
+    const cfg = _rhc(workDir, 'hh', 'ats_config')?.value;
+    if (cfg?.vacancy_title) {
+      atsLine     = `✅ ATS конфиг: «${cfg.vacancy_title}»`;
+      scoringLine = '✅ Фоновая оценка: активна (каждые ~5 мин)';
+    } else {
+      atsLine     = '❌ ATS конфиг: не настроен';
+      scoringLine = '⏸ Фоновая оценка: выключена — скажи «настрой критерии оценки»';
+    }
+  } catch {
+    atsLine     = '❌ ATS конфиг: не настроен';
+    scoringLine = '⏸ Фоновая оценка: выключена';
+  }
+
+  const reviewToken = hhReviewToken(userId);
+  const tokenParam  = reviewToken ? `&token=${reviewToken}` : '';
+  const reviewUrl   = `${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}`;
+
+  return [
+    '📊 HH статус:',
+    '',
+    vacLine,
+    atsLine,
+    scoringLine,
+    '',
+    `📋 Страница ревью: ${reviewUrl}`,
+  ].join('\n');
+}
+
 // Export cache invalidation for tests
 function _clearCache() { _cache.clear(); }
 
-module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, _clearCache, readActiveVacancy: _readActiveVacancy };
+module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, _clearCache, readActiveVacancy: _readActiveVacancy };

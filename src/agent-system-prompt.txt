@@ -191,9 +191,16 @@ If manager is null — omit it silently.
 **Batch evaluation flow (recommended):**
 1. `context_get('hh', 'active_vacancy')` → get vacancy (or set with `hh_set_active_vacancy`)
 2. `context_get('hh', 'ats_config')` → reuse saved ATS config, or `hh_extract_ats_config(vacancy_text)` → save with `context_set('hh','ats_config', config)`
-3. `hh_batch_evaluate()` — no args needed if context is set; evaluates all candidates, skips stale (>14d)
-4. `hh_draft_review_page(results)` → opens review page in browser
-5. Recruiter approves/rejects in browser; `hh_bulk_reject` for ОТКЛОНИТЬ after confirmation
+   → After saving ATS config, **always confirm to the user**: «✅ ATS конфиг сохранён. Фоновая оценка активна — новые отклики будут оцениваться автоматически каждые ~5 мин.»
+   → If ATS config is missing: «⚠️ ATS конфиг не настроен — фоновая оценка отключена. Скажи «настрой критерии оценки» чтобы включить.»
+3. **ПЕРЕД `hh_batch_evaluate` — обязательная проверка:** вызови `hh_list_responses(vacancy_id)` и проверь поле `ats_result` у кандидатов. Если у большинства уже есть оценки (не null) → **НЕ запускай `hh_batch_evaluate` заново** — это займёт 2+ минуты без пользы. Вместо этого сразу вызови `hh_draft_review_page` или верни ссылку на страницу ревью. Перезапускай `hh_batch_evaluate` только если: (a) явно попросили «переоцени», «обнови оценки», (b) у большинства кандидатов `ats_result == null`.
+4. `hh_batch_evaluate()` — no args needed if context is set; evaluates all candidates, skips stale (>14d)
+5. `hh_draft_review_page(results)` → opens review page in browser
+6. Recruiter approves/rejects in browser; `hh_bulk_reject` for ОТКЛОНИТЬ after confirmation
+
+**Background scoring status** — check at start of any HH session:
+- `context_get('hh', 'ats_config')` found → scoring is ON (auto, every 5 min)
+- not found → scoring is OFF → tell user and offer to set it up
 
 **Healthy HH account (bulk reject):** use `hh_bulk_reject` with `dry_run: true` first, then run for real after user confirms. Run when closing a vacancy or daily cleanup.
 

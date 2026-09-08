@@ -11,8 +11,8 @@
  * leaving the agent unable to surface it.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir, tmpdir } from 'os';
 import { createRequire } from 'module';
@@ -184,5 +184,104 @@ describe('Flow 3 — hh_send_message + hh_get_messages', () => {
     // neg-002 has no seed messages in mock
     expect(result.messages.length).toBe(0);
     expect(result.total).toBe(0);
+  });
+});
+
+// ── Flow 4: hh_batch_evaluate — message_draft persistence ────────────────────
+
+describe('Flow 4 — hh_batch_evaluate message_draft persistence', () => {
+  const DATA_DIR = join(homedir(), 'agent-data');
+  const CAND_DIR = join(DATA_DIR, 'hh', TEST_USER_ID, 'candidates');
+
+  const ATS_CONFIG = {
+    vacancy_title: 'Backend Developer',
+    required: ['Node.js'],
+    preferred: ['PostgreSQL'],
+    knockout: [],
+    pass_threshold: 50,
+    review_threshold: 30,
+    vacancy_context: 'Test vacancy',
+    updated_at: '2026-09-08T10:00:00.000Z',
+  };
+
+  const FAKE_ATS_RESULT = {
+    score: 80,
+    verdict: 'ПРОПУСТИТЬ',
+    reasoning: 'Good candidate',
+    matched: ['Node.js'],
+    gaps: [],
+  };
+
+  function writeCandidateHistory(negId, data) {
+    mkdirSync(CAND_DIR, { recursive: true });
+    writeFileSync(join(CAND_DIR, `${negId}.json`), JSON.stringify(data), { mode: 0o600 });
+  }
+
+  function readCandidateHistory(negId) {
+    const file = join(CAND_DIR, `${negId}.json`);
+    if (!existsSync(file)) return null;
+    return JSON.parse(readFileSync(file, 'utf8'));
+  }
+
+  beforeEach(() => {
+    // Clean candidate files before each test
+    if (existsSync(CAND_DIR)) {
+      const { readdirSync, unlinkSync } = require('fs');
+      for (const f of readdirSync(CAND_DIR)) {
+        try { unlinkSync(join(CAND_DIR, f)); } catch {}
+      }
+    }
+    process.env.AGENT_DATA_DIR = DATA_DIR;
+    // Provide a fake OR key so handler doesn't bail early; LLM call will fail gracefully
+    process.env.OPENROUTER_API_KEY = 'test-or-key-fake';
+  });
+
+  afterEach(() => {
+    delete process.env.AGENT_DATA_DIR;
+    delete process.env.OPENROUTER_API_KEY;
+  });
+
+  it('reuses existing message_draft when config_version matches — no regeneration', async () => {
+    const negId = 'neg-001';
+    const existingDraft = {
+      text: 'Никита, здравствуйте! Мы хотели бы обсудить вашу кандидатуру.',
+      generated_at: '2026-09-08T10:00:00.000Z',
+      config_version: ATS_CONFIG.updated_at,
+    };
+    writeCandidateHistory(negId, { messages: [], ats_result: FAKE_ATS_RESULT, message_draft: existingDraft });
+
+    const result = await tools.hh_batch_evaluate.handler({ vacancy_id: 'vac-001', ats_config: ATS_CONFIG });
+
+    expect(result.error).toBeUndefined();
+    const candidate = result.results.find(r => r.negotiation_id === negId);
+    expect(candidate).toBeDefined();
+    expect(candidate.message_draft).toEqual(existingDraft);
+
+    // Verify file still has the original draft (not overwritten)
+    const savedHistory = readCandidateHistory(negId);
+    expect(savedHistory.message_draft).toEqual(existingDraft);
+  });
+
+  it('includes message_draft: null in results and does not crash when draft generation fails', async () => {
+    const negId = 'neg-001';
+    // Candidate scored but no draft yet; LLM call will fail (fake key) → graceful null
+    writeCandidateHistory(negId, { messages: [], ats_result: FAKE_ATS_RESULT });
+
+    const result = await tools.hh_batch_evaluate.handler({ vacancy_id: 'vac-001', ats_config: ATS_CONFIG });
+
+    expect(result.error).toBeUndefined();
+    const candidate = result.results.find(r => r.negotiation_id === negId);
+    expect(candidate).toBeDefined();
+    // Draft generation failed with fake key — null, not an exception
+    expect(candidate.message_draft).toBeNull();
+  });
+
+  it('result object always contains message_draft field for each candidate', async () => {
+    const result = await tools.hh_batch_evaluate.handler({ vacancy_id: 'vac-001', ats_config: ATS_CONFIG });
+
+    expect(result.error).toBeUndefined();
+    for (const c of result.results) {
+      expect(Object.prototype.hasOwnProperty.call(c, 'message_draft')).toBe(true);
+    }
   });
 });
