@@ -1018,8 +1018,21 @@ function buildContextCard(username, workDir) {
 
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
+  // HH: active vacancy + ATS config / scoring status
+  const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+  if (fs.existsSync(hhVacFile)) {
+    try {
+      const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
+      if (vac?.title) {
+        const atsFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+        const hasAts = fs.existsSync(atsFile);
+        const scoringIcon = hasAts ? '⚡' : '⏸';
+        lines.push(`💼 ${vac.title} ${scoringIcon}`);
+      }
+    } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
+  }
+
   const PINNED_CONTEXTS = [
-    { skill: 'hh', key: 'active_vacancy', label: '💼' },
     { skill: 'gdrive', key: 'pinned_folder', label: '📁' },
   ];
   for (const { skill, key, label } of PINNED_CONTEXTS) {
