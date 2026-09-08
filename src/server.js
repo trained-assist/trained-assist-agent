@@ -3189,6 +3189,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       resume_text: buildResumeText(neg),
       history_messages: history.messages || [],
       already_sent: (history.messages || []).some(m => m.role === 'employer'),
+      needs_reply: (() => {
+        const msgs = history.messages || [];
+        const last = msgs[msgs.length - 1];
+        return !last || last.role !== 'employer';
+      })(),
       alternate_url: r.alternate_url || null,
     };
   });
@@ -3203,7 +3208,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   }
 
   const sorted = sortCandidates(candidates);
-  const waitingCandidates = sortCandidates(candidates.filter(c => !c.already_sent && c.verdict !== 'ОТКЛОНИТЬ'));
+  const waitingCandidates = sortCandidates(candidates.filter(c => c.needs_reply));
 
   const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
   const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
@@ -3312,8 +3317,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     });
   }
 
-  const waitingCardsHtml = buildCardsHtml(waitingCandidates, 0);
-  const allCardsHtml = buildCardsHtml(sorted, 10000);
+  const cardsHtml = buildCardsHtml(waitingCandidates, 0);
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -3394,11 +3398,6 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .toast{position:fixed;top:20px;right:20px;padding:10px 18px;border-radius:8px;background:#16a34a;color:#fff;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:fadein .2s}
 .toast-err{background:#dc2626}
 @keyframes fadein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
-.tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:2px solid #e2e8f0;padding-bottom:0}
-.tab-btn{padding:8px 18px;border:none;border-radius:8px 8px 0 0;font-size:14px;font-weight:600;cursor:pointer;background:#f1f5f9;color:#64748b;transition:background .15s,color .15s;border-bottom:2px solid transparent;margin-bottom:-2px}
-.tab-btn.active{background:#fff;color:#4f46e5;border-bottom:2px solid #4f46e5}
-.tab-badge{display:inline-block;background:#e2e8f0;color:#475569;font-size:12px;font-weight:700;padding:1px 7px;border-radius:99px;margin-left:6px}
-.tab-btn.active .tab-badge{background:#ede9fe;color:#4f46e5}
 @media(max-width:640px){
 body{padding:12px 12px 100px}
 h1{font-size:18px}
@@ -3413,8 +3412,6 @@ h1{font-size:18px}
 .toolbar{gap:5px}
 .tb-btn{padding:5px 8px;font-size:12px}
 .msg-area{font-size:13px}
-.tabs{gap:2px}
-.tab-btn{padding:7px 12px;font-size:13px}
 }
 .sync-btn{background:none;border:none;color:#6366f1;font-size:13px;cursor:pointer;font-weight:500;padding:0;text-decoration:underline;text-underline-offset:2px}
 .sync-btn:hover{opacity:.75}
@@ -3423,11 +3420,7 @@ h1{font-size:18px}
 </head>
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
-<p class="subtitle">${sorted.length} откликов${actionable ? ' · ' + actionable + ' требуют сообщения' : ''}${ageText ? ` · обновлено ${ageText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
-<div class="tabs">
-  <button class="tab-btn active" id="tab-waiting" onclick="switchTab('waiting')">Ждут ответа <span class="tab-badge" id="badge-waiting">${waitingCandidates.length}</span></button>
-  <button class="tab-btn" id="tab-all" onclick="switchTab('all')">Все диалоги <span class="tab-badge" id="badge-all">${sorted.length}</span></button>
-</div>
+<p class="subtitle">${sorted.length} откликов · ${waitingCandidates.length} ждут ответа${ageText ? ` · обновлено ${ageText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
   <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
@@ -3441,15 +3434,11 @@ h1{font-size:18px}
   <button class="tb-btn score-btn" data-bucket="2" onclick="toggleBucket(2)">2</button>
   <button class="tb-btn score-btn" data-bucket="1" onclick="toggleBucket(1)">1</button>
   <div class="tb-sep"></div>
+  <button class="tb-btn" onclick="selectAll(true)">✓ Выбрать все</button>
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
-<div id="tab-waiting-container">
-  ${waitingCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Нет кандидатов, ожидающих ответа.</p>' : waitingCardsHtml.join('')}
-</div>
-<div id="tab-all-container" style="display:none">
-  ${allCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Откликов нет.</p>' : ''}
-  <div id="cards-container"></div>
-  <div id="sentinel" style="height:1px;margin-bottom:80px"></div>
+<div id="cards-container">
+  ${cardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Все отвечено — нет кандидатов, ожидающих ответа.</p>' : cardsHtml.join('')}
 </div>
 <div class="footer">
   <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
@@ -3462,42 +3451,6 @@ const HH_USER = '${esc(username)}';
 const HH_SECRET = '${esc(agentSecret)}';
 const HH_VACANCY_ID = '${esc(String(vacancyId || ''))}';
 const done = new Set();
-let activeTab = 'waiting';
-
-const CARDS_HTML_ALL = ${JSON.stringify(allCardsHtml)};
-const LAZY_BATCH = 50;
-let rendered = 0;
-
-function renderBatch(count) {
-  const container = document.getElementById('cards-container');
-  const end = Math.min(rendered + (count || LAZY_BATCH), CARDS_HTML_ALL.length);
-  const frag = document.createDocumentFragment();
-  for (let j = rendered; j < end; j++) {
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = CARDS_HTML_ALL[j];
-    frag.appendChild(wrapper.firstElementChild);
-  }
-  container.appendChild(frag);
-  rendered = end;
-  onCheck();
-  if (rendered >= CARDS_HTML_ALL.length) lazyObserver.disconnect();
-  setTimeout(autoGenerate, 0);
-}
-
-const lazyObserver = new IntersectionObserver(entries => {
-  if (entries[0].isIntersecting && rendered < CARDS_HTML_ALL.length) renderBatch(LAZY_BATCH);
-}, { rootMargin: '1500px' });
-lazyObserver.observe(document.getElementById('sentinel'));
-
-function switchTab(tab) {
-  activeTab = tab;
-  document.getElementById('tab-waiting-container').style.display = tab === 'waiting' ? '' : 'none';
-  document.getElementById('tab-all-container').style.display = tab === 'all' ? '' : 'none';
-  document.getElementById('tab-waiting').classList.toggle('active', tab === 'waiting');
-  document.getElementById('tab-all').classList.toggle('active', tab === 'all');
-  if (tab === 'all' && rendered === 0) renderBatch(50);
-  onCheck();
-}
 
 async function syncNow() {
   const btn = document.getElementById('syncBtn');
