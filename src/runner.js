@@ -1335,7 +1335,17 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     fs.writeFileSync(path.join(tDir, '.chatid'), String(chatId), { mode: 0o600 });
     const oldChatDir = path.join(os.homedir(), 'agent-tokens', String(user.id));
     if (fs.existsSync(oldChatDir)) {
-      fs.writeFileSync(path.join(oldChatDir, '.username'), String(user.username), { mode: 0o600 });
+      // Only write .username if the folder has no existing owner or already belongs to us.
+      // Overwriting a different profile's marker would cause loadUserTokens to migrate
+      // that profile's tokens into ours (cross-profile isolation leak).
+      const markerPath = path.join(oldChatDir, '.username');
+      let existingOwner = null;
+      try { existingOwner = fs.readFileSync(markerPath, 'utf8').trim() || null; } catch { /* no marker yet */ }
+      if (!existingOwner || existingOwner === String(user.username)) {
+        fs.writeFileSync(markerPath, String(user.username), { mode: 0o600 });
+      } else {
+        console.warn('[runner] skipped .username overwrite: chatId=%s owned by "%s", current user "%s"', user.id, existingOwner, user.username);
+      }
     }
   } catch (e) { console.warn('[runner] persist chatId:', e.message); }
 
