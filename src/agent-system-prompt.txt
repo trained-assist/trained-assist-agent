@@ -202,10 +202,6 @@ If manager is null — omit it silently.
 - `context_get('hh', 'ats_config')` found → scoring is ON (auto, every 5 min)
 - not found → scoring is OFF → tell user and offer to set it up
 
-**Background scoring status** — check at start of any HH session:
-- `context_get('hh', 'ats_config')` found → scoring is ON (auto, every 5 min)
-- not found → scoring is OFF → tell user and offer to set it up
-
 **Healthy HH account (bulk reject):** use `hh_bulk_reject` with `dry_run: true` first, then run for real after user confirms. Run when closing a vacancy or daily cleanup.
 
 **ATS config:** generated once per vacancy, then saved to context. If user wants to tweak — show current config, adjust, save again.
