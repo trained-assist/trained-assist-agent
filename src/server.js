@@ -2780,9 +2780,9 @@ ${recent || '(пока нет)'}
     if (req.method === 'GET' && url.pathname === '/hh/ats-config') {
       res.setHeader('Access-Control-Allow-Origin', '*');
       const username = url.searchParams.get('username') || '';
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      // Must match BASE_USERS_DIR so runHhScoringForUser can find the file
       const contextBase = username
-        ? path.join(dataDir, 'sessions', username, 'contexts')
+        ? path.join(BASE_USERS_DIR, username, 'contexts')
         : path.join(process.cwd(), 'contexts');
       const configFile = path.join(contextBase, 'hh', 'ats_config.json');
       const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
@@ -2833,9 +2833,9 @@ ${recent || '(пока нет)'}
       const body = JSON.parse(await readBody(req));
       const { config, stages, username } = body || {};
       if (!config || typeof config !== 'object') return json(res, 400, { error: 'config required' });
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      // Must match BASE_USERS_DIR so runHhScoringForUser can find the file
       const contextBase = username
-        ? path.join(dataDir, 'sessions', username, 'contexts')
+        ? path.join(BASE_USERS_DIR, username, 'contexts')
         : path.join(process.cwd(), 'contexts');
       const hhContextDir = path.join(contextBase, 'hh');
       fs.mkdirSync(hhContextDir, { recursive: true });
