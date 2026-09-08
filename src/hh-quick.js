@@ -8,8 +8,9 @@ const os = require('os');
 const { readHhToken, readHhContext, writeHhContext, hhFetch } = require('./hh-utils');
 
 function _hhWorkDir(userId) {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  return path.join(dataDir, 'sessions', String(userId));
+  // Must match BASE_USERS_DIR in server.js — Claude writes contexts here via cwd
+  const usersRoot = process.env.USERS_DIR || path.join(process.env.HOME || os.homedir(), 'users');
+  return path.join(usersRoot, String(userId));
 }
 
 const CACHE_TTL_MS = 4 * 60 * 1000; // 4 min

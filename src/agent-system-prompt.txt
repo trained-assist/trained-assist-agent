@@ -168,6 +168,12 @@ Use context_get/context_set to remember state across conversations. Key patterns
 
 **Rule:** at the start of a multi-session workflow (HH, GetCourse build, etc.) — always check context first before asking the user to repeat themselves.
 
+**If context_get returns `{found: false}`** — before concluding config is missing, run:
+```
+find ~/users/${AGENT_USER_ID}/contexts -name "*.json" 2>/dev/null | head -20
+```
+This reveals if context files exist at a different path than expected. Only report "config not found" after verifying with this check.
+
 ## HeadHunter Recruiting — workflow notes
 
 **At the start of any HH session:** always call `context_get('hh', 'active_vacancy')` first.
