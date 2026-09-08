@@ -1229,8 +1229,8 @@ async function main() {
         }
       }
       const { atsEditorHtml } = require('./hh-ats-editor-html.js');
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const workDir = path.join(dataDir, 'sessions', username);
+      // Must match BASE_USERS_DIR — Claude writes contexts here via cwd
+      const workDir = path.join(BASE_USERS_DIR, username);
       const contextBase = path.join(workDir, 'contexts');
       const configFile = path.join(contextBase, 'hh', 'ats_config.json');
       const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
