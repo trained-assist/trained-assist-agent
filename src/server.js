@@ -2492,7 +2492,18 @@ ${expLines || '—'}
       // Fallback notification for unknown services (e.g. kinescope-creds, notion-login).
       // TOKEN_SERVICE_ACTIONS handles known services above; nalog-creds is handled separately.
       // For everything else: confirm receipt so the user knows what to do next.
-      if (!svcAction && label !== 'nalog-creds') {
+      // Guard: skip if value is empty/trivial — ZeroCreds may POST non-preflight test calls
+      // with empty or auto-generated data before the user fills the form.
+      const hasRealValue = (() => {
+        if (!storedValue || storedValue === '{}' || storedValue === '""' || storedValue === '') return false;
+        try {
+          const parsed = JSON.parse(storedValue);
+          if (typeof parsed !== 'object' || parsed === null) return storedValue.length > 3;
+          const vals = Object.values(parsed);
+          return vals.length > 0 && vals.some(v => v && String(v).length > 0);
+        } catch { return storedValue.length > 3; }
+      })();
+      if (!svcAction && label !== 'nalog-creds' && hasRealValue) {
         const fbChatId = readChatId(String(userId));
         if (fbChatId && secrets.BOT_TOKEN) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
