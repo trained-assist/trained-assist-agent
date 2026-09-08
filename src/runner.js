@@ -83,6 +83,8 @@ const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие)
 const GDRIVE_SHARED_CONFIRM_INTENT = /^(?:пошарил|поделился|расшарил|дал\s+доступ|открыл\s+доступ|готово|ок|сделал|расшарен|добавил)\.?$/i;
 // "можешь читать гугл шит", "умеешь работать с гугл таблицами"
 const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
+const GDRIVE_NOTIF_OFF_INTENT  = /\/google_drive_sharing_notifications_switch_off|выключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|отключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|не.{0,10}уведомля.{0,30}(?:гугл|google|drive|шаринг|файл)|без.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
+const GDRIVE_NOTIF_ON_INTENT   = /\/google_drive_sharing_notifications_switch_on|включи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|верн.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
 const HH_STATUS_INTENT       = /hh.{0,10}статус|статус.{0,10}hh|статус.{0,10}(?:рекрут|вакансии|оценки|скоринга)|как.{0,15}дела.{0,15}hh|что.{0,15}активн.{0,15}hh|включена.{0,15}оценка|работает.{0,15}(?:скоринг|оценка|hh)|\/hh_status/i;
 const HH_MY_VACANCIES_INTENT = /мои.{0,10}вакансии|список.{0,10}вакансий|какие.{0,10}вакансии|с чем работать|покажи.{0,15}вакансии|дай.{0,15}вакансии|мои.{0,10}активные/i;
@@ -451,6 +453,18 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
       return 'Google Drive не настроен. Напиши «подключи Google Drive» — помогу настроить за пару минут.';
     }
     return null; // share intent without config — let Claude call gdrive_setup automatically
+  }
+
+  // Toggle GDrive sharing notifications
+  if (GDRIVE_NOTIF_OFF_INTENT.test(task) && userId) {
+    const mutedFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-notif-muted');
+    fs.writeFileSync(mutedFile, JSON.stringify({ muted_at: new Date().toISOString() }), { mode: 0o600 });
+    return '🔕 Уведомления о шаринге Google Drive отключены.\n\nФайлы продолжают добавляться в каталог — просто без уведомлений в чат. Включить обратно: `/google_drive_sharing_notifications_switch_on`';
+  }
+  if (GDRIVE_NOTIF_ON_INTENT.test(task) && userId) {
+    const mutedFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-notif-muted');
+    if (fs.existsSync(mutedFile)) fs.unlinkSync(mutedFile);
+    return '🔔 Уведомления о шаринге Google Drive включены.\n\nБуду писать когда кто-то откроет доступ к файлу или папке.';
   }
 
   // Capability question about illustration generation
