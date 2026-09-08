@@ -7,48 +7,6 @@ on:
     branches: [main]
 
 jobs:
-  # Validates that Claude-authored PRs include a <!-- csm-session: UUID --> comment
-  # so the CI callback workflow can wake up the session that created the PR.
-  session-link-check:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-    steps:
-      - name: Check for csm-session comment
-        run: |
-          BODY=$(gh pr view "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --json body -q '.body // ""')
-
-          # Only enforce for Claude-authored PRs (body contains Claude Code attribution).
-          if ! echo "$BODY" | grep -q "Generated with \[Claude Code\]"; then
-            echo "Human-authored PR — skipping session-link check."
-            exit 0
-          fi
-
-          echo "Claude-authored PR detected — checking for csm-session comment..."
-
-          # Allow explicit opt-out for PRs where Session Manager is unavailable (e.g. local dev).
-          if echo "$BODY" | grep -q "<!-- csm-session-skip -->"; then
-            echo "⚠️  csm-session-skip marker found — skipping check (no callback will fire for this PR)."
-            exit 0
-          fi
-
-          if echo "$BODY" | grep -qP '<!-- csm-session: [\w\-]{8,} -->'; then
-            echo "✅ csm-session comment found."
-          elif echo "$BODY" | grep -qP 'https://claude\.ai/code/session_\w+'; then
-            echo "✅ csm-session found via claude.ai URL."
-          else
-            echo "❌ Claude-authored PR is missing a valid <!-- csm-session: UUID --> comment."
-            echo ""
-            echo "Without it, CI failures and merge conflicts won't wake up the session."
-            echo "Fix: add the session ID to the PR body (replace SESSION_ID placeholder):"
-            echo "  MY_SESSION=\$(curl -s 'http://localhost:3000/api/sessions/my-id?path=\$(pwd)' | jq -r '.sessionId // empty')"
-            echo "  gh pr edit ${{ github.event.pull_request.number }} --body-file <(gh pr view ${{ github.event.pull_request.number }} --json body -q '.body' | sed \"s/SESSION_ID/\$MY_SESSION/\")"
-            exit 1
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -72,11 +30,10 @@ jobs:
           fi
 
   merge:
-    needs: [ci, session-link-check]
+    needs: [ci]
     if: |
       github.event_name == 'pull_request' &&
-      needs.ci.result == 'success' &&
-      (needs.session-link-check.result == 'success' || needs.session-link-check.result == 'failure')
+      needs.ci.result == 'success'
     runs-on: ubuntu-latest
     concurrency:
       group: merge-${{ github.event.pull_request.number }}

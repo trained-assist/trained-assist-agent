@@ -60,6 +60,7 @@ function getPendingTasks() {
 // Returns a string if the task matches, null otherwise.
 
 const STALE_PR_ALARM_INTENT = /Проверь PR #\d+: CI статус, конфликты/;
+const BUG_REPORT_INTENT     = /^\/bugreport\b|баг.{0,15}репорт|bug.{0,10}report|сообщи.{0,15}о.{0,10}(баг|проблем|ошибк)|создай.{0,15}issue|репорт.{0,10}бага|пожаловаться.{0,20}(бот|агент|баг)/i;
 const SETUP_INTENT          = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
 const INN_CAPABILITY_INTENT  = /(?:скил|skill|умееш|можешь|есть.{0,30}возможн|есть.{0,30}функц|есть.{0,30}инструм|что.{0,20}умееш).{0,80}(?:инн|огрн|компани|директор|выручк|реквизит)/i;
 // Only capability/question words, NOT action verbs (собери/собрать/найди → those are tasks, go to Claude)
@@ -217,6 +218,15 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
       '',
       'Когда всё скинешь — скажи «всё».',
     ].join('\n');
+  }
+
+  // /bugreport — collect bug description and create GitHub issue
+  if (BUG_REPORT_INTENT.test(task)) {
+    if (!workDir) return null;
+    const bugPendingPath = path.join(workDir, 'contexts', 'bugreport', 'pending.json');
+    fs.mkdirSync(path.dirname(bugPendingPath), { recursive: true });
+    fs.writeFileSync(bugPendingPath, JSON.stringify({ started_at: new Date().toISOString() }));
+    return null; // let Claude handle with bug report context injected below
   }
 
   // /ping — liveness check
@@ -1446,7 +1456,30 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     'Исключение: если пользователь явно просит «напиши сюда» или «отправь текстом» — отвечай текстом.',
   ].join('\n');
   const timeoutSection = `[Системное ограничение: у тебя 40 минут на задачу. На 38-й минуте ты получишь SIGTERM — это сигнал «заверши текущий шаг и выведи итоги». При длинных задачах сохраняй промежуточные результаты в файлы, чтобы можно было продолжить позже.]`;
-  let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
+
+  // Bug report mode — inject instructions when user triggered /bugreport (flag persists until Claude clears it)
+  let bugReportSection = '';
+  if (user.workDir) {
+    const bugPendingPath = path.join(user.workDir, 'contexts', 'bugreport', 'pending.json');
+    if (fs.existsSync(bugPendingPath)) {
+      bugReportSection = [
+        '[РЕЖИМ БАГ-РЕПОРТ]',
+        'Пользователь хочет сообщить о баге или проблеме в боте-агенте.',
+        'Алгоритм:',
+        '1. Если описание проблемы уже есть (в текущем сообщении или в истории сессии выше) — сразу создай GitHub issue:',
+        `   gh issue create --repo trained-assist/trained-assist-agent --title "Bug: <краткое описание>" --body "<подробности + последние сообщения из истории как контекст>"`,
+        '   Добавь label: gh issue edit <номер> --add-label bug',
+        `   После создания issue: удали файл ${bugPendingPath} (это выключит режим баг-репорта)`,
+        '   Ответь пользователю только ссылкой на issue + одно предложение что там.',
+        '2. Если описания ещё нет — спроси: "Что случилось? Опиши проблему как можно подробнее — что делал, что ожидал, что получил."',
+        '   Не создавай issue пока нет описания.',
+        '',
+        'В body issue включи: описание проблемы, username пользователя, последние сообщения из истории сессии как контекст бага.',
+      ].join('\n');
+    }
+  }
+
+  let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, bugReportSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;

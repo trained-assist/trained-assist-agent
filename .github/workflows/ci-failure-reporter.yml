@@ -1,0 +1,35 @@
+name: CI Failure Reporter
+
+# Reports CI failures to ci-runner, which spawns a short-lived fixer session.
+# Set CI_RUNNER_URL in repo variables (Settings → Variables):
+#   e.g. https://136-65-7-197.sslip.io  or  https://csm-relay.skillset-apply.workers.dev/github/<RELAY_NODE_ID>
+
+on:
+  workflow_run:
+    workflows: ["CI + Deploy"]
+    types: [completed]
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'failure'
+    steps:
+      - name: Forward failure event to ci-runner
+        run: |
+          RUNNER_URL="${{ vars.CI_RUNNER_URL }}"
+          if [ -z "$RUNNER_URL" ]; then
+            echo "::warning::CI_RUNNER_URL not set — skipping failure report"
+            exit 0
+          fi
+          HTTP_CODE=$(curl -sS --max-time 10 \
+            -o /tmp/runner_resp.json \
+            -w "%{http_code}" \
+            -X POST "${RUNNER_URL}/webhook/github" \
+            -H "Content-Type: application/json" \
+            -H "x-github-event: workflow_run" \
+            -d @"$GITHUB_EVENT_PATH") || HTTP_CODE="000"
+          echo "Runner HTTP $HTTP_CODE"
+          cat /tmp/runner_resp.json || true
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "::warning::ci-runner returned $HTTP_CODE"
+          fi
