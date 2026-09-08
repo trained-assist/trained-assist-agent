@@ -50,6 +50,7 @@ const DEFAULT_NEGOTIATIONS = [
     message: 'Очень интересная позиция! Имею 5 лет опыта с Node.js и PostgreSQL.',
     resume: {
       id: 'res-001',
+      alternate_url: 'https://hh.ru/resume/res-001',
       first_name: 'Алексей',
       last_name: 'Иванов',
       title: 'Senior Backend Developer',
@@ -85,6 +86,7 @@ const DEFAULT_NEGOTIATIONS = [
     message: null,
     resume: {
       id: 'res-002',
+      alternate_url: 'https://hh.ru/resume/res-002',
       first_name: 'Мария',
       last_name: 'Петрова',
       title: 'Junior PHP Developer',
@@ -113,6 +115,7 @@ const DEFAULT_NEGOTIATIONS = [
     message: 'Рассматриваю предложения. Опыт 3 года: Go, Kubernetes, PostgreSQL.',
     resume: {
       id: 'res-003',
+      alternate_url: 'https://hh.ru/resume/res-003',
       first_name: 'Дмитрий',
       last_name: 'Сидоров',
       title: 'Backend / DevOps Engineer',

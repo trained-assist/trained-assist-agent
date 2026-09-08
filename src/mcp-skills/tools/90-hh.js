@@ -608,6 +608,7 @@ module.exports = {
               updated_at: updatedAt?.slice(0, 10) || null,
               days_since_activity: daysSince,
               has_message: !!neg.message,
+              resume_url: neg.resume?.alternate_url || null,
             };
           });
 

@@ -5,6 +5,24 @@ set -e
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 
+# Save current commit so we can roll back if smoke tests fail
+PREV_COMMIT=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")
+NEW_COMMIT=$(git -C "$REPO_DIR" rev-parse origin/main 2>/dev/null || echo "")
+
+rollback() {
+  if [ -z "$PREV_COMMIT" ] || [ "$PREV_COMMIT" = "$NEW_COMMIT" ]; then
+    echo "  ⚠️  No previous commit to roll back to — skipping rollback"
+    return
+  fi
+  echo "==> 🔄 Rolling back to $PREV_COMMIT..."
+  git -C "$REPO_DIR" reset --hard "$PREV_COMMIT"
+  cd "$REPO_DIR"
+  rm -rf node_modules
+  npm ci --omit=dev
+  sudo systemctl restart "$SERVICE"
+  echo "==> Rolled back to previous version. Deploy failed."
+}
+
 echo "==> Stopping service before dependency install..."
 sudo systemctl stop "$SERVICE" 2>/dev/null || true
 
@@ -119,7 +137,11 @@ AGENT_SECRET=$(gcloud secrets versions access latest --secret=AGENT_SECRET --pro
 if [ -z "$AGENT_SECRET" ]; then
   echo "  ⚠️  AGENT_SECRET not available — skipping smoke tests"
 else
-  AGENT_URL="http://localhost:8080" AGENT_SECRET="$AGENT_SECRET" bash "$REPO_DIR/scripts/smoke-test.sh"
+  if ! AGENT_URL="http://localhost:8080" AGENT_SECRET="$AGENT_SECRET" bash "$REPO_DIR/scripts/smoke-test.sh"; then
+    echo "==> ❌ Smoke tests FAILED"
+    rollback
+    exit 1
+  fi
 fi
 
-echo "==> Deploy complete"
+echo "==> Deploy complete ✅"
