@@ -176,6 +176,11 @@ function createMockHhServer(options = {}) {
       let raw = '';
       req.on('data', c => (raw += c));
       req.on('end', () => {
+        const ct = req.headers['content-type'] || '';
+        if (ct.includes('application/x-www-form-urlencoded')) {
+          const parsed = Object.fromEntries(new URLSearchParams(raw));
+          return cb(parsed);
+        }
         try { cb(raw ? JSON.parse(raw) : {}); }
         catch { send(400, { error: 'bad json' }); }
       });

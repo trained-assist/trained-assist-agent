@@ -1264,7 +1264,7 @@ async function main() {
       const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
 
       try {
-        await hhApiPost(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
+        await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
         const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
         const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
         fs.mkdirSync(histDir, { recursive: true });
@@ -1456,7 +1456,7 @@ async function main() {
 
       try {
         // Send rejection message first
-        await hhApiPost(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
+        await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
         // Then reject in HH
         await hhApiPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData.access_token);
 
@@ -3758,6 +3758,45 @@ function hhApiRequest(method, apiPath, accessToken, body) {
 
 function hhApiPost(apiPath, token, body) { return hhApiRequest('POST', apiPath, token, body); }
 function hhApiPut(apiPath, token, body) { return hhApiRequest('PUT', apiPath, token, body || undefined); }
+
+// HH messages endpoint requires application/x-www-form-urlencoded, not JSON
+function hhApiPostForm(apiPath, token, fields) {
+  return new Promise((resolve, reject) => {
+    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
+    const u = new URL(base);
+    const lib = u.protocol === 'https:' ? https : http;
+    const bodyStr = new URLSearchParams(fields).toString();
+    const reqOpts = {
+      hostname: u.hostname,
+      path: apiPath,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+        'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(bodyStr),
+      },
+    };
+    if (u.port) reqOpts.port = parseInt(u.port, 10);
+    const req = lib.request(reqOpts, (r) => {
+      const chunks = [];
+      r.on('data', c => chunks.push(c));
+      r.on('end', () => {
+        const data = Buffer.concat(chunks).toString('utf8');
+        if (r.statusCode === 204 || !data) return resolve({});
+        if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
+        try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      });
+    });
+    req.setTimeout(HH_API_TIMEOUT_MS, () => {
+      req.destroy(new Error(`HH API timeout after ${HH_API_TIMEOUT_MS / 1000}s: POST ${apiPath}`));
+    });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[unhandledRejection] at:', promise, 'reason:', reason);
