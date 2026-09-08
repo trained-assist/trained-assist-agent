@@ -1023,6 +1023,36 @@ module.exports = {
               }
             }
 
+            // Persist message_draft so the live /hh/review page can pre-fill the textarea
+            let messageDraft = history.message_draft || null;
+            if (atsResult.score != null && atsResult.verdict !== 'ОТКЛОНИТЬ') {
+              const configVersion = ats_config.updated_at || null;
+              if (!messageDraft || messageDraft.config_version !== configVersion) {
+                try {
+                  const alreadySent = (history.messages || []).some(m => m.role === 'employer');
+                  const msgType = atsResult.verdict === 'ПРОПУСТИТЬ' ? 'invite_call'
+                    : alreadySent ? 'followup'
+                    : 'initial';
+                  const draftText = await generateMessage(
+                    candidateContext,
+                    atsResult,
+                    name,
+                    apiKey,
+                    msgType,
+                    history.messages || [],
+                    USER_ID,
+                  );
+                  if (draftText) {
+                    messageDraft = { text: draftText, generated_at: new Date().toISOString(), config_version: configVersion };
+                    history.message_draft = messageDraft;
+                    saveCandidateHistory(USER_ID, neg.id, history);
+                  }
+                } catch (e) {
+                  console.error(`[hh_batch_evaluate] draft error for ${neg.id}: ${e.message}`);
+                }
+              }
+            }
+
             results.push({
               negotiation_id: neg.id,
               name,
@@ -1035,6 +1065,7 @@ module.exports = {
               updated_at: updatedAt?.slice(0, 10) || null,
               resume_text: candidateContext,
               history_messages: history.messages || [],
+              message_draft: messageDraft,
             });
           }
 

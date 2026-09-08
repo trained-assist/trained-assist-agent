@@ -3129,6 +3129,14 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { messages: [], ats_result: null }; }
   }
 
+  // Read ATS config version to validate cached drafts
+  let atsConfigVersion = null;
+  try {
+    const workDir = path.join(BASE_USERS_DIR, String(username));
+    const atsCfg = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'ats_config.json'), 'utf8'));
+    atsConfigVersion = atsCfg?.value?.updated_at || null;
+  } catch {}
+
   function buildResumeText(neg) {
     const r = neg.resume || {};
     const lines = [];
@@ -3172,7 +3180,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       reasoning: ats?.reasoning ?? null,
       matched: ats?.matched || [],
       gaps: ats?.gaps || [],
-      draft_message: ats?.draft_message ?? null,
+      draft_message: (() => {
+        const md = history.message_draft;
+        if (md?.text && (!atsConfigVersion || md.config_version === atsConfigVersion)) return md.text;
+        return ats?.draft_message ?? null;
+      })(),
       days_since_activity: daysAgo,
       resume_text: buildResumeText(neg),
       history_messages: history.messages || [],
