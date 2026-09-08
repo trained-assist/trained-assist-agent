@@ -626,6 +626,13 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     if (!match.test(task)) continue;
     console.log('[quick-answer] matched service=%s uid=%s', service || 'null', userId);
     if (service && userId) {
+      // Guard: if already connected, don't re-send the connect link
+      if (service === 'hh') {
+        const hhPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'hh');
+        if (fs.existsSync(hhPath)) {
+          return 'HeadHunter уже подключён ✅ Могу искать кандидатов, писать сообщения, создавать вакансии.';
+        }
+      }
       return { __connectLink: true, service, hint };
     }
     return hint;
