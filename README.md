@@ -894,95 +894,23 @@ GitHub branch protection is not available on this private repo (free plan) — e
 
 ---
 
-## PR Session Lifecycle — обязательные правила для Claude
+## CI Failure Handling — автоматическое
 
-Когда Claude создаёт PR — CI может упасть, появиться merge conflict, или PR зависнет без внимания. Чтобы этого не происходило, каждый PR должен включать session ID, чтобы сессия могла получать callback-ы и самостоятельно реагировать.
+CI-падения обрабатываются автоматически через Session Manager — никаких дополнительных действий не нужно.
 
-### Шаг 1. Получи свой session ID
+Когда CI падает на любом PR, `ci-failure-reporter.yml` отправляет событие в Session Manager. Session Manager:
+1. Ищет локальный путь к репозиторию по имени
+2. Проверяет, нет ли уже активной сессии для этого проекта
+3. Если нет — запускает короткую одноразовую сессию-фиксер с контекстом падения
+4. Фиксер чинит проблему, коммитит, пушит — CI перезапускается автоматически
+5. Если не может починить — пишет `CI_FAILURE_SUMMARY.md` в корень проекта и уведомляет через Telegram
 
-**Правило: всегда используй session ID из attribution URL в system-reminder, а не из Session Manager API.**
+**Не нужно:**
+- Встраивать session ID в тело PR
+- Ставить алармы вручную
+- Следить за CI из той же сессии
 
-Каждая сессия Claude Code получает attribution URL в system-reminder в формате:
-```
-Claude-Session: https://claude.ai/code/session_01E2Lipo7mtQhPi2382Zc8Ma
-```
-
-Этот ID (`01E2Lipo7mtQhPi2382Zc8Ma`) — и есть `SESSION_ID`. Используй его напрямую.
-
+**PR создаётся просто:**
 ```bash
-# Опционально — Session Manager может дать доп. контекст,
-# но attribution URL из system-reminder всегда доступен:
-MY_SESSION=<ID из https://claude.ai/code/session_XXXXX в system-reminder>
+gh pr create --title "feat: ..." --fill
 ```
-
-**Если Session Manager недоступен** (curl вернул ошибку или пустой ответ) — всё равно используй ID из attribution URL. Без этого CI упадёт.
-
-### Шаг 2. Создай PR с session ID в теле
-
-Используй `gh pr create` с телом из шаблона (`.github/PULL_REQUEST_TEMPLATE.md`), **обязательно заменив SESSION_ID на реальный ID** (не оставляй placeholder):
-
-```bash
-gh pr create --title "feat: ..." --body "$(cat <<EOF
-## Описание
-
-Краткое описание изменения.
-
-## Тип изменения
-
-- [x] feat
-
-<!-- csm-session: $MY_SESSION -->
-
-https://claude.ai/code/session_$MY_SESSION
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-EOF
-)"
-```
-
-> CI автоматически проверит наличие `<!-- csm-session: UUID -->` или `https://claude.ai/code/session_XXXXX` в теле. Если SESSION_ID не заменён — job упадёт.
-
-> **Важно:** Никогда не оставляй литерал `SESSION_ID` в теле PR — это placeholder. CI принимает любой буквенно-цифровой ID длиной 8+ символов вместо UUID-формата, но для обратной связи нужен реальный ID сессии.
-
-### Шаг 3. Поставь self-alarm (страховка)
-
-Если callback не придёт (relay недоступен, или PR создан без триггера) — сессия всё равно проснётся:
-
-```bash
-curl -s -X POST "http://localhost:3000/api/sessions/$MY_SESSION/alarm" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Проверь PR: CI статус, конфликты, review", "check_after_ms": 1800000}'
-```
-
-### При получении `[CI CALLBACK]`
-
-Callback приходит в формате:
-
-```
-[CI CALLBACK] Workflow: CI + Deploy | Status: failure | URL: https://github.com/...
-```
-
-| Status | Что делать |
-|--------|-----------|
-| `success` | Убедись что PR готов к мержу. Отмени alarm если ставил. |
-| `failure` | Прочитай логи по URL. Исправь ошибки, запушь, жди следующий callback. |
-| `cancelled` | Не критично — CI перезапустится. Ничего делать не нужно. |
-| `⚠️ MERGE CONFLICT` | `git fetch origin && git rebase origin/main && git push --force-with-lease` |
-| `new_commits` | Новые коммиты в ветке — жди новых результатов CI. |
-
-### Если CI падает 3+ раз с одной ошибкой
-
-Не продолжай цикл бесконечно. Напиши комментарий в PR и попроси human review:
-
-```bash
-gh pr comment $PR_NUMBER --body "🚨 CI падает 3 раза подряд с ошибкой: <описание>. Нужен human review."
-```
-
-### Где жаловаться на проблемы
-
-| Проблема | Куда |
-|----------|------|
-| Relay не отвечает | `curl https://csm-relay.skillset-apply.workers.dev/health` — если 5xx, это инфра. Поставь alarm как страховку. |
-| Session Manager не найден | `curl -s "http://localhost:3000/api/sessions/my-id?path=$(pwd)"` — если 404, сессия не зарегистрирована |
-| PR завис без CI | Проверь Actions вкладку в GitHub — возможно CI не запустился из-за draft PR или syntax error в workflow |
-| Merge conflict после push | `git fetch origin main && git rebase origin/main` — всегда rebase, не merge |
