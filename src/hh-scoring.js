@@ -364,6 +364,24 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
   const styleFile = fs.existsSync(styleInTokens) ? styleInTokens : (fs.existsSync(styleInWork) ? styleInWork : null);
   const commStyle = styleFile ? fs.readFileSync(styleFile, 'utf8').trim() : null;
 
+  // Read recruiter identity config (agency, name, signature, rules)
+  let msgCfg = null;
+  try {
+    const msgCfgFile = path.join(workDir, 'contexts', 'hh', 'message_config.json');
+    if (fs.existsSync(msgCfgFile)) {
+      const raw = JSON.parse(fs.readFileSync(msgCfgFile, 'utf8'));
+      let val = raw?.value;
+      if (typeof val === 'string') val = JSON.parse(val);
+      if (val && typeof val === 'object') msgCfg = val;
+    }
+  } catch { /* ignore */ }
+  const recruiterCtx = msgCfg ? [
+    msgCfg.represent_as || (msgCfg.agency ? `Ты пишешь от лица агентства ${msgCfg.agency}.` : ''),
+    msgCfg.recruiter_name ? `Твоё имя: ${msgCfg.recruiter_name}.` : '',
+    msgCfg.signature ? `Подпись в конце каждого сообщения: «${msgCfg.signature}».` : '',
+    ...(msgCfg.rules || []).map(r => `ПРАВИЛО: ${r}`),
+  ].filter(Boolean).join('\n') : '';
+
   const vacancyCtx = atsConfig.vacancy_title && atsConfig.vacancy_context
     ? `Вакансия: ${atsConfig.vacancy_title}\n\n${atsConfig.vacancy_context}`
     : '';
@@ -397,9 +415,11 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
         const r = neg.resume || {};
         const firstName = r.first_name || r.last_name || 'Кандидат';
 
-        const systemPrompt = commStyle
-          ? `${isReject ? rejectionSystem : baseSystem}\n\n## Стиль рекрутера\n${commStyle}`
-          : (isReject ? rejectionSystem : baseSystem);
+        const systemPrompt = [
+          isReject ? rejectionSystem : baseSystem,
+          recruiterCtx ? `\n\n## Идентичность рекрутера\n${recruiterCtx}` : '',
+          commStyle ? `\n\n## Стиль рекрутера\n${commStyle}` : '',
+        ].join('');
 
         const resumeText = buildResumeText(neg);
         const userMsg = isReject

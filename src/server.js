@@ -1296,6 +1296,18 @@ async function main() {
       const styleFile = path.join(hhTokensBase, String(username), 'hh-message-style');
       const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
 
+      // Read recruiter identity config (agency, name, signature, rules)
+      let msgCfg = null;
+      try {
+        const msgCfgFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'message_config.json');
+        if (fs.existsSync(msgCfgFile)) {
+          const raw = JSON.parse(fs.readFileSync(msgCfgFile, 'utf8'));
+          let val = raw?.value;
+          if (typeof val === 'string') val = JSON.parse(val);
+          if (val && typeof val === 'object') msgCfg = val;
+        }
+      } catch { /* ignore */ }
+
       const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
       const candDir = path.join(dataDir, 'hh', String(username), 'candidates');
       const histFile = path.join(candDir, `${negotiation_id}.json`);
@@ -1366,10 +1378,19 @@ async function main() {
       const rejectionSystem = `Ты — рекрутер. Напиши вежливый отказ кандидату.
 Тон: уважительный, тёплый, без объяснения причин. Пожелай удачи в поиске. 2-3 предложения. Пиши на русском языке.`;
 
+      const recruiterCtx = msgCfg ? [
+        msgCfg.represent_as || (msgCfg.agency ? `Ты пишешь от лица агентства ${msgCfg.agency}.` : ''),
+        msgCfg.recruiter_name ? `Твоё имя: ${msgCfg.recruiter_name}.` : '',
+        msgCfg.signature ? `Подпись в конце каждого сообщения: «${msgCfg.signature}».` : '',
+        ...(msgCfg.rules || []).map(r => `ПРАВИЛО: ${r}`),
+      ].filter(Boolean).join('\n') : '';
+
       const activeSystem = msgType === 'rejection' ? rejectionSystem : msgType === 'followup' ? followupSystem : baseSystem;
-      const systemPrompt = commStyle
-        ? `${activeSystem}\n\n## Стиль общения рекрутера\n${commStyle}`
-        : activeSystem;
+      const systemPrompt = [
+        activeSystem,
+        recruiterCtx ? `\n\n## Идентичность рекрутера\n${recruiterCtx}` : '',
+        commStyle ? `\n\n## Стиль общения рекрутера\n${commStyle}` : '',
+      ].join('');
 
       const firstName = (candidate_name || 'Кандидат').split(' ')[0];
       const userMsg = msgType === 'rejection'
