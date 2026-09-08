@@ -2403,8 +2403,14 @@ ${expLines || '—'}
       try {
         if (fs.statSync(tokenFilePath).isDirectory()) tokenFilePath = path.join(tokenFilePath, 'credentials.json');
       } catch { /* path doesn't exist yet — write flat file */ }
+      // Check if value changed — ZeroCreds retries the same webhook, skip notification on duplicates.
+      let valueChanged = true;
+      try {
+        const existing = fs.readFileSync(tokenFilePath, 'utf8');
+        if (existing === storedValue) valueChanged = false;
+      } catch { /* file didn't exist — first save */ }
       fs.writeFileSync(tokenFilePath, storedValue, { mode: 0o600 });
-      console.log(`[tokens] saved label="${label}" userId=${userId} path=${tokenFilePath}`);
+      console.log(`[tokens] saved label="${label}" userId=${userId} path=${tokenFilePath} changed=${valueChanged}`);
 
       // Dispatch service-specific post-save actions (Playwright login, notifications, etc.)
       // Add new services here — no need to touch the handler logic below.
@@ -2430,7 +2436,7 @@ ${expLines || '—'}
       };
 
       const svcAction = TOKEN_SERVICE_ACTIONS[label];
-      if (svcAction) {
+      if (svcAction && valueChanged) {
         let creds;
         try { creds = JSON.parse(storedValue); } catch { /* not JSON — skip action */ }
         if (creds && svcAction.guard(creds)) {
@@ -2503,7 +2509,7 @@ ${expLines || '—'}
           return vals.length > 0 && vals.some(v => v && String(v).length > 0);
         } catch { return storedValue.length > 3; }
       })();
-      if (!svcAction && label !== 'nalog-creds' && hasRealValue) {
+      if (!svcAction && label !== 'nalog-creds' && hasRealValue && valueChanged) {
         const fbChatId = readChatId(String(userId));
         if (fbChatId && secrets.BOT_TOKEN) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
