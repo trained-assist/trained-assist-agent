@@ -248,6 +248,12 @@ async function _checkUser(userId, botToken) {
       ? `📂 Открыли доступ к ${label} [${name}](${link})\nОт: ${owner}\n\nСкажи что делать с файлом.`
       : `📂 Открыли доступ к ${label} «${name}»\nОт: ${owner}\n\nСкажи что делать с файлом.`;
 
+    const mutedFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-notif-muted');
+    if (fs.existsSync(mutedFile)) {
+      console.log(`[drive-watcher] userId=${userId}: notifications muted, skipping TG send for "${name}"`);
+      continue;
+    }
+
     const chatId = _readChatId(userId);
     if (!chatId) {
       console.warn(`[drive-watcher] no chatId for userId=${userId}, skipping notification`);
