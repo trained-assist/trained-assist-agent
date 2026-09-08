@@ -1026,8 +1026,8 @@ function buildContextCard(username, workDir) {
       if (vac?.title) {
         const atsFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
         const hasAts = fs.existsSync(atsFile);
-        const scoringIcon = hasAts ? '⚡' : '⏸';
-        lines.push(`💼 ${vac.title} ${scoringIcon}`);
+        lines.push(`💼 ${vac.title}`);
+        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
       }
     } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
   }
