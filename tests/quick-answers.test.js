@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -198,6 +198,17 @@ describe('Revoke service access', () => {
 // ── Expo participants capability ──────────────────────────────────────────────
 
 describe('Expo participants capability questions', () => {
+  let expoWorkDir;
+
+  beforeAll(() => {
+    expoWorkDir = mkdtempSync(join(tmpdir(), 'qa-expo-test-'));
+    mkdirSync(join(expoWorkDir, 'expo-pipeline'), { recursive: true });
+  });
+
+  afterAll(() => {
+    rmSync(expoWorkDir, { recursive: true, force: true });
+  });
+
   it.each([
     'умеешь собрать участников выставки?',
     'можешь собрать список экспонентов?',
@@ -206,7 +217,7 @@ describe('Expo participants capability questions', () => {
     'есть инструмент для экспонентов?',
     'умеешь парсить участников expo?',
   ])('expo capability: "%s" → quick', (task) => {
-    expect(qa(task)).not.toBeNull();
+    expect(qa(task, null, expoWorkDir)).not.toBeNull();
   });
 
   it.each([
@@ -215,14 +226,18 @@ describe('Expo participants capability questions', () => {
     'зайди на страницу участников выставки и скачай список',
     'найди участников на сайте выставки agros.org.ru',
   ])('actual expo task NOT intercepted: "%s"', (task) => {
-    expect(qa(task)).toBeNull();
+    expect(qa(task, null, expoWorkDir)).toBeNull();
   });
 
   it('expo+INN combo question → expo answer (not INN answer)', () => {
-    const r = qa('умеешь собрать участников выставки и обогатить по ИНН?');
+    const r = qa('умеешь собрать участников выставки и обогатить по ИНН?', null, expoWorkDir);
     expect(r).not.toBeNull();
     // Should be expo answer mentioning "выставок", not INN enrichment answer
     expect(r).toMatch(/выставок|выставк/i);
+  });
+
+  it('expo capability without workDir → null (guard: skill not activated)', () => {
+    expect(qa('умеешь собрать участников выставки?')).toBeNull();
   });
 });
 
@@ -308,6 +323,20 @@ describe('Google Drive — SA email quick answer', () => {
 // ── False-positive guard: real tasks must NOT be intercepted ──────────────────
 
 describe('GetCourse capability questions', () => {
+  const gcUserId = 'test-gc-user-' + Date.now();
+  let gcConfigPath;
+
+  beforeAll(() => {
+    const gcDir = join(homedir(), 'agent-tokens', gcUserId, 'getcourse');
+    mkdirSync(gcDir, { recursive: true });
+    gcConfigPath = join(gcDir, 'config.json');
+    writeFileSync(gcConfigPath, JSON.stringify({ domain: 'test.getcourse.ru', api_key: 'fake' }));
+  });
+
+  afterAll(() => {
+    rmSync(join(homedir(), 'agent-tokens', gcUserId), { recursive: true, force: true });
+  });
+
   it.each([
     'умеешь работать с геткурс?',
     'можешь работать с getcourse?',
@@ -318,7 +347,11 @@ describe('GetCourse capability questions', () => {
     'умеешь добавлять учеников в курс',
     'умеешь работать с уроками',
   ])('capability: "%s" → quick', (task) => {
-    expect(qa(task)).not.toBeNull();
+    expect(qa(task, gcUserId)).not.toBeNull();
+  });
+
+  it('gc capability without userId → null (guard: skill not configured)', () => {
+    expect(qa('умеешь работать с геткурс?')).toBeNull();
   });
 
   it.each([
@@ -330,7 +363,7 @@ describe('GetCourse capability questions', () => {
     // These are either setup-handled or go to Claude — but they must not return null
     // if matched by another quick-answer rule; we only check they don't silently eat tasks
     // that should reach Claude. Setup tasks return non-null (correct). Action tasks → null.
-    const result = qa(task);
+    const result = qa(task, gcUserId);
     const isSetup = /подключи|настро|интегр/i.test(task);
     if (isSetup) expect(result).not.toBeNull(); // correctly handled by QUICK_SETUPS
     else expect(result).toBeNull();             // must reach Claude
