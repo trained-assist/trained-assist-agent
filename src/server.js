@@ -1955,6 +1955,30 @@ ${expLines || '—'}
       return json(res, 200, { ok: true, username });
     }
 
+    // ── POST /web/logout — clear the auth cookie ─────────────────────────────
+    if (req.method === 'POST' && url.pathname === '/web/logout') {
+      clearTokenCookie(res);
+      return json(res, 200, { ok: true });
+    }
+
+    // ── GET /web, /web/, /web/<asset> — serve the vendored web UI (public) ────
+    if (req.method === 'GET' && (url.pathname === '/web' || url.pathname === '/web/' ||
+        /^\/web\/(index\.html|login\.html|app\.js|style\.css)$/.test(url.pathname))) {
+      const WEB_UI_DIR = path.join(__dirname, 'web-ui');
+      const CT = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+      let file = url.pathname.replace(/^\/web\/?/, '') || 'index.html';
+      const full = path.join(WEB_UI_DIR, file);
+      // Defence-in-depth: never serve outside the web-ui dir
+      if (!path.resolve(full).startsWith(path.resolve(WEB_UI_DIR))) return json(res, 400, { error: 'bad path' });
+      try {
+        const buf = fs.readFileSync(full);
+        res.writeHead(200, { 'Content-Type': CT[path.extname(full)] || 'application/octet-stream', 'Cache-Control': 'no-cache' }).end(buf);
+      } catch {
+        res.writeHead(404, { 'Content-Type': 'text/plain' }).end('not found');
+      }
+      return;
+    }
+
     // ── POST /admin/webpass — generate password for a profile (AGENT_SECRET) ─
     if (req.method === 'POST' && url.pathname === '/admin/webpass') {
       const auth = req.headers['authorization'] || '';

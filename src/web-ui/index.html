@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Assistant</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+</head>
+<body>
+  <div class="container" id="app">
+
+    <!-- Loading -->
+    <div id="view-loading" style="padding:48px 0;text-align:center">
+      <div class="loading" style="justify-content:center">
+        <div class="spinner"></div> Loading…
+      </div>
+    </div>
+
+    <!-- Sessions list -->
+    <div id="view-sessions" class="hidden">
+      <nav class="nav">
+        <span class="nav-title">Claude Assistant</span>
+        <button class="btn btn-primary" id="btn-new">+ New</button>
+        <button class="btn btn-ghost" id="btn-logout">Logout</button>
+      </nav>
+      <div class="card">
+        <div class="section-header">
+          <h2>Sessions</h2>
+        </div>
+        <div id="sessions-list"></div>
+      </div>
+    </div>
+
+    <!-- Session detail -->
+    <div id="view-session" class="hidden">
+      <nav class="nav">
+        <a class="nav-back" id="btn-back" href="#">← Sessions</a>
+        <span class="nav-title" id="session-title"></span>
+        <button class="btn btn-danger hidden" id="btn-stop">Stop</button>
+      </nav>
+      <div class="card" id="session-card">
+        <div id="messages-container" class="messages"></div>
+        <div id="stream-area" class="stream-area hidden"></div>
+        <div id="reconnect-notice" class="reconnect-notice hidden">Reconnecting…</div>
+        <div class="reply-form">
+          <textarea id="reply-input" placeholder="Reply (Ctrl+Enter to send)" rows="2"></textarea>
+          <button class="btn btn-primary" id="btn-send">Send</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- New session modal -->
+  <div id="modal-new" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <h2>New Session</h2>
+      <div class="field">
+        <label for="folder-select">Project folder</label>
+        <select id="folder-select">
+          <option value="">Loading folders…</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="task-input">Task</label>
+        <textarea id="task-input" rows="4" placeholder="Describe what Claude should do…"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="btn-cancel-new">Cancel</button>
+        <button class="btn btn-primary" id="btn-start-new">Start</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

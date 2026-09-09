@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — Claude Assistant</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="auth-page">
+    <div class="auth-card">
+      <h1>Claude Assistant</h1>
+      <form id="form">
+        <div class="field">
+          <label for="username">Username</label>
+          <input type="text" id="username" autocomplete="username" autocapitalize="off" spellcheck="false" autofocus required>
+        </div>
+        <div class="field">
+          <label for="password">Access Password</label>
+          <input type="password" id="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">Sign in</button>
+        <div id="err" class="err hidden"></div>
+      </form>
+    </div>
+  </div>
+  <script>
+    document.getElementById('form').addEventListener('submit', async e => {
+      e.preventDefault();
+      const btn = e.target.querySelector('button[type=submit]');
+      const err = document.getElementById('err');
+      btn.disabled = true;
+      btn.textContent = 'Signing in…';
+      err.classList.add('hidden');
+
+      try {
+        const res = await fetch('/web/auth', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: document.getElementById('username').value.trim(),
+            password: document.getElementById('password').value
+          })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          err.textContent = data.error || 'Invalid username or password';
+          err.classList.remove('hidden');
+          btn.disabled = false;
+          btn.textContent = 'Sign in';
+          return;
+        }
+        // Auth is a httpOnly cookie set by the server — nothing to store client-side.
+        location.href = 'index.html';
+      } catch {
+        err.textContent = 'Connection error. Try again.';
+        err.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Sign in';
+      }
+    });
+  </script>
+</body>
+</html>
