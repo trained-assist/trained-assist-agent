@@ -914,3 +914,24 @@ CI-падения обрабатываются автоматически чер
 ```bash
 gh pr create --title "feat: ..." --fill
 ```
+
+---
+
+## Immutable PRs — правило для Claude
+
+**Никогда не пушить в чужую ветку.** PR — одноразовая попытка.
+
+Если нужно починить упавший CI чужого PR:
+
+```bash
+git fetch origin
+git checkout -b fix/ci-<branch>-$(date +%s) origin/<branch>
+# вносишь фикс
+git push origin fix/ci-...
+gh pr create --base main --fill
+# закрыть старый PR:
+OLD=$(gh pr list --head <branch> --json number --jq '.[0].number')
+[ -n "$OLD" ] && gh pr close "$OLD" --comment "Superseded by this PR"
+```
+
+Перед любым `git push`: убедись что ветка была создана тобой в этой сессии.
