@@ -1,9 +1,16 @@
 const path = require('path');
-const os = require('os');
+const { EventEmitter } = require('events');
 const { webAuth } = require('./web-auth');
 const { listSessions, getSession } = require('./session-store');
-const { isTaskRunning } = require('./runner');
+const { isTaskRunning, runTask, stopUserTask } = require('./runner');
 const { userWorkDir } = require('./data-paths');
+
+// Per-task SSE emitters: taskId → EventEmitter
+const taskEmitters = new Map();
+
+const PING_INTERVAL_MS = 15_000;
+const USERNAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 function json(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
@@ -100,6 +107,47 @@ async function handleWebRoute(req, url, res, secrets) {
     return json(res, 200, { root: workDir, tree }), true;
   }
 
+  // ── POST /web/run — start a new task, stream via SSE ────────────────────
+  if (req.method === 'POST' && p === '/web/run') {
+    const username = webAuth(req, secrets.WEB_JWT_SECRET);
+    if (!username) return json(res, 401, { error: 'unauthorized' }), true;
+    if (!checkOrigin(req, secrets)) return json(res, 403, { error: 'forbidden' }), true;
+
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }), true; }
+    const { task, sessionId } = body || {};
+    if (!task || typeof task !== 'string' || !task.trim()) return json(res, 400, { error: 'task required' }), true;
+
+    return streamWebTask({ req, res, secrets, username, task: task.trim(), sessionId: sessionId || null }), true;
+  }
+
+  // ── POST /web/reply/:sessionId — resume a session ────────────────────────
+  if (req.method === 'POST' && p.startsWith('/web/reply/')) {
+    const username = webAuth(req, secrets.WEB_JWT_SECRET);
+    if (!username) return json(res, 401, { error: 'unauthorized' }), true;
+    if (!checkOrigin(req, secrets)) return json(res, 403, { error: 'forbidden' }), true;
+
+    const sessionId = p.slice('/web/reply/'.length);
+    if (!sessionId || !SESSION_ID_RE.test(sessionId)) return json(res, 400, { error: 'invalid session id' }), true;
+
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }), true; }
+    const { message } = body || {};
+    if (!message || typeof message !== 'string' || !message.trim()) return json(res, 400, { error: 'message required' }), true;
+
+    return streamWebTask({ req, res, secrets, username, task: message.trim(), sessionId }), true;
+  }
+
+  // ── POST /web/stop/:sessionId — stop running task ────────────────────────
+  if (req.method === 'POST' && p.startsWith('/web/stop/')) {
+    const username = webAuth(req, secrets.WEB_JWT_SECRET);
+    if (!username) return json(res, 401, { error: 'unauthorized' }), true;
+    if (!checkOrigin(req, secrets)) return json(res, 403, { error: 'forbidden' }), true;
+
+    stopUserTask(username);
+    return json(res, 200, { ok: true }), true;
+  }
+
   return false;
 }
 
@@ -133,6 +181,85 @@ function buildDirTree(dir, root, maxDepth, currentDepth = 0) {
     }
   }
   return result;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    req.on('error', reject);
+  });
+}
+
+function checkOrigin(req, secrets) {
+  const origin = req.headers['origin'] || '';
+  const allowed = process.env.AGENT_PUBLIC_URL || 'http://localhost:3001';
+  // Also allow localhost in dev
+  if (origin === allowed) return true;
+  if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return true;
+  return false;
+}
+
+async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
+  const workDir = userWorkDir(username);
+  const taskId = `${username}-web-${Date.now()}`;
+
+  const emitter = new EventEmitter();
+  taskEmitters.set(taskId, emitter);
+
+  // Start SSE stream
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const send = (data) => {
+    try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+  };
+
+  const ping = setInterval(() => {
+    try { res.write('event: ping\ndata: {}\n\n'); } catch {}
+  }, PING_INTERVAL_MS);
+
+  emitter.on('chunk', text => send({ type: 'chunk', text }));
+  emitter.on('done', sessionId => send({ type: 'done', sessionId }));
+  emitter.on('error', err => send({ type: 'error', error: err }));
+
+  req.on('close', () => {
+    clearInterval(ping);
+    taskEmitters.delete(taskId);
+  });
+
+  const finish = (eventName, payload) => {
+    emitter.emit(eventName, payload);
+    clearInterval(ping);
+    taskEmitters.delete(taskId);
+    try { res.end(); } catch {}
+  };
+
+  // runTask returns a Promise that resolves when Claude exits
+  runTask({
+    taskId,
+    user: { id: 0, name: username, username, workDir },
+    task,
+    context: '',
+    sessionId: sessionId || undefined,
+    secrets: { TELEGRAM_BOT_TOKEN: secrets.BOT_TOKEN, ...secrets },
+    initialMsgId: null,
+    pinnedMsgId: null,
+    outputCallback: (text) => emitter.emit('chunk', text),
+  }).then(() => {
+    // sessionId may have been created inside _runTask; best we can do is
+    // tell the client the task is done — they can refresh /web/sessions to find it
+    finish('done', sessionId || null);
+  }).catch((err) => {
+    finish('error', err?.message || 'task failed');
+  });
 }
 
 module.exports = { handleWebRoute };
