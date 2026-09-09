@@ -961,6 +961,14 @@ function getActiveTaskCount() {
   return userQueues.size;
 }
 
+function isTaskRunning(username) {
+  const prefix = `${username}-`;
+  for (const [taskId] of activeTimers.entries()) {
+    if (taskId.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
 /**
  * Kill any running Claude process for a given username.
  * Finds all entries in activeTimers whose taskId starts with `${username}-`
@@ -1889,7 +1897,7 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
 
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  waitForIdle, getActiveTaskCount, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
 };

@@ -6,6 +6,7 @@ const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkPassword, generatePassword } = require('./web-auth');
+const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
@@ -1934,6 +1935,11 @@ ${expLines || '—'}
       } catch (e) {
         return json(res, 500, { error: e.message });
       }
+    }
+
+    // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
+    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth') {
+      if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
     // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
