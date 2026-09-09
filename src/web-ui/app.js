@@ -89,8 +89,8 @@ function renderSessions(sessions) {
   el.innerHTML = sessions.map(s => `
     <div class="session-item" data-id="${esc(s.id)}">
       <div class="session-info">
-        <div class="session-path">${esc(s.path || s.id)}</div>
-        <div class="session-meta">${timeAgo(s.createdAt)}</div>
+        <div class="session-path">${esc(s.topic || s.lastUserMessage || s.id)}</div>
+        <div class="session-meta">${timeAgo(s.lastAt || s.createdAt)}${s.messageCount ? ` · ${s.messageCount} msg` : ''}</div>
       </div>
       ${statusBadge(s.status)}
     </div>
@@ -130,7 +130,7 @@ async function loadSession(id) {
 
 function renderSession(session) {
   const { id, status, messages, lastMessage } = session;
-  $('session-title').textContent = session.path || id;
+  $('session-title').textContent = session.topic || session.path || id;
 
   const msgs = Array.isArray(messages) && messages.length
     ? messages
@@ -284,7 +284,7 @@ async function startStream(endpoint, body, appendUserMsg = null) {
               }
               return;
             } else if (msg.type === 'error') {
-              streamEl.innerHTML = `<div class="err">${esc(msg.message || 'Error')}</div>`;
+              streamEl.innerHTML = `<div class="err">${esc(msg.error || msg.message || 'Error')}</div>`;
               finalise();
               return;
             }
