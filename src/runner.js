@@ -874,7 +874,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   return null;
 }
 
-// Per-user serial task queue: Map<userId, Promise>
+// Per-user serial task queue: Map<username, Promise>
 // Prevents concurrent Claude processes for the same user (OOM risk on small VMs).
 const userQueues = new Map();
 
@@ -1003,7 +1003,7 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  const userId = String(opts.user.id);
+  const queueKey = opts.user.username;
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -1021,15 +1021,15 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  const prev = userQueues.get(userId) ?? Promise.resolve();
+  const prev = userQueues.get(queueKey) ?? Promise.resolve();
   const current = prev.then(() => _runTask(opts)).catch(err => {
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
-  userQueues.set(userId, current);
+  userQueues.set(queueKey, current);
   current.finally(() => {
     clearPendingTask(opts.taskId);
     // Only clear if no newer task was enqueued after us
-    if (userQueues.get(userId) === current) userQueues.delete(userId);
+    if (userQueues.get(queueKey) === current) userQueues.delete(queueKey);
   });
   return current;
 }
