@@ -100,6 +100,9 @@ const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}
 const ILLUSTRATE_ENABLE_INTENT = /включ.{0,20}(?:рисован|иллюстр|картинк|рисунок)|добав.{0,20}(?:рисован|иллюстр|генерац)|активируй.{0,20}(?:рисован|иллюстр|скил.{0,10}рисован)|\/enable_illustrate/i;
 // Matches concrete draw commands with subject content — these go to Claude even when skill is enabled
 const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|создай.{0,20}(?:иллюстр|картинк|схем)|сделай.{0,20}(?:иллюстр|картинк|схем)|покажи.{0,20}(?:схем|как устроен|анатоми))\s+\S.{5,}/i;
+// Developer intent — matches "разработай X", "создай приложение", "сделай сервис" etc.
+// NOT vacancy creation ("создай вакансию") or illustrate ("создай иллюстрацию") — those have dedicated intents.
+const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|напиш[иь]).{0,40}(?:приложени|сервис(?!\s*аккаунт)|бот(?!\s*токен|\s*ключ)(?!\s*weeek|\s*hh|\s*tilda|\s*nalog)|сайт(?!\s*с\s+tilda)(?!\s+tilda)|систем|скрипт(?!\s+для\s+(?:выставки|expo))|библиотек|пакет|модул|апи-сервис)|implement\s+\S|build\s+(?:app|service|bot|api)|develop\s+(?:app|feature|bot)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
@@ -174,6 +177,20 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   if (STALE_PR_ALARM_INTENT.test(task)) {
     const prNum = task.match(/#(\d+)/)?.[1];
     return `✅ PR #${prNum} уже смёрджен. Этот alarm устарел — можно его удалить.`;
+  }
+
+  // Developer intent — if GitHub not connected, ask to connect before doing anything
+  if (DEV_INTENT.test(task) && userId) {
+    const ghPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'github');
+    if (!fs.existsSync(ghPath)) {
+      return {
+        __connectLink: true,
+        service: 'github',
+        hint: 'Для разработки нужен GitHub.\n\nЕсли аккаунта нет — создай бесплатно на github.com.\n\nТокен: github.com/settings/tokens → Generate new token (classic) → выбери scopes: repo, read:org\n\nПосле подключения расскажи задачу подробнее — уточним User Story и начнём.',
+      };
+    }
+    // GitHub connected — let Claude handle dev tasks with dev_* tools
+    return null;
   }
 
   // Vacancy creation flow — intercept before other intents so collecting mode takes priority

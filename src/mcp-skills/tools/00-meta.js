@@ -57,6 +57,17 @@ const SKILLS = [
     requires: 'Вызови connect({ service: "github" }) — получишь защищённую ссылку для ввода PAT. Scope: repo, read:org.',
   },
   {
+    id: 'dev',
+    name: 'Developer — разработка ПО',
+    description: 'Полный цикл разработки: клонирует репозиторий на VM, редактирует файлы, запускает тесты, коммитит, пушит, создаёт PR. ' +
+      'Workflow: dev_clarify_requirements (уточнить User Story) → dev_workspace_setup (clone + npm install) → ' +
+      'редактирование через Read/Edit/Write → тесты через bash → git commit/push → github_create_pr. ' +
+      'ВСЕГДА уточняй User Story если задача неоднозначная: кто пользователь, что именно делает, acceptance criteria. ' +
+      'Если нет аккаунта GitHub — рекомендуй создать на github.com (бесплатно). ' +
+      'Если нет репозитория — предложи dev_new_repo.',
+    requires: 'GitHub токен (scope: repo). Подключи через connect({ service: "github" }).',
+  },
+  {
     id: 'inn-enrichment',
     name: 'INN Enrichment — обогащение компаний',
     description: 'Для списка компаний (300–1000) находит ИНН, ОГРН, директора, выручку, прибыль. ' +
