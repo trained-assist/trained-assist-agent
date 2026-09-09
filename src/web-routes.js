@@ -1,7 +1,7 @@
 const path = require('path');
 const { EventEmitter } = require('events');
 const { webAuth } = require('./web-auth');
-const { listSessions, getSession } = require('./session-store');
+const { listSessions, getSession, getCurrentSessionId } = require('./session-store');
 const { isTaskRunning, runTask, stopUserTask } = require('./runner');
 const { userWorkDir } = require('./data-paths');
 
@@ -254,9 +254,14 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
     pinnedMsgId: null,
     outputCallback: (text) => emitter.emit('chunk', text),
   }).then(() => {
-    // sessionId may have been created inside _runTask; best we can do is
-    // tell the client the task is done — they can refresh /web/sessions to find it
-    finish('done', sessionId || null);
+    // sessionId may have been created inside _runTask. The runner persists the
+    // active session id per-workDir, so read it back to tell the client which
+    // session to navigate to (critical for brand-new tasks where sessionId was null).
+    let realId = sessionId || null;
+    if (!realId) {
+      try { realId = getCurrentSessionId(workDir) || null; } catch {}
+    }
+    finish('done', realId);
   }).catch((err) => {
     finish('error', err?.message || 'task failed');
   });
