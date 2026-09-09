@@ -130,3 +130,27 @@ jobs:
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
             AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
+
+  notify-merge-queue:
+    needs: [deploy-gcp, deploy-ru]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.deploy-gcp.result == 'success' &&
+      needs.deploy-ru.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify merge-queue — deploy complete
+        run: |
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.MERGE_QUEUE_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/Deploy-Playbooks/merge-queue/dispatches \
+            -d '{
+              "event_type": "deploy_completed",
+              "client_payload": {
+                "repo": "${{ github.repository }}",
+                "base_branch": "main"
+              }
+            }'
