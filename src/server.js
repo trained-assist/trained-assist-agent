@@ -5,6 +5,7 @@ const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
+const { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkPassword, generatePassword } = require('./web-auth');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
@@ -1935,7 +1936,33 @@ ${expLines || '—'}
       }
     }
 
-    // Auth: all endpoints require Bearer token
+    // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
+    if (req.method === 'POST' && url.pathname === '/web/auth') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, password } = body || {};
+      if (!username || !password || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username or password' });
+      if (!secrets.WEB_JWT_SECRET) return json(res, 503, { error: 'web auth not configured' });
+      if (!checkPassword(username, password)) return json(res, 401, { error: 'invalid username or password' });
+      const token = signJwt(username, secrets.WEB_JWT_SECRET);
+      setTokenCookie(res, token);
+      return json(res, 200, { ok: true, username });
+    }
+
+    // ── POST /admin/webpass — generate password for a profile (AGENT_SECRET) ─
+    if (req.method === 'POST' && url.pathname === '/admin/webpass') {
+      const auth = req.headers['authorization'] || '';
+      if (auth !== `Bearer ${secrets.AGENT_SECRET}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      const password = generatePassword();
+      savePassword(username, password);
+      return json(res, 200, { ok: true, username, password });
+    }
+
+    // ── Auth: all endpoints require Bearer token ──────────────────────────────
     const auth = req.headers['authorization'] || '';
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
       res.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }));
