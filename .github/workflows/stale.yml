@@ -1,0 +1,23 @@
+name: Stale bot
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # daily at 9am UTC
+  workflow_dispatch:
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/stale@v9
+        with:
+          stale-pr-message: 'This PR has been inactive for 10 days and will be closed in 3 days if no further activity.'
+          close-pr-message: 'Closing this PR due to 13 days of inactivity. If the fix is still needed, a new fixer session can reopen or recreate it.'
+          days-before-pr-stale: 10
+          days-before-pr-close: 3
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          stale-pr-label: 'stale'
