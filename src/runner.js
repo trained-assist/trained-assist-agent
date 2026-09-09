@@ -1262,7 +1262,7 @@ function ensureSkillDir(workDir, domainPath, description) {
   return dir;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0 }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
@@ -1632,6 +1632,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           for (const block of event.message.content) {
             if (block.type === 'text') {
               fullOutput.text += block.text;
+              if (outputCallback) try { outputCallback(block.text); } catch {}
             } else if (block.type === 'tool_use') {
               lastActivity = formatToolActivity(block.name, block.input);
               if (!outputStarted && msgId) {
