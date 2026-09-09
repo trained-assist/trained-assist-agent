@@ -503,8 +503,9 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     return 'Есть скил генерации иллюстраций (DALL-E 3 + Ideogram), но он ещё не включён.\n\nНапиши «включи рисование» — и я активирую его для тебя.';
   }
 
-  // Capability question about exhibition participants — check before INN (expo+INN combo questions → expo answer)
+  // Capability question about exhibition participants — only if expo pipeline exists for this profile
   if (EXPO_CAPABILITY_INTENT.test(task) && !sessionExists) {
+    if (!workDir || !fs.existsSync(path.join(workDir, 'expo-pipeline'))) return null;
     return 'Да, умею собирать участников выставок.\n\nДай мне ссылку на сайт выставки — зайду, найду страницу участников и верну список компаний в CSV.\n\nДальше могу обогатить по ИНН: директор, выручка, сайт — скидывай сразу с таким запросом, если нужно.\n\nПришли URL сайта выставки.';
   }
 
@@ -513,8 +514,9 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     return 'Да, есть скил INN Enrichment.\n\nНаходит для списка компаний (300–1000 шт): ИНН, ОГРН, директора, выручку и прибыль.\n\nИсточники: БФО ФНС (бесплатно), ЕГРЮЛ, DaData, Checko — всё уже настроено, ключи у платформы.\n\nЧасть запросов платные (DaData, Checko), но не переживайте — мы предоставляем пакет ощутимого размера, чтобы получить результат. Если понадобится больше — докупим вместе.\n\nПришли JSON-файл, CSV или ссылку на Google Sheet со списком компаний — и запущу.';
   }
 
-  // Capability question about GetCourse
+  // Capability question about GetCourse — only if connected for this profile
   if (GC_CAPABILITY_INTENT.test(task) && !sessionExists) {
+    if (!userId || !fs.existsSync(path.join(os.homedir(), 'agent-tokens', String(userId), 'getcourse', 'config.json'))) return null;
     return [
       'Вот что умею в GetCourse:\n',
       '📋 Курсы (L2 — через сессию):',
@@ -543,9 +545,12 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   // Length guard: long messages are instructions, not criteria lookup requests
   if (EXPO_CRITERIA_INTENT.test(task) && task.length < 200 && workDir) {
     try {
-      const { formatCriteriaText, readCriteria } = require('./mcp-skills/tools/87-expo-pipeline.js');
-      const criteria = readCriteria(workDir);
-      return formatCriteriaText(criteria);
+      const pipelineDirC = path.join(workDir, 'expo-pipeline');
+      if (fs.existsSync(pipelineDirC)) {
+        const { formatCriteriaText, readCriteria } = require('./mcp-skills/tools/87-expo-pipeline.js');
+        const criteria = readCriteria(workDir);
+        return formatCriteriaText(criteria);
+      }
     } catch (e) {
       console.error('[quick-answer] expo criteria error:', e.message);
     }
@@ -869,7 +874,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   return null;
 }
 
-// Per-user serial task queue: Map<userId, Promise>
+// Per-user serial task queue: Map<username, Promise>
 // Prevents concurrent Claude processes for the same user (OOM risk on small VMs).
 const userQueues = new Map();
 
@@ -1006,7 +1011,7 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  const userId = String(opts.user.id);
+  const queueKey = opts.user.username;
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -1024,15 +1029,15 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  const prev = userQueues.get(userId) ?? Promise.resolve();
+  const prev = userQueues.get(queueKey) ?? Promise.resolve();
   const current = prev.then(() => _runTask(opts)).catch(err => {
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
-  userQueues.set(userId, current);
+  userQueues.set(queueKey, current);
   current.finally(() => {
     clearPendingTask(opts.taskId);
     // Only clear if no newer task was enqueued after us
-    if (userQueues.get(userId) === current) userQueues.delete(userId);
+    if (userQueues.get(queueKey) === current) userQueues.delete(queueKey);
   });
   return current;
 }
