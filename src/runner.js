@@ -554,9 +554,12 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   // Expo pipeline — site config / filter ranges
   if (EXPO_SITE_CONFIG_INTENT.test(task) && task.length < 200 && workDir) {
     try {
-      const { formatSiteConfigText, readSiteConfig } = require('./mcp-skills/tools/87-expo-pipeline.js');
-      const config = readSiteConfig(workDir);
-      return formatSiteConfigText(config);
+      const pipelineDir = path.join(workDir, 'expo-pipeline');
+      if (fs.existsSync(pipelineDir)) {
+        const { formatSiteConfigText, readSiteConfig } = require('./mcp-skills/tools/87-expo-pipeline.js');
+        const config = readSiteConfig(workDir);
+        return formatSiteConfigText(config);
+      }
     } catch (e) {
       console.error('[quick-answer] expo site-config error:', e.message);
     }
