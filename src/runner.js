@@ -105,6 +105,7 @@ const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|созд
 const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|напиш[иь]).{0,40}(?:приложени|сервис(?!\s*аккаунт)|бот(?!\s*токен|\s*ключ)(?!\s*weeek|\s*hh|\s*tilda|\s*nalog)|сайт(?!\s*с\s+tilda)(?!\s+tilda)|систем|скрипт(?!\s+для\s+(?:выставки|expo))|библиотек|пакет|модул|апи-сервис)|implement\s+\S|build\s+(?:app|service|bot|api)|develop\s+(?:app|feature|bot)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
+const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
 const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|опубликуй.{0,20}(?:страниц|лендинг)|создай.{0,20}(?:страниц.{0,20}вакансии|лендинг)|сгенерир.{0,20}страниц|сделай.{0,20}страниц.{0,20}вакансии|страниц.{0,30}(?:вакансии.{0,30})?(?:сгенерир|создай|опубликуй|сделай)|страниц.{0,20}готов/i;
@@ -1046,8 +1047,49 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  // Wakeup command — kill stuck task + clear the queue so new messages can flow through.
+  if (WAKEUP_INTENT.test((opts.task || '').trim())) {
+    const username = opts.user.username;
+    const hadActive = activeTimers.size > 0;
+    const stopped = stopUserTask(username);
+    // Clear the user's queue so the next task doesn't wait forever
+    userQueues.delete(username);
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    const msg = stopped
+      ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
+      : hadActive
+        ? '🔄 Очередь очищена. Активных задач не было.'
+        : '✅ Всё чисто, активных задач нет.';
+    if (botToken) {
+      const im = opts.initialMsgId;
+      if (im) tgEdit(botToken, chatId, im, msg).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+      else     tgSend(botToken, chatId, msg).catch(() => {});
+    }
+    return Promise.resolve(msg);
+  }
+
   const prev = userQueues.get(queueKey) ?? Promise.resolve();
-  const current = prev.then(() => _runTask(opts)).catch(err => {
+
+  // If there's already a queued task, show "В очереди (Xs)" while waiting.
+  let queueWaitTimer = null;
+  const isQueued = userQueues.has(queueKey);
+  if (isQueued && opts.initialMsgId && opts.secrets?.TELEGRAM_BOT_TOKEN) {
+    const queueStart = Date.now();
+    const botToken = opts.secrets.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    const msgId = opts.initialMsgId;
+    queueWaitTimer = setInterval(() => {
+      const secs = Math.round((Date.now() - queueStart) / 1000);
+      tgEdit(botToken, chatId, msgId, `⏳ В очереди… (${secs}с)`).catch(() => {});
+    }, 3000);
+  }
+
+  const current = prev.then(() => {
+    if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
+    return _runTask(opts);
+  }).catch(err => {
+    if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
   userQueues.set(queueKey, current);
@@ -1309,17 +1351,26 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const ctxMsgCount = forceClaude ? 8 : 6;
 
   if (sessionId) {
-    // Explicit session ID from bot — always honor it, create if needed
+    // Explicit session ID from bot — honor it, but enforce per-chat ownership
     activeSessionId = sessionId;
     const existing = sessions.getSession(user.workDir, sessionId);
     if (existing) {
+      // Strict chat isolation: a session belongs to exactly one chat.
+      // If it's owned by a different chat, reject and notify — don't mix contexts.
+      if (existing.ownerChatId && String(existing.ownerChatId) !== String(chatId)) {
+        const msg = `⚠️ Эта сессия перешла в другой чат этого профиля.\n\nЧтобы вернуть её сюда — напишите /sessions и выберите нужную, или просто напишите новый запрос.`;
+        if (initialMsgId) await tgEdit(BOT_TOKEN, chatId, initialMsgId, msg).catch(() => tgSend(BOT_TOKEN, chatId, msg));
+        else await tgSend(BOT_TOKEN, chatId, msg);
+        clearPendingTask(taskId);
+        return;
+      }
       sessionExists = true;
       const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
       if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
   } else {
     // No explicit session — try to continue the most recent one (within 4h)
-    const currentId = getCurrentSessionId(user.workDir);
+    const currentId = getCurrentSessionId(user.workDir, chatId);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
       sessionExists = true;
@@ -1398,10 +1449,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       } else {
         // New conversation — create session with first exchange
-        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
+        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
-      setCurrentSessionId(user.workDir, activeSessionId);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
     // NOTE: if you add a new callback_data format here, add a handler in
     // trained-assist-tg-bot/src/handlers/callbacks.js AND add the prefix to
@@ -1417,7 +1468,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   if (sessionExists) {
     sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
-    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
+    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId });
   }
 
   // Use bot's pinned placeholder if provided; otherwise send our own
@@ -1731,7 +1782,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       // Save partial progress so the next run sees what was done
       if (activeSessionId && partialText) {
         sessions.appendReply(user.workDir, activeSessionId, `[прервано таймаутом]\n${partialText}`);
-        setCurrentSessionId(user.workDir, activeSessionId);
+        setCurrentSessionId(user.workDir, activeSessionId, chatId);
       }
 
       if (continuationCount < MAX_CONTINUATIONS) {
@@ -1785,7 +1836,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
     if (activeSessionId && partial) {
       sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
-      setCurrentSessionId(user.workDir, activeSessionId);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
     return stoppedMsg;
   }
@@ -1847,7 +1898,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // Append assistant reply to session history
   if (activeSessionId) {
     sessions.appendReply(user.workDir, activeSessionId, result);
-    setCurrentSessionId(user.workDir, activeSessionId);
+    setCurrentSessionId(user.workDir, activeSessionId, chatId);
   }
 
   return result;

@@ -38,7 +38,7 @@ function saveIndex(workDir, sessions) {
 }
 
 /** Create a new session record, return its id */
-function createSession(workDir, { task, id: providedId }) {
+function createSession(workDir, { task, id: providedId, chatId }) {
   const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
@@ -55,6 +55,7 @@ function createSession(workDir, { task, id: providedId }) {
   fs.mkdirSync(dir, { recursive: true });
   const full = {
     ...meta,
+    ownerChatId: chatId || null,
     messages: [{ role: 'user', content: task, at: now }],
   };
   atomicWrite(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));
@@ -148,9 +149,13 @@ function buildContext(workDir, sessionId, limit = 500, msgCount = 6) {
 const CURRENT_SESSION_FILE = 'current-session.json';
 const CURRENT_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
-function getCurrentSessionId(workDir) {
+function _currentSessionFile(chatId) {
+  return chatId ? `current-session-${chatId}.json` : CURRENT_SESSION_FILE;
+}
+
+function getCurrentSessionId(workDir, chatId) {
   try {
-    const fp = path.join(workDir, SESSIONS_DIR, CURRENT_SESSION_FILE);
+    const fp = path.join(workDir, SESSIONS_DIR, _currentSessionFile(chatId));
     if (!fs.existsSync(fp)) return null;
     const { id, lastAt } = JSON.parse(fs.readFileSync(fp, 'utf8'));
     if (Date.now() - lastAt > CURRENT_SESSION_TTL_MS) return null;
@@ -158,11 +163,22 @@ function getCurrentSessionId(workDir) {
   } catch (e) { console.warn('[session-store] getCurrentSessionId:', e.message); return null; }
 }
 
-function setCurrentSessionId(workDir, id) {
+function setCurrentSessionId(workDir, id, chatId) {
   try {
     const dir = path.join(workDir, SESSIONS_DIR);
     fs.mkdirSync(dir, { recursive: true });
-    atomicWrite(path.join(dir, CURRENT_SESSION_FILE), JSON.stringify({ id, lastAt: Date.now() }));
+    atomicWrite(path.join(dir, _currentSessionFile(chatId)), JSON.stringify({ id, lastAt: Date.now() }));
+    // Update ownerChatId in the session file so it knows which chat it belongs to
+    if (id && chatId) {
+      const fp = sessionFilePath(workDir, id);
+      if (fs.existsSync(fp)) {
+        const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+        if (full.ownerChatId !== chatId) {
+          full.ownerChatId = chatId;
+          atomicWrite(fp, JSON.stringify(full, null, 2));
+        }
+      }
+    }
   } catch (e) {
     console.error('[session-store] setCurrentSessionId error:', e.message);
   }
