@@ -162,6 +162,80 @@ const MIME_READABLE = {
   'text/html': null, 'text/markdown': null,
 };
 
+// ── Public files — NO Service Account needed ─────────────────────────────────
+// A Google file shared "anyone with the link" is fetchable over plain HTTP.
+// Do NOT reflexively call gdrive_setup for these. Two facts drive this path:
+//   • CSV export (…/export?format=csv) returns only VISIBLE cell text and drops
+//     any hyperlink embedded inside a cell — a limitation of the CSV format,
+//     not of access.
+//   • XLSX export (…/export?format=xlsx) preserves in-cell hyperlinks. The xlsx
+//     is a zip; each worksheet's <hyperlink> maps to a URL via its .rels file.
+
+const zlib = require('zlib');
+
+// Minimal ZIP central-directory reader — enough for xlsx, no external deps.
+function readZipEntries(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('not a zip (no EOCD)');
+  const count = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  const entries = {};
+  for (let n = 0; n < count && buf.readUInt32LE(off) === 0x02014b50; n++) {
+    const method   = buf.readUInt16LE(off + 10);
+    const compSize = buf.readUInt32LE(off + 20);
+    const nameLen  = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commLen  = buf.readUInt16LE(off + 32);
+    const lho      = buf.readUInt32LE(off + 42);
+    const name     = buf.toString('utf8', off + 46, off + 46 + nameLen);
+    const dataStart = lho + 30 + buf.readUInt16LE(lho + 26) + buf.readUInt16LE(lho + 28);
+    const raw = buf.subarray(dataStart, dataStart + compSize);
+    entries[name] = () => (method === 0 ? raw : zlib.inflateRawSync(raw));
+    off += 46 + nameLen + extraLen + commLen;
+  }
+  return entries;
+}
+
+// Extract in-cell hyperlinks from an xlsx buffer → [{ sheet, cell, url }].
+function extractXlsxHyperlinks(buf) {
+  const entries = readZipEntries(buf);
+  const out = [];
+  for (const p of Object.keys(entries)) {
+    const m = p.match(/^xl\/worksheets\/(sheet\d+)\.xml$/);
+    if (!m) continue;
+    const sheet = m[1];
+    const xml = entries[p]().toString('utf8');
+    const rels = {};
+    const relsFile = entries[`xl/worksheets/_rels/${sheet}.xml.rels`];
+    if (relsFile) {
+      for (const r of relsFile().toString('utf8').matchAll(/Id="([^"]+)"[^>]*Target="([^"]+)"/g)) {
+        rels[r[1]] = r[2];
+      }
+    }
+    // Attribute order varies (r:id may precede ref) — parse each tag order-agnostically.
+    for (const h of xml.matchAll(/<hyperlink\b[^>]*\/?>/g)) {
+      const tag = h[0];
+      const rid = (tag.match(/r:id="([^"]+)"/) || [])[1];
+      const ref = (tag.match(/\bref="([^"]+)"/) || [])[1] || null;
+      if (rid && rels[rid]) out.push({ sheet, cell: ref, url: rels[rid] });
+    }
+  }
+  return out;
+}
+
+// Pull a Google file ID out of any Drive/Docs/Sheets URL (or return the raw ID).
+function parseFileId(input) {
+  if (!input) return null;
+  const s = String(input).trim();
+  const m = s.match(/\/d\/([A-Za-z0-9_-]{20,})/) || s.match(/[?&]id=([A-Za-z0-9_-]{20,})/);
+  if (m) return m[1];
+  if (/^[A-Za-z0-9_-]{20,}$/.test(s)) return s;
+  return null;
+}
+
 // ── SA lifecycle helpers (used by runner.js revoke flow) ─────────────────────
 
 // Reads the SA email for a user without loading the full SA JSON into scope.
@@ -193,7 +267,9 @@ async function deleteServiceAccount(userId) {
 
 module.exports = {
   isReady: () => !!parseSaJson(USER_ID),
-  setupTools: ['gdrive_setup', 'gdrive_status'],
+  // gdrive_public_sheet needs no SA — keep it exposed even before setup so the
+  // agent never reflexively calls gdrive_setup for a public "anyone with link" sheet.
+  setupTools: ['gdrive_setup', 'gdrive_status', 'gdrive_public_sheet'],
   deleteServiceAccount,
 
   tools: {
@@ -374,8 +450,57 @@ module.exports = {
       },
     },
 
+    gdrive_public_sheet: {
+      description: 'Read a PUBLIC Google Sheet (shared "anyone with the link") over plain HTTP — NO Service Account, NO gdrive_setup needed. Returns both the CSV cell text AND every in-cell hyperlink (cell → URL). Use this whenever a user hands you a public Google Sheets link, ESPECIALLY when they care about links embedded inside cells (CSV export silently drops those). Only fall back to gdrive_read_file / gdrive_setup when the file is private (403).',
+      inputSchema: {
+        type: 'object',
+        required: ['url_or_id'],
+        properties: {
+          url_or_id: { type: 'string', description: 'Full Google Sheets URL or the bare file ID' },
+          gid:       { type: 'string', description: 'Sheet/tab gid for the CSV export (optional; default first tab)' },
+          max_chars: { type: 'number', description: 'Max CSV chars to return (default 8000)' },
+        },
+      },
+      handler: async ({ url_or_id, gid, max_chars = 8000 }) => {
+        const id = parseFileId(url_or_id);
+        if (!id) return { error: 'Не смог извлечь file ID из ввода', input: url_or_id };
+        const base = `https://docs.google.com/spreadsheets/d/${id}/export`;
+
+        // CSV — visible cell text (fast, but drops in-cell hyperlinks).
+        let csv = '', csvError = null;
+        try {
+          const csvUrl = `${base}?format=csv${gid ? `&gid=${encodeURIComponent(gid)}` : ''}`;
+          const r = await fetch(csvUrl, { signal: AbortSignal.timeout(15000) });
+          if (r.status === 403 || r.status === 401) {
+            return { error: 'private_file', message: 'Файл не публичный (403). Это приватный файл — тогда нужен gdrive_setup: расшарь его с SA email (gdrive_status покажет email).' };
+          }
+          if (!r.ok) throw new Error(`CSV ${r.status}`);
+          csv = await r.text();
+        } catch (e) { csvError = e.message; }
+
+        // XLSX — preserves in-cell hyperlinks.
+        let hyperlinks = [], linkError = null;
+        try {
+          const r = await fetch(`${base}?format=xlsx`, { signal: AbortSignal.timeout(20000) });
+          if (!r.ok) throw new Error(`XLSX ${r.status}`);
+          hyperlinks = extractXlsxHyperlinks(Buffer.from(await r.arrayBuffer()));
+        } catch (e) { linkError = e.message; }
+
+        const truncated = csv.length > max_chars;
+        return {
+          file_id: id,
+          csv: truncated ? csv.slice(0, max_chars) : csv,
+          csv_truncated: truncated,
+          hyperlinks,
+          hyperlink_count: hyperlinks.length,
+          ...(csvError ? { csv_error: csvError } : {}),
+          ...(linkError ? { hyperlink_error: linkError } : {}),
+        };
+      },
+    },
+
     gdrive_read_file: {
-      description: 'Read content of a Drive file. Google Docs → plain text, Sheets → CSV, plain text → as is. Returns first 8000 chars.',
+      description: 'Read content of a Drive file (requires gdrive_setup / SA access). Google Docs → plain text, Sheets → CSV, plain text → as is. Returns first 8000 chars. NOTE: for a PUBLIC sheet, or when the user wants hyperlinks embedded inside cells, use gdrive_public_sheet instead — CSV export here drops in-cell links.',
       inputSchema: {
         type: 'object',
         required: ['file_id'],
