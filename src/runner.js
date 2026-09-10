@@ -1319,7 +1319,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
   } else {
     // No explicit session — try to continue the most recent one (within 4h)
-    const currentId = getCurrentSessionId(user.workDir);
+    const currentId = getCurrentSessionId(user.workDir, chatId);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
       sessionExists = true;
@@ -1401,7 +1401,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
-      setCurrentSessionId(user.workDir, activeSessionId);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
     // NOTE: if you add a new callback_data format here, add a handler in
     // trained-assist-tg-bot/src/handlers/callbacks.js AND add the prefix to
@@ -1731,7 +1731,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       // Save partial progress so the next run sees what was done
       if (activeSessionId && partialText) {
         sessions.appendReply(user.workDir, activeSessionId, `[прервано таймаутом]\n${partialText}`);
-        setCurrentSessionId(user.workDir, activeSessionId);
+        setCurrentSessionId(user.workDir, activeSessionId, chatId);
       }
 
       if (continuationCount < MAX_CONTINUATIONS) {
@@ -1785,7 +1785,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
     if (activeSessionId && partial) {
       sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
-      setCurrentSessionId(user.workDir, activeSessionId);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
     return stoppedMsg;
   }
@@ -1847,7 +1847,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // Append assistant reply to session history
   if (activeSessionId) {
     sessions.appendReply(user.workDir, activeSessionId, result);
-    setCurrentSessionId(user.workDir, activeSessionId);
+    setCurrentSessionId(user.workDir, activeSessionId, chatId);
   }
 
   return result;

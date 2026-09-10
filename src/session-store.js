@@ -148,9 +148,13 @@ function buildContext(workDir, sessionId, limit = 500, msgCount = 6) {
 const CURRENT_SESSION_FILE = 'current-session.json';
 const CURRENT_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
-function getCurrentSessionId(workDir) {
+function _currentSessionFile(chatId) {
+  return chatId ? `current-session-${chatId}.json` : CURRENT_SESSION_FILE;
+}
+
+function getCurrentSessionId(workDir, chatId) {
   try {
-    const fp = path.join(workDir, SESSIONS_DIR, CURRENT_SESSION_FILE);
+    const fp = path.join(workDir, SESSIONS_DIR, _currentSessionFile(chatId));
     if (!fs.existsSync(fp)) return null;
     const { id, lastAt } = JSON.parse(fs.readFileSync(fp, 'utf8'));
     if (Date.now() - lastAt > CURRENT_SESSION_TTL_MS) return null;
@@ -158,11 +162,11 @@ function getCurrentSessionId(workDir) {
   } catch (e) { console.warn('[session-store] getCurrentSessionId:', e.message); return null; }
 }
 
-function setCurrentSessionId(workDir, id) {
+function setCurrentSessionId(workDir, id, chatId) {
   try {
     const dir = path.join(workDir, SESSIONS_DIR);
     fs.mkdirSync(dir, { recursive: true });
-    atomicWrite(path.join(dir, CURRENT_SESSION_FILE), JSON.stringify({ id, lastAt: Date.now() }));
+    atomicWrite(path.join(dir, _currentSessionFile(chatId)), JSON.stringify({ id, lastAt: Date.now() }));
   } catch (e) {
     console.error('[session-store] setCurrentSessionId error:', e.message);
   }
