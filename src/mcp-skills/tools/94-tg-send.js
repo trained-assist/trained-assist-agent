@@ -1,0 +1,138 @@
+'use strict';
+
+// tg_send_file / tg_send_photo — send local files to the user's Telegram chat.
+// Always available (no opt-in gate), uses AGENT_BOT_TOKEN + AGENT_CHAT_ID from runner.
+
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+const http = require('http');
+
+const BOT_TOKEN = process.env.AGENT_BOT_TOKEN || '';
+const CHAT_ID   = process.env.AGENT_CHAT_ID   || '';
+const TG_API    = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+
+function detectMime(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const map = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.pdf': 'application/pdf',
+    '.txt': 'text/plain',
+    '.csv': 'text/csv',
+    '.json': 'application/json',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.zip': 'application/zip',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+function isImage(filePath) {
+  return /\.(png|jpe?g|gif|webp)$/i.test(filePath);
+}
+
+function tgRequest(method, body) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(`${TG_API}/bot${BOT_TOKEN}/${method}`);
+    const mod = parsed.protocol === 'https:' ? https : http;
+    const req = mod.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${body.boundary}`,
+        'Content-Length': body.data.length,
+      },
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        try {
+          const d = JSON.parse(text);
+          if (!d.ok) reject(new Error(`Telegram error: ${JSON.stringify(d)}`));
+          else resolve(d);
+        } catch { reject(new Error(`Non-JSON TG response: ${text.slice(0, 200)}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body.data);
+    req.end();
+  });
+}
+
+function buildMultipart(fields, file) {
+  const boundary = `----FormBoundary${Date.now().toString(16)}`;
+  const CRLF = '\r\n';
+  const parts = [];
+  for (const [name, value] of Object.entries(fields)) {
+    parts.push(Buffer.from(`--${boundary}${CRLF}Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}${value}${CRLF}`));
+  }
+  parts.push(Buffer.from(
+    `--${boundary}${CRLF}Content-Disposition: form-data; name="${file.field}"; filename="${file.name}"${CRLF}Content-Type: ${file.mime}${CRLF}${CRLF}`
+  ));
+  parts.push(file.data);
+  parts.push(Buffer.from(`${CRLF}--${boundary}--${CRLF}`));
+  return { boundary, data: Buffer.concat(parts) };
+}
+
+async function sendFile(filePath, caption, asPhoto) {
+  if (!BOT_TOKEN || !CHAT_ID) throw new Error('AGENT_BOT_TOKEN or AGENT_CHAT_ID not set');
+  const buf = fs.readFileSync(filePath);
+  const name = path.basename(filePath);
+  const mime = detectMime(filePath);
+  const usePhoto = asPhoto !== false && isImage(filePath);
+  const field = usePhoto ? 'photo' : 'document';
+  const method = usePhoto ? 'sendPhoto' : 'sendDocument';
+  const fields = { chat_id: CHAT_ID };
+  if (caption) fields.caption = String(caption).slice(0, 1024);
+  const body = buildMultipart(fields, { field, name, mime, data: buf });
+  return tgRequest(method, body);
+}
+
+module.exports = {
+  tools: {
+    tg_send_file: {
+      description:
+        'Send a local file (image, PDF, CSV, any format) to the user\'s Telegram chat. ' +
+        'Use for screenshots, QR codes, generated reports — anything the user should receive in chat. ' +
+        'Images are sent as photos by default (use as_document=true to force file mode).',
+      inputSchema: {
+        type: 'object',
+        required: ['file_path'],
+        properties: {
+          file_path: {
+            type: 'string',
+            description: 'Absolute path to the local file to send.',
+          },
+          caption: {
+            type: 'string',
+            description: 'Optional caption shown under the file/photo (max 1024 chars).',
+          },
+          as_document: {
+            type: 'boolean',
+            description: 'Force sending as a document (not compressed photo). Default false for images.',
+          },
+        },
+      },
+      async handler({ file_path, caption, as_document }) {
+        if (!file_path) return { error: 'file_path is required' };
+        if (!fs.existsSync(file_path)) return { error: `File not found: ${file_path}` };
+        try {
+          const result = await sendFile(file_path, caption, !as_document);
+          return {
+            ok: true,
+            file: path.basename(file_path),
+            message_id: result.result?.message_id,
+          };
+        } catch (e) {
+          return { ok: false, error: e.message };
+        }
+      },
+    },
+  },
+};
