@@ -1351,10 +1351,19 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const ctxMsgCount = forceClaude ? 8 : 6;
 
   if (sessionId) {
-    // Explicit session ID from bot — always honor it, create if needed
+    // Explicit session ID from bot — honor it, but enforce per-chat ownership
     activeSessionId = sessionId;
     const existing = sessions.getSession(user.workDir, sessionId);
     if (existing) {
+      // Strict chat isolation: a session belongs to exactly one chat.
+      // If it's owned by a different chat, reject and notify — don't mix contexts.
+      if (existing.ownerChatId && String(existing.ownerChatId) !== String(chatId)) {
+        const msg = `⚠️ Эта сессия перешла в другой чат этого профиля.\n\nЧтобы вернуть её сюда — напишите /sessions и выберите нужную, или просто напишите новый запрос.`;
+        if (initialMsgId) await tgEdit(BOT_TOKEN, chatId, initialMsgId, msg).catch(() => tgSend(BOT_TOKEN, chatId, msg));
+        else await tgSend(BOT_TOKEN, chatId, msg);
+        clearPendingTask(taskId);
+        return;
+      }
       sessionExists = true;
       const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
       if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
@@ -1440,7 +1449,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       } else {
         // New conversation — create session with first exchange
-        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
+        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
       setCurrentSessionId(user.workDir, activeSessionId, chatId);
@@ -1459,7 +1468,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   if (sessionExists) {
     sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
-    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined });
+    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId });
   }
 
   // Use bot's pinned placeholder if provided; otherwise send our own
