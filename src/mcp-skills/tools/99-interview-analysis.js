@@ -140,24 +140,56 @@ function renderMarkdown(d) {
   return m.join('\n') + '\n';
 }
 
-const SYSTEM_PROMPT =
-  'Ты — старший рекрутёр-аналитик. Тебе дают КРИТЕРИИ заказчика и ТРАНСКРИПТ ' +
-  'видео-интервью кандидата (речь рекрутёра и кандидата вперемешку, авто-распознавание). ' +
-  'Твоя задача — строго по критериям оценить кандидата и вернуть ТОЛЬКО валидный JSON без markdown, ' +
-  'по схеме:\n{' +
-  '"candidate":str,' +
-  '"portrait":str,' +
-  '"match":{"profile_fit":str,"red_flags":[str],"green_flags":[str]},' +
-  '"scoring":[{"criterion":str,"weight":int,"score":int,"evidence":str}],' +
-  '"total_score":int,"max_score":int,' +
-  '"recommendation":"advance|maybe|reject",' +
-  '"recruiter_questions":[str],' +
-  '"checklist":[str]}\n' +
-  'score 0-5; evidence — цитата/факт из транскрипта. total_score = сумма score*weight, ' +
-  'max_score = сумма weight*5. Опирайся ТОЛЬКО на факты из транскрипта; если чего-то нет — ' +
-  "пиши в evidence ('не прозвучало'). Не выдумывай цифры. Веса и логику скоринга бери из критериев. " +
-  'recruiter_questions — 5-8 скорректированных вопросов, чтобы РАНО отсечь красные флаги. ' +
-  'checklist — 6-10 пунктов чек-листа оценки.';
+// Экспертные бест-практики оценки ВИДЕО-интервью (то, что рекомендуют эксперты по
+// найму: структурированное/поведенческое интервью, STAR, evidence-based, борьба с
+// когнитивными искажениями). Вшиты в промпт, чтобы разбор был не «по наитию», а по
+// проверенной методике. Инъектируются ТОЛЬКО когда interview_type === 'video' —
+// именно для видео-интервью критично отделять суть от «телегеничности» и делать
+// поправку на авто-распознавание речи.
+const VIDEO_BEST_PRACTICES =
+  '\n\n=== БЕСТ-ПРАКТИКИ ОЦЕНКИ ВИДЕО-ИНТЕРВЬЮ (следуй строго) ===\n' +
+  '1. Структурированность: оценивай каждого кандидата по ОДНИМ И ТЕМ ЖЕ критериям и шкале — ' +
+  'не «в целом понравился». Балл всегда обоснован фактом, а не общим впечатлением.\n' +
+  '2. Поведенческие доказательства (STAR): ценно, когда кандидат приводит конкретную Ситуацию → ' +
+  'Задачу → Действие → Результат с цифрами. Абстрактные «мы обычно делаем так» и «я командный ' +
+  'игрок» без примеров — это НЕ доказательство, балл ниже.\n' +
+  '3. «Могу» vs «Буду»: раздельно оценивай компетенции (может ли делать работу) и мотивацию/ ' +
+  'соответствие (захочет ли, впишется ли). Сильный по навыкам, но без мотива к этой роли — риск.\n' +
+  '4. Борьба с искажениями: игнорируй эффект ореола (одна яркая деталь ≠ хорош во всём), ' +
+  'первое впечатление, «похож на меня». Харизма и гладкая речь — НЕ компетенция; оценивай суть ответа.\n' +
+  '5. Специфика видео: суди по содержанию, а не по «картинке»/уверенности тона/продакшену. ' +
+  'Транскрипт — авто-распознавание: не штрафуй за оговорки, обрывки и опечатки распознавания; ' +
+  'невербалику по тексту не домысливай.\n' +
+  '6. Красные флаги: размытость вместо конкретики, приписывание себе командных результатов ' +
+  '(«мы» без своей роли), противоречия в фактах/датах, обесценивание прошлых работодателей, ' +
+  'уклонение от прямого вопроса. Отмечай и проси уточнить рано.\n' +
+  '7. Калибровка вердикта: advance — есть доказанные ключевые компетенции и нет критичных ' +
+  'красных флагов; reject — провал по must-have или подтверждённый серьёзный флаг; maybe — ' +
+  'смешанно/данных мало. Пиши, каких доказательств НЕ хватило для более уверенного вывода.';
+
+function buildSystemPrompt(interviewType) {
+  const base =
+    'Ты — старший рекрутёр-аналитик. Тебе дают КРИТЕРИИ заказчика и ТРАНСКРИПТ ' +
+    (interviewType === 'video' ? 'видео-интервью' : 'интервью') +
+    ' кандидата (речь рекрутёра и кандидата вперемешку, авто-распознавание). ' +
+    'Твоя задача — строго по критериям оценить кандидата и вернуть ТОЛЬКО валидный JSON без markdown, ' +
+    'по схеме:\n{' +
+    '"candidate":str,' +
+    '"portrait":str,' +
+    '"match":{"profile_fit":str,"red_flags":[str],"green_flags":[str]},' +
+    '"scoring":[{"criterion":str,"weight":int,"score":int,"evidence":str}],' +
+    '"total_score":int,"max_score":int,' +
+    '"recommendation":"advance|maybe|reject",' +
+    '"recruiter_questions":[str],' +
+    '"checklist":[str]}\n' +
+    'score 0-5; evidence — цитата/факт из транскрипта. total_score = сумма score*weight, ' +
+    'max_score = сумма weight*5. Опирайся ТОЛЬКО на факты из транскрипта; если чего-то нет — ' +
+    "пиши в evidence ('не прозвучало'). Не выдумывай цифры. Веса и логику скоринга бери из критериев. " +
+    'recruiter_questions — 5-8 скорректированных вопросов, чтобы РАНО отсечь красные флаги. ' +
+    'checklist — 6-10 пунктов чек-листа оценки.';
+  // Бест-практики видео-интервью — только для типа video.
+  return interviewType === 'video' ? base + VIDEO_BEST_PRACTICES : base;
+}
 
 const DEFAULT_CRITERIA =
   'Критерии заказчика не заданы. Оцени кандидата как опытный рекрутёр общего профиля: ' +
@@ -216,14 +248,16 @@ module.exports = {
         properties: {
           transcript: { type: 'string', description: 'Текст транскрипта интервью (речь целиком).' },
           candidate_name: { type: 'string', description: 'Имя кандидата (для заголовка и идемпотентности). По умолчанию «candidate».' },
+          interview_type: { type: 'string', enum: ['video', 'phone', 'text'], description: 'Опц.: тип интервью. Дефолт «video». Экспертные бест-практики оценки видео-интервью (STAR, суть-vs-картинка, поправка на авто-распознавание) вшиваются в разбор ТОЛЬКО при type=video.' },
           criteria: { type: 'string', description: 'Опц.: критерии заказчика на этот вызов. Если не задано — берутся сохранённые.' },
           model: { type: 'string', description: 'Опц.: модель OpenRouter. Дефолт google/gemini-2.5-flash.' },
           force: { type: 'boolean', description: 'Опц.: переоценить, даже если разбор уже есть.' },
         },
         required: ['transcript'],
       },
-      handler: async ({ transcript, candidate_name, criteria, model, force }) => {
+      handler: async ({ transcript, candidate_name, criteria, model, force, interview_type }) => {
         if (!transcript || !transcript.trim()) throw new Error('transcript пустой');
+        const itype = (interview_type || 'video').toLowerCase();
         const name = (candidate_name || 'candidate').trim();
         const slug = slugName(name);
         const dir = sessionDir();
@@ -242,9 +276,10 @@ module.exports = {
           `=== КРИТЕРИИ ЗАКАЗЧИКА ===\n${crit}\n\n` +
           `=== КАНДИДАТ: ${name} ===\n=== ТРАНСКРИПТ ИНТЕРВЬЮ ===\n${transcript}`;
 
-        const raw = await openrouterJson(model || 'google/gemini-2.5-flash', SYSTEM_PROMPT, user);
+        const raw = await openrouterJson(model || 'google/gemini-2.5-flash', buildSystemPrompt(itype), user);
         const d = parseLlmJson(raw);
         if (!d.candidate) d.candidate = name;
+        d.interview_type = itype;
 
         fs.writeFileSync(outJson, JSON.stringify(d, null, 2), 'utf-8');
         const md = renderMarkdown(d);
@@ -253,6 +288,8 @@ module.exports = {
         return {
           cached: false,
           candidate: d.candidate,
+          interview_type: itype,
+          best_practices_applied: itype === 'video',
           total_score: d.total_score,
           max_score: d.max_score,
           recommendation: d.recommendation,
