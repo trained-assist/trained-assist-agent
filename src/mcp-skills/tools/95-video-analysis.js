@@ -47,10 +47,34 @@ function loadDeepgramKey() {
   try { return fs.readFileSync(KEY_FILE(), 'utf-8').trim(); } catch { return ''; }
 }
 
-// Рабочая директория пайплайна в сессии юзера — пофайловая, резюмируемая.
-function workDir() {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  const dir = path.join(dataDir, 'sessions', USER_ID, 'video-analysis');
+// Видимая пользователю рабочая директория (~/users/<USER_ID>). Пишем сюда, а не в
+// служебную agent-data — иначе транскрипты «пропадают» в невидимой юзеру папке
+// (ровно тот баг, что ловили: инструмент отчитывался «получил транскрипты», но их
+// не было там, где юзер их ждал).
+function userWorkspace() {
+  const usersRoot = process.env.AGENT_USERS_DIR || path.join(os.homedir(), 'users');
+  if (USER_ID) {
+    const ws = path.join(usersRoot, USER_ID);
+    try { if (fs.existsSync(ws)) return ws; } catch { /* ignore */ }
+  }
+  return '';
+}
+
+// Рабочая директория пайплайна — пофайловая, резюмируемая. Приоритет: явный out_dir
+// → видимый воркспейс (~/users/<id>/interviews, тот же путь transcripts/analysis, что
+// и у per-user пайплайна) → agent-data только как последний фолбэк (нет воркспейса).
+function workDir(outDir) {
+  let dir;
+  if (outDir && String(outDir).trim()) {
+    const o = String(outDir).trim();
+    dir = path.isAbsolute(o) ? o : path.join(userWorkspace() || process.cwd(), o);
+  } else {
+    const ws = userWorkspace();
+    dir = ws
+      ? path.join(ws, 'interviews')
+      : path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
+          'sessions', USER_ID, 'video-analysis');
+  }
   fs.mkdirSync(path.join(dir, 'transcripts'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'audio'), { recursive: true });
   return dir;
@@ -190,9 +214,9 @@ module.exports = {
 
     video_analysis_status: {
       description: 'Показать состояние пайплайна разбора видео: задан ли ключ Deepgram, сколько транскриптов/разборов уже готово.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => {
-        const dir = workDir();
+      inputSchema: { type: 'object', properties: { out_dir: { type: 'string', description: 'Опц.: та же папка, что передавалась в video_analyze_batch (для проверки конкретного каталога).' } } },
+      handler: async ({ out_dir } = {}) => {
+        const dir = workDir(out_dir);
         const tdir = path.join(dir, 'transcripts');
         const transcripts = fs.existsSync(tdir) ? fs.readdirSync(tdir).filter(f => f.endsWith('.txt')) : [];
         return {
@@ -226,12 +250,13 @@ module.exports = {
           language: { type: 'string', description: 'Опц.: язык расшифровки (ru/en/…) или "auto" для авто-детекта. Дефолт ru.' },
           model: { type: 'string', description: 'Опц.: модель OpenRouter для разбора. Дефолт google/gemini-2.5-flash.' },
           max_items: { type: 'number', description: 'Опц.: обработать не больше N новых видео за вызов (для очень больших пачек). Дефолт без лимита.' },
+          out_dir: { type: 'string', description: 'Опц.: куда складывать транскрипты/разборы. По умолчанию видимая папка юзера ~/users/<id>/interviews (transcripts/ + analysis/). Относительный путь — от рабочей директории юзера.' },
           transcribe_only: { type: 'boolean', description: 'Опц.: только расшифровать, без анализа.' },
           force: { type: 'boolean', description: 'Опц.: перерасшифровать/переоценить, даже если результат уже есть.' },
         },
         required: ['videos'],
       },
-      handler: async ({ videos, criteria, language, model, max_items, transcribe_only, force }) => {
+      handler: async ({ videos, criteria, language, model, max_items, out_dir, transcribe_only, force }) => {
         const key = loadDeepgramKey();
         if (!key) {
           return {
@@ -242,7 +267,10 @@ module.exports = {
         const items = normalizeVideos(videos);
         if (!items.length) throw new Error('videos пустой — нет ни одного источника');
 
-        const dir = workDir();
+        const dir = workDir(out_dir);
+        // Разборы кладём рядом с транскриптами — в подпапку analysis/ той же видимой
+        // директории (совпадает с per-user раскладкой interviews/analysis).
+        const analysisDir = path.join(dir, 'analysis');
         const results = [];
         let processed = 0;
 
@@ -276,7 +304,7 @@ module.exports = {
             // 2) Анализ (если не transcribe_only) — тот же движок, идемпотентный.
             if (!transcribe_only) {
               const a = await interviewAnalyze({
-                transcript, candidate_name: item.name, criteria, model, force,
+                transcript, candidate_name: item.name, criteria, model, out_dir: analysisDir, force,
               });
               r.analyzed = a.cached ? 'cached' : 'ok';
               r.total_score = a.total_score ?? a.analysis?.total_score;

@@ -33,9 +33,32 @@ function interviewDir() {
   return dir;
 }
 
-function sessionDir() {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  const dir = path.join(dataDir, 'sessions', USER_ID, 'interview-analysis');
+// Видимая пользователю рабочая директория (~/users/<USER_ID>). Именно сюда пишем
+// результаты — иначе разбор «пропадает» в служебной agent-data, невидимой юзеру.
+function userWorkspace() {
+  const usersRoot = process.env.AGENT_USERS_DIR || path.join(os.homedir(), 'users');
+  if (USER_ID) {
+    const ws = path.join(usersRoot, USER_ID);
+    try { if (fs.existsSync(ws)) return ws; } catch { /* ignore */ }
+  }
+  return '';
+}
+
+// Куда писать разборы. Приоритет: явный out_dir → видимый воркспейс
+// (~/users/<id>/interviews/analysis, тот же путь, что и у per-user пайплайна) →
+// служебная agent-data только как последний фолбэк (нет воркспейса).
+function sessionDir(outDir) {
+  let dir;
+  if (outDir && String(outDir).trim()) {
+    const o = String(outDir).trim();
+    dir = path.isAbsolute(o) ? o : path.join(userWorkspace() || process.cwd(), o);
+  } else {
+    const ws = userWorkspace();
+    dir = ws
+      ? path.join(ws, 'interviews', 'analysis')
+      : path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
+          'sessions', USER_ID, 'interview-analysis');
+  }
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -218,15 +241,16 @@ module.exports = {
           candidate_name: { type: 'string', description: 'Имя кандидата (для заголовка и идемпотентности). По умолчанию «candidate».' },
           criteria: { type: 'string', description: 'Опц.: критерии заказчика на этот вызов. Если не задано — берутся сохранённые.' },
           model: { type: 'string', description: 'Опц.: модель OpenRouter. Дефолт google/gemini-2.5-flash.' },
+          out_dir: { type: 'string', description: 'Опц.: куда сохранить разбор. По умолчанию видимая папка юзера ~/users/<id>/interviews/analysis. Относительный путь считается от рабочей директории юзера.' },
           force: { type: 'boolean', description: 'Опц.: переоценить, даже если разбор уже есть.' },
         },
         required: ['transcript'],
       },
-      handler: async ({ transcript, candidate_name, criteria, model, force }) => {
+      handler: async ({ transcript, candidate_name, criteria, model, out_dir, force }) => {
         if (!transcript || !transcript.trim()) throw new Error('transcript пустой');
         const name = (candidate_name || 'candidate').trim();
         const slug = slugName(name);
-        const dir = sessionDir();
+        const dir = sessionDir(out_dir);
         const outJson = path.join(dir, `${slug}.analysis.json`);
         const outMd = path.join(dir, `${slug}.analysis.md`);
 
