@@ -153,9 +153,12 @@ async function chat(task, { userId = 111222333, sessionId = null, claudeReply = 
   });
 }
 
-function readCurrentSession() {
-  const fp = join(workDir, 'sessions', 'current-session.json');
-  return existsSync(fp) ? JSON.parse(readFileSync(fp, 'utf8')) : null;
+function readCurrentSession(userId = 111222333) {
+  // Try per-chat file first (current format), fall back to legacy
+  const perChat = join(workDir, 'sessions', `current-session-${userId}.json`);
+  if (existsSync(perChat)) return JSON.parse(readFileSync(perChat, 'utf8'));
+  const legacy = join(workDir, 'sessions', 'current-session.json');
+  return existsSync(legacy) ? JSON.parse(readFileSync(legacy, 'utf8')) : null;
 }
 
 function readSession(id) {
@@ -314,7 +317,8 @@ describe('Session continuity TTL', () => {
   it('starts new session after TTL expired', { timeout: 25000 }, async () => {
     await chat('подключи github');
     const current = readCurrentSession();
-    const fp = join(workDir, 'sessions', 'current-session.json');
+    // Use per-chat file path (userId=111222333 is the default in chat())
+    const fp = join(workDir, 'sessions', 'current-session-111222333.json');
 
     // Expire the session
     writeFileSync(fp, JSON.stringify({ ...current, lastAt: Date.now() - 5 * 60 * 60 * 1000 }));
