@@ -88,6 +88,66 @@ function slugName(name) {
     .slice(0, 80) || 'video';
 }
 
+// ── Durable batch ledger ─────────────────────────────────────────────────────
+// ЗАЧЕМ: инцидент был не в потере работы (она пишется пофайлово и резюмируема),
+// а в ОТЧЁТНОСТИ — агент в другой сессии заявил «папки пустые, 0 готовых, пайплайн
+// оборвался», рассуждая из устаревшего контекста, а не с диска. Пустая audio/
+// (аудио чистится после расшифровки — это норма) читалась как «ничего не сделано».
+// Леджер даёт ЛЮБОЙ сессии durable-факт: сколько видео в пачке ожидалось, что из
+// них готово, когда было последнее событие и завершена ли пачка. Отчёт → с диска.
+
+function nowIso() {
+  try { return new Date().toISOString(); } catch { return ''; }
+}
+
+const LEDGER_FILE = (dir) => path.join(dir, 'video-pipeline-ledger.json');
+
+function readLedger(dir) {
+  try {
+    return JSON.parse(fs.readFileSync(LEDGER_FILE(dir), 'utf-8'));
+  } catch {
+    return { version: 1, batches: [], items: {}, last_event: null, finished_at: null };
+  }
+}
+
+function writeLedger(dir, led) {
+  try { fs.writeFileSync(LEDGER_FILE(dir), JSON.stringify(led, null, 2), 'utf-8'); }
+  catch { /* лог отчётности не должен ронять сам пайплайн */ }
+}
+
+// Зафиксировать старт пачки: ожидаемый состав (имена/slug'и) и время.
+function recordBatchStart(dir, items) {
+  const led = readLedger(dir);
+  const at = nowIso();
+  led.batches.push({ started_at: at, count: items.length, names: items.map(i => i.name) });
+  led.finished_at = null; // новая пачка — снимаем терминальную метку
+  for (const it of items) {
+    const slug = slugName(it.name);
+    if (!led.items[slug]) led.items[slug] = { name: it.name, slug, requested_at: at };
+    else led.items[slug].requested_at = at;
+  }
+  led.last_event = { at, event: 'batch_start', count: items.length };
+  writeLedger(dir, led);
+}
+
+// Обновить состояние одного видео (событие с меткой времени).
+function recordItem(dir, slug, patch, event) {
+  const led = readLedger(dir);
+  const at = nowIso();
+  led.items[slug] = Object.assign({ slug }, led.items[slug] || {}, patch, { updated_at: at });
+  led.last_event = Object.assign({ at, event, slug }, patch.error ? { error: patch.error } : {});
+  writeLedger(dir, led);
+}
+
+// Терминальная метка пачки — «дошли до конца цикла», не зависит от контекста сессии.
+function recordBatchDone(dir, summary) {
+  const led = readLedger(dir);
+  const at = nowIso();
+  led.finished_at = at;
+  led.last_event = Object.assign({ at, event: 'batch_done' }, summary || {});
+  writeLedger(dir, led);
+}
+
 // ── Яндекс.Диск: публичная ссылка → прямой href ──────────────────────────────
 
 function resolveYandex(publicUrl) {
@@ -213,18 +273,91 @@ module.exports = {
     },
 
     video_analysis_status: {
-      description: 'Показать состояние пайплайна разбора видео: задан ли ключ Deepgram, сколько транскриптов/разборов уже готово.',
+      description:
+        'АВТОРИТЕТНОЕ состояние пайплайна разбора видео — читается С ДИСКА, не из памяти. Показывает по каждому ' +
+        'видео: расшифровано ли, разобрано ли, скоринг/вердикт; сколько ожидалось в пачке (из леджера), что ' +
+        'осталось, завершена ли пачка и когда было последнее событие. ВСЕГДА вызывай это перед тем, как ' +
+        'отчитаться пользователю о прогрессе разбора видео — отчитывайся по этому ответу, а НЕ по своему ' +
+        'контексту (пустая папка audio/ = норма, аудио чистится после расшифровки, это НЕ «работа потеряна»).',
       inputSchema: { type: 'object', properties: { out_dir: { type: 'string', description: 'Опц.: та же папка, что передавалась в video_analyze_batch (для проверки конкретного каталога).' } } },
       handler: async ({ out_dir } = {}) => {
         const dir = workDir(out_dir);
         const tdir = path.join(dir, 'transcripts');
-        const transcripts = fs.existsSync(tdir) ? fs.readdirSync(tdir).filter(f => f.endsWith('.txt')) : [];
+        const adir = path.join(dir, 'analysis');
+        const audioDir = path.join(dir, 'audio');
+
+        // 1) Факты С ДИСКА — источник истины.
+        const txtFiles = fs.existsSync(tdir) ? fs.readdirSync(tdir).filter(f => f.endsWith('.txt')) : [];
+        const jsonFiles = fs.existsSync(adir) ? fs.readdirSync(adir).filter(f => f.endsWith('.analysis.json')) : [];
+        const audioLeftover = fs.existsSync(audioDir) ? fs.readdirSync(audioDir).filter(f => !f.startsWith('.')) : [];
+
+        const transcribed = new Set(txtFiles.map(f => f.replace(/\.txt$/, '')));
+        const analyzed = new Map(); // slug → {score, max, rec}
+        for (const f of jsonFiles) {
+          const slug = f.replace(/\.analysis\.json$/, '');
+          let meta = {};
+          try {
+            const d = JSON.parse(fs.readFileSync(path.join(adir, f), 'utf-8'));
+            meta = { total_score: d.total_score, max_score: d.max_score, recommendation: d.recommendation };
+          } catch { /* битый json — всё равно считаем разобранным по факту файла */ }
+          analyzed.set(slug, meta);
+        }
+
+        // 2) Ожидаемый состав пачки — из леджера (durable, переживает сессии).
+        const led = readLedger(dir);
+        const ledgerSlugs = Object.keys(led.items || {});
+        const expected = ledgerSlugs.length
+          ? ledgerSlugs
+          : Array.from(new Set([...transcribed, ...analyzed.keys()]));
+
+        // 3) Пофайловая сводка + что осталось.
+        const items = expected.map((slug) => {
+          const li = (led.items && led.items[slug]) || {};
+          const a = analyzed.get(slug) || null;
+          return {
+            name: li.name || slug,
+            slug,
+            transcribed: transcribed.has(slug),
+            analyzed: analyzed.has(slug),
+            total_score: a ? a.total_score : undefined,
+            max_score: a ? a.max_score : undefined,
+            recommendation: a ? a.recommendation : undefined,
+            error: li.error || undefined,
+          };
+        }).sort((x, y) => x.slug.localeCompare(y.slug, 'ru'));
+
+        const outstanding = items.filter(i => !i.transcribed || !i.analyzed)
+          .map(i => ({ name: i.name, needs: !i.transcribed ? 'transcribe+analyze' : 'analyze' }));
+        const complete = expected.length > 0 && outstanding.length === 0;
+
+        // 4) Готовый к пересказу текст — чтобы агент отчитался по нему дословно.
+        const parts = [
+          `Разбор видео: ${transcribed.size}/${expected.length} расшифровано, ${analyzed.size}/${expected.length} проанализировано.`,
+        ];
+        if (complete) parts.push('Пачка завершена — всё готово.');
+        else if (outstanding.length) parts.push(`Осталось: ${outstanding.map(o => `${o.name} (${o.needs})`).join(', ')}.`);
+        if (led.finished_at) parts.push(`Последнее завершение пачки: ${led.finished_at}.`);
+        else if (led.last_event) parts.push(`Последнее событие: ${led.last_event.event} @ ${led.last_event.at}.`);
+        parts.push('Папка audio/ пустая — это норма (аудио удаляется после расшифровки), НЕ признак потери работы.');
+
         return {
           deepgram_key_set: !!loadDeepgramKey(),
           ffmpeg: true,
-          transcripts_done: transcripts.length,
-          transcripts,
+          complete,
+          expected_total: expected.length,
+          transcripts_done: transcribed.size,
+          analyses_done: analyzed.size,
+          outstanding,
+          items,
+          last_event: led.last_event,
+          batch_finished_at: led.finished_at,
+          audio_leftover: audioLeftover,
           work_dir: dir,
+          has_ledger: ledgerSlugs.length > 0,
+          summary: parts.join(' '),
+          note: 'Это состояние прочитано С ДИСКА. Отчитывайся пользователю по нему, не по своей памяти. ' +
+            'Пустая audio/ — норма (аудио чистится после расшифровки), не «потеря работы».' +
+            (ledgerSlugs.length ? '' : ' Леджер пачки отсутствует (эти файлы могли быть сделаны прежним пайплайном) — expected_total выведен из файлов на диске.'),
           hint: loadDeepgramKey() ? undefined : 'Ключ Deepgram не задан — вызови video_set_deepgram_key(key).',
         };
       },
@@ -274,6 +407,10 @@ module.exports = {
         const results = [];
         let processed = 0;
 
+        // Durable-леджер: фиксируем ожидаемый состав пачки ДО обработки, чтобы любая
+        // будущая сессия знала, сколько видео ожидалось, даже если эта прервётся.
+        recordBatchStart(dir, items);
+
         for (const item of items) {
           const slug = slugName(item.name);
           const txtPath = path.join(dir, 'transcripts', `${slug}.txt`);
@@ -297,6 +434,7 @@ module.exports = {
               fs.unlinkSync(audioPath); // аудио — промежуточное, чистим
               r.transcribed = 'ok';
               processed++;
+              recordItem(dir, slug, { name: item.name, transcript_chars: transcript.length, transcribed_at: nowIso(), error: null }, 'transcribed');
             }
             r.transcript_chars = transcript.length;
             r.transcript_path = txtPath;
@@ -311,14 +449,21 @@ module.exports = {
               r.max_score = a.max_score ?? a.analysis?.max_score;
               r.recommendation = a.recommendation ?? a.analysis?.recommendation;
               r.analysis_md_path = a.md_path;
+              recordItem(dir, slug, {
+                name: item.name, analyzed_at: nowIso(),
+                total_score: r.total_score, max_score: r.max_score, recommendation: r.recommendation, error: null,
+              }, 'analyzed');
             }
           } catch (e) {
             r.error = String(e.message || e);
+            recordItem(dir, slug, { name: item.name, error: r.error }, 'error');
           }
           results.push(r);
         }
 
         const ok = results.filter(x => !x.error).length;
+        // Терминальная метка пачки на диске — durable-факт «дошли до конца цикла».
+        recordBatchDone(dir, { total: items.length, succeeded: ok, failed: results.length - ok, new_transcriptions: processed });
         return {
           total: items.length,
           succeeded: ok,
@@ -326,7 +471,9 @@ module.exports = {
           new_transcriptions: processed,
           results,
           work_dir: dir,
-          hint: 'Транскрипты и разборы сохранены пофайлово — повторный вызов доганит незавершённое.',
+          hint: 'Транскрипты и разборы сохранены пофайлово + записан durable-леджер. ' +
+            'Прогресс проверяй/отчитывай через video_analysis_status (читает с диска), а не по памяти — ' +
+            'повторный вызов доганит незавершённое.',
         };
       },
     },
