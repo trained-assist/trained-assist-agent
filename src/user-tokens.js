@@ -194,8 +194,10 @@ function loadUserTokens(userId, legacyChatId) {
   const accessed = [];
   for (const file of fs.readdirSync(dir)) {
     if (LOG_FILES.has(file)) continue;
+    const filePath = path.join(dir, file);
+    try { if (fs.statSync(filePath).isDirectory()) continue; } catch { continue; }
     let val;
-    try { val = fs.readFileSync(path.join(dir, file), 'utf8').trim(); }
+    try { val = fs.readFileSync(filePath, 'utf8').trim(); }
     catch (e) { console.warn('[user-tokens] readFileSync race:', e.message); continue; } // file deleted between readdirSync and readFileSync — skip
     const label = file.toLowerCase();
     accessed.push(label);
@@ -235,7 +237,10 @@ function loadUserTokens(userId, legacyChatId) {
 function listConnectedServices(userId) {
   const dir = tokensDir(userId);
   if (!fs.existsSync(dir)) return null;
-  const files = fs.readdirSync(dir).filter(f => !LOG_FILES.has(f));
+  const files = fs.readdirSync(dir).filter(f => {
+    if (LOG_FILES.has(f)) return false;
+    try { return !fs.statSync(path.join(dir, f)).isDirectory(); } catch { return false; }
+  });
   if (files.length === 0) return null;
   return files.map(f => {
     const name = SERVICE_DISPLAY[f.toLowerCase()] || f;
