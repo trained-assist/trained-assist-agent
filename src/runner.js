@@ -1460,7 +1460,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     const expandMarkup = activeSessionId && !isUtility
       ? { inline_keyboard: [[{ text: '↗️ вдумчивее плиз', callback_data: `ask_claude|${activeSessionId}` }]] }
       : null;
-    await tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, expandMarkup ? { reply_markup: expandMarkup } : {});
+    const quickExtra = expandMarkup ? { reply_markup: expandMarkup } : {};
+    if (initialMsgId) {
+      await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra));
+    } else {
+      await tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra);
+    }
     return quickReply;
   }
 
