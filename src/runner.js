@@ -125,6 +125,9 @@ const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем
 const PERSONA_INTENT        = /^\/(?:persona|role|роль|персона|character|характер)(?=\s|$)/i;
 // Published guide: what a persona is + how to write a good one (patterns/examples).
 const PERSONA_GUIDE_URL     = 'https://instant-publish.trainedassist.store/p/persona-guide';
+// /project — list / switch / create projects. Lets the user steer which project new
+// sessions bind to (see projects.js + the project-binding block in run()).
+const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\s|$)/i;
 // Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
 const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|квалиф)|критери.{0,20}(?:целев|отбор|выставк)|целев.{0,20}(?:критери|требовани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
 const EXPO_STATUS_INTENT    = /статус.{0,20}(?:пайплайн|pipeline|выставк|обработк)|pipeline.{0,10}статус|сколько.{0,15}целевых|сколько.{0,15}компаний.{0,20}(?:выставк|обработан|pipeline)|expo.{0,10}статус/i;
@@ -180,7 +183,7 @@ const QUICK_SETUPS = [
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
-function getQuickAnswer(task, userId, workDir, sessionExists = false) {
+function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null) {
   // Stale PR alarm — fires repeatedly from csm-relay after PR is already merged
   if (STALE_PR_ALARM_INTENT.test(task)) {
     const prNum = task.match(/#(\d+)/)?.[1];
@@ -214,6 +217,56 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
     }
     const saved = persona.save(workDir, rest);
     return `✅ Роль ассистента сохранена (${saved.length} симв). Применяется с этой сессии в каждом ответе.\n\nПоказать: \`/persona\` · убрать: \`/persona clear\``;
+  }
+
+  // /project — list / switch / create projects. The active project (per chat) decides
+  // which project folder NEW sessions bind to (see decideNewSessionProject + the binding
+  // block in run()). A running session keeps its own project; switching affects new ones.
+  if (PROJECT_INTENT.test(task)) {
+    if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
+    const rest = task.replace(PROJECT_INTENT, '').trim();
+    const list = projects.listProjects(workDir);
+    const activeId = projects.getActiveProjectId(workDir, chatId);
+
+    // create: /project new recruiting: Название
+    const createMatch = rest.match(/^(?:new|new project|новый|создать|создай|create|add)\s+(.+)$/i);
+    if (createMatch) {
+      const meta = projects.createProject(workDir, createMatch[1].trim());
+      projects.setActiveProjectId(workDir, meta.id, chatId);
+      return `✅ Проект создан и выбран: «${meta.name}» (${meta.label}).\nНовые сессии пойдут в него. Список: \`/project\``;
+    }
+
+    if (!rest) {
+      if (list.length === 0) {
+        return [
+          '📁 Проектов пока нет.',
+          '',
+          'Создать: `/project new recruiting: Название` (тип задаётся префиксом — recruiting, generic).',
+        ].join('\n');
+      }
+      const lines = list.map((p, i) => `${p.id === activeId ? '▶️' : '     '} ${i + 1}. ${p.name} — ${p.label}`);
+      return [
+        '📁 Проекты (▶️ — активный, новые сессии идут в него):',
+        ...lines,
+        '',
+        'Сменить: `/project <номер или часть названия>`',
+        'Создать: `/project new recruiting: Название`',
+      ].join('\n');
+    }
+
+    // switch: by list number or by id/name substring
+    let target = null;
+    const num = /^\d+$/.test(rest) ? parseInt(rest, 10) : null;
+    if (num && num >= 1 && num <= list.length) {
+      target = list[num - 1];
+    } else {
+      const q = rest.toLowerCase();
+      target = list.find(p => p.id.toLowerCase() === q || (p.name || '').toLowerCase() === q)
+        || list.find(p => (p.name || '').toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
+    }
+    if (!target) return `Проект «${rest}» не найден. Список проектов: \`/project\``;
+    projects.setActiveProjectId(workDir, target.id, chatId);
+    return `▶️ Активный проект: «${target.name}» (${target.label}).\nСледующие новые сессии пойдут в него. Список: \`/project\``;
   }
 
   // Developer intent — if GitHub not connected, ask to connect before doing anything
@@ -768,8 +821,8 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 }
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false) {
-  const sync = getQuickAnswer(task, userId, workDir, sessionExists);
+async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null) {
+  const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId);
   if (sync !== null) {
     if (sync && typeof sync === 'object' && sync.__connectLink) {
       try {
@@ -1515,14 +1568,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
       SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
       CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
-      PERSONA_INTENT.test(task);
+      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task);
 
     if (!isUtility) {
       if (sessionExists) {
