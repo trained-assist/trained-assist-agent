@@ -37,13 +37,15 @@ function saveIndex(workDir, sessions) {
   atomicWrite(sessionsPath(workDir), JSON.stringify(sessions, null, 2));
 }
 
-/** Create a new session record, return its id */
-function createSession(workDir, { task, id: providedId, chatId }) {
+/** Create a new session record, return its id.
+ *  `projectId` anchors the session to a project folder (see projects.js). Optional —
+ *  legacy/un-migrated profiles create sessions with projectId=null and behave as before. */
+function createSession(workDir, { task, id: providedId, chatId, projectId = null }) {
   const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
 
-  const meta = { id, topic, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
+  const meta = { id, topic, projectId: projectId || null, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
 
   const sessions = loadIndex(workDir);
   sessions.unshift(meta);
@@ -56,6 +58,7 @@ function createSession(workDir, { task, id: providedId, chatId }) {
   const full = {
     ...meta,
     ownerChatId: chatId || null,
+    projectId: projectId || null,
     messages: [{ role: 'user', content: task, at: now }],
   };
   atomicWrite(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));

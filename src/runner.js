@@ -5,6 +5,7 @@ const os = require('os');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('./session-store');
+const projects = require('./projects');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
 const { recordUsage, getUsageTotals } = require('./usage-store');
 const {
@@ -1414,6 +1415,50 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
+  // ── Project binding ─────────────────────────────────────────────────────────
+  // A session lives inside a PROJECT (see projects.js): its cwd is the project folder
+  // and the project's PROFILE.md domain rules are folded into the system prompt.
+  //
+  // OPT-IN per profile: only profiles that already have a projects/ dir use the new
+  // model. Un-migrated profiles (all 11 live ones today) get boundProjectId=null and
+  // behave exactly as before — migration is gradual, "потихонечку, по 1".
+  //
+  // Continuing session -> keep the project stored on the session (never re-ask).
+  // New session         -> auto-bind the single project, create the first one, or
+  //                        (when several exist) fall back to the active/most-recent
+  //                        project for now — the interactive "which project?" prompt is
+  //                        a follow-up on the gateway side (recorded via projectAskPending).
+  let boundProjectId = null;
+  let projectAskPending = false;
+  const projectEnabled = (() => {
+    try { return fs.existsSync(projects.projectsRoot(user.workDir)); } catch { return false; }
+  })();
+  if (projectEnabled) {
+    try {
+      if (sessionExists && activeSessionId) {
+        const s = sessions.getSession(user.workDir, activeSessionId);
+        boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId);
+      } else {
+        const decision = projects.decideNewSessionProject(user.workDir, chatId);
+        if (decision.action === 'auto') {
+          boundProjectId = decision.project.id;
+        } else if (decision.action === 'create') {
+          boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }).id;
+        } else { // 'ask' — pick active/most-recent for now, flag the pending question
+          boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
+          projectAskPending = true;
+        }
+      }
+      if (boundProjectId) {
+        projects.setActiveProjectId(user.workDir, boundProjectId, chatId);
+        const dir = projects.projectDir(user.workDir, boundProjectId);
+        if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
+      }
+    } catch (e) {
+      console.warn('[runner] project binding:', e.message);
+    }
+  }
+
   // When forceClaude=true (user tapped "вдумчивее"), enrich the task with context about
   // the previous response being unsatisfactory — so Claude knows to give a better answer.
   if (forceClaude && activeSessionId && sessionExists) {
@@ -1480,7 +1525,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       } else {
         // New conversation — create session with first exchange
-        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId });
+        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
       setCurrentSessionId(user.workDir, activeSessionId, chatId);
@@ -1504,7 +1549,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   if (sessionExists) {
     sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
-    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId });
+    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
   }
 
   // Use bot's pinned placeholder if provided; otherwise send our own
@@ -1628,7 +1673,21 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   const basePromptFile = path.join(__dirname, 'agent-system-prompt.txt');
   // Merge the user's per-profile persona into the system prompt (returns base file if none set).
-  const systemPromptFile = persona.buildSystemPromptFile(user.workDir, basePromptFile);
+  let systemPromptFile = persona.buildSystemPromptFile(user.workDir, basePromptFile);
+  // Fold the bound project's PROFILE.md (domain rules) on top of the persona-merged prompt.
+  try {
+    const profileTxt = boundProjectId ? projects.profileText(user.workDir, boundProjectId) : null;
+    if (profileTxt) {
+      const meta = projects.getProject(user.workDir, boundProjectId);
+      const baseTxt = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
+      const merged = baseTxt +
+        `\n\n# ПРОЕКТ: ${meta ? meta.name : boundProjectId} (${meta ? meta.label : 'project'}) — доменные правила\n` +
+        profileTxt + '\n';
+      const out = path.join(user.workDir, '.system-prompt.txt');
+      fs.writeFileSync(out, merged, { mode: 0o600 });
+      systemPromptFile = out;
+    }
+  } catch (e) { console.warn('[runner] project profile merge:', e.message); }
 
   const proc = spawn(process.env.CLAUDE_BIN || 'claude', [
     '--dangerously-skip-permissions',
