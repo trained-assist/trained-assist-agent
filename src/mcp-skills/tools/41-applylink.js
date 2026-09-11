@@ -20,7 +20,15 @@ const https = require('https');
 const { URL } = require('url');
 
 const BASE = (process.env.APPLYLINK_BASE || 'https://applylink.skillset-apply.workers.dev').replace(/\/$/, '');
+// The link handed to users must be on the pretty custom domain, NOT the raw
+// workers.dev origin the worker echoes back (it builds apply_url from the request
+// origin, which is whatever host this tool called). Always rewrite to PUBLIC_BASE.
+const PUBLIC_BASE = (process.env.APPLYLINK_PUBLIC_BASE || 'https://apply.trainedassist.store').replace(/\/$/, '');
 const KEY = process.env.APPLYLINK_KEY || 'applylink2026';
+
+function applyUrl(id) {
+  return `${PUBLIC_BASE}/?v=${encodeURIComponent(id)}`;
+}
 
 function request(method, path, body) {
   return new Promise((resolve, reject) => {
@@ -90,7 +98,9 @@ module.exports = {
         + 'Pass an "id" to update an existing vacancy (fields merge over current values); omit it to create a new one. '
         + 'The vacancy carries the scoring PROMPT (scoring.prompt — the criteria each applicant is scored against) and '
         + 'the follow-up QUESTIONS, so the link fully drives per-vacancy behaviour. '
-        + 'Returns { ok, apply_url, vacancy }. Example: title "Финансовый советник", location "Россия", '
+        + 'Returns { ok, apply_url, vacancy } — apply_url is on the pretty domain (apply.trainedassist.store). '
+        + 'For a Russian-language role ALWAYS pass language:"ru" (and default_country:"RU") so the candidate form renders in Russian. '
+        + 'Example: title "Финансовый советник", location "Россия", language "ru", '
         + 'scoring.prompt describing what makes a strong advisor. Синонимы: заказать ссылку на вакансию, создать/обновить вакансию, форма отклика.',
       inputSchema: {
         type: 'object',
@@ -111,7 +121,7 @@ module.exports = {
         const v = r.body.vacancy;
         return {
           ok: true,
-          apply_url: r.body.apply_url,
+          apply_url: applyUrl(v.id),
           vacancy_id: v.id,
           title: v.title,
           alias_email: v.alias_email,
@@ -136,7 +146,7 @@ module.exports = {
           title: v.title,
           location: v.location || '',
           active: v.active !== false,
-          apply_url: `${BASE}/?v=${encodeURIComponent(v.id)}`,
+          apply_url: applyUrl(v.id),
           alias_email: v.alias_email,
           has_scoring_prompt: !!(v.scoring && v.scoring.prompt),
         }));
