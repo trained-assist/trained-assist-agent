@@ -50,6 +50,28 @@ const TYPES = {
       '- Отклики/форма — applylink/ этого проекта.\n' +
       '- Все транскрипты и анализы кладём в interviews/, не в корень профиля.\n',
   },
+  expo: {
+    label: 'Выставка',
+    prefixes: ['expo', 'выставка', 'exhibition', 'экспо'],
+    dirs: ['site', 'site/_archive', 'deploy', 'data'],
+    seedFiles: {
+      'EVENT.md':
+        '# Выставка\n\n' +
+        '- EVENT_KEY: <напр. flowersexpo2026>\n' +
+        '- Дата / город:\n' +
+        '- Каталог-сайт: site/<slug>.html → deploy/<slug>/index.html\n' +
+        '- Telegram-бот: deploy/<slug>/telegram_companies.json\n' +
+        '- Деплой: npx wrangler pages deploy deploy/<slug> --project-name <slug>\n',
+    },
+    profile:
+      '# Домен проекта: Выставка (Flexi)\n\n' +
+      '- Одна выставка = один проект. Time-boxed: собрали участников → каталог → отработали стенды → закрыли.\n' +
+      '- Каталог-сайт живёт в site/, собранный деплой — в deploy/<slug>/ (index.html + telegram_companies.json).\n' +
+      '- Пер-выставочные pipeline-данные (участники, ИНН, финансы, EX-массив) — в data/, не в корень профиля.\n' +
+      '- Общие данные (brands.json, cpm-list.json, критерии классификации) — durable-инфра профиля, НЕ копируются в проект.\n' +
+      '- Классификация target/near-target и revenue-фильтры — через expo_* инструменты.\n' +
+      '- Деплой: npx wrangler pages deploy deploy/<slug> --project-name <slug>.\n',
+  },
   generic: {
     label: 'Проект',
     prefixes: ['project', 'проект'],
