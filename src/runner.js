@@ -128,6 +128,20 @@ const PERSONA_GUIDE_URL     = 'https://instant-publish.trainedassist.store/p/per
 // /project — list / switch / create projects. Lets the user steer which project new
 // sessions bind to (see projects.js + the project-binding block in run()).
 const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\s|$)/i;
+// /get_webpass <username> — ADMIN-ONLY. Generates + reveals a fresh web password for
+// ANY profile, writing it to that profile's ~/agent-tokens/<user>/.webpasswd (the SAME
+// store the site verifies against via POST /web/verify). This is the single fix for
+// "the site password only exists for 2 of 11 profiles" — every profile can now be
+// issued a working password on demand. The password store is scrypt-hashed (one-way),
+// so this always ROTATES: each call sets a new password and the previous one dies.
+const GET_WEBPASS_INTENT    = /^\/(?:get_webpass|webpass|вебпароль)(?=\s|$)/i;
+// Admin chat ids allowed to run /get_webpass. Comma-separated env override; default is
+// the product owner's chat. Gating is on chatId (not username) because the command can
+// target arbitrary profiles — it's a privilege-escalation surface if left open.
+const ADMIN_CHAT_IDS = new Set(
+  (process.env.ADMIN_CHAT_IDS || '5308931318').split(',').map(s => s.trim()).filter(Boolean)
+);
+const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('./web-auth');
 // Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
 const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|квалиф)|критери.{0,20}(?:целев|отбор|выставк)|целев.{0,20}(?:критери|требовани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
 const EXPO_STATUS_INTENT    = /статус.{0,20}(?:пайплайн|pipeline|выставк|обработк)|pipeline.{0,10}статус|сколько.{0,15}целевых|сколько.{0,15}компаний.{0,20}(?:выставк|обработан|pipeline)|expo.{0,10}статус/i;
@@ -217,6 +231,34 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     }
     const saved = persona.save(workDir, rest);
     return `✅ Роль ассистента сохранена (${saved.length} симв). Применяется с этой сессии в каждом ответе.\n\nПоказать: \`/persona\` · убрать: \`/persona clear\``;
+  }
+
+  // /get_webpass <username> — ADMIN-ONLY. Issue a fresh web-UI password for any profile.
+  // Closes [028]: 9 of 11 profiles never had a .webpasswd, so the site (which delegates
+  // to /web/verify against that store) had nothing to check → 401. Now the admin can
+  // mint a working password for any profile on demand; the site picks it up with no sync.
+  if (GET_WEBPASS_INTENT.test(task)) {
+    if (!chatId || !ADMIN_CHAT_IDS.has(String(chatId))) {
+      return '⛔ Команда доступна только администратору.';
+    }
+    const rest = task.replace(GET_WEBPASS_INTENT, '').trim();
+    const target = (rest ? rest.split(/\s+/)[0] : userId || '').trim();
+    if (!target) return 'Укажи профиль: `/get_webpass <username>`';
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(target)) {
+      return `Некорректное имя профиля: \`${target}\`. Допустимы латиница, цифры, _ и -.`;
+    }
+    const pass = genWebPassword();
+    saveWebPassword(target, pass);
+    return [
+      `🔑 Новый веб-пароль для профиля \`${target}\`:`,
+      '',
+      `\`${pass}\``,
+      '',
+      `Вход: https://app.trainedassist.store`,
+      `Username: \`${target}\` · пароль — выше.`,
+      '',
+      '⚠️ Это НОВЫЙ пароль — прежний (если был) больше не работает.',
+    ].join('\n');
   }
 
   // /project — list / switch / create projects. The active project (per chat) decides
