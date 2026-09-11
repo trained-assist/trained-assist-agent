@@ -20,6 +20,7 @@ const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage,
 const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('./hh-vacancy');
 const { loadUserSiteIntents } = require('./user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
+const persona = require('./persona');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -118,6 +119,9 @@ const CONTEXT_ON_INTENT     = /^\/context_on$|включи.{0,15}контекс�
 const CALLTIPS_PREPARE_INTENT = /(?:подготов|составь|сделай|создай).{0,30}(?:план|вопросы|интервью).{0,30}(?:для|с|звонк)|подготов.{0,20}(?:к|для).{0,10}звонк|план.{0,20}(?:интервью|звонка|встречи).{0,30}(?:с|для)|call.?tips.{0,20}(?:для|с|план|prepare)/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
+// /persona command (aliases /role /роль /персона /character /характер). Cyrillic word boundaries:
+// JS \b doesn't fire after a Cyrillic letter, so terminate the command with (?=\s|$) instead of \b.
+const PERSONA_INTENT        = /^\/(?:persona|role|роль|персона|character|характер)(?=\s|$)/i;
 // Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
 const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|квалиф)|критери.{0,20}(?:целев|отбор|выставк)|целев.{0,20}(?:критери|требовани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
 const EXPO_STATUS_INTENT    = /статус.{0,20}(?:пайплайн|pipeline|выставк|обработк)|pipeline.{0,10}статус|сколько.{0,15}целевых|сколько.{0,15}компаний.{0,20}(?:выставк|обработан|pipeline)|expo.{0,10}статус/i;
@@ -178,6 +182,32 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
   if (STALE_PR_ALARM_INTENT.test(task)) {
     const prNum = task.match(/#(\d+)/)?.[1];
     return `✅ PR #${prNum} уже смёрджен. Этот alarm устарел — можно его удалить.`;
+  }
+
+  // /persona — view / set / clear the assistant's per-profile role. Injected into the
+  // system prompt of every session (see spawn below). Sync file ops, safe in getQuickAnswer.
+  if (PERSONA_INTENT.test(task)) {
+    if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
+    const rest = task.replace(PERSONA_INTENT, '').trim();
+    if (!rest) {
+      const cur = persona.load(workDir);
+      if (!cur) {
+        return [
+          '🎭 Роль ассистента не задана.',
+          '',
+          'Задать: `/persona <пара абзацев про роль>`',
+          'Например: `/persona Ты — рекрутер-аналитик. Оцениваешь кандидатов по фактам…`',
+          'Убрать: `/persona clear`',
+        ].join('\n');
+      }
+      return `🎭 Текущая роль ассистента:\n\n${cur}\n\nИзменить: \`/persona <текст>\` · убрать: \`/persona clear\``;
+    }
+    if (/^(clear|сброс|reset|убери|удали)$/i.test(rest)) {
+      const had = persona.clear(workDir);
+      return had ? '🎭 Роль ассистента убрана. Дальше — базовое поведение.' : '🎭 Роль и так не была задана.';
+    }
+    const saved = persona.save(workDir, rest);
+    return `✅ Роль ассистента сохранена (${saved.length} симв). Применяется с этой сессии в каждом ответе.\n\nПоказать: \`/persona\` · убрать: \`/persona clear\``;
   }
 
   // Developer intent — if GitHub not connected, ask to connect before doing anything
@@ -1441,7 +1471,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
       SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
-      CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task);
+      CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
+      PERSONA_INTENT.test(task);
 
     if (!isUtility) {
       if (sessionExists) {
@@ -1595,14 +1626,16 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
   const { ANTHROPIC_API_KEY: _stripped, ...cleanEnv } = process.env;
 
-  const systemPromptFile = path.join(__dirname, 'agent-system-prompt.txt');
+  const basePromptFile = path.join(__dirname, 'agent-system-prompt.txt');
+  // Merge the user's per-profile persona into the system prompt (returns base file if none set).
+  const systemPromptFile = persona.buildSystemPromptFile(user.workDir, basePromptFile);
 
   const proc = spawn(process.env.CLAUDE_BIN || 'claude', [
     '--dangerously-skip-permissions',
     '--output-format', 'stream-json',
     '--verbose',
     '--mcp-config', mcpConfig,
-    ...(fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
+    ...(systemPromptFile && fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
     '--print', prompt,
   ], {
     cwd: user.cwd || user.workDir,
