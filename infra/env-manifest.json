@@ -62,7 +62,8 @@
       { "name": "GOOGLE_OAUTH_CLIENT_SECRET", "description": "Google OAuth2 client secret" },
       { "name": "HH_CLIENT_ID",            "description": "HeadHunter OAuth2 app client ID" },
       { "name": "HH_CLIENT_SECRET",        "description": "HeadHunter OAuth2 app client secret" },
-      { "name": "WEB_JWT_SECRET",          "description": "JWT signing secret for web UI cookie auth (GCP only — web UI not deployed on RU VM)" }
+      { "name": "WEB_JWT_SECRET",          "description": "JWT signing secret for web UI cookie auth (GCP only — web UI not deployed on RU VM)" },
+      { "name": "WEB_VERIFY_SECRET",       "description": "Bearer secret gating POST /web/verify stateless password delegation (GCP only; falls back to AGENT_SECRET if unset)" }
     ]
   },
 
