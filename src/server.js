@@ -1959,8 +1959,29 @@ ${expLines || '—'}
     }
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth') {
+    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify') {
       if (await handleWebRoute(req, url, res, secrets)) return;
+    }
+
+    // ── POST /web/verify — stateless password check for external frontends ────
+    // An external web front-end (e.g. the Cloudflare session-manager worker at
+    // app.trainedassist.store) POSTs {username, password} here to validate a
+    // login against the SAME per-profile password store the bot writes to
+    // (savePassword → ~/agent-tokens/<user>/.webpasswd). This lets any password
+    // the bot generates work on the web UI automatically, with no manual sync.
+    // Protected by a shared bearer secret so it can't be used as a public
+    // password oracle; does NOT require WEB_JWT_SECRET (no cookie is issued —
+    // the caller mints its own session token on a 200).
+    if (req.method === 'POST' && url.pathname === '/web/verify') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, password } = body || {};
+      if (!username || !password || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username or password' });
+      if (!checkPassword(username, password)) return json(res, 401, { error: 'invalid username or password' });
+      return json(res, 200, { ok: true, username });
     }
 
     // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
