@@ -1959,7 +1959,7 @@ ${expLines || '—'}
     }
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify') {
+    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects') {
       if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
@@ -1982,6 +1982,36 @@ ${expLines || '—'}
       if (!username || !password || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username or password' });
       if (!checkPassword(username, password)) return json(res, 401, { error: 'invalid username or password' });
       return json(res, 200, { ok: true, username });
+    }
+
+    // ── POST /web/projects — authoritative project list for external frontends ─
+    // Same delegation pattern as /web/verify: an external UI (the Cloudflare
+    // session-manager worker) POSTs {username} + shared bearer, and gets back the
+    // profile's project list read from the SINGLE source of truth — projects.js /
+    // the on-disk projects/ folder. The worker must NOT keep its own list, or it
+    // drifts from the bot the same way the password store did (see [028]). Flat,
+    // linear list (no tree) — {id,name,type,label,lastAt}. Empty array if the
+    // profile has not opted into the projects model yet (no projects/ folder).
+    if (req.method === 'POST' && url.pathname === '/web/projects') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      // Lazy require so this file still loads on branches where the projects model
+      // has not landed yet — a missing module degrades to an empty list, not a crash.
+      try {
+        const { listProjects } = require('./projects');
+        const { userWorkDir } = require('./data-paths');
+        const projects = listProjects(userWorkDir(username)).map(p => ({
+          id: p.id, name: p.name, type: p.type, label: p.label, lastAt: p.lastAt || 0,
+        }));
+        return json(res, 200, { projects });
+      } catch (e) {
+        return json(res, 200, { projects: [], note: 'projects model unavailable' });
+      }
     }
 
     // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
