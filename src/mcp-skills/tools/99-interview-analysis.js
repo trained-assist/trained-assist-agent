@@ -44,18 +44,29 @@ function userWorkspace() {
   return '';
 }
 
-// Куда писать разборы. Приоритет: явный out_dir → видимый воркспейс
-// (~/users/<id>/interviews/analysis, тот же путь, что и у per-user пайплайна) →
-// служебная agent-data только как последний фолбэк (нет воркспейса).
+// Активный проект. Когда сессия привязана к проекту, runner ставит cwd = папке
+// проекта (в ней лежит project.json). Пишем разборы В ПРОЕКТ, а не в корень
+// профиля — иначе абстракция проектов бессмысленна и корень снова засоряется.
+function activeProjectDir() {
+  try {
+    const cwd = process.cwd();
+    if (fs.existsSync(path.join(cwd, 'project.json'))) return cwd;
+  } catch { /* ignore */ }
+  return '';
+}
+
+// Куда писать разборы. Приоритет: явный out_dir → активный проект
+// (projects/<id>/interviews/analysis) → видимый воркспейс профиля (легаси,
+// сессия без проекта) → служебная agent-data только как последний фолбэк.
 function sessionDir(outDir) {
   let dir;
   if (outDir && String(outDir).trim()) {
     const o = String(outDir).trim();
-    dir = path.isAbsolute(o) ? o : path.join(userWorkspace() || process.cwd(), o);
+    dir = path.isAbsolute(o) ? o : path.join(activeProjectDir() || userWorkspace() || process.cwd(), o);
   } else {
-    const ws = userWorkspace();
-    dir = ws
-      ? path.join(ws, 'interviews', 'analysis')
+    const base = activeProjectDir() || userWorkspace();
+    dir = base
+      ? path.join(base, 'interviews', 'analysis')
       : path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
           'sessions', USER_ID, 'interview-analysis');
   }

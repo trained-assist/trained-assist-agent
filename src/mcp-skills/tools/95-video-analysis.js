@@ -60,18 +60,28 @@ function userWorkspace() {
   return '';
 }
 
+// Активный проект: runner ставит cwd = папке проекта (там project.json). Пишем
+// транскрипты/разборы в проект, а не в корень профиля — иначе корень снова засоряется.
+function activeProjectDir() {
+  try {
+    const cwd = process.cwd();
+    if (fs.existsSync(path.join(cwd, 'project.json'))) return cwd;
+  } catch { /* ignore */ }
+  return '';
+}
+
 // Рабочая директория пайплайна — пофайловая, резюмируемая. Приоритет: явный out_dir
-// → видимый воркспейс (~/users/<id>/interviews, тот же путь transcripts/analysis, что
-// и у per-user пайплайна) → agent-data только как последний фолбэк (нет воркспейса).
+// → активный проект (projects/<id>/interviews) → видимый воркспейс профиля (легаси)
+// → agent-data только как последний фолбэк (нет воркспейса).
 function workDir(outDir) {
   let dir;
   if (outDir && String(outDir).trim()) {
     const o = String(outDir).trim();
-    dir = path.isAbsolute(o) ? o : path.join(userWorkspace() || process.cwd(), o);
+    dir = path.isAbsolute(o) ? o : path.join(activeProjectDir() || userWorkspace() || process.cwd(), o);
   } else {
-    const ws = userWorkspace();
-    dir = ws
-      ? path.join(ws, 'interviews')
+    const base = activeProjectDir() || userWorkspace();
+    dir = base
+      ? path.join(base, 'interviews')
       : path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
           'sessions', USER_ID, 'video-analysis');
   }
