@@ -123,6 +123,8 @@ const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем
 // /persona command (aliases /role /роль /персона /character /характер). Cyrillic word boundaries:
 // JS \b doesn't fire after a Cyrillic letter, so terminate the command with (?=\s|$) instead of \b.
 const PERSONA_INTENT        = /^\/(?:persona|role|роль|персона|character|характер)(?=\s|$)/i;
+// Published guide: what a persona is + how to write a good one (patterns/examples).
+const PERSONA_GUIDE_URL     = 'https://instant-publish.trainedassist.store/p/persona-guide';
 // Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
 const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|квалиф)|критери.{0,20}(?:целев|отбор|выставк)|целев.{0,20}(?:критери|требовани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
 const EXPO_STATUS_INTENT    = /статус.{0,20}(?:пайплайн|pipeline|выставк|обработк)|pipeline.{0,10}статус|сколько.{0,15}целевых|сколько.{0,15}компаний.{0,20}(?:выставк|обработан|pipeline)|expo.{0,10}статус/i;
@@ -196,12 +198,15 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false) {
         return [
           '🎭 Роль ассистента не задана.',
           '',
-          'Задать: `/persona <пара абзацев про роль>`',
-          'Например: `/persona Ты — рекрутер-аналитик. Оцениваешь кандидатов по фактам…`',
-          'Убрать: `/persona clear`',
+          'Как задать:',
+          '• Инлайн: `/persona Ты — рекрутер-аналитик. Оцениваешь кандидатов по фактам…`',
+          '• Реплаем: ответь этой командой на сообщение с текстом роли — бот возьмёт его как роль (удобно для длинных абзацев).',
+          '• Убрать: `/persona clear`',
+          '',
+          '📖 Что такое персона и как её правильно составить (паттерны + примеры): ' + PERSONA_GUIDE_URL,
         ].join('\n');
       }
-      return `🎭 Текущая роль ассистента:\n\n${cur}\n\nИзменить: \`/persona <текст>\` · убрать: \`/persona clear\``;
+      return `🎭 Текущая роль ассистента:\n\n${cur}\n\nИзменить: \`/persona <текст>\` (или реплаем на сообщение с ролью) · убрать: \`/persona clear\`\n\n📖 Как составить хорошую персону: ${PERSONA_GUIDE_URL}`;
     }
     if (/^(clear|сброс|reset|убери|удали)$/i.test(rest)) {
       const had = persona.clear(workDir);
