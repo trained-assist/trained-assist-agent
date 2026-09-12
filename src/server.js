@@ -10,7 +10,8 @@ const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
+const { generateSummary } = require('./session-summary');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
 const { nalogFormHtml, nalogCodeFormHtml } = require('./connect-forms/nalog');
@@ -2756,7 +2757,25 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid username' });
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '10', 10), 50);
       const workDir = path.join(BASE_USERS_DIR, username);
-      return json(res, 200, { sessions: listSessions(workDir, limit) });
+      let sessionList = listSessions(workDir, limit);
+      // Lazily backfill durable summaries so external consumers (Telegram gateway,
+      // web UI) get a meaningful {title, gist} — not a raw first-message truncation.
+      // Mirrors the /sessions lazy-generation in runner.runQuickAnswer; this is the
+      // HTTP entry point those UIs actually hit, so the class lives here too.
+      const orKey = secrets.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY;
+      const stale = sessionList.filter(s => needsSummary(s));
+      if (stale.length && orKey) {
+        await Promise.all(stale.map(async (s) => {
+          try {
+            const full = getSessionData(workDir, s.id);
+            if (!full) return;
+            const sum = await generateSummary(full.messages, { apiKey: orKey });
+            if (sum) setSummary(workDir, s.id, sum, s.messageCount);
+          } catch { /* best-effort; fall back to raw topic */ }
+        }));
+        sessionList = listSessions(workDir, limit); // reload with fresh summaries
+      }
+      return json(res, 200, { sessions: sessionList });
     }
 
     // POST /sessions/archive — remove sessions from the index
