@@ -1016,9 +1016,66 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   return null;
 }
 
-// Per-user serial task queue: Map<username, Promise>
-// Prevents concurrent Claude processes for the same user (OOM risk on small VMs).
-const userQueues = new Map();
+// ── Concurrency model (see issues #488 / #489) ──────────────────────────────
+// Unit of parallelism is the SESSION. In practice a chat holds at most one
+// active session at a time ("one active session per chat" invariant), so we
+// serialise per CHAT lane — two messages in the same chat never run at once,
+// but different chats of the same profile (and different profiles) run in
+// parallel. Session-level context ownership is enforced separately by
+// ownerChatId (see _runTask).
+//
+// The real OOM backstop is no longer the per-username lock (that was a 2019-era
+// blunt instrument that serialised an entire profile). It moved to a GLOBAL
+// counting semaphore MAX_CONCURRENT_TASKS + a free-RAM watchdog, both of which
+// gate the actual `claude` spawn across every chat/profile at once.
+//
+// Map<chatId(string), Promise> — the tail of each chat's lane.
+const chatLanes = new Map();
+
+// Global concurrency cap on live `claude` processes (across all profiles).
+// RAM is cheap and monitored externally, so this is deliberately generous;
+// tune via env without a code change.
+const MAX_CONCURRENT_TASKS = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS) || 6);
+// Soft free-RAM floor (MB). Below this we hold off spawning new tasks.
+const MIN_FREE_RAM_MB = Math.max(0, Number(process.env.MIN_FREE_RAM_MB) || 512);
+const RAM_POLL_MS = 2000;
+const RAM_WAIT_MAX_MS = 60000; // never deadlock — proceed after this even if low
+
+let _runningTasks = 0;
+const _slotWaiters = [];
+
+function _acquireSlot() {
+  return new Promise(resolve => {
+    const grab = () => {
+      if (_runningTasks < MAX_CONCURRENT_TASKS) { _runningTasks++; resolve(); }
+      else _slotWaiters.push(grab);
+    };
+    grab();
+  });
+}
+
+function _releaseSlot() {
+  _runningTasks = Math.max(0, _runningTasks - 1);
+  const next = _slotWaiters.shift();
+  if (next) next();
+}
+
+// Wait until free RAM is above the floor, or RAM_WAIT_MAX_MS elapses (backstop,
+// os.freemem() undercounts reclaimable page cache — this is a soft guard, not a
+// hard admission controller; external monitoring is the primary control).
+async function _waitForRam() {
+  if (MIN_FREE_RAM_MB <= 0) return;
+  const start = Date.now();
+  for (;;) {
+    const freeMb = os.freemem() / (1024 * 1024);
+    if (freeMb >= MIN_FREE_RAM_MB) return;
+    if (Date.now() - start >= RAM_WAIT_MAX_MS) {
+      console.warn(`[runner] RAM watchdog: proceeding after ${RAM_WAIT_MAX_MS}ms, free=${Math.round(freeMb)}MB < ${MIN_FREE_RAM_MB}MB`);
+      return;
+    }
+    await new Promise(r => setTimeout(r, RAM_POLL_MS));
+  }
+}
 
 // Active task timer state — allows Claude to extend its own session via MCP tool.
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
@@ -1097,7 +1154,7 @@ function extendTaskTimeout(taskId) {
  * @returns {Promise<boolean>} true if all tasks drained, false if timed out
  */
 function waitForIdle(timeoutMs) {
-  const pending = Array.from(userQueues.values());
+  const pending = Array.from(chatLanes.values());
   if (pending.length === 0) return Promise.resolve(true);
   const drained = Promise.allSettled(pending).then(() => true);
   const timedOut = new Promise(resolve => setTimeout(() => resolve(false), timeoutMs));
@@ -1105,7 +1162,8 @@ function waitForIdle(timeoutMs) {
 }
 
 function getActiveTaskCount() {
-  return userQueues.size;
+  // Live `claude` processes if any are running, else queued lanes (drain hint).
+  return _runningTasks || chatLanes.size;
 }
 
 function isTaskRunning(username) {
@@ -1153,7 +1211,9 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  const queueKey = opts.user.username;
+  // Lane key = chatId (opts.user.id). One active session per chat; different
+  // chats/profiles run in parallel, bounded by the global semaphore below.
+  const queueKey = String(opts.user.id);
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -1176,8 +1236,8 @@ function runTask(opts) {
     const username = opts.user.username;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username);
-    // Clear the user's queue so the next task doesn't wait forever
-    userQueues.delete(username);
+    // Clear this chat's lane so the next task doesn't wait behind a stuck one.
+    chatLanes.delete(String(opts.user.id));
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const chatId = opts.user.id;
     const msg = stopped
@@ -1193,11 +1253,11 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  const prev = userQueues.get(queueKey) ?? Promise.resolve();
+  const prev = chatLanes.get(queueKey) ?? Promise.resolve();
 
   // If there's already a queued task, show "В очереди (Xs)" while waiting.
   let queueWaitTimer = null;
-  const isQueued = userQueues.has(queueKey);
+  const isQueued = chatLanes.has(queueKey);
   if (isQueued && opts.initialMsgId && opts.secrets?.TELEGRAM_BOT_TOKEN) {
     const queueStart = Date.now();
     const botToken = opts.secrets.TELEGRAM_BOT_TOKEN;
@@ -1209,18 +1269,26 @@ function runTask(opts) {
     }, 3000);
   }
 
-  const current = prev.then(() => {
+  const current = prev.then(async () => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
-    return _runTask(opts);
+    // Global admission control: wait for a free slot + enough RAM before we
+    // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
+    await _waitForRam();
+    await _acquireSlot();
+    try {
+      return await _runTask(opts);
+    } finally {
+      _releaseSlot();
+    }
   }).catch(err => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
-  userQueues.set(queueKey, current);
+  chatLanes.set(queueKey, current);
   current.finally(() => {
     clearPendingTask(opts.taskId);
     // Only clear if no newer task was enqueued after us
-    if (userQueues.get(queueKey) === current) userQueues.delete(queueKey);
+    if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
   });
   return current;
 }
@@ -1487,6 +1555,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         else await tgSend(BOT_TOKEN, chatId, msg);
         clearPendingTask(taskId);
         return;
+      }
+      // Legacy / owner-less session (#489): the null ownerChatId short-circuited
+      // the guard above, letting ANY chat adopt it and mix contexts. Claim it for
+      // the current chat on first touch so a foreign chat is rejected next time.
+      if (!existing.ownerChatId && chatId) {
+        sessions.claimOwnerChatId(user.workDir, sessionId, chatId);
       }
       sessionExists = true;
       const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
