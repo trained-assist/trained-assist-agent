@@ -5,6 +5,7 @@ const os = require('os');
 const { writeMcpConfig } = require('./browser');
 const sessions = require('./session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('./session-store');
+const { generateSummary } = require('./session-summary');
 const projects = require('./projects');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
 const { recordUsage, getUsageTotals } = require('./usage-store');
@@ -89,6 +90,8 @@ const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|спо
 const GDRIVE_NOTIF_OFF_INTENT  = /\/google_drive_sharing_notifications_switch_off|выключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|отключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|не.{0,10}уведомля.{0,30}(?:гугл|google|drive|шаринг|файл)|без.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const GDRIVE_NOTIF_ON_INTENT   = /\/google_drive_sharing_notifications_switch_on|включи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|верн.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
+// "Подробнее N" / "/session N" / "подробнее о 3" — expand one session from the last /sessions list
+const SESSION_DETAIL_INTENT = /^\/(?:sessions?|диалог)\s*(\d{1,2})\b|^подробнее(?:\s+(?:о|про|по))?\s*(?:диалог[ае]?\s*|сесси[июя]\s*|№\s*)?(\d{1,2})\b|^(\d{1,2})\s*подробнее/i;
 const HH_STATUS_INTENT       = /hh.{0,10}статус|статус.{0,10}hh|статус.{0,10}(?:рекрут|вакансии|оценки|скоринга)|как.{0,15}дела.{0,15}hh|что.{0,15}активн.{0,15}hh|включена.{0,15}оценка|работает.{0,15}(?:скоринг|оценка|hh)|\/hh_status/i;
 const HH_MY_VACANCIES_INTENT = /мои.{0,10}вакансии|список.{0,10}вакансий|какие.{0,10}вакансии|с чем работать|покажи.{0,15}вакансии|дай.{0,15}вакансии|мои.{0,10}активные/i;
 const HH_FUNNEL_INTENT      = /сколько откликов|статистика воронки|что новенького|воронка кандидатов|статистика.{0,15}вакансии|кандидатов по.{0,15}вакансии|обновление.{0,15}вакансии/i;
@@ -190,6 +193,35 @@ const QUICK_SETUPS = [
     hint: 'Введи адрес сайта, логин и пароль — я автоматически зайду и изучу его.',
   },
 ];
+
+// Render the /sessions list. Prefers the durable summary.title over the raw topic;
+// no LLM here — reads whatever summaries are already on disk (async enrichment
+// happens in runQuickAnswer before this).
+function renderSessionsList(list) {
+  const lines = list.map((s, i) => {
+    const d = new Date(s.lastAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+    const title = (s.summary && s.summary.title) ? s.summary.title : s.topic.slice(0, 60);
+    return `${i + 1}. ${title} (${d}, ${s.messageCount} сообщ.)`;
+  });
+  return '💬 Последние диалоги:\n' + lines.join('\n') + '\n\nПодробнее о любом — напишите «Подробнее N» (номер из списка).';
+}
+
+// Render the expanded card for one session from its durable summary.
+function renderSessionDetail(meta, n) {
+  const d = new Date(meta.lastAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const sum = meta.summary || {};
+  const out = [`📄 Диалог ${n}: ${sum.title || meta.topic}`, `🕒 ${d} · ${meta.messageCount} сообщ.`, ''];
+  if (sum.gist) out.push(sum.gist);
+  if (sum.ended) out.push('', `🏁 Чем закончилось: ${sum.ended}`);
+  if (sum.key_points && sum.key_points.length) {
+    out.push('', 'Ключевые моменты:');
+    for (const kp of sum.key_points) out.push(`• ${kp}`);
+  }
+  if (!sum.gist && !sum.ended && (!sum.key_points || !sum.key_points.length)) {
+    out.push('(резюме недоступно — покажу тему)', '', meta.topic);
+  }
+  return out.join('\n');
+}
 
 // Guard rule for return null inside a matched intent block:
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
@@ -408,11 +440,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     if (!workDir) return 'Не удалось определить рабочую директорию.';
     const list = sessions.listSessions(workDir, 10);
     if (!list || list.length === 0) return 'Нет активных диалогов.';
-    const lines = list.map((s, i) => {
-      const d = new Date(s.lastAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-      return `${i + 1}. ${s.topic.slice(0, 60)} (${d}, ${s.messageCount} сообщ.)`;
-    });
-    return '💬 Последние диалоги:\n' + lines.join('\n');
+    return renderSessionsList(list);
   }
 
   // /usage — token usage stats
@@ -857,6 +885,41 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null) {
+  // Session summaries (durable artifact) — handled here (async) so we can generate
+  // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
+  if (workDir) {
+    const detailM = task.trim().match(SESSION_DETAIL_INTENT);
+    if (detailM) {
+      const n = parseInt(detailM[1] || detailM[2] || detailM[3], 10);
+      const list = sessions.listSessions(workDir, 10);
+      if (!list || list.length === 0) return 'Нет активных диалогов.';
+      if (!n || n < 1 || n > list.length) return `Нет диалога №${n}. Напишите /sessions — покажу список.`;
+      const meta = list[n - 1];
+      if (sessions.needsSummary(meta)) {
+        const full = sessions.getSession(workDir, meta.id);
+        const sum = full && await generateSummary(full.messages, { apiKey: openrouterKey });
+        if (sum) { sessions.setSummary(workDir, meta.id, sum, meta.messageCount); meta.summary = sum; }
+      }
+      return renderSessionDetail(meta, n);
+    }
+    if (SESSIONS_INTENT.test(task)) {
+      let list = sessions.listSessions(workDir, 10);
+      if (!list || list.length === 0) return 'Нет активных диалогов.';
+      // Generate summaries for sessions that lack a fresh one — in parallel, persist to disk.
+      const stale = list.filter(s => sessions.needsSummary(s));
+      if (stale.length && (openrouterKey || process.env.OPENROUTER_API_KEY)) {
+        await Promise.all(stale.map(async (s) => {
+          const full = sessions.getSession(workDir, s.id);
+          if (!full) return;
+          const sum = await generateSummary(full.messages, { apiKey: openrouterKey });
+          if (sum) sessions.setSummary(workDir, s.id, sum, s.messageCount);
+        }));
+        list = sessions.listSessions(workDir, 10); // reload with fresh summaries
+      }
+      return renderSessionsList(list);
+    }
+  }
+
   const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
   if (sync !== null) {
     if (sync && typeof sync === 'object' && sync.__connectLink) {
@@ -1681,7 +1744,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
-      SESSIONS_INTENT.test(task) || USAGE_INTENT.test(task) ||
+      SESSIONS_INTENT.test(task) || SESSION_DETAIL_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
       CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
       PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task);

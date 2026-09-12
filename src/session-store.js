@@ -209,6 +209,45 @@ function claimOwnerChatId(workDir, id, chatId) {
   }
 }
 
+/** Persist a durable summary object onto a session (both index + full file).
+ *  `atMsgCount` records the message count the summary reflects, so we know when
+ *  it goes stale (see needsSummary). Idempotent; safe to call repeatedly. */
+function setSummary(workDir, id, summary, atMsgCount) {
+  if (!id || !summary) return false;
+  try {
+    const fp = sessionFilePath(workDir, id);
+    let mc = atMsgCount;
+    if (fs.existsSync(fp)) {
+      const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      if (mc == null) mc = full.messageCount || (full.messages ? full.messages.length : 0);
+      full.summary = summary;
+      full.summaryMsgCount = mc;
+      full.summaryAt = Date.now();
+      atomicWrite(fp, JSON.stringify(full, null, 2));
+    }
+    const sessions = loadIndex(workDir);
+    const idx = sessions.findIndex(s => s.id === id);
+    if (idx >= 0) {
+      if (mc == null) mc = sessions[idx].messageCount;
+      sessions[idx].summary = summary;
+      sessions[idx].summaryMsgCount = mc;
+      sessions[idx].summaryAt = Date.now();
+      saveIndex(workDir, sessions);
+    }
+    return true;
+  } catch (e) {
+    console.error('[session-store] setSummary error:', e.message);
+    return false;
+  }
+}
+
+/** True when a session's stored summary is missing or stale (messages grew since). */
+function needsSummary(meta) {
+  if (!meta) return false;
+  if (!meta.summary || !meta.summary.title) return true;
+  return (meta.summaryMsgCount || 0) !== (meta.messageCount || 0);
+}
+
 /** Archive (remove) sessions by id; returns count actually removed */
 function archiveSessions(workDir, sessionIds) {
   if (!Array.isArray(sessionIds) || sessionIds.length === 0) return 0;
@@ -225,4 +264,4 @@ function archiveSessions(workDir, sessionIds) {
   return archived;
 }
 
-module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId, claimOwnerChatId, archiveSessions };
+module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId, claimOwnerChatId, archiveSessions, setSummary, needsSummary };
