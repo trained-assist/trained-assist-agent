@@ -23,6 +23,7 @@ const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancySt
 const { loadUserSiteIntents } = require('./user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
 const persona = require('./persona');
+const answerRouter = require('./answer-router');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -1799,6 +1800,16 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
     activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
+    // Answer router: на входе НОВОЙ сессии выбрать глубину (one-shot vs deep/research).
+    // Durable-сайдкар, читается при сборке промпта на каждом ходу. Skip для авто-followup
+    // (там режим задаёт reopen-инструкция). Fail-open в one-shot внутри decideMode.
+    if (!internalFollowup) {
+      try {
+        const modeRec = await answerRouter.decideMode(task, { apiKey: secrets.OPENROUTER_API_KEY });
+        answerRouter.writeMode(user.workDir, activeSessionId, modeRec);
+        console.log('[%s] answer-router mode=%s score=%s (%s)', taskId, modeRec.mode, modeRec.score, modeRec.reason);
+      } catch (e) { console.warn('[%s] answer-router:', taskId, e.message); }
+    }
   }
 
   // Use bot's pinned placeholder if provided; otherwise send our own
@@ -1950,6 +1961,20 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       systemPromptFile = out;
     }
   } catch (e) { console.warn('[runner] project profile merge:', e.message); }
+
+  // Answer router: если для этой сессии выбран deep-режим — снять cap «2-3 предложения»
+  // блоком в системном промпте. Читаем durable-решение с диска (пишется при создании
+  // сессии), поэтому режим держится на всех ходах. Нет решения → one-shot (без изменений).
+  try {
+    const modeRec = answerRouter.readMode(user.workDir, activeSessionId);
+    if (modeRec && modeRec.mode === 'deep') {
+      const baseTxt = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
+      const merged = baseTxt + '\n' + answerRouter.buildDeepBlock() + '\n';
+      const out = path.join(user.workDir, '.system-prompt.txt');
+      fs.writeFileSync(out, merged, { mode: 0o600 });
+      systemPromptFile = out;
+    }
+  } catch (e) { console.warn('[runner] answer-router deep block:', e.message); }
 
   const proc = spawn(process.env.CLAUDE_BIN || 'claude', [
     '--dangerously-skip-permissions',
