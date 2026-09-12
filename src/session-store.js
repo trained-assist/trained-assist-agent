@@ -187,6 +187,28 @@ function setCurrentSessionId(workDir, id, chatId) {
   }
 }
 
+/**
+ * First-touch ownership claim for legacy / owner-less sessions (issue #489).
+ * Persists ownerChatId ONLY when it is currently unset — never overwrites an
+ * existing owner. Returns the effective owner chatId (existing or newly set),
+ * or null on failure / when chatId is falsy.
+ */
+function claimOwnerChatId(workDir, id, chatId) {
+  if (!id || !chatId) return null;
+  try {
+    const fp = sessionFilePath(workDir, id);
+    if (!fs.existsSync(fp)) return null;
+    const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    if (full.ownerChatId) return full.ownerChatId; // already owned — leave as-is
+    full.ownerChatId = chatId;
+    atomicWrite(fp, JSON.stringify(full, null, 2));
+    return chatId;
+  } catch (e) {
+    console.warn('[session-store] claimOwnerChatId:', e.message);
+    return null;
+  }
+}
+
 /** Archive (remove) sessions by id; returns count actually removed */
 function archiveSessions(workDir, sessionIds) {
   if (!Array.isArray(sessionIds) || sessionIds.length === 0) return 0;
@@ -203,4 +225,4 @@ function archiveSessions(workDir, sessionIds) {
   return archived;
 }
 
-module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId, archiveSessions };
+module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId, claimOwnerChatId, archiveSessions };
