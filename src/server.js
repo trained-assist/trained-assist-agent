@@ -372,15 +372,16 @@ function scheduleHhBackgroundScoring() {
   setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
 }
 
-// Followup controller tick: fire due check-backs for tasks the user asked us to
-// see through. Re-entrancy + hard-cap live in the module; here we just inject deps.
-function scheduleFollowupController(secrets) {
-  const followup = require('./followup-controller');
+// GTD controller tick: fire due check-backs for workrun tasks the user asked us
+// to see through to done. Re-entrancy + hard-cap live in the module; here we just
+// inject deps.
+function scheduleGtdController(secrets) {
+  const gtd = require('./gtd-controller');
   const { isTaskRunning } = require('./runner');
   const { getSession } = require('./session-store');
-  const run = () => followup.runDue({
+  const run = () => gtd.runDue({
     secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning, runTask, getSession,
-  }).catch(err => console.error('[followup] tick error:', err.message));
+  }).catch(err => console.error('[gtd] tick error:', err.message));
   setTimeout(run, 2 * 60 * 1000);      // first tick 2 min after start
   setInterval(run, 5 * 60 * 1000);     // then every 5 min
 }
@@ -3353,7 +3354,7 @@ ${recent || '(пока нет)'}
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
-  scheduleFollowupController(secrets);
+  scheduleGtdController(secrets);
   resumePendingTasks(secrets).catch(err => console.error('[resume] startup error:', err.message));
 
   // Deploys restart this service frequently (every few minutes during an
