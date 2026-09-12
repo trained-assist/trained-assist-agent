@@ -1596,7 +1596,22 @@ function ensureSkillDir(workDir, domainPath, description) {
   return dir;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalFollowup = false }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalFollowup = false, mode = null }) {
+  // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
+  // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
+  const explicitMode = answerRouter.normalizeMode(mode);
+
+  // Кнопки явных действий под ответом. Дефолт → предложить проработку/уточнение.
+  // Если сессия уже deep (проработка идёт) — не предлагаем «Запустить проработку».
+  // NOTE: новый callback_data-префикс → добавь handler в trained-assist-tg-bot/
+  // src/handlers/callbacks.js И префикс в tests/callbacks.test.js.
+  const actionButtons = (sid, { deep = false } = {}) => {
+    if (!sid || deep) return null;
+    return { inline_keyboard: [[
+      { text: '⏻ Запустить проработку', callback_data: `workrun|${sid}` },
+      { text: '❓ Уточнить задачу',    callback_data: `clarify|${sid}` },
+    ]] };
+  };
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
@@ -1619,9 +1634,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let sessionContext = context;
   let sessionExists = false; // true when continuing an existing session (not creating)
 
-  // forceClaude (user tapped "вдумчивее") gets a wider context window so long data like
-  // requisites or HH descriptions aren't truncated in the session history.
-  // 8 messages = 4 user turns + 4 replies — enough to cover typical "think harder" scenarios.
+  // forceClaude (тап по inline-кнопке проработки/уточнения) gets a wider context window so
+  // long data like requisites or HH descriptions aren't truncated in the session history.
+  // 8 messages = 4 user turns + 4 replies — enough to cover typical deep/clarify scenarios.
   const ctxLimit = forceClaude ? 1500 : 500;
   const ctxMsgCount = forceClaude ? 8 : 6;
 
@@ -1709,18 +1724,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
   }
 
-  // When forceClaude=true (user tapped "вдумчивее"), enrich the task with context about
-  // the previous response being unsatisfactory — so Claude knows to give a better answer.
+  // forceClaude=true (тап по inline-кнопке): деривируем задачу из сессии и обрамляем её
+  // под выбранное действие. deep (⏻ проработка): быстрый ответ уже дан, нужен полный
+  // разбор того же запроса — прежний ответ прикладываем как контекст. clarify (❓): рамку
+  // задаёт CLARIFY-блок промпта, задачу не трогаем. Без mode — задача как есть.
   if (forceClaude && activeSessionId && sessionExists) {
     const sess = sessions.getSession(user.workDir, activeSessionId);
     if (!task) task = sess?.lastUserMessage || '';
-    if (task && sess) {
+    if (task && sess && explicitMode === 'deep') {
       const msgs = sess.messages || [];
       const lastAssistantMsg = [...msgs].reverse().find(m => m.role === 'assistant');
-      if (lastAssistantMsg) {
-        const prevReply = lastAssistantMsg.content.slice(0, 800);
-        task = `[Пользователь нажал «вдумчивее» — предыдущий ответ его не устроил.\nПредыдущий ответ был: "${prevReply}".\nЗадача: "${task}"]`;
-      }
+      const prevReply = lastAssistantMsg ? `\nБыстрый ответ уже был дан: "${lastAssistantMsg.content.slice(0, 800)}".` : '';
+      task = `[Пользователь запустил проработку того же запроса.${prevReply}\nЗапрос: "${task}"]`;
     }
   }
 
@@ -1780,12 +1795,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       }
       setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
-    // NOTE: if you add a new callback_data format here, add a handler in
-    // trained-assist-tg-bot/src/handlers/callbacks.js AND add the prefix to
-    // KNOWN_CALLBACK_PREFIXES in trained-assist-tg-bot/tests/callbacks.test.js
-    const expandMarkup = activeSessionId && !isUtility
-      ? { inline_keyboard: [[{ text: '↗️ вдумчивее плиз', callback_data: `ask_claude|${activeSessionId}` }]] }
-      : null;
+    // Под быстрым one-shot ответом — явные действия: проработка / уточнение.
+    const expandMarkup = !isUtility ? actionButtons(activeSessionId) : null;
     const quickExtra = expandMarkup ? { reply_markup: expandMarkup } : {};
     if (initialMsgId) {
       await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra));
@@ -1800,16 +1811,15 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
     activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
-    // Answer router: на входе НОВОЙ сессии выбрать глубину (one-shot vs deep/research).
-    // Durable-сайдкар, читается при сборке промпта на каждом ходу. Skip для авто-followup
-    // (там режим задаёт reopen-инструкция). Fail-open в one-shot внутри decideMode.
-    if (!internalFollowup) {
-      try {
-        const modeRec = await answerRouter.decideMode(task, { apiKey: secrets.OPENROUTER_API_KEY });
-        answerRouter.writeMode(user.workDir, activeSessionId, modeRec);
-        console.log('[%s] answer-router mode=%s score=%s (%s)', taskId, modeRec.mode, modeRec.score, modeRec.reason);
-      } catch (e) { console.warn('[%s] answer-router:', taskId, e.message); }
-    }
+  }
+
+  // Answer router (manual launch): глубина выбирается ЯВНОЙ кнопкой, не угадывается.
+  // «⏻ Запустить проработку» → mode='deep' пишется в durable-сайдкар (sticky: держится
+  // на всех последующих ходах). 'clarify' транзиентен — не пишем. Дефолт (нет кнопки) —
+  // one-shot, сайдкар не трогаем.
+  if (explicitMode === 'deep' && activeSessionId) {
+    answerRouter.writeMode(user.workDir, activeSessionId, { mode: 'deep', source: 'workrun' });
+    console.log('[%s] answer-router mode=deep (workrun)', taskId);
   }
 
   // Use bot's pinned placeholder if provided; otherwise send our own
@@ -1962,19 +1972,23 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
   } catch (e) { console.warn('[runner] project profile merge:', e.message); }
 
-  // Answer router: если для этой сессии выбран deep-режим — снять cap «2-3 предложения»
-  // блоком в системном промпте. Читаем durable-решение с диска (пишется при создании
-  // сессии), поэтому режим держится на всех ходах. Нет решения → one-shot (без изменений).
+  // Answer router: вставить блок режима в системный промпт для этого хода.
+  //  • clarify (транзиентно, этот ход) → блок вопросов, приоритетнее deep.
+  //  • deep (sticky, из durable-сайдкара) → снять cap «2-3 предложения».
+  //  • иначе → one-shot, промпт без изменений.
   try {
-    const modeRec = answerRouter.readMode(user.workDir, activeSessionId);
-    if (modeRec && modeRec.mode === 'deep') {
+    const deepSticky = answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
+    const block = explicitMode === 'clarify' ? answerRouter.buildClarifyBlock()
+                : deepSticky                  ? answerRouter.buildDeepBlock()
+                : null;
+    if (block) {
       const baseTxt = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
-      const merged = baseTxt + '\n' + answerRouter.buildDeepBlock() + '\n';
+      const merged = baseTxt + '\n' + block + '\n';
       const out = path.join(user.workDir, '.system-prompt.txt');
       fs.writeFileSync(out, merged, { mode: 0o600 });
       systemPromptFile = out;
     }
-  } catch (e) { console.warn('[runner] answer-router deep block:', e.message); }
+  } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
   const proc = spawn(process.env.CLAUDE_BIN || 'claude', [
     '--dangerously-skip-permissions',
@@ -2263,13 +2277,21 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
   const final = result.slice(-MAX_MSG_LEN);
 
-  // Send result (clear stop button if it was shown)
+  // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
+  // сессия уже deep (проработка только что и была). После clarify — показываем (чтобы
+  // юзер мог запустить проработку по уточнённому ТЗ).
+  const finalDeep = explicitMode === 'deep' ||
+    answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
+  const finalMarkup = internalFollowup ? null : actionButtons(activeSessionId, { deep: finalDeep });
+  const finalExtra = { reply_markup: finalMarkup || { inline_keyboard: [] } };
+
+  // Send result (clear stop button; attach action buttons unless suppressed)
   if (msgId) {
-    await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, { reply_markup: { inline_keyboard: [] } }).catch(() =>
-      tgSend(BOT_TOKEN, chatId, `🧠 ${final}`)
+    await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, finalExtra).catch(() =>
+      tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra)
     );
   } else {
-    await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`);
+    await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra);
   }
 
   // Update context pin after task (skipped when user ran /context_off)
