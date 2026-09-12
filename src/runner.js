@@ -1595,7 +1595,7 @@ function ensureSkillDir(workDir, domainPath, description) {
   return dir;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalFollowup = false }) {
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
@@ -2258,6 +2258,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   if (activeSessionId) {
     sessions.appendReply(user.workDir, activeSessionId, result);
     setCurrentSessionId(user.workDir, activeSessionId, chatId);
+
+    // Followup controller: if the user asked us to see this through to the end,
+    // schedule a durable check-back. Skip on internal followup re-runs (no self-loop).
+    if (!internalFollowup) {
+      try {
+        const followup = require('./followup-controller');
+        followup.maybeSchedule({
+          workDir: user.workDir, sessionId: activeSessionId, chatId,
+          username: user.username, task, apiKey: secrets.OPENROUTER_API_KEY,
+        }).catch(e => console.warn('[followup] schedule:', e.message));
+      } catch (e) { console.warn('[followup] hook:', e.message); }
+    }
   }
 
   return result;
