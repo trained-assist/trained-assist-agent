@@ -1047,6 +1047,25 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  // Admin restart command — only for the operator chat. Sends confirmation then exits (systemd restarts).
+  const ADMIN_CHAT_IDS = new Set([5308931318]);
+  if (/^\/restart$/i.test((opts.task || '').trim()) && ADMIN_CHAT_IDS.has(Number(opts.user.id))) {
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    const msg = '🔄 Сервер перезапускается... (systemd поднимет через несколько секунд)';
+    const sendAndExit = () => setTimeout(() => process.exit(0), 600);
+    if (botToken) {
+      const im = opts.initialMsgId;
+      (im
+        ? tgEdit(botToken, chatId, im, msg).catch(() => tgSend(botToken, chatId, msg))
+        : tgSend(botToken, chatId, msg)
+      ).catch(() => {}).finally(sendAndExit);
+    } else {
+      sendAndExit();
+    }
+    return Promise.resolve(msg);
+  }
+
   // Wakeup command — kill stuck task + clear the queue so new messages can flow through.
   if (WAKEUP_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -1504,14 +1523,21 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
 
   // Inject requirements log so Claude can track and update user requirements
-  const reqLog = readLog(user.workDir);
+  const MAX_SECTION_CHARS = 10_000;
+  const reqLogRaw = readLog(user.workDir);
+  const reqLog = reqLogRaw && reqLogRaw.length > MAX_SECTION_CHARS
+    ? reqLogRaw.slice(0, MAX_SECTION_CHARS) + '\n...[лог обрезан]'
+    : reqLogRaw;
   const reqLogSection = reqLog
     ? `[REQUIREMENTS LOG — обновляй в конце каждой задачи]\n${reqLog}`
     : '';
 
   // Inject per-user agent notes (adaptive logic refinements written by the agent itself)
   const notesPath = path.join(user.workDir, 'agent-notes.md');
-  const agentNotes = fs.existsSync(notesPath) ? fs.readFileSync(notesPath, 'utf8').trim() : '';
+  const agentNotesRaw = fs.existsSync(notesPath) ? fs.readFileSync(notesPath, 'utf8').trim() : '';
+  const agentNotes = agentNotesRaw.length > MAX_SECTION_CHARS
+    ? agentNotesRaw.slice(0, MAX_SECTION_CHARS) + '\n...[заметки обрезаны]'
+    : agentNotesRaw;
   const notesSection = agentNotes
     ? `[AGENT NOTES — твои собственные заметки о логике/решениях для этого юзера]\n${agentNotes}`
     : '';
@@ -1581,7 +1607,13 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, bugReportSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
-  const prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
+  let prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
+  // Guard against E2BIG: OS ARG_MAX is 2MB; cap at 1MB to leave room for env vars.
+  const MAX_PROMPT_CHARS = 1_000_000;
+  if (prompt.length > MAX_PROMPT_CHARS) {
+    console.warn('[%s] prompt too large (%d chars), truncating to %d', taskId, prompt.length, MAX_PROMPT_CHARS);
+    prompt = prompt.slice(0, MAX_PROMPT_CHARS) + '\n...[промпт обрезан из-за размера]';
+  }
   const fullOutput = { text: '' };
 
   const sessionFilePath = activeSessionId
