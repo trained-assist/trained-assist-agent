@@ -10,7 +10,8 @@ const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
+const { generateSummary } = require('./session-summary');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
 const { nalogFormHtml, nalogCodeFormHtml } = require('./connect-forms/nalog');
@@ -119,6 +120,52 @@ ${sessionDescriptions}
   if (!match) return { sessionId: null, confidence: 'low' };
 
   return { sessionId: match.id, confidence: 'high' };
+}
+
+// ШАГ 1.2 — cheap completeness gate. Given a coalesced intake buffer, decide
+// whether it reads as a finished, actionable request or an obviously cut-off
+// fragment ("сделай так чтобы", "а можешь", trailing "и…"). STRONG bias toward
+// "complete": we only want to catch clearly truncated thoughts so a costly
+// session doesn't start on half an instruction and then redo the work. On any
+// doubt or error we return complete=true (fail open — never trap the user).
+async function checkCompleteness(text, openrouterKey) {
+  const trimmed = (text || '').trim();
+  if (!trimmed || !openrouterKey) return { complete: true };
+
+  const prompt = `Пользователь пишет ассистенту в Telegram. Реши, законченная ли это мысль/запрос, который можно начинать выполнять, или она ЯВНО оборвана на полуслове (человек не дописал).
+
+СООБЩЕНИЕ:
+"""
+${trimmed.slice(0, 1200)}
+"""
+
+Ответь ТОЛЬКО одним словом:
+- "complete" — если это осмысленный запрос/вопрос/утверждение, который можно выполнять (даже короткий, даже без деталей).
+- "incomplete" — ТОЛЬКО если мысль явно оборвана: обрывается на предлоге/союзе, "сделай так чтобы", "а можешь", "нужно чтобы…" без продолжения, висящее "и".
+
+Сильно склоняйся к "complete". Придирайся только к очевидно недописанному. Ничего лишнего, одно слово.`;
+
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${openrouterKey}`,
+    },
+    body: JSON.stringify({
+      model: 'openai/gpt-4o-mini',
+      max_tokens: 8,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`OpenRouter API ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const answer = (data.choices?.[0]?.message?.content || '').toLowerCase();
+  // Default to complete unless the model explicitly said incomplete.
+  return { complete: !answer.includes('incomplete') };
 }
 
 // OAuth2 state store: state_token → {userId, expires}
@@ -2710,7 +2757,25 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid username' });
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '10', 10), 50);
       const workDir = path.join(BASE_USERS_DIR, username);
-      return json(res, 200, { sessions: listSessions(workDir, limit) });
+      let sessionList = listSessions(workDir, limit);
+      // Lazily backfill durable summaries so external consumers (Telegram gateway,
+      // web UI) get a meaningful {title, gist} — not a raw first-message truncation.
+      // Mirrors the /sessions lazy-generation in runner.runQuickAnswer; this is the
+      // HTTP entry point those UIs actually hit, so the class lives here too.
+      const orKey = secrets.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY;
+      const stale = sessionList.filter(s => needsSummary(s));
+      if (stale.length && orKey) {
+        await Promise.all(stale.map(async (s) => {
+          try {
+            const full = getSessionData(workDir, s.id);
+            if (!full) return;
+            const sum = await generateSummary(full.messages, { apiKey: orKey });
+            if (sum) setSummary(workDir, s.id, sum, s.messageCount);
+          } catch { /* best-effort; fall back to raw topic */ }
+        }));
+        sessionList = listSessions(workDir, limit); // reload with fresh summaries
+      }
+      return json(res, 200, { sessions: sessionList });
     }
 
     // POST /sessions/archive — remove sessions from the index
@@ -2767,6 +2832,22 @@ ${expLines || '—'}
       } catch (e) {
         console.error('[classify] error:', e.message);
         return json(res, 200, { sessionId: null, confidence: 'low' }); // fallback: show picker
+      }
+    }
+
+    // POST /intake-gate — cheap completeness check for the debounce DO (ШАГ 1.2)
+    if (req.method === 'POST' && url.pathname === '/intake-gate') {
+      const body = await readBody(req);
+      let payload;
+      try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
+      const { text } = payload;
+      if (typeof text !== 'string') return json(res, 400, { error: 'missing text' });
+      try {
+        const result = await checkCompleteness(text, secrets.OPENROUTER_API_KEY);
+        return json(res, 200, result);
+      } catch (e) {
+        console.error('[intake-gate] error:', e.message);
+        return json(res, 200, { complete: true }); // fail open — never trap the user
       }
     }
 
