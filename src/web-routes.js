@@ -16,6 +16,45 @@ function json(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
 }
 
+// Shared session readers — used by both the cookie-authed /web/* routes below
+// and the stateless bearer-gated /web/sessions-list, /web/session-get endpoints
+// in server.js (the Cloudflare front-end delegates to those). Single source of
+// truth so the external UI and the agent's own UI never drift.
+function listSessionsFor(username, limit = 20) {
+  const workDir = userWorkDir(username);
+  const cap = Math.min(parseInt(limit, 10) || 20, 50);
+  const running = isTaskRunning(username);
+  return listSessions(workDir, cap).map((s, i) => ({
+    id: s.id,
+    topic: s.topic,
+    lastAt: s.lastAt,
+    createdAt: s.createdAt,
+    messageCount: s.messageCount,
+    lastUserMessage: s.lastUserMessage,
+    status: (running && i === 0) ? 'running' : (s.status || 'completed'),
+  }));
+}
+
+function getSessionFor(username, sessionId) {
+  if (!sessionId || !SESSION_ID_RE.test(sessionId)) return null;
+  const workDir = userWorkDir(username);
+  const index = listSessions(workDir, 50);
+  const meta = index.find(s => s.id === sessionId);
+  if (!meta) return null;
+  const session = getSession(workDir, sessionId);
+  if (!session) return null;
+  const running = isTaskRunning(username);
+  return {
+    id: session.id,
+    topic: session.topic,
+    createdAt: session.createdAt,
+    lastAt: session.lastAt,
+    messageCount: session.messageCount,
+    status: running && index[0]?.id === sessionId ? 'running' : (session.status || 'completed'),
+    messages: session.messages || [],
+  };
+}
+
 // Resolve session status: running (process alive) or from stored field, fallback completed
 function sessionStatus(username, session) {
   if (isTaskRunning(username)) {
@@ -40,21 +79,7 @@ async function handleWebRoute(req, url, res, secrets) {
     const username = webAuth(req, secrets.WEB_JWT_SECRET);
     if (!username) return json(res, 401, { error: 'unauthorized' }), true;
 
-    const workDir = userWorkDir(username);
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 50);
-    const sessions = listSessions(workDir, limit);
-
-    const running = isTaskRunning(username);
-    const result = sessions.map((s, i) => ({
-      id: s.id,
-      topic: s.topic,
-      lastAt: s.lastAt,
-      createdAt: s.createdAt,
-      messageCount: s.messageCount,
-      lastUserMessage: s.lastUserMessage,
-      status: (running && i === 0) ? 'running' : (s.status || 'completed'),
-    }));
-
+    const result = listSessionsFor(username, url.searchParams.get('limit') || '20');
     return json(res, 200, result), true;
   }
 
@@ -66,26 +91,9 @@ async function handleWebRoute(req, url, res, secrets) {
     const sessionId = p.slice('/web/session/'.length);
     if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) return json(res, 400, { error: 'invalid session id' }), true;
 
-    const workDir = userWorkDir(username);
-
-    // Verify the session belongs to this profile (check index before loading full file)
-    const index = listSessions(workDir, 50);
-    const meta = index.find(s => s.id === sessionId);
-    if (!meta) return json(res, 404, { error: 'session not found' }), true;
-
-    const session = getSession(workDir, sessionId);
-    if (!session) return json(res, 404, { error: 'session not found' }), true;
-
-    const running = isTaskRunning(username);
-    return json(res, 200, {
-      id: session.id,
-      topic: session.topic,
-      createdAt: session.createdAt,
-      lastAt: session.lastAt,
-      messageCount: session.messageCount,
-      status: running && index[0]?.id === sessionId ? 'running' : (session.status || 'completed'),
-      messages: session.messages || [],
-    }), true;
+    const out = getSessionFor(username, sessionId);
+    if (!out) return json(res, 404, { error: 'session not found' }), true;
+    return json(res, 200, out), true;
   }
 
   // ── GET /web/files/tree — directory tree inside profile workDir ──────────
@@ -267,4 +275,4 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
   });
 }
 
-module.exports = { handleWebRoute };
+module.exports = { handleWebRoute, listSessionsFor, getSessionFor };
