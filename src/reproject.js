@@ -179,26 +179,44 @@ async function clusterSessions(sessions, criteria, opts = {}) {
 // ── Cycle 2: consolidate near-duplicate clusters into canonical projects ──────
 
 const CONSOLIDATE_SYSTEM = [
-  'Тебе дают черновые кластеры проектов (ключ + имя + сколько сессий).',
-  'Некоторые описывают ОДИН И ТОТ ЖЕ проект разными словами. Объедини такие.',
+  'Ты сводишь черновые кластеры сессий в НАСТОЯЩИЕ проекты по критерию пользователя.',
+  'Черновой кластер обычно = одна сессия/одна тема. Твоя задача — собрать в один проект ВСЕ кластеры,',
+  'которые по критерию относятся к одной единице работы (напр. одна вакансия/наём: поиск кандидатов,',
+  'контакты, анализ ЗП, правки бота, КП по этой вакансии — это ОДИН проект, а не пять).',
+  'Тебе дают критерий, и по каждому кластеру: ключ, имя, тип, число сессий и выжимку содержания.',
+  'Опирайся на СОДЕРЖАНИЕ, а не только на имя — разные формулировки одной вакансии/линии работы объединяй.',
   'Верни СТРОГО JSON: {"map":{"<исходный cluster>":"<канонический cluster>"},"projects":[{"cluster","name","type"}]}.',
-  'Канонический cluster — латиница/цифры/дефис. name — самое ясное имя. type — recruiting|expo|generic.',
-  'Не объединяй разные проекты. Если сомневаешься — оставь раздельными.',
+  'Канонический cluster — латиница/цифры/дефис. name — самое ясное имя проекта. type — recruiting|expo|generic.',
+  'Цель — компактная структура по критерию. Объединяй охотно; раздельно оставляй только явно НЕсвязанные линии работы.',
 ].join('\n');
 
-async function consolidateClusters(assignments, opts = {}) {
+async function consolidateClusters(assignments, sessions = [], criteria = '', opts = {}) {
+  const byId = new Map((sessions || []).map(s => [s.id, s]));
   const byCluster = new Map();
   for (const a of assignments) {
     const k = a.cluster || 'unassigned';
-    if (!byCluster.has(k)) byCluster.set(k, { cluster: k, name: a.name || k, type: a.type || 'generic', count: 0 });
-    byCluster.get(k).count++;
+    if (!byCluster.has(k)) byCluster.set(k, { cluster: k, name: a.name || k, type: a.type || 'generic', count: 0, sample: '' });
+    const c = byCluster.get(k);
+    c.count++;
+    // Keep a representative content snippet so the merger can judge semantic sameness,
+    // not just name-duplication (the over-split fix): richest session wins the sample slot.
+    const s = byId.get(a.id);
+    if (s) {
+      const snip = String(s.topic || '') + ' — ' + String(s.digest || '').replace(/\s+/g, ' ');
+      if (snip.length > c.sample.length) c.sample = snip.slice(0, 320);
+    }
   }
   const raw = [...byCluster.values()];
   // Nothing to merge → identity map.
   if (raw.length <= 1) {
     return { map: Object.fromEntries(raw.map(r => [r.cluster, r.cluster])), projects: raw };
   }
-  const user = 'Черновые кластеры:\n' + raw.map(r => `- ${r.cluster} | "${r.name}" | ${r.type} | ${r.count} сессий`).join('\n');
+  const user = [
+    `Критерий группировки от пользователя: ${criteria || 'одна линия работы = один проект; для рекрутинга одна вакансия = один проект'}`,
+    '',
+    'Черновые кластеры:',
+    ...raw.map(r => `- ${r.cluster} | "${r.name}" | ${r.type} | ${r.count} сессий\n    содержание: ${r.sample || '(нет)'}`),
+  ].join('\n');
   let out;
   try {
     out = await callModel({ system: CONSOLIDATE_SYSTEM, user, model: opts.model || CONSOLIDATE_MODEL, apiKey: opts.apiKey });
@@ -475,7 +493,7 @@ async function preview(profileRoot, { criteria, apiKey, model, now = Date.now() 
   const sessions = gatherSessions(profileRoot);
   if (!sessions.length) return { error: 'no sessions found for this profile' };
   const assignments = await clusterSessions(sessions, criteria, { apiKey, model });
-  const consolidation = await consolidateClusters(assignments, { apiKey });
+  const consolidation = await consolidateClusters(assignments, sessions, criteria, { apiKey });
   const plan = buildPlan(profileRoot, sessions, assignments, consolidation);
   plan.generatedAt = now;
   const state = { criteria: criteria || null, at: now, plan, assignments };

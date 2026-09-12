@@ -13,6 +13,7 @@
 // Product-owner invariants: nothing moves without confirm; every apply is reversible;
 // classification is cheap-model only (Claude is not used for the sorting).
 
+const fs = require('fs');
 const path = require('path');
 const reproject = require('../../reproject');
 
@@ -21,8 +22,21 @@ try { dataPaths = require('../../data-paths'); } catch { /* optional */ }
 
 // Resolve the profile root (USERS_ROOT/<username>) — the dir that holds sessions.json,
 // sessions/, projects/. Robust across "cwd is now a project subdir" (projects abstraction):
-// prefer AGENT_SESSION_FILE (sessions/<id>.json → ../..), then username env, then cwd walk.
-function resolveProfileRoot() {
+// prefer an EXPLICIT profile (operate-on-behalf: an operator reprojecting another user's
+// profile), then AGENT_SESSION_FILE (sessions/<id>.json → ../..), then username env, then cwd walk.
+//
+// An explicit `profile` is a username = the USERS_ROOT/<username> dir. It must map to a real
+// profile dir (has sessions.json) — we refuse to invent an empty root, so a typo can't silently
+// reproject "nothing" or scaffold junk under a wrong path.
+function resolveProfileRoot(profile) {
+  if (profile) {
+    if (!dataPaths) throw new Error('data-paths unavailable — cannot resolve explicit profile');
+    const root = dataPaths.userWorkDir(profile);
+    if (!fs.existsSync(path.join(root, 'sessions.json'))) {
+      throw new Error(`Профиль «${profile}» не найден (нет ${root}/sessions.json). Укажи имя папки профиля из USERS_ROOT.`);
+    }
+    return root;
+  }
   const sf = process.env.AGENT_SESSION_FILE;
   if (sf) return path.dirname(path.dirname(sf));
   const user = process.env.AGENT_USER_ID || process.env.USER_ID || process.env.AGENT_USERNAME;
@@ -54,10 +68,15 @@ module.exports = {
             type: 'string',
             description: 'Override модели классификатора (по умолчанию REPROJECT_MODEL / deepseek).',
           },
+          profile: {
+            type: 'string',
+            description: 'Имя папки профиля в USERS_ROOT для переструктуризации ЧУЖОГО профиля (напр. «mbk_luda_recruiter»). Без него — профиль текущей сессии.',
+          },
         },
       },
-      handler: async ({ criteria, model } = {}) => {
-        const root = resolveProfileRoot();
+      handler: async ({ criteria, model, profile } = {}) => {
+        let root;
+        try { root = resolveProfileRoot(profile); } catch (e) { return { error: String(e.message || e) }; }
         try {
           const out = await reproject.preview(root, { criteria, model, now: Date.now() });
           if (out.error) return out;
@@ -85,10 +104,15 @@ module.exports = {
         type: 'object',
         properties: {
           confirm: { type: 'boolean', description: 'true — реально применить. false/пусто — сухой прогон.' },
+          profile: {
+            type: 'string',
+            description: 'Имя папки профиля в USERS_ROOT (должно совпадать с тем, что передавали в reproject_preview). Без него — профиль текущей сессии.',
+          },
         },
       },
-      handler: async ({ confirm = false } = {}) => {
-        const root = resolveProfileRoot();
+      handler: async ({ confirm = false, profile } = {}) => {
+        let root;
+        try { root = resolveProfileRoot(profile); } catch (e) { return { error: String(e.message || e) }; }
         const state = reproject.loadState(root);
         if (!state || !state.plan) {
           return { error: 'Нет сохранённого плана. Сначала вызови reproject_preview.' };
@@ -113,9 +137,18 @@ module.exports = {
 
     reproject_revert: {
       description: 'Откатить последний reproject_apply по ledger (вернуть прежние projectId сессий).',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => {
-        const root = resolveProfileRoot();
+      inputSchema: {
+        type: 'object',
+        properties: {
+          profile: {
+            type: 'string',
+            description: 'Имя папки профиля в USERS_ROOT (тот же, что применяли). Без него — профиль текущей сессии.',
+          },
+        },
+      },
+      handler: async ({ profile } = {}) => {
+        let root;
+        try { root = resolveProfileRoot(profile); } catch (e) { return { error: String(e.message || e) }; }
         try {
           return reproject.revertPlan(root, { now: Date.now() });
         } catch (e) {
