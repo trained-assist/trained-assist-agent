@@ -2836,6 +2836,22 @@ ${expLines || '—'}
         }));
         sessionList = listSessions(workDir, limit); // reload with fresh summaries
       }
+      // Attach a human project name so external UIs (Telegram /sessions) can show
+      // "какой это проект" without resolving opaque projectIds themselves. Lazy
+      // require keeps this working on branches without the projects model; unknown
+      // or legacy (projectId=null) sessions simply carry no projectName.
+      try {
+        const projects = require('./projects');
+        const nameCache = {};
+        sessionList = sessionList.map((s) => {
+          if (!s.projectId) return s;
+          if (!(s.projectId in nameCache)) {
+            const p = projects.getProject(workDir, s.projectId);
+            nameCache[s.projectId] = p ? p.name : null;
+          }
+          return nameCache[s.projectId] ? { ...s, projectName: nameCache[s.projectId] } : s;
+        });
+      } catch { /* projects model absent — serve sessions without projectName */ }
       return json(res, 200, { sessions: sessionList });
     }
 
