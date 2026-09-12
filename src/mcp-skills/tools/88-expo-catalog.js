@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { expoDataDir, expoDeployDir } = require('../expo-paths.js');
 
 const TEMPLATE_PATH = path.join(__dirname, '../../catalog-template/index.html');
 
@@ -66,7 +67,7 @@ Parameters:
         const workDir = ctx?.workDir || process.cwd();
 
         const id = expo_id.startsWith('http') ? slugify(expo_id) : expo_id;
-        const expoDir = path.join(workDir, 'expo-pipeline', id);
+        const expoDir = expoDataDir(workDir, id);
 
         // Find source data file
         const candidates = use_targets
@@ -139,8 +140,9 @@ Parameters:
           .replace(/\{\{EXPO_DATE\}\}/g, expo_date)
           .replace('{{EX_JSON}}', exJson);
 
-        // Write output
-        const outputDir = out_dir ? path.resolve(out_dir) : expoDir;
+        // Write output — into the clean deployable dir (deploy/<slug>/ in a project,
+        // legacy expo-pipeline/<id>/ otherwise), never the data dir with its inputs.
+        const outputDir = out_dir ? path.resolve(out_dir) : expoDeployDir(workDir, id);
         fs.mkdirSync(outputDir, { recursive: true });
         const outputPath = path.join(outputDir, 'index.html');
         fs.writeFileSync(outputPath, html, 'utf8');
@@ -188,8 +190,7 @@ Returns the deployed URL.`,
       handler: async ({ expo_id, out_dir, project_name }, ctx) => {
         const workDir = ctx?.workDir || process.cwd();
         const id = expo_id.startsWith('http') ? slugify(expo_id) : expo_id;
-        const expoDir = path.join(workDir, 'expo-pipeline', id);
-        const deployDir = out_dir ? path.resolve(out_dir) : expoDir;
+        const deployDir = out_dir ? path.resolve(out_dir) : expoDeployDir(workDir, id);
         const slug = project_name || id;
 
         const indexPath = path.join(deployDir, 'index.html');
