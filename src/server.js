@@ -1959,7 +1959,7 @@ ${expLines || '—'}
     }
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects') {
+    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get') {
       if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
@@ -2011,6 +2011,48 @@ ${expLines || '—'}
         return json(res, 200, { projects });
       } catch (e) {
         return json(res, 200, { projects: [], note: 'projects model unavailable' });
+      }
+    }
+
+    // ── POST /web/sessions-list — authoritative session list for external UIs ─
+    // Same delegation pattern as /web/verify & /web/projects. The Cloudflare
+    // session-manager worker (app.trainedassist.store) POSTs {username, limit} +
+    // shared bearer and gets back the profile's REAL sessions — the same ones the
+    // bot writes to disk on every Telegram turn (session-store). Without this the
+    // worker only ever showed its own Durable-Object demo/imported sessions, so a
+    // user's Telegram dialogs never appeared. Single source of truth = disk.
+    if (req.method === 'POST' && url.pathname === '/web/sessions-list') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, limit } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      try {
+        const { listSessionsFor } = require('./web-routes');
+        return json(res, 200, { sessions: listSessionsFor(username, limit || 30) });
+      } catch (e) {
+        return json(res, 200, { sessions: [], note: 'session store unavailable' });
+      }
+    }
+
+    // ── POST /web/session-get — full session (messages) for external UIs ──────
+    if (req.method === 'POST' && url.pathname === '/web/session-get') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, id } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      try {
+        const { getSessionFor } = require('./web-routes');
+        const session = getSessionFor(username, id);
+        if (!session) return json(res, 404, { error: 'session not found' });
+        return json(res, 200, { session });
+      } catch (e) {
+        return json(res, 500, { error: 'session read failed' });
       }
     }
 
