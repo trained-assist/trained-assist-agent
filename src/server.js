@@ -372,15 +372,16 @@ function scheduleHhBackgroundScoring() {
   setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
 }
 
-// Followup controller tick: fire due check-backs for tasks the user asked us to
-// see through. Re-entrancy + hard-cap live in the module; here we just inject deps.
-function scheduleFollowupController(secrets) {
-  const followup = require('./followup-controller');
+// GTD controller tick: fire due check-backs for workrun tasks the user asked us
+// to see through to done. Re-entrancy + hard-cap live in the module; here we just
+// inject deps.
+function scheduleGtdController(secrets) {
+  const gtd = require('./gtd-controller');
   const { isTaskRunning } = require('./runner');
   const { getSession } = require('./session-store');
-  const run = () => followup.runDue({
+  const run = () => gtd.runDue({
     secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning, runTask, getSession,
-  }).catch(err => console.error('[followup] tick error:', err.message));
+  }).catch(err => console.error('[gtd] tick error:', err.message));
   setTimeout(run, 2 * 60 * 1000);      // first tick 2 min after start
   setInterval(run, 5 * 60 * 1000);     // then every 5 min
 }
@@ -2490,7 +2491,7 @@ ${expLines || '—'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectDir, fileBase64, fileName, fileMimeType } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectDir, fileBase64, fileName, fileMimeType, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
@@ -2549,7 +2550,7 @@ ${expLines || '—'}
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets }).catch(err =>
+      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
@@ -3353,7 +3354,7 @@ ${recent || '(пока нет)'}
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
-  scheduleFollowupController(secrets);
+  scheduleGtdController(secrets);
   resumePendingTasks(secrets).catch(err => console.error('[resume] startup error:', err.message));
 
   // Deploys restart this service frequently (every few minutes during an
