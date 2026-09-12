@@ -1048,7 +1048,7 @@ function runTask(opts) {
   }
 
   // Admin restart command — only for the operator chat. Sends confirmation then exits (systemd restarts).
-  const ADMIN_CHAT_IDS = new Set([5308931318]);
+  const ADMIN_CHAT_IDS = new Set([-5308931318]);
   if (/^\/restart$/i.test((opts.task || '').trim()) && ADMIN_CHAT_IDS.has(Number(opts.user.id))) {
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const chatId = opts.user.id;
