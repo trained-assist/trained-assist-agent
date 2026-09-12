@@ -29,6 +29,15 @@ const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
   path.join(process.env.HOME || '/home/vova', 'users');
 
+// Narrow ("specialized") bots delegate into a real profile instead of owning their
+// own. @cmr_management_bot ("misha") IS Flexi Consulting — its data (6 expo projects,
+// interviews, contexts) lives under the `flexi-consult` profile, so the bot must
+// delegate there, not into an empty `misha` profile. Config-driven, not hardcoded,
+// so future narrow bots just add an entry (bot key → owning profile).
+const NARROW_BOTS = {
+  misha: { profile: process.env.MISHA_PROFILE || 'flexi-consult' },
+};
+
 const VM_NAME = process.env.VM_NAME || 'unknown';
 let GIT_COMMIT = 'unknown';
 try { GIT_COMMIT = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
@@ -3994,7 +4003,8 @@ async function processMishaUpdate(update, botToken, secrets) {
   if (!msg) return;
 
   const chatId = String(msg.chat.id);
-  const username = 'misha';
+  // Delegate into the owning profile (flexi-consult), NOT a standalone "misha" profile.
+  const username = NARROW_BOTS.misha.profile;
   const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
   async function tgSend(text) {
@@ -4063,6 +4073,7 @@ async function processMishaUpdate(update, botToken, secrets) {
 
   let taskParts = [];
   let forceNewSession = false;
+  let bindEventKey = null; // expo eventKey from a deep link → bind session to that project
 
   // /start — check for exhibition deep link parameter
   if (cmd === '/start') {
@@ -4072,6 +4083,7 @@ async function processMishaUpdate(update, botToken, secrets) {
       const eventKey = startParam.slice(0, delimIdx);
       const companyId = startParam.slice(delimIdx + 6);
       const isInn = /^\d{10,12}$/.test(companyId);
+      bindEventKey = eventKey;
       forceNewSession = true;
       taskParts.push(`КОМАНДА: Выставочная сделка (deep link)
 Выставка (eventKey): ${eventKey}
@@ -4139,6 +4151,26 @@ ${isInn ? `ИНН компании: ${companyId}` : `ID/стенд компан�
     }
     await tgSend(specText);
     return;
+  }
+
+  // Generic slash commands (/sessions, /usage, /project, /persona, /get_webpass,
+  // /secrets_list …) — the "narrow bot falls back to the ordinary agent" contract.
+  // Route them through the same quick-answer engine the main bot uses so the narrow
+  // bot answers them identically instead of forwarding raw "/sessions" text to Claude.
+  if (cmd && cmd.startsWith('/') && cmd !== '/new_deal' && cmd !== '/start') {
+    try {
+      const { runQuickAnswer } = require('./runner');
+      const reply = await runQuickAnswer(
+        text, username, workDir, secrets.OPENROUTER_API_KEY || null,
+        false, chatId, msg.from?.id || null
+      );
+      if (reply !== null && reply !== undefined) {
+        await tgSend(typeof reply === 'string' ? reply : JSON.stringify(reply));
+        return;
+      }
+    } catch (e) {
+      console.error('[misha] quick-answer proxy error:', e.message);
+    }
   }
 
   // /new_deal — clear session and start deal creation
@@ -4219,12 +4251,33 @@ ${isInn ? `ИНН компании: ${companyId}` : `ID/стенд компан�
   const sentMsg = await tgSend('⏳ Думаю…');
   const initialMsgId = sentMsg?.result?.message_id || null;
 
+  // Bind the session to the expo project matching the deep-link eventKey
+  // (huntingexpo2026 → projects/expo-huntingexpo2026). Pre-setting the active project
+  // makes the runner's project-binding block resolve cwd + PROFILE.md deterministically
+  // to that exhibition instead of falling back to the most-recent project.
+  let cwd = workDir;
+  if (bindEventKey) {
+    try {
+      const projects = require('./projects');
+      const projId = `expo-${bindEventKey}`;
+      const dir = projects.projectDir(workDir, projId);
+      if (fs.existsSync(dir)) {
+        projects.setActiveProjectId(workDir, projId, chatId);
+        cwd = dir;
+      } else {
+        console.warn(`[misha] no project for eventKey ${bindEventKey} (${projId})`);
+      }
+    } catch (e) {
+      console.error('[misha] project bind error:', e.message);
+    }
+  }
+
   const user = {
     id: Number(chatId),
     name: username,
     username,
     workDir,
-    cwd: workDir,
+    cwd,
     telegramUserId: msg.from?.id || null,
   };
   const mishaSecrets = { ...secrets, BOT_TOKEN: botToken };
