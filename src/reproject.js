@@ -226,7 +226,10 @@ function buildPlan(profileRoot, sessions, assignments, consolidation) {
 
   for (const s of sessions) {
     const a = assignments.find(x => x.id === s.id);
-    if (!a || !a.cluster) { unassigned.push(s.id); continue; }
+    if (!a || !a.cluster) {
+      unassigned.push({ id: s.id, topic: s.topic, reason: a && a.reason ? a.reason : 'модель не отнесла сессию ни к одному проекту' });
+      continue;
+    }
     const canon = consolidation.map[a.cluster] || a.cluster;
     if (!buckets.has(canon)) {
       const pm = projMeta.get(canon) || { name: a.name || canon, type: a.type || 'generic' };
@@ -236,11 +239,14 @@ function buildPlan(profileRoot, sessions, assignments, consolidation) {
         type: pm.type || a.type || 'generic',
         sessionIds: [],
         confidences: [],
+        members: [], // per-session detail for the report
       });
     }
     const b = buckets.get(canon);
     b.sessionIds.push(s.id);
-    if (typeof a.confidence === 'number') b.confidences.push(a.confidence);
+    const conf = typeof a.confidence === 'number' ? a.confidence : null;
+    if (conf != null) b.confidences.push(conf);
+    b.members.push({ id: s.id, topic: s.topic, confidence: conf, reason: a.reason || '' });
   }
 
   const plannedProjects = [...buckets.values()].map(b => {
@@ -248,6 +254,21 @@ function buildPlan(profileRoot, sessions, assignments, consolidation) {
     const slug = `${b.type}-${projects.slugify(b.name)}`;
     const match = existing.find(e => e.id === slug || e.id.startsWith(slug + '-'));
     const avgConf = b.confidences.length ? b.confidences.reduce((x, y) => x + y, 0) / b.confidences.length : null;
+    const minConf = b.confidences.length ? Math.min(...b.confidences) : null;
+    // Sessions the model was unsure about — these are the "ambiguous fit to this folder".
+    const weakMembers = b.members
+      .filter(m => m.confidence != null && m.confidence < 0.6)
+      .sort((x, y) => (x.confidence || 0) - (y.confidence || 0));
+    // Clarity of the folder itself: how cleanly its sessions belong here.
+    //   clear    — everything confidently in one line of work (a good, obvious folder)
+    //   mixed    — mostly fits but a few sessions are borderline (check those)
+    //   weak     — low average / single lonely session → the folder itself is doubtful
+    let clarity;
+    if (avgConf == null) clarity = 'weak';
+    else if (avgConf >= 0.75 && weakMembers.length === 0) clarity = 'clear';
+    else if (avgConf >= 0.55) clarity = 'mixed';
+    else clarity = 'weak';
+    if (b.sessionIds.length === 1 && (avgConf == null || avgConf < 0.85)) clarity = 'weak';
     return {
       name: b.name,
       type: b.type,
@@ -255,13 +276,16 @@ function buildPlan(profileRoot, sessions, assignments, consolidation) {
       sessionCount: b.sessionIds.length,
       sessionIds: b.sessionIds,
       avgConfidence: avgConf == null ? null : Math.round(avgConf * 100) / 100,
+      minConfidence: minConf == null ? null : Math.round(minConf * 100) / 100,
+      clarity,
+      weakMembers: weakMembers.map(m => ({ ...m, confidence: m.confidence == null ? null : Math.round(m.confidence * 100) / 100 })),
     };
   }).sort((a, b) => b.sessionCount - a.sessionCount);
 
   const warnings = [];
   if (unassigned.length) warnings.push(`${unassigned.length} сессий не классифицированы — останутся без проекта.`);
-  const lowConf = plannedProjects.filter(p => p.avgConfidence != null && p.avgConfidence < 0.5);
-  if (lowConf.length) warnings.push(`${lowConf.length} проектов с низкой уверенностью (<0.5) — проверь глазами.`);
+  const weakProjects = plannedProjects.filter(p => p.clarity === 'weak');
+  if (weakProjects.length) warnings.push(`${weakProjects.length} проект(ов) со спорной границей — модель не уверена, что это отдельная линия работы.`);
 
   return {
     generatedAt: null, // stamped by caller (Date.now unavailable in some harnesses)
@@ -274,27 +298,78 @@ function buildPlan(profileRoot, sessions, assignments, consolidation) {
 
 // ── Render a human report ─────────────────────────────────────────────────────
 
+const CLARITY = {
+  clear: { icon: '🟢', label: 'чёткая папка', note: 'все сессии уверенно про одно и то же — папку можно принимать как есть.' },
+  mixed: { icon: '🟡', label: 'в основном ок, есть спорные', note: 'ядро сессий подходит, но пару сессий стоит глянуть глазами (ниже помечены).' },
+  weak: { icon: '🔴', label: 'спорная папка', note: 'модель не уверена, что это отдельная линия работы (низкая уверенность или одинокая сессия). Возможно, это часть другого проекта или наоборот две разные темы в одной куче.' },
+};
+
 function renderReport(plan) {
-  const lines = [];
-  lines.push(`# Предлагаемая структура проектов`);
-  lines.push('');
-  lines.push(`Всего сессий: ${plan.totalSessions} · проектов: ${plan.projects.length} · без проекта: ${plan.unassigned.length}`);
-  lines.push('');
+  const L = [];
+  L.push('# Предлагаемая структура проектов');
+  L.push('');
+
+  // ── Что это и как читать ────────────────────────────────────────────────
+  L.push('## Что произошло');
+  L.push('Я прошёлся по всем сессиям профиля дешёвой моделью-классификатором (не Claude — несколько быстрых проходов) и сгруппировал их в **проекты**. Проект = одна связная линия работы: одна вакансия, одна выставка, одна разработка. Каждой сессии модель поставила проект и **уверенность** (0–1) — насколько ей очевидно, что сессия относится именно сюда.');
+  L.push('');
+  L.push('**Ничего пока не перемещено** — это только предложение. Смотрим, где границы папок хорошие, а где спорные, правим критерий и повторяем сколько нужно. Применение (когда одобрите) полностью обратимо.');
+  L.push('');
+  L.push('**Как читать статус папки:**');
+  L.push(`- ${CLARITY.clear.icon} **${CLARITY.clear.label}** — ${CLARITY.clear.note}`);
+  L.push(`- ${CLARITY.mixed.icon} **${CLARITY.mixed.label}** — ${CLARITY.mixed.note}`);
+  L.push(`- ${CLARITY.weak.icon} **${CLARITY.weak.label}** — ${CLARITY.weak.note}`);
+  L.push('');
+
+  const clear = plan.projects.filter(p => p.clarity === 'clear').length;
+  const mixed = plan.projects.filter(p => p.clarity === 'mixed').length;
+  const weak = plan.projects.filter(p => p.clarity === 'weak').length;
+  L.push(`**Итого:** ${plan.totalSessions} сессий → ${plan.projects.length} проектов (${CLARITY.clear.icon} ${clear} чётких · ${CLARITY.mixed.icon} ${mixed} со спорными · ${CLARITY.weak.icon} ${weak} спорных) · без проекта: ${plan.unassigned.length}.`);
+  L.push('');
+  L.push('---');
+  L.push('');
+
+  // ── Проекты ─────────────────────────────────────────────────────────────
   for (const p of plan.projects) {
-    const tag = p.existingProjectId ? `→ существующий \`${p.existingProjectId}\`` : '→ **новый**';
-    const conf = p.avgConfidence == null ? '' : ` · уверенность ${p.avgConfidence}`;
-    lines.push(`## ${p.name}  (${p.type}) ${tag}`);
-    lines.push(`${p.sessionCount} сессий${conf}`);
-    lines.push('');
+    const c = CLARITY[p.clarity] || CLARITY.mixed;
+    const tag = p.existingProjectId ? `существующая папка \`${p.existingProjectId}\`` : '**новая папка**';
+    const conf = p.avgConfidence == null ? 'уверенность: н/д' : `уверенность ${p.avgConfidence}`;
+    L.push(`## ${c.icon} ${p.name}`);
+    L.push(`тип: ${p.type} · ${p.sessionCount} сессий · ${conf} · ${tag}`);
+    L.push(`_${c.label}: ${c.note}_`);
+    if (p.weakMembers && p.weakMembers.length) {
+      L.push('');
+      L.push('Сессии, которые сюда легли неоднозначно (проверь — возможно, им место в другом проекте):');
+      for (const m of p.weakMembers.slice(0, 8)) {
+        const why = m.reason ? ` — ${m.reason}` : '';
+        L.push(`- «${m.topic || m.id}» (уверенность ${m.confidence ?? '—'})${why}`);
+      }
+    }
+    L.push('');
   }
+
+  // ── Без проекта ─────────────────────────────────────────────────────────
+  if (plan.unassigned.length) {
+    L.push('---');
+    L.push(`## ⚪ Без проекта (${plan.unassigned.length})`);
+    L.push('Модель не смогла отнести эти сессии ни к одной линии работы — останутся без папки, пока не уточним критерий:');
+    for (const u of plan.unassigned.slice(0, 10)) {
+      L.push(`- «${u.topic || u.id}»${u.reason ? ` — ${u.reason}` : ''}`);
+    }
+    L.push('');
+  }
+
+  // ── Что дальше ──────────────────────────────────────────────────────────
+  L.push('---');
   if (plan.warnings.length) {
-    lines.push('---');
-    lines.push('**Предупреждения:**');
-    for (const w of plan.warnings) lines.push(`- ${w}`);
+    L.push('**На что обратить внимание:**');
+    for (const w of plan.warnings) L.push(`- ${w}`);
+    L.push('');
   }
-  lines.push('');
-  lines.push('_Ничего не перемещено. Подтвердите — тогда применю (обратимо, с ledger)._');
-  return lines.join('\n');
+  L.push('**Дальше:**');
+  L.push('- Всё нравится → скажите «применяй» (перепривяжу сессии к папкам, обратимо — откат одной командой).');
+  L.push('- Что-то не так → скажите, что именно (напр. «разбей X по заказчикам» / «объедини Y и Z» / «это не отдельный проект»), уточню критерий и пересоберу.');
+  return L.join('\n');
 }
 
 // ── Apply / revert (reversible) ───────────────────────────────────────────────
