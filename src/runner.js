@@ -128,29 +128,17 @@ const PERSONA_GUIDE_URL     = 'https://instant-publish.trainedassist.store/p/per
 // /project — list / switch / create projects. Lets the user steer which project new
 // sessions bind to (see projects.js + the project-binding block in run()).
 const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\s|$)/i;
-// /get_webpass <username> — ADMIN-ONLY. Generates + reveals a fresh web password for
-// ANY profile, writing it to that profile's ~/agent-tokens/<user>/.webpasswd (the SAME
-// store the site verifies against via POST /web/verify). This is the single fix for
-// "the site password only exists for 2 of 11 profiles" — every profile can now be
-// issued a working password on demand. The password store is scrypt-hashed (one-way),
-// so this always ROTATES: each call sets a new password and the previous one dies.
-// Tolerate a trailing @botname (Telegram appends it in groups: "/get_webpass@Bot user").
+// /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
+// for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
+// store the site verifies against via POST /web/verify). This is the single fix for "the
+// site password only exists for 2 of 11 profiles" — any user mints a working password on
+// demand. The password store is scrypt-hashed (one-way), so this always ROTATES: each call
+// sets a new password and the previous one dies.
+// Deliberately NO cross-profile targeting and NO admin/chat-id gate: resetting your own
+// credential can't escalate anything, and every user can self-serve, so cross-profile
+// issuance is redundant. This also kills the group-chat-id / @botname gating that kept
+// breaking. Tolerate a trailing @botname (Telegram appends it in groups) + ignore any args.
 const GET_WEBPASS_INTENT    = /^\/(?:get_webpass|webpass|вебпароль)(?:@\S+)?(?=\s|$)/i;
-// Who may run /get_webpass. The command can target arbitrary profiles, so it's a
-// privilege-escalation surface and must be gated. We gate on TWO axes (either grants):
-//   ADMIN_USER_IDS  — Telegram from.id of the sender. This is the robust one: a person's
-//                     id is stable whether they DM the bot (chat.id == from.id) or run the
-//                     command in the admin group (chat.id is the negative group id).
-//   ADMIN_CHAT_IDS  — chat.id, kept for back-compat. Defaults include BOTH the owner's
-//                     private chat (5308931318) and the admin group (-5308931318) so the
-//                     command works in the admin group even before telegramUserId flows.
-// Gating on chatId alone was the bug: in a group chat.id is negative and never matched.
-const ADMIN_USER_IDS = new Set(
-  (process.env.ADMIN_USER_IDS || '5308931318').split(',').map(s => s.trim()).filter(Boolean)
-);
-const ADMIN_CHAT_IDS = new Set(
-  (process.env.ADMIN_CHAT_IDS || '5308931318,-5308931318').split(',').map(s => s.trim()).filter(Boolean)
-);
 const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('./web-auth');
 // Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
 const EXPO_CRITERIA_INTENT  = /требовани.{0,20}(?:целев|квалиф)|критери.{0,20}(?:целев|отбор|выставк)|целев.{0,20}(?:критери|требовани)|покажи.{0,15}критери|мои.{0,10}критери|expo.{0,10}criteria|target.{0,10}criteria/i;
@@ -243,26 +231,19 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     return `✅ Роль ассистента сохранена (${saved.length} симв). Применяется с этой сессии в каждом ответе.\n\nПоказать: \`/persona\` · убрать: \`/persona clear\``;
   }
 
-  // /get_webpass <username> — ADMIN-ONLY. Issue a fresh web-UI password for any profile.
-  // Closes [028]: 9 of 11 profiles never had a .webpasswd, so the site (which delegates
-  // to /web/verify against that store) had nothing to check → 401. Now the admin can
-  // mint a working password for any profile on demand; the site picks it up with no sync.
+  // /get_webpass — PURE SELF-SERVICE. Issue a fresh web-UI password for the CALLER'S OWN
+  // profile. Closes [028]/[029]: 9 of 11 profiles never had a .webpasswd, so the site (which
+  // delegates to /web/verify against that store) had nothing to check → 401. Any user mints
+  // a working password on demand; the site picks it up with no sync. No cross-profile
+  // targeting, no admin/chat-id gate (see comment on GET_WEBPASS_INTENT) — any trailing arg
+  // is ignored, the password is always for `userId` (the profile bound to this session).
   if (GET_WEBPASS_INTENT.test(task)) {
-    const isAdmin = (telegramUserId && ADMIN_USER_IDS.has(String(telegramUserId)))
-                 || (chatId && ADMIN_CHAT_IDS.has(String(chatId)));
-    if (!isAdmin) {
-      return '⛔ Команда доступна только администратору.';
-    }
-    const rest = task.replace(GET_WEBPASS_INTENT, '').trim();
-    const target = (rest ? rest.split(/\s+/)[0] : userId || '').trim();
-    if (!target) return 'Укажи профиль: `/get_webpass <username>`';
-    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(target)) {
-      return `Некорректное имя профиля: \`${target}\`. Допустимы латиница, цифры, _ и -.`;
-    }
+    const target = (userId || '').trim();
+    if (!target) return 'Не удалось определить профиль. Попробуй ещё раз.';
     const pass = genWebPassword();
     saveWebPassword(target, pass);
     return [
-      `🔑 Новый веб-пароль для профиля \`${target}\`:`,
+      `🔑 Твой новый веб-пароль:`,
       '',
       `\`${pass}\``,
       '',
