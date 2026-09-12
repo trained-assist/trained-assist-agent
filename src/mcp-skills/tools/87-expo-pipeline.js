@@ -2,23 +2,27 @@
 
 const fs = require('fs');
 const path = require('path');
+const { activeExpoProject, expoDataDir, expoConfigDir } = require('../expo-paths.js');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Shared, cross-exhibition config lives at the profile root (durable), even when
+// the session is bound to a single expo project — see expo-paths.js.
 function pipelineDir(workDir) {
-  return path.join(workDir, 'expo-pipeline');
+  return expoConfigDir(workDir);
 }
 
+// Per-exhibition pipeline data: project-aware (project data/ vs legacy per-id dir).
 function expoDir(workDir, expoId) {
-  return path.join(pipelineDir(workDir), expoId);
+  return expoDataDir(workDir, expoId);
 }
 
 function criteriaPath(workDir) {
-  return path.join(pipelineDir(workDir), 'criteria.json');
+  return path.join(expoConfigDir(workDir), 'criteria.json');
 }
 
 function siteConfigPath(workDir) {
-  return path.join(pipelineDir(workDir), 'site-config.json');
+  return path.join(expoConfigDir(workDir), 'site-config.json');
 }
 
 const DEFAULT_SITE_CONFIG = {
@@ -344,14 +348,10 @@ Use to check progress and find expo_ids for qualify/targets commands.`,
       },
       handler: async ({ expo_id } = {}, ctx) => {
         const workDir = ctx?.workDir || process.cwd();
-        const baseDir = pipelineDir(workDir);
+        const proj = activeExpoProject(workDir);
 
-        if (!fs.existsSync(baseDir)) {
-          return { pipelines: [], message: 'Нет активных pipeline. Запусти expo_find_participants для начала.' };
-        }
-
-        function readPipelineStatus(id) {
-          const dir = expoDir(workDir, id);
+        function readPipelineStatus(id, dirOverride) {
+          const dir = dirOverride || expoDir(workDir, id);
           const pipelinePath = path.join(dir, 'pipeline.json');
           let meta = {};
           try { meta = JSON.parse(fs.readFileSync(pipelinePath, 'utf8')); } catch {}
@@ -377,6 +377,29 @@ Use to check progress and find expo_ids for qualify/targets commands.`,
             targets:    countFile(targetsFile, 'companies'),
             steps:      meta.steps || {},
           };
+        }
+
+        // Inside an expo project the data is flat in data/ — one pipeline = one
+        // project, no per-id subfolders to scan.
+        if (proj) {
+          const dir = path.join(proj, 'data');
+          if (!fs.existsSync(dir)) {
+            return { pipelines: [], message: 'Нет данных pipeline в data/. Запусти expo_pipeline_run / expo_find_participants.' };
+          }
+          let meta = {};
+          try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'pipeline.json'), 'utf8')); } catch {}
+          const id = meta.expo_id || path.basename(proj);
+          const st = readPipelineStatus(id, dir);
+          return {
+            pipelines: [st],
+            summary: `📁 ${st.expo_id}${st.source_url ? `\n   URL: ${st.source_url}` : ''}\n   📋 Компаний: ${st.companies ?? '—'} | 🔍 Обогащено: ${st.enriched ?? '—'} | ✅ Целевых: ${st.targets ?? '—'}`,
+          };
+        }
+
+        // Legacy (no project): scan the per-profile expo-pipeline/ subfolders.
+        const baseDir = path.join(workDir, 'expo-pipeline');
+        if (!fs.existsSync(baseDir)) {
+          return { pipelines: [], message: 'Нет активных pipeline. Запусти expo_find_participants для начала.' };
         }
 
         if (expo_id) {

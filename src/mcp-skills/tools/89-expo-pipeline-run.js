@@ -13,6 +13,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { expoDataDir } = require('../expo-paths.js');
 
 function slugify(url) {
   try {
@@ -85,7 +86,9 @@ For hands-free completion without user interaction, create a cron:
     handler: async ({ expo_url, event_key, expo_title, catalog_base = '', favicon_emoji = '🌸', batch_size = 20, max_batches = 2, production_okved, auto_cron = false, auto_deploy = false, project_name }, ctx) => {
       const workDir = ctx?.workDir || process.cwd();
       const expoId  = slugify(expo_url);
-      const expoDir = path.join(workDir, 'expo-pipeline', expoId);
+      // Project-aware: writes into the project's data/ when the session is bound
+      // to an expo project, else the legacy expo-pipeline/<id>/ dir.
+      const expoDir = expoDataDir(workDir, expoId);
       fs.mkdirSync(expoDir, { recursive: true });
 
       const log     = [];
