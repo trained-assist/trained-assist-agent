@@ -2352,6 +2352,20 @@ ${expLines || '—'}
       return json(res, 200, { ok: true, killed });
     }
 
+    // GET /tasks/running?username=xxx — ground truth for whether a Claude
+    // session is live for this user. The gateway IntakeBuffer polls this to
+    // hold new messages for the REAL duration of a run (not just the /run
+    // enqueue, which returns 202 immediately). Reading live state here — rather
+    // than trusting a fire-and-forget completion callback — means a dropped
+    // packet can't trap the buffer; the next poll self-heals.
+    if (req.method === 'GET' && url.pathname === '/tasks/running') {
+      const username = url.searchParams.get('username');
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+      const { isTaskRunning } = require('./runner');
+      return json(res, 200, { running: isTaskRunning(username) });
+    }
+
     // GET /projects?username=xxx — list project subdirs sorted by session frequency
     if (req.method === 'GET' && url.pathname === '/projects') {
       const username = url.searchParams.get('username');
