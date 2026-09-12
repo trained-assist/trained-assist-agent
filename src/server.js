@@ -2070,6 +2070,39 @@ ${expLines || '—'}
       }
     }
 
+    // ── POST /web/project-create — create a project from an external frontend ──
+    // Symmetric to POST /web/projects (list): the Cloudflare session-manager worker
+    // POSTs {username, name, type?} + shared bearer, and we create the project on the
+    // SINGLE source of truth (projects.js / on-disk projects/ folder). This is also
+    // the opt-in action — creating the first project rolls out the projects/ folder,
+    // switching the profile onto the project model. Deliberate and reversible (rm the
+    // folder). type must be a known key (recruiting|expo|generic); a bare name with a
+    // "recruiting: X" prefix is also parsed by createProject. Empty type → generic.
+    if (req.method === 'POST' && url.pathname === '/web/project-create') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, name, type } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      const trimmed = (name || '').trim();
+      if (!trimmed || trimmed.length > 120) return json(res, 400, { error: 'invalid name' });
+      const ALLOWED_TYPES = ['recruiting', 'expo', 'generic'];
+      if (type && !ALLOWED_TYPES.includes(type)) return json(res, 400, { error: 'invalid type' });
+      try {
+        const { createProject } = require('./projects');
+        const { userWorkDir } = require('./data-paths');
+        // type given → structured {type,name}; otherwise let createProject parse any
+        // "recruiting: X"-style prefix out of the bare name (defaults to generic).
+        const input = type ? { type, name: trimmed } : trimmed;
+        const meta = createProject(userWorkDir(username), input);
+        return json(res, 200, { project: { id: meta.id, name: meta.name, type: meta.type, label: meta.label, lastAt: meta.lastAt || 0 } });
+      } catch (e) {
+        return json(res, 500, { error: 'project create failed', detail: String(e && e.message || e) });
+      }
+    }
+
     // ── POST /web/sessions-list — authoritative session list for external UIs ─
     // Same delegation pattern as /web/verify & /web/projects. The Cloudflare
     // session-manager worker (app.trainedassist.store) POSTs {username, limit} +
