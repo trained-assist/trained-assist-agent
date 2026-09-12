@@ -134,12 +134,22 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // "the site password only exists for 2 of 11 profiles" — every profile can now be
 // issued a working password on demand. The password store is scrypt-hashed (one-way),
 // so this always ROTATES: each call sets a new password and the previous one dies.
-const GET_WEBPASS_INTENT    = /^\/(?:get_webpass|webpass|вебпароль)(?=\s|$)/i;
-// Admin chat ids allowed to run /get_webpass. Comma-separated env override; default is
-// the product owner's chat. Gating is on chatId (not username) because the command can
-// target arbitrary profiles — it's a privilege-escalation surface if left open.
+// Tolerate a trailing @botname (Telegram appends it in groups: "/get_webpass@Bot user").
+const GET_WEBPASS_INTENT    = /^\/(?:get_webpass|webpass|вебпароль)(?:@\S+)?(?=\s|$)/i;
+// Who may run /get_webpass. The command can target arbitrary profiles, so it's a
+// privilege-escalation surface and must be gated. We gate on TWO axes (either grants):
+//   ADMIN_USER_IDS  — Telegram from.id of the sender. This is the robust one: a person's
+//                     id is stable whether they DM the bot (chat.id == from.id) or run the
+//                     command in the admin group (chat.id is the negative group id).
+//   ADMIN_CHAT_IDS  — chat.id, kept for back-compat. Defaults include BOTH the owner's
+//                     private chat (5308931318) and the admin group (-5308931318) so the
+//                     command works in the admin group even before telegramUserId flows.
+// Gating on chatId alone was the bug: in a group chat.id is negative and never matched.
+const ADMIN_USER_IDS = new Set(
+  (process.env.ADMIN_USER_IDS || '5308931318').split(',').map(s => s.trim()).filter(Boolean)
+);
 const ADMIN_CHAT_IDS = new Set(
-  (process.env.ADMIN_CHAT_IDS || '5308931318').split(',').map(s => s.trim()).filter(Boolean)
+  (process.env.ADMIN_CHAT_IDS || '5308931318,-5308931318').split(',').map(s => s.trim()).filter(Boolean)
 );
 const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('./web-auth');
 // Explicit request patterns only — NOT "целевых компаний" buried in a long instruction
@@ -197,7 +207,7 @@ const QUICK_SETUPS = [
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
-function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null) {
+function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null, telegramUserId = null) {
   // Stale PR alarm — fires repeatedly from csm-relay after PR is already merged
   if (STALE_PR_ALARM_INTENT.test(task)) {
     const prNum = task.match(/#(\d+)/)?.[1];
@@ -238,7 +248,9 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   // to /web/verify against that store) had nothing to check → 401. Now the admin can
   // mint a working password for any profile on demand; the site picks it up with no sync.
   if (GET_WEBPASS_INTENT.test(task)) {
-    if (!chatId || !ADMIN_CHAT_IDS.has(String(chatId))) {
+    const isAdmin = (telegramUserId && ADMIN_USER_IDS.has(String(telegramUserId)))
+                 || (chatId && ADMIN_CHAT_IDS.has(String(chatId)));
+    if (!isAdmin) {
       return '⛔ Команда доступна только администратору.';
     }
     const rest = task.replace(GET_WEBPASS_INTENT, '').trim();
@@ -863,8 +875,8 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 }
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null) {
-  const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId);
+async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null) {
+  const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
   if (sync !== null) {
     if (sync && typeof sync === 'object' && sync.__connectLink) {
       try {
@@ -1610,7 +1622,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId);
+  const quickReply = forceClaude ? null : await runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId);
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
