@@ -2486,8 +2486,8 @@ ${expLines || '—'}
         const { decideNewSessionProject } = require('./projects');
         const d = decideNewSessionProject(workDir, chatId);
         const out = { action: d.action, active: d.active || null };
-        if (d.action === 'auto') out.choices = [{ id: d.project.id, name: d.project.name, label: d.project.label || d.project.name }];
-        else if (d.action === 'ask') out.choices = d.choices.map(p => ({ id: p.id, name: p.name, label: p.label || p.name }));
+        if (d.action === 'auto') out.choices = [{ id: d.project.id, name: d.project.name, type: d.project.type || 'generic', label: d.project.label || d.project.name }];
+        else if (d.action === 'ask') out.choices = d.choices.map(p => ({ id: p.id, name: p.name, type: p.type || 'generic', label: p.label || p.name }));
         else out.choices = [];
         return json(res, 200, out);
       } catch (e) {
