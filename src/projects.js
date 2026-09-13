@@ -199,6 +199,56 @@ function touchProject(workDir, id, { now = Date.now() } = {}) {
   try { atomicWrite(metaPath(workDir, id), JSON.stringify(meta, null, 2)); } catch { /* best-effort */ }
 }
 
+// ── Name + 3-sense summary (durable, LLM-generated, regenerated as project grows) ──
+// The folder/id is immutable; only the display `name` + `summary` change. `nameLocked`
+// is set when the user renames by hand — auto-naming then leaves the name alone but may
+// still refresh the summary. `summarySessionCount` records how many sessions the summary
+// reflects, so we know when it's stale.
+function setProjectSummary(workDir, id, { name, summary, type } = {}, sessionCount, { now = Date.now() } = {}) {
+  const meta = getProject(workDir, id);
+  if (!meta) return false;
+  if (name && !meta.nameLocked) meta.name = name;
+  if (summary) meta.summary = summary;
+  if (type && meta.type === 'generic' && TYPES[type]) { meta.type = type; meta.label = typeOf(type).label; }
+  if (typeof sessionCount === 'number') meta.summarySessionCount = sessionCount;
+  meta.summaryAt = now;
+  try { atomicWrite(metaPath(workDir, id), JSON.stringify(meta, null, 2)); return true; }
+  catch { return false; }
+}
+
+// True when a project's summary is missing or the session count grew since we last made it.
+function needsSummary(meta, sessionCount) {
+  if (!meta) return false;
+  if (!meta.summary || !meta.summary.start) return true;
+  if (typeof sessionCount === 'number') return (meta.summarySessionCount || 0) !== sessionCount;
+  return false;
+}
+
+// Manual rename — display-only, and locks the name against auto-naming.
+function renameProject(workDir, id, name, { now = Date.now() } = {}) {
+  const meta = getProject(workDir, id);
+  if (!meta) return null;
+  meta.name = String(name || '').trim().slice(0, MAX_NAME) || meta.name;
+  meta.nameLocked = true;
+  meta.lastAt = now;
+  try { atomicWrite(metaPath(workDir, id), JSON.stringify(meta, null, 2)); } catch { /* best-effort */ }
+  return meta;
+}
+
+// Reversible "delete": move the project folder under projects/_archive/ instead of rm.
+// Returns the archive path, or null if nothing moved. Never removes session data.
+function archiveProject(workDir, id) {
+  const dir = projectDir(workDir, id);
+  if (!fs.existsSync(dir)) return null;
+  const archiveRoot = path.join(projectsRoot(workDir), '_archive');
+  fs.mkdirSync(archiveRoot, { recursive: true });
+  let dest = path.join(archiveRoot, id);
+  let n = 2;
+  while (fs.existsSync(dest)) dest = path.join(archiveRoot, `${id}-${n++}`);
+  fs.renameSync(dir, dest);
+  return dest;
+}
+
 // ── Active project per chat ─────────────────────────────────────────────────
 
 function _activePath(workDir, chatId) {
@@ -261,4 +311,8 @@ module.exports = {
   setActiveProjectId,
   decideNewSessionProject,
   profileText,
+  setProjectSummary,
+  needsSummary,
+  renameProject,
+  archiveProject,
 };
