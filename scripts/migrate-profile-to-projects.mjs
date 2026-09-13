@@ -74,10 +74,9 @@ function planProfile(workDir) {
     // ── recruiting artifacts → the profile's single recruiting project ──────────
     if (['vacancy-drafts', 'transcripts', 'interviews', 'applylink'].includes(name)) {
       if (recruitingProjects.length === 1) {
-        const sub = name === 'interviews' ? 'interviews'
-          : name === 'transcripts' ? 'interviews/transcripts'
-          : name === 'applylink' ? 'applylink'
-          : name; // vacancy-drafts → keep name
+        // toSub = PARENT dir the moved folder lands in; apply appends basename(fromRel).
+        // (interviews/transcripts/applylink/vacancy-drafts keep their own name at that parent.)
+        const sub = name === 'transcripts' ? 'interviews' : '';
         moves.push({ projectId: recruitingProjects[0].id, fromRel: name, toSub: sub, note: 'recruiting artifact' });
       } else if (recruitingProjects.length === 0) {
         manual.push({ name, reason: 'recruiting artifact but profile has NO recruiting project — create one (need vacancy name) then move' });
