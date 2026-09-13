@@ -132,6 +132,15 @@ if [ -f "$NGINX_CONF_SRC" ] && command -v nginx >/dev/null 2>&1; then
   fi
 fi
 
+echo "==> Installing disk-hygiene crons..."
+if [ -x "$REPO_DIR/ops/cron/install.sh" ]; then
+  if sh "$REPO_DIR/ops/cron/install.sh"; then
+    echo "  disk-hygiene crons installed"
+  else
+    echo "  ⚠️  cron install failed — disk guard may be stale"
+  fi
+fi
+
 echo "==> Running smoke tests..."
 AGENT_SECRET=$(gcloud secrets versions access latest --secret=AGENT_SECRET --project=alesa-personal-assistent 2>/dev/null || echo "$AGENT_SECRET")
 if [ -z "$AGENT_SECRET" ]; then
