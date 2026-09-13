@@ -1606,7 +1606,7 @@ function ensureSkillDir(workDir, domainPath, description) {
   return dir;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -1690,48 +1690,42 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
-  // ── Project binding ─────────────────────────────────────────────────────────
-  // A session lives inside a PROJECT (see projects.js): its cwd is the project folder
-  // and the project's PROFILE.md domain rules are folded into the system prompt.
-  //
-  // OPT-IN per profile: only profiles that already have a projects/ dir use the new
-  // model. Un-migrated profiles (all 11 live ones today) get boundProjectId=null and
-  // behave exactly as before — migration is gradual, "потихонечку, по 1".
+  // ── Project binding (always on — no opt-in gate) ────────────────────────────
+  // Every session lives inside a typed PROJECT (see projects.js): its cwd is the
+  // project folder and the project's PROFILE.md domain rules fold into the system
+  // prompt. This is now the SINGLE project mechanism — the old raw-subfolder picker
+  // (projectDir string) is retired (issue #517, no backward-compat).
   //
   // Continuing session -> keep the project stored on the session (never re-ask).
-  // New session         -> auto-bind the single project, create the first one, or
-  //                        (when several exist) fall back to the active/most-recent
-  //                        project for now — the interactive "which project?" prompt is
-  //                        a follow-up on the gateway side (recorded via projectAskPending).
+  // New session:
+  //   - gateway already resolved the choice -> opts.projectId is passed in -> bind it.
+  //   - otherwise decideNewSessionProject: auto (1 project) / create default (0) /
+  //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
+  //     so we never block silently here.
   let boundProjectId = null;
-  let projectAskPending = false;
-  const projectEnabled = (() => {
-    try { return fs.existsSync(projects.projectsRoot(user.workDir)); } catch { return false; }
-  })();
-  if (projectEnabled) {
-    try {
-      if (sessionExists && activeSessionId) {
-        const s = sessions.getSession(user.workDir, activeSessionId);
-        boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId);
-      } else {
-        const decision = projects.decideNewSessionProject(user.workDir, chatId);
-        if (decision.action === 'auto') {
-          boundProjectId = decision.project.id;
-        } else if (decision.action === 'create') {
-          boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }).id;
-        } else { // 'ask' — pick active/most-recent for now, flag the pending question
-          boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
-          projectAskPending = true;
-        }
+  try {
+    if (sessionExists && activeSessionId) {
+      const s = sessions.getSession(user.workDir, activeSessionId);
+      boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId);
+    } else if (projectId && projects.getProject(user.workDir, projectId)) {
+      boundProjectId = projectId; // explicit choice from the gateway picker
+    } else {
+      const decision = projects.decideNewSessionProject(user.workDir, chatId);
+      if (decision.action === 'auto') {
+        boundProjectId = decision.project.id;
+      } else if (decision.action === 'create') {
+        boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }).id;
+      } else { // 'ask' — gateway didn't pass a choice; fall back so we never block silently
+        boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
       }
-      if (boundProjectId) {
-        projects.setActiveProjectId(user.workDir, boundProjectId, chatId);
-        const dir = projects.projectDir(user.workDir, boundProjectId);
-        if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
-      }
-    } catch (e) {
-      console.warn('[runner] project binding:', e.message);
     }
+    if (boundProjectId) {
+      projects.setActiveProjectId(user.workDir, boundProjectId, chatId);
+      const dir = projects.projectDir(user.workDir, boundProjectId);
+      if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
+    }
+  } catch (e) {
+    console.warn('[runner] project binding:', e.message);
   }
 
   // forceClaude=true (тап по inline-кнопке): деривируем задачу из сессии и обрамляем её
