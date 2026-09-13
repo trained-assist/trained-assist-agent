@@ -93,7 +93,7 @@ const GDRIVE_NOTIF_ON_INTENT   = /\/google_drive_sharing_notifications_switch_on
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
 // /bug_or_feature — FAST capture: last messages + logs + note → GitHub issue, no Claude session.
 // Distinct from the older free-text BUG_REPORT_INTENT (line ~67) which spawns a full session.
-const BUG_OR_FEATURE_INTENT = /^\/(?:bug_or_feature|bug|feature|баг|фича|report|репорт)\b/i;
+const BUG_OR_FEATURE_INTENT = /^\/(?:bug_or_feature|bug|feature|баг|фича|report|репорт)(?=\s|$)/i;
 // "Подробнее N" / "/session N" / "подробнее о 3" — expand one session from the last /sessions list
 const SESSION_DETAIL_INTENT = /^\/(?:sessions?|диалог)\s*(\d{1,2})\b|^подробнее(?:\s+(?:о|про|по))?\s*(?:диалог[ае]?\s*|сесси[июя]\s*|№\s*)?(\d{1,2})\b|^(\d{1,2})\s*подробнее/i;
 const HH_STATUS_INTENT       = /hh.{0,10}статус|статус.{0,10}hh|статус.{0,10}(?:рекрут|вакансии|оценки|скоринга)|как.{0,15}дела.{0,15}hh|что.{0,15}активн.{0,15}hh|включена.{0,15}оценка|работает.{0,15}(?:скоринг|оценка|hh)|\/hh_status/i;
