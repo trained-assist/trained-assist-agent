@@ -63,6 +63,14 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
   };
   atomicWrite(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));
 
+  // Register the new session as the chat's CURRENT session immediately — durable at
+  // creation, not deferred until after the (long) Claude run. Otherwise a follow-up
+  // arriving mid-run, or a crash before the run finishes («on sdoh»), leaves the
+  // freshly-created session orphaned: getCurrentSessionId returns null, the next
+  // message spawns a brand-new context-blind session, and the accumulated ТЗ is lost
+  // (issue #531). setCurrentSessionId is idempotent with the later runner calls.
+  if (chatId) setCurrentSessionId(workDir, id, chatId);
+
   return id;
 }
 
