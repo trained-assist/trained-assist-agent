@@ -1189,6 +1189,43 @@ function _releaseSlot() {
   if (next) next();
 }
 
+// Per-profile ("repository") concurrency cap. A single profile can have at most
+// this many live `claude` processes at once — a 5th task for the same profile
+// queues until one of its own frees up. Sits UNDER the global cap as a fairness
+// bound so one profile can't monopolise every global slot and starve others.
+// With one active profile this is the effective ceiling (4 < global 6). Tune via
+// env without a code change.
+const MAX_CONCURRENT_PER_KEY = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS_PER_KEY) || 4);
+const _perKeyRunning = new Map(); // Map<key, count>
+const _perKeyWaiters = new Map(); // Map<key, Array<fn>>
+
+function _acquireKeySlot(key) {
+  return new Promise(resolve => {
+    const grab = () => {
+      const n = _perKeyRunning.get(key) || 0;
+      if (n < MAX_CONCURRENT_PER_KEY) { _perKeyRunning.set(key, n + 1); resolve(); }
+      else {
+        const w = _perKeyWaiters.get(key) || [];
+        w.push(grab);
+        _perKeyWaiters.set(key, w);
+      }
+    };
+    grab();
+  });
+}
+
+function _releaseKeySlot(key) {
+  const n = _perKeyRunning.get(key) || 0;
+  if (n <= 1) _perKeyRunning.delete(key);
+  else _perKeyRunning.set(key, n - 1);
+  const w = _perKeyWaiters.get(key);
+  if (w && w.length) {
+    const next = w.shift();
+    if (!w.length) _perKeyWaiters.delete(key);
+    next();
+  }
+}
+
 // Wait until free RAM is above the floor, or RAM_WAIT_MAX_MS elapses (backstop,
 // os.freemem() undercounts reclaimable page cache — this is a soft guard, not a
 // hard admission controller; external monitoring is the primary control).
@@ -1417,16 +1454,27 @@ function runTask(opts) {
     }, 3000);
   }
 
+  // Per-profile cap key ("repository" = one profile's workspace). Falls back to
+  // chatId if a caller has no username (internal/system tasks).
+  const capKey = String(opts.user.username || opts.user.id);
+
   const current = prev.then(async () => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
-    // Global admission control: wait for a free slot + enough RAM before we
-    // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
-    await _waitForRam();
-    await _acquireSlot();
+    // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
+    // profile's 4-slot cap waits here without holding a scarce global slot.
+    await _acquireKeySlot(capKey);
     try {
-      return await _runTask(opts);
+      // Global admission control: wait for a free slot + enough RAM before we
+      // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
+      await _waitForRam();
+      await _acquireSlot();
+      try {
+        return await _runTask(opts);
+      } finally {
+        _releaseSlot();
+      }
     } finally {
-      _releaseSlot();
+      _releaseKeySlot(capKey);
     }
   }).catch(err => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
