@@ -7,6 +7,7 @@ const sessions = require('./session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('./session-store');
 const { generateSummary } = require('./session-summary');
 const projects = require('./projects');
+const { resolveLaneKey } = require('./lane-key');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
 const { recordUsage, getUsageTotals } = require('./usage-store');
 const {
@@ -1377,9 +1378,18 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Lane key = chatId (opts.user.id). One active session per chat; different
-  // chats/profiles run in parallel, bounded by the global semaphore below.
-  const queueKey = String(opts.user.id);
+  // Lane key = the workDir the task will run in (resolved read-only from its
+  // project binding), NOT chatId. Two tasks that share a workDir serialize (this
+  // is the R6 fix: web id:0 and a chat hitting the SAME project no longer race);
+  // different projects of one profile get different keys and run in PARALLEL —
+  // the owner-required per-profile concurrency. Fairness across a profile's many
+  // projects is bounded separately by the per-profile cap (capKey below).
+  // See docs/CONCURRENCY-LANE-GRANULARITY.md.
+  const queueKey = resolveLaneKey(opts.user, {
+    sessionId: opts.sessionId,
+    projectId: opts.projectId,
+    newProjectName: opts.newProjectName,
+  }, { projects, sessions });
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -1421,8 +1431,8 @@ function runTask(opts) {
     const username = opts.user.username;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username);
-    // Clear this chat's lane so the next task doesn't wait behind a stuck one.
-    chatLanes.delete(String(opts.user.id));
+    // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
+    chatLanes.delete(queueKey);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const chatId = opts.user.id;
     const msg = stopped
