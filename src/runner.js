@@ -1678,20 +1678,65 @@ function ensureSkillDir(workDir, domainPath, description) {
   return dir;
 }
 
+// §C (#530): дешёвая LLM смотрит финал ГЛУБОКОГО ответа — описан ли в нём ПЛАН
+// дальнейших действий («дальше предлагаю сделать так и так», перечень шагов к
+// реализации). Если да — под ответом покажем «▶️ Действуй дальше по плану». Строго
+// консервативно: сомнение / короткий ответ / нет ключа → false (кнопку не показываем).
+async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
+  const t = String(text || '').trim();
+  if (t.length < 200) return false; // слишком коротко для плана дальнейших шагов
+  const orKey = apiKey || process.env.OPENROUTER_API_KEY;
+  if (!orKey) return false;
+  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
+  const system = [
+    'Ты смотришь на ответ ассистента и решаешь: описан ли в нём ПЛАН дальнейших действий,',
+    'который ассистент предлагает выполнить СЛЕДУЮЩИМ шагом («дальше предлагаю сделать…»,',
+    'перечень конкретных шагов к реализации, «следующие шаги», «дальше нужно…»).',
+    'План = есть конкретные предлагаемые действия ВПЕРЁД, которые можно пойти и выполнить.',
+    'НЕ план: итог/объяснение уже сделанного, ответ на вопрос, список фактов без действий,',
+    'вопрос к пользователю без шагов.',
+    'Ответь СТРОГО одним JSON: {"plan": true|false}. Сомневаешься → false.',
+  ].join(' ');
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, temperature: 0, max_tokens: 20,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: t.slice(0, 3000) },
+        ],
+      }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content || '';
+    const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
+    return obj?.plan === true;
+  } catch (e) {
+    console.warn('[plan-detect]', e.message);
+    return false;
+  }
+}
+
 async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
 
-  // Кнопки явных действий под ответом. Дефолт → предложить проработку/уточнение.
-  // Если сессия уже deep (проработка идёт) — не предлагаем «Запустить проработку».
+  // Кнопки явных действий под ответом. Единый путь ЗАПУСКА проработки — накопитель
+  // ввода (кнопка «▶️ Запустить проработку» в шлюзе, callback intake_run), поэтому
+  // отдельной кнопки запуска здесь БОЛЬШЕ НЕТ (#530 §B: убран второй путь, что
+  // перезапускал sess.lastUserMessage в обход буфера). Оставляем только «❓ Уточнить».
   // NOTE: новый callback_data-префикс → добавь handler в trained-assist-tg-bot/
   // src/handlers/callbacks.js И префикс в tests/callbacks.test.js.
   const actionButtons = (sid, { deep = false } = {}) => {
     if (!sid || deep) return null;
     return { inline_keyboard: [[
-      { text: '⏻ Запустить проработку', callback_data: `workrun|${sid}` },
-      { text: '❓ Уточнить задачу',    callback_data: `clarify|${sid}` },
+      { text: '❓ Уточнить задачу', callback_data: `clarify|${sid}` },
     ]] };
   };
   const { BOT_TOKEN } = secrets;
@@ -2371,7 +2416,21 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // юзер мог запустить проработку по уточнённому ТЗ).
   const finalDeep = explicitMode === 'deep' ||
     answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
-  const finalMarkup = internalGtd ? null : actionButtons(activeSessionId, { deep: finalDeep });
+  // §C (#530): под длинным ГЛУБОКИМ ответом, если в нём описан план дальнейших действий,
+  // показываем «▶️ Действуй дальше по плану» (callback plan|{sid}) — продолжение той же
+  // сессии по озвученному плану, без переспроса. Плана нет → кнопки нет. one-shot/clarify
+  // → прежние actionButtons (только «❓ Уточнить»).
+  let finalMarkup = null;
+  if (!internalGtd) {
+    if (finalDeep && activeSessionId) {
+      const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
+      finalMarkup = hasPlan
+        ? { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] }
+        : null;
+    } else {
+      finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
+    }
+  }
   const finalExtra = { reply_markup: finalMarkup || { inline_keyboard: [] } };
 
   // Send result (clear stop button; attach action buttons unless suppressed)
