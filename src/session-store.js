@@ -33,8 +33,20 @@ function atomicWrite(fp, data) {
   fs.renameSync(tmp, fp);
 }
 
+/** Order by recency of activity (lastAt), newest first. Falls back to createdAt
+ *  for legacy records missing lastAt. Mutates and returns the same array. */
+function sortByRecency(sessions) {
+  return sessions.sort((a, b) => (b.lastAt || b.createdAt || 0) - (a.lastAt || a.createdAt || 0));
+}
+
 function saveIndex(workDir, sessions) {
-  atomicWrite(sessionsPath(workDir), JSON.stringify(sessions, null, 2));
+  // Single source of truth: the on-disk index is always ordered by recency of
+  // activity and capped at MAX_SESSIONS. This keeps the session picker and the
+  // gateway's reply-classifier fed with genuinely recent sessions, and makes
+  // eviction drop the least-recently-active rather than the oldest-created.
+  const ordered = sortByRecency(sessions);
+  if (ordered.length > MAX_SESSIONS) ordered.splice(MAX_SESSIONS);
+  atomicWrite(sessionsPath(workDir), JSON.stringify(ordered, null, 2));
 }
 
 /** Create a new session record, return its id.
@@ -49,8 +61,7 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
 
   const sessions = loadIndex(workDir);
   sessions.unshift(meta);
-  if (sessions.length > MAX_SESSIONS) sessions.splice(MAX_SESSIONS);
-  saveIndex(workDir, sessions);
+  saveIndex(workDir, sessions); // saveIndex orders by recency and caps at MAX_SESSIONS
 
   // Write full session file
   const dir = path.join(workDir, SESSIONS_DIR);
@@ -129,7 +140,10 @@ function appendReply(workDir, id, reply) {
 
 /** List sessions (index only, no message bodies) */
 function listSessions(workDir, limit = 10) {
-  return loadIndex(workDir).slice(0, limit);
+  // Defensive re-sort: heals legacy indexes written before recency ordering,
+  // so the picker/classifier get the most-recently-active sessions even on the
+  // first read after upgrade (before any write re-orders the file).
+  return sortByRecency(loadIndex(workDir)).slice(0, limit);
 }
 
 /** Get full session with messages */
