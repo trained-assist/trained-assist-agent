@@ -24,6 +24,7 @@ const { loadUserSiteIntents } = require('./user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
 const persona = require('./persona');
 const answerRouter = require('./answer-router');
+const { formatForTelegram, makeLlmFixer } = require('./tg-format');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -2428,22 +2429,41 @@ function formatToolActivity(name, input = {}) {
 
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
+// Lazy singleton cheap-LLM fixer for the formatting ladder (rung 2).
+let _tgFixer;
+function tgFixer() {
+  if (_tgFixer === undefined) _tgFixer = makeLlmFixer(process.env.OPENROUTER_API_KEY);
+  return _tgFixer;
+}
+
+// Run every outgoing message through the Markdown->TG-HTML degradation ladder
+// (converter -> validator -> cheap LLM fix -> plain-text floor) at this single
+// chokepoint, so no callsite can leak raw markdown. A caller that already set
+// parse_mode is trusted and passes through untouched.
+async function tgFormat(text, extra) {
+  if (extra && extra.parse_mode) return { text, extra };
+  const { text: out, parse_mode } = await formatForTelegram(text, { llmFix: tgFixer() });
+  return { text: out, extra: parse_mode ? { ...extra, parse_mode } : extra };
+}
+
 async function tgSend(token, chatId, text, extra = {}) {
+  const f = await tgFormat(text, extra);
   const res = await fetch(`${TG_API}/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, ...extra }),
+    body: JSON.stringify({ chat_id: chatId, text: f.text, ...f.extra }),
     signal: AbortSignal.timeout(10_000),
   });
   return res.json();
 }
 
 async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
+  const f = await tgFormat(text, extra);
   for (let i = 0; i < retries; i++) {
     const res = await fetch(`${TG_API}/bot${token}/editMessageText`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, ...extra }),
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: f.text, ...f.extra }),
       signal: AbortSignal.timeout(10_000),
     });
     const data = await res.json();
