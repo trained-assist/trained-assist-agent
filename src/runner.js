@@ -889,6 +889,34 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null) {
+  // /bug_or_feature — second step: if a report is awaiting the user's comment, the NEXT
+  // message IS that comment. Capture it and file the issue. Guards: a slash command
+  // cancels capture (don't bury a command as a note); "отмена" cancels explicitly;
+  // a stale flag (>30 min) is ignored so an unrelated later message isn't swallowed.
+  if (workDir) {
+    const ofPending = path.join(workDir, 'contexts', 'bugreport', `or-feature-pending-${chatId || 'default'}.json`);
+    try {
+      if (fs.existsSync(ofPending)) {
+        const p = JSON.parse(fs.readFileSync(ofPending, 'utf8') || '{}');
+        const ageMs = Date.now() - new Date(p.started_at || 0).getTime();
+        const fresh = ageMs >= 0 && ageMs < 30 * 60 * 1000;
+        const trimmed = task.trim();
+        if (!fresh || trimmed.startsWith('/')) {
+          fs.unlinkSync(ofPending); // stale, or a real command follows — drop capture, process normally
+        } else if (/^(отмена|отменить|отмени|cancel|отбой|не надо)$/i.test(trimmed)) {
+          fs.unlinkSync(ofPending);
+          return '❌ Отменил. Отчёт не отправлен.';
+        } else {
+          fs.unlinkSync(ofPending);
+          const { createBugReport } = require('./bug-report');
+          return await createBugReport({ workDir, chatId, userId, note: task });
+        }
+      }
+    } catch (e) {
+      console.warn('[bug_or_feature] pending-consume error:', e.message);
+    }
+  }
+
   // Session summaries (durable artifact) — handled here (async) so we can generate
   // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
   if (workDir) {
@@ -925,8 +953,22 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   }
 
   // /bug_or_feature — bundle last messages + logs + note into a GitHub issue (async).
+  // Bare invocation (no inline note) → ask the user what's wrong first, then the next
+  // message becomes the note (consumed at the top of runQuickAnswer). Inline note
+  // (`/bug_or_feature текст`) fires immediately — the comment is already there.
   if (BUG_OR_FEATURE_INTENT.test(task)) {
     const note = task.replace(BUG_OR_FEATURE_INTENT, '').trim();
+    if (!note && workDir) {
+      const ofPending = path.join(workDir, 'contexts', 'bugreport', `or-feature-pending-${chatId || 'default'}.json`);
+      fs.mkdirSync(path.dirname(ofPending), { recursive: true });
+      fs.writeFileSync(ofPending, JSON.stringify({ started_at: new Date().toISOString() }));
+      return [
+        '📝 Опиши, что случилось или что хочешь улучшить — одним сообщением.',
+        'Приложу к отчёту последние сообщения этой сессии и хвост логов.',
+        '',
+        '(Чтобы отменить — напиши «отмена».)',
+      ].join('\n');
+    }
     const { createBugReport } = require('./bug-report');
     return await createBugReport({ workDir, chatId, userId, note });
   }
