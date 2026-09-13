@@ -7,7 +7,6 @@ const sessions = require('./session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('./session-store');
 const { generateSummary } = require('./session-summary');
 const projects = require('./projects');
-const { resolveLaneKey } = require('./lane-key');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
 const { recordUsage, getUsageTotals } = require('./usage-store');
 const {
@@ -1147,11 +1146,13 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 }
 
 // ── Concurrency model (see issues #488 / #489) ──────────────────────────────
-// Unit of parallelism is the SESSION. In practice a chat holds at most one
-// active session at a time ("one active session per chat" invariant), so we
-// serialise per CHAT lane — two messages in the same chat never run at once,
-// but different chats of the same profile (and different profiles) run in
-// parallel. Session-level context ownership is enforced separately by
+// Unit of parallelism is the SESSION. We serialise per SESSION lane — two
+// messages for the same session never run at once (can't have two `claude`
+// processes appending one transcript), but DIFFERENT sessions run in parallel
+// even when they share a workDir (chat + web, or two chats in one project).
+// A brand-new session with no id yet falls back to a per-CHAT lane so two
+// concurrent first-messages in one chat collapse into one session ("one active
+// session per chat"). Session-level context ownership is enforced separately by
 // ownerChatId (see _runTask).
 //
 // The real OOM backstop is no longer the per-username lock (that was a 2019-era
@@ -1159,8 +1160,20 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 // counting semaphore MAX_CONCURRENT_TASKS + a free-RAM watchdog, both of which
 // gate the actual `claude` spawn across every chat/profile at once.
 //
-// Map<chatId(string), Promise> — the tail of each chat's lane.
+// Map<laneKey(string), Promise> — the tail of each lane. laneKey is
+// `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
+
+// Serialization-lane key. The lane exists ONLY to stop two `claude` processes
+// appending the SAME transcript at once, so the key is the SESSION — NOT the
+// workDir (two sessions sharing a workDir must run in parallel: the
+// owner-required "several parallel sessions per profile" invariant) and NOT the
+// profile (that would over-serialize). A brand-new session has no id yet → key
+// on the chat so two concurrent first-messages in one chat collapse into one
+// session instead of spawning two claudes.
+function _laneKey(sessionId, chatId) {
+  return sessionId ? `session:${sessionId}` : `chat:${String(chatId)}`;
+}
 
 // Global concurrency cap on live `claude` processes (across all profiles).
 // RAM is cheap and monitored externally, so this is deliberately generous;
@@ -1378,18 +1391,21 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Lane key = the workDir the task will run in (resolved read-only from its
-  // project binding), NOT chatId. Two tasks that share a workDir serialize (this
-  // is the R6 fix: web id:0 and a chat hitting the SAME project no longer race);
-  // different projects of one profile get different keys and run in PARALLEL —
-  // the owner-required per-profile concurrency. Fairness across a profile's many
-  // projects is bounded separately by the per-profile cap (capKey below).
-  // See docs/CONCURRENCY-LANE-GRANULARITY.md.
-  const queueKey = resolveLaneKey(opts.user, {
-    sessionId: opts.sessionId,
-    projectId: opts.projectId,
-    newProjectName: opts.newProjectName,
-  }, { projects, sessions });
+  // Lane key = the SESSION. The lane's ONLY job is to stop two `claude`
+  // processes appending the SAME transcript at once — that boundary is the
+  // session, not the workDir. Two sessions that share a workDir (chat + web, or
+  // different chats hitting the same project) DO NOT race in practice and MUST
+  // run in parallel — this is the owner-required "several parallel sessions per
+  // profile/workDir" invariant. Serializing on workDir (the old #546 behaviour)
+  // wrongly collapsed those into one lane; keying on the session restores the
+  // model this file already stated: "Unit of parallelism is the SESSION".
+  //   • sessionId present → serialize only same-session messages.
+  //   • no sessionId (brand-new session) → fall back to the chat lane so two
+  //     concurrent first-messages in one chat collapse into one session instead
+  //     of spawning two claudes (the "one active session per chat" invariant).
+  // Cross-session parallelism is bounded only by the per-profile cap (capKey)
+  // and the global slot semaphore below — never by this lane.
+  const queueKey = _laneKey(opts.sessionId, opts.user.id);
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -2623,4 +2639,6 @@ module.exports = {
   _pin: { updateContextPin, readPinStore },
   // Exported for final-text-selection tests only
   _final: { pickFinalText },
+  // Exported for lane-granularity tests only
+  _laneKey,
 };
