@@ -30,6 +30,18 @@ const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
 const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
+
+// Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
+// the last complete assistant turn; only as a last resort the whole accumulated stream
+// (the scratchpad). This stops "Let me confirm… Now writing…" narration leaking as final.
+function pickFinalText(claudeResult, lastAssistantMsg, fullText) {
+  const clean = typeof claudeResult === 'string' ? claudeResult.trim() : '';
+  if (clean) return clean;
+  const last = (lastAssistantMsg || '').trim();
+  if (last) return last;
+  return (fullText || '').trim();
+}
+
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
@@ -2093,6 +2105,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let lastSent = '';
   let lineBuffer = '';
   let claudeResult = null;  // text from result event
+  let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
   let claudeUsage = null;   // usage from result event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
@@ -2164,9 +2177,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
             console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
           }
         } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+          let turnText = '';
           for (const block of event.message.content) {
             if (block.type === 'text') {
               fullOutput.text += block.text;
+              turnText += block.text;
               if (outputCallback) try { outputCallback(block.text); } catch {}
             } else if (block.type === 'tool_use') {
               lastActivity = formatToolActivity(block.name, block.input);
@@ -2176,6 +2191,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
               }
             }
           }
+          if (turnText.trim()) lastAssistantMsg = turnText; // keep only the latest coherent turn
           scheduleStream();
         }
       } catch {
@@ -2245,6 +2261,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (timedOut) {
       const nextCount = continuationCount + 1;
       const partialText = fullOutput.text.trim();
+      // Durable record keeps the full progress; the Telegram summary shows only the last
+      // coherent turn so the scratchpad narration never leaks to the user.
+      const partialDisplay = pickFinalText(null, lastAssistantMsg, partialText);
 
       // Save partial progress so the next run sees what was done
       if (activeSessionId && partialText) {
@@ -2254,8 +2273,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
       if (continuationCount < MAX_CONTINUATIONS) {
         const statusLine = `⏱ Прервал по 40-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
-        const tgMsg = partialText.length > 20
-          ? `🧠 ${partialText.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
+        const tgMsg = partialDisplay.length > 20
+          ? `🧠 ${partialDisplay.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
           : statusLine;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
         else await tgSend(BOT_TOKEN, chatId, tgMsg);
@@ -2292,8 +2311,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // User pressed Stop — show partial result and exit cleanly
   if (sessionState.userStopped) {
     const partial = fullOutput.text.trim();
-    const stoppedMsg = partial
-      ? `⛔ Остановлено\n\n${partial.slice(-MAX_MSG_LEN)}`
+    const partialDisplay = pickFinalText(null, lastAssistantMsg, partial);
+    const stoppedMsg = partialDisplay
+      ? `⛔ Остановлено\n\n${partialDisplay.slice(-MAX_MSG_LEN)}`
       : '⛔ Остановлено. Можешь задать новый вопрос.';
     const clearMarkup = { reply_markup: { inline_keyboard: [] } };
     if (msgId) {
@@ -2317,7 +2337,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
 
   // Prefer the clean result string from the result event; fall back to accumulated stream text
-  const result = (claudeResult ?? fullOutput.text).trim() || '(нет вывода)';
+  const result = pickFinalText(claudeResult, lastAssistantMsg, fullOutput.text) || '(нет вывода)';
 
   // Detect Claude Code auth failure — set flag and send clear message instead of raw error
   if (isAuthError(result)) {
@@ -2484,4 +2504,6 @@ module.exports = {
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
   // Exported for pin-state tests only
   _pin: { updateContextPin, readPinStore },
+  // Exported for final-text-selection tests only
+  _final: { pickFinalText },
 };
