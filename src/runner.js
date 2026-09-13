@@ -1490,47 +1490,64 @@ function buildContextCard(username, workDir) {
 
 const NO_PIN_HINT = '\n\n💡 Дай мне права Admin в группе — буду обновлять без спама. Или /context_off чтобы скрыть.';
 
+// Reads the pin store, keyed per-chat: { chats: { "<chatId>": { msgId, lastCard, noPin } } }.
+// One profile can serve many Telegram chats, so each chat keeps its own pinned card.
+// Migrates the legacy flat format ({ msgId, chatId, lastCard, noPin }) transparently.
+function readPinStore(pinFile) {
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[runner] pin state parse:', e.message);
+  }
+  if (!raw || typeof raw !== 'object') return { chats: {} };
+  if (raw.chats && typeof raw.chats === 'object') return raw;
+  // Legacy flat format → migrate under its chatId (drop it if the chat is unknown).
+  const store = { chats: {} };
+  if (raw.msgId && raw.chatId != null) {
+    store.chats[String(raw.chatId)] = { msgId: raw.msgId, lastCard: raw.lastCard || null, noPin: !!raw.noPin };
+  }
+  return store;
+}
+
 // Creates or silently updates the context pin after task completion.
-// State (msgId + chatId + lastCard + noPin) is stored in workDir/.pin_state.json.
+// State is stored per-chat in workDir/.pin_state.json (see readPinStore).
 // botPinnedMsgId: the pinned message ID known to the bot — used to seed state when we have none.
 async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
   const pinFile = path.join(workDir, '.pin_state.json');
-  let state = null;
-  try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch (e) { console.warn('[runner] pin state parse:', e.message); }
+  const store = readPinStore(pinFile);
+  const key = String(chatId);
+  let entry = store.chats[key] || null;
+  const save = (next) => {
+    store.chats[key] = next;
+    fs.writeFileSync(pinFile, JSON.stringify(store));
+  };
 
-  // Discard state from a different chat (many-chats-one-profile scenario).
-  if (state?.chatId && state.chatId !== chatId) {
-    console.log(`[pin] chatId mismatch (stored=${state.chatId} current=${chatId}), resetting state`);
-    state = null;
-  }
-
-  // Seed from bot's authoritative pinned message when we have no local state.
-  if (!state?.msgId && botPinnedMsgId) {
-    state = { msgId: botPinnedMsgId, chatId, lastCard: null };
+  // Seed from bot's authoritative pinned message when this chat has no local state.
+  if (!entry?.msgId && botPinnedMsgId) {
+    entry = { msgId: botPinnedMsgId, lastCard: null };
   }
 
   // In no-pin mode (bot lacks admin rights): just edit the message in-place with a hint.
   // Never attempt pinChatMessage again — it would fail and spam the chat.
-  if (state?.noPin) {
+  if (entry?.noPin) {
     const cardWithHint = card + NO_PIN_HINT;
-    if (state?.msgId) {
-      const edited = await tgEdit(token, chatId, state.msgId, cardWithHint).catch(() => null);
+    if (entry?.msgId) {
+      const edited = await tgEdit(token, chatId, entry.msgId, cardWithHint).catch(() => null);
       if (edited?.ok || edited?.description?.includes('message is not modified')) {
-        fs.writeFileSync(pinFile, JSON.stringify({ ...state, lastCard: cardWithHint }));
+        save({ ...entry, lastCard: cardWithHint });
         return;
       }
     }
     // Previous message was deleted — send a new one (still no pin attempt).
     const msg = await tgSend(token, chatId, cardWithHint);
     const newId = msg?.result?.message_id;
-    if (newId) fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: cardWithHint, noPin: true }));
+    if (newId) save({ msgId: newId, lastCard: cardWithHint, noPin: true });
     return;
   }
 
-  if (state?.msgId) {
-    const edited = await tgEdit(token, chatId, state.msgId, card).catch(() => null);
+  if (entry?.msgId) {
+    const edited = await tgEdit(token, chatId, entry.msgId, card).catch(() => null);
     if (edited?.ok || edited?.description?.includes('message is not modified')) {
-      fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, chatId, lastCard: card }));
+      save({ msgId: entry.msgId, lastCard: card });
       return;
     }
     // Edit failed (message deleted) — fall through to create new.
@@ -1542,7 +1559,7 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   if (!newId) return;
 
   // Always save msgId so next run edits in-place instead of sending another new message.
-  fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: card }));
+  save({ msgId: newId, lastCard: card });
 
   const res = await fetch(`${TG_API}/bot${token}/pinChatMessage`, {
     method: 'POST',
@@ -1556,7 +1573,7 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
       // Enter no-pin mode: add hint to the existing message and remember the flag.
       const cardWithHint = card + NO_PIN_HINT;
       await tgEdit(token, chatId, newId, cardWithHint).catch(() => {});
-      fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: cardWithHint, noPin: true }));
+      save({ msgId: newId, lastCard: cardWithHint, noPin: true });
     }
   }
 }
@@ -2448,4 +2465,6 @@ module.exports = {
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
+  // Exported for pin-state tests only
+  _pin: { updateContextPin, readPinStore },
 };
