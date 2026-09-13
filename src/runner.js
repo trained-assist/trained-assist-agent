@@ -1606,7 +1606,7 @@ function ensureSkillDir(workDir, domainPath, description) {
   return dir;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -1709,6 +1709,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId);
     } else if (projectId && projects.getProject(user.workDir, projectId)) {
       boundProjectId = projectId; // explicit choice from the gateway picker
+    } else if (newProjectName) {
+      // gateway "➕ Новый проект" — provisional name derived from the first message
+      boundProjectId = projects.createProject(user.workDir, newProjectName).id;
     } else {
       const decision = projects.decideNewSessionProject(user.workDir, chatId);
       if (decision.action === 'auto') {

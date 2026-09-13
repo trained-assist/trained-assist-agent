@@ -2500,7 +2500,7 @@ ${expLines || '—'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectId, fileBase64, fileName, fileMimeType, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
@@ -2522,6 +2522,8 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid contextFromSession' });
       if (projectId && !/^[a-zA-Z0-9][a-zA-Z0-9_\-.]*$/.test(projectId))
         return json(res, 400, { error: 'invalid projectId' });
+      if (newProjectName && (typeof newProjectName !== 'string' || newProjectName.length > 200))
+        return json(res, 400, { error: 'invalid newProjectName' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
@@ -2555,7 +2557,7 @@ ${expLines || '—'}
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null }).catch(err =>
+      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
@@ -2841,6 +2843,20 @@ ${expLines || '—'}
         }));
         sessionList = listSessions(workDir, limit); // reload with fresh summaries
       }
+      // Resolve projectId -> projectName so the gateway/web session lists can label
+      // each dialog by its typed project (issue #517).
+      try {
+        const { getProject } = require('./projects');
+        const nameCache = {};
+        sessionList = sessionList.map(s => {
+          if (!s.projectId) return s;
+          if (!(s.projectId in nameCache)) {
+            const p = getProject(workDir, s.projectId);
+            nameCache[s.projectId] = p ? p.name : null;
+          }
+          return { ...s, projectName: nameCache[s.projectId] };
+        });
+      } catch { /* projects model unavailable — leave list as-is */ }
       return json(res, 200, { sessions: sessionList });
     }
 
