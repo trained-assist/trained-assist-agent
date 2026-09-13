@@ -132,6 +132,11 @@ if [ -f "$NGINX_CONF_SRC" ] && command -v nginx >/dev/null 2>&1; then
   fi
 fi
 
+echo "==> Installing box-hygiene crons (idempotent, from repo)..."
+# Reproducible disk safety net + dead-tenant sweep — see ops/ and scripts/install-cron.sh.
+# Non-fatal: a crontab hiccup must never fail a deploy.
+REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/install-cron.sh" || echo "  ⚠️  install-cron failed (non-fatal)"
+
 echo "==> Running smoke tests..."
 AGENT_SECRET=$(gcloud secrets versions access latest --secret=AGENT_SECRET --project=alesa-personal-assistent 2>/dev/null || echo "$AGENT_SECRET")
 if [ -z "$AGENT_SECRET" ]; then
