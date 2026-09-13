@@ -26,6 +26,19 @@ Supersedes the opt-in/gradual approach in PROJECT-PICKER-517-findings.md.
 
 ### Step 0 — durable plan (this doc). DONE.
 
+### Step 1 — Migration tool — BUILT (scripts/migrate-profile-to-projects.mjs)
+Dry-run over all profiles (2026-09-13) — tool is conservative, only moves CLEAR artifacts:
+- AUTO-MOVE (clear): `flexi` → `expo-pipeline/flowers-expo-2026` → new `expo: flowers-expo-2026` project /data/.
+- MANUAL (need a name/target decision, left at root by design):
+  - `tes-recruiter`: vacancy-drafts/ + transcripts/ → new recruiting project (need vacancy name).
+  - `mbk_luda_recruiter`: interviews/ leftover → which of its 2 recruiting projects? (inspect content).
+  - `flexi-consult`: expo-pipeline/ (no per-expo subdir) correctly LEFT at root = shared config. ✅
+  - `efi`, `vova-recruiter`, etc.: loose pngs/json — leave (not domain artifacts a session needs in cwd).
+- CLEAN (no root artifacts): most profiles → will just get a lazy default project, NO regression.
+Gate removal is therefore safe for all "clean" profiles immediately; only flexi/tes-recruiter/mbk
+need an --apply pass first.
+
+### (design notes below — original)
 ### Step 1 — Migration tool (repo script, generalized, non-destructive)
 - `scripts/migrate-profile-to-projects.mjs` (promote the two ad-hoc per-profile scripts to one).
 - Uses REAL src/projects.js so ids/scaffold match prod. Ledger-first (projects/.migration-ledger.jsonl),
