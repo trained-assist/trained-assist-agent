@@ -43,14 +43,6 @@ const VM_NAME = process.env.VM_NAME || 'unknown';
 let GIT_COMMIT = 'unknown';
 try { GIT_COMMIT = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
 
-function trackProjectUsage(workDir, projectName) {
-  const file = path.join(workDir, '.project-usage.json');
-  let usage = {};
-  try { usage = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-  usage[projectName] = (usage[projectName] || 0) + 1;
-  try { fs.writeFileSync(file, JSON.stringify(usage)); } catch {}
-}
-
 const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 // Matches assistant replies that signal task completion — session should not be reused
 // Active forms: убрал, удалил, сделал, etc.
@@ -2460,30 +2452,47 @@ ${expLines || '—'}
       return json(res, 200, { running: isTaskRunning(username) });
     }
 
-    // GET /projects?username=xxx — list project subdirs sorted by session frequency
+    // GET /projects?username=xxx — TYPED project list (projects.js), most-recent first.
+    // Single source of truth: the on-disk projects/ folder. Replaces the old raw-subdir
+    // listing (issue #517 convergence — no more folder-name picker).
     if (req.method === 'GET' && url.pathname === '/projects') {
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
-      let usage = {};
-      try { usage = JSON.parse(fs.readFileSync(path.join(workDir, '.project-usage.json'), 'utf8')); } catch {}
-
-      let subdirs = [];
       try {
-        subdirs = fs.readdirSync(workDir, { withFileTypes: true })
-          .filter(e => e.isDirectory() && !e.name.startsWith('.'))
-          .map(e => e.name);
-      } catch {}
+        const { listProjects } = require('./projects');
+        const projects = listProjects(workDir).map(p => ({
+          id: p.id, name: p.name, type: p.type, label: p.label || p.name, lastAt: p.lastAt || 0,
+        }));
+        return json(res, 200, { projects });
+      } catch (e) {
+        return json(res, 200, { projects: [], note: 'projects model unavailable' });
+      }
+    }
 
-      // Root dir always first in candidates; sort by count desc then name asc
-      const projects = [
-        { name: '', label: '🏠 Корень', count: usage[''] || 0 },
-        ...subdirs.map(name => ({ name, label: name, count: usage[name] || 0 })),
-      ].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    // GET /project-decision?username=xxx&chatId=yyy — what the gateway should do when a
+    // NEW dialog starts (issue #517): {action:'auto'|'create'|'ask', choices:[{id,name,label}], active}.
+    // 'ask' -> gateway renders the inline picker and defers the task until the user chooses.
+    if (req.method === 'GET' && url.pathname === '/project-decision') {
+      const username = url.searchParams.get('username');
+      const chatId = url.searchParams.get('chatId') || null;
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
 
-      return json(res, 200, { projects });
+      const workDir = path.join(BASE_USERS_DIR, username);
+      try {
+        const { decideNewSessionProject } = require('./projects');
+        const d = decideNewSessionProject(workDir, chatId);
+        const out = { action: d.action, active: d.active || null };
+        if (d.action === 'auto') out.choices = [{ id: d.project.id, name: d.project.name, label: d.project.label || d.project.name }];
+        else if (d.action === 'ask') out.choices = d.choices.map(p => ({ id: p.id, name: p.name, label: p.label || p.name }));
+        else out.choices = [];
+        return json(res, 200, out);
+      } catch (e) {
+        return json(res, 200, { action: 'create', choices: [], active: null, note: 'projects model unavailable' });
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/run') {
@@ -2491,7 +2500,7 @@ ${expLines || '—'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectDir, fileBase64, fileName, fileMimeType, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
@@ -2511,19 +2520,17 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid sessionId' });
       if (contextFromSession && !/^[a-zA-Z0-9_-]+$/.test(contextFromSession))
         return json(res, 400, { error: 'invalid contextFromSession' });
-      if (projectDir && !/^[a-zA-Z0-9][a-zA-Z0-9_\-.]*$/.test(projectDir))
-        return json(res, 400, { error: 'invalid projectDir' });
+      if (projectId && !/^[a-zA-Z0-9][a-zA-Z0-9_\-.]*$/.test(projectId))
+        return json(res, 400, { error: 'invalid projectId' });
+      if (newProjectName && (typeof newProjectName !== 'string' || newProjectName.length > 200))
+        return json(res, 400, { error: 'invalid newProjectName' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
 
-      // cwd = project subdir for Claude; workDir stays as data dir for sessions/logs
-      const cwd = projectDir ? path.resolve(path.join(workDir, projectDir)) : workDir;
-      if (!cwd.startsWith(workDir)) return json(res, 400, { error: 'invalid projectDir' });
-      if (projectDir) {
-        fs.mkdirSync(cwd, { recursive: true });
-        trackProjectUsage(workDir, projectDir);
-      }
+      // cwd defaults to workDir; the runner's project-binding block resolves the real
+      // cwd from the bound project (projectId passed here, or the session's stored one).
+      const cwd = workDir;
 
       const user = { id: userId, name: username, username, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
@@ -2550,7 +2557,7 @@ ${expLines || '—'}
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null }).catch(err =>
+      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
@@ -2836,6 +2843,20 @@ ${expLines || '—'}
         }));
         sessionList = listSessions(workDir, limit); // reload with fresh summaries
       }
+      // Resolve projectId -> projectName so the gateway/web session lists can label
+      // each dialog by its typed project (issue #517).
+      try {
+        const { getProject } = require('./projects');
+        const nameCache = {};
+        sessionList = sessionList.map(s => {
+          if (!s.projectId) return s;
+          if (!(s.projectId in nameCache)) {
+            const p = getProject(workDir, s.projectId);
+            nameCache[s.projectId] = p ? p.name : null;
+          }
+          return { ...s, projectName: nameCache[s.projectId] };
+        });
+      } catch { /* projects model unavailable — leave list as-is */ }
       return json(res, 200, { sessions: sessionList });
     }
 
