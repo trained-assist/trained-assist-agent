@@ -1978,9 +1978,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   //  • иначе → one-shot, промпт без изменений.
   try {
     const deepSticky = answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
+    // internalGtd ходы — уже «дожим до конца», им oneshot-гард про research не нужен.
     const block = explicitMode === 'clarify' ? answerRouter.buildClarifyBlock()
                 : deepSticky                  ? answerRouter.buildDeepBlock()
-                : null;
+                : internalGtd                 ? null
+                : answerRouter.buildOneshotBlock();
     if (block) {
       const baseTxt = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
       const merged = baseTxt + '\n' + block + '\n';
