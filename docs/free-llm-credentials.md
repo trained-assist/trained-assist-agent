@@ -1,0 +1,58 @@
+# Free/cheap LLM credentials — how to call them
+
+Context: issue #584 (multi-step PR auto-triage pipeline — analyze failed CI,
+draft a fix, verify, clarify issues, draft PRs for simple bugs). Every sub-agent
+step in that pipeline should default to a cheap/free model via OpenRouter
+instead of Claude, and fall back to Claude only when the cheap model fails or
+the task needs deeper reasoning.
+
+## Credential
+
+- Env var: `OPENROUTER_API_KEY` — already declared in `src/secrets.js` (`OPTIONAL`
+  list) and loaded the same way as every other integration key. No new secret
+  plumbing needed; if a profile hasn't set it, `getOpenRouterKey()`-style
+  lookups return `null` and callers should skip/fallback (see
+  `src/hh-scoring.js:271`).
+- Set per-profile like any other secret: `/settoken` flow or the credentials
+  form (`src/mcp-skills/tools/23-credentials-form.js`), or directly in the
+  profile's secrets store.
+
+## Call pattern (already used in this repo)
+
+OpenRouter is called as a plain OpenAI-compatible chat-completions endpoint:
+`https://openrouter.ai/api/v1/chat/completions`, header
+`Authorization: Bearer ${OPENROUTER_API_KEY}`.
+
+Existing call sites to copy from:
+- `src/hh-scoring.js` — model selection + fallback pattern
+  (`FALLBACK_MODEL = 'google/gemini-2.5-flash'`)
+- `src/mcp-skills/tools/41-applylink.js` — PDF/resume extraction via
+  OpenRouter (`gemini-2.5-flash` native file parsing + `gpt-4o-mini` text
+  fallback, run concurrently, pick the more complete result)
+- `src/hh-bullshit-guard.js`, `src/session-summary.js`, `src/project-summary.js`,
+  `src/mcp-skills/tools/96-label.js` — cheap-model classification/summary calls
+
+## Recommended models for pipeline steps
+
+| Step | Task | Model | Why |
+|---|---|---|---|
+| 1 | Analyze failed PR/CI logs | `deepseek/deepseek-chat` (a.k.a. "DeepSeek V3") | strong at reading logs/diffs, cheap |
+| 2 | Draft a fix from the analysis | `deepseek/deepseek-chat` or escalate to Claude if the diff touches >1 file / architecture | code-editing capable, cheap |
+| 3 | Clarify an issue (gather info from past sessions) | `google/gemini-2.5-flash` | fast, cheap, good at summarizing/collating |
+| 4 | Prepare a PR for simple bugs | same as step 2 | |
+| 5 | Verify a fix (adversarial check) | run 3x with `google/gemini-2.5-flash-lite` (cheapest) as independent voters, majority wins | matches the "3 attempts" pattern already used elsewhere (see `verify` skill / adversarial-verify pattern in Workflow tool) |
+
+`google/gemini-2.0-flash-001` is retired (404) — do not use it; `2.5-flash` /
+`2.5-flash-lite` are the live replacements (confirmed working on CID/Cyrillic
+PDF OCR, see `agent-notes.md`).
+
+## Budget/fallback rule
+
+Every pipeline step must:
+1. Try the assigned OpenRouter model first.
+2. On empty/malformed response or 2 consecutive failures, fall back to Claude
+   for that single step (not the whole pipeline) — same "3 attempts then
+   escalate to human" cap requested in issue #584.
+3. Never silently swallow a step failure — log which model handled the step
+   in the PR/issue comment the pipeline posts, so cost and reliability are
+   auditable per step.
