@@ -314,56 +314,92 @@ async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessTo
 // Fetches messages from HH API for negotiations where HH has more messages than we've stored,
 // merges them into local history (deduplicates by HH message ID), stores applicant replies.
 // Capped at 15 negotiations per call to avoid long page loads.
-async function syncHhMessagesToHistory(dataDir, username, negotiations, accessToken) {
+// Sync HH thread messages to local candidate history.
+// options.incremental=true  → only sync candidates where neg.updated_at > last_hh_message_at
+//                              (used in background loop — avoids redundant API calls)
+// options.incremental=false → sync all candidates with messages, capped at options.cap (default 15)
+//                              (used on page load — ensures fresh data, bounded latency)
+// Returns { synced: N, newMessages: M } for sync-log stats.
+async function syncHhMessagesToHistory(dataDir, username, negotiations, accessToken, options = {}) {
+  const { incremental = false, cap = 15, maxConcurrent = 4 } = options;
   const candDir = path.join(dataDir, 'hh', String(username), 'candidates');
   try { fs.mkdirSync(candDir, { recursive: true }); } catch {}
 
-  const toSync = negotiations
-    .filter(n => (n.counters?.messages || 0) > 0)
-    .slice(0, 15);
+  let candidates = negotiations.filter(n => (n.counters?.messages || 0) > 0);
 
-  await Promise.allSettled(toSync.map(async neg => {
-    const file = path.join(candDir, `${neg.id}.json`);
-    let history = { messages: [], ats_result: null };
-    try { history = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-    history.messages = history.messages || [];
-
-    const hhCount = neg.counters?.messages || 0;
-    // Skip if we already have all messages (approximate: compare stored count with HH count)
-    const storedTotal = history.messages.length;
-    // Always sync if there are unread messages; otherwise skip if counts match
-    const hasUnread = (neg.counters?.unread_messages || 0) > 0 || neg.has_updates;
-    if (!hasUnread && storedTotal >= hhCount) return;
-
-    try {
-      const data = await hhApiRequest('GET', `/negotiations/${neg.id}/messages?per_page=50`, accessToken);
-      const hhMsgs = (data.items || []).filter(m => m.text); // skip empty state-change entries
-      if (!hhMsgs.length) return;
-
-      // Build a set of already-stored HH message IDs to deduplicate
-      const storedIds = new Set(history.messages.map(m => m.hh_id).filter(Boolean));
-
-      let added = false;
-      for (const m of hhMsgs) {
-        if (storedIds.has(m.id)) continue;
-        history.messages.push({
-          hh_id: m.id,
-          role: m.author?.participant_type === 'applicant' ? 'applicant' : 'employer',
-          text: m.text,
-          timestamp: m.created_at,
-        });
-        storedIds.add(m.id);
-        added = true;
+  if (incremental) {
+    // Only sync candidates where HH updated_at is newer than our last sync timestamp
+    candidates = candidates.filter(neg => {
+      const file = path.join(candDir, `${neg.id}.json`);
+      try {
+        const h = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const lastSynced = h.last_hh_message_at || 0;
+        const hhUpdated = neg.updated_at ? new Date(neg.updated_at).getTime() : 0;
+        return hhUpdated > lastSynced;
+      } catch {
+        return true; // no file yet → sync
       }
-      if (added) {
-        // Sort by timestamp ascending
-        history.messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    });
+  } else {
+    candidates = candidates.slice(0, cap);
+  }
+
+  let synced = 0;
+  let newMessages = 0;
+
+  // Process in batches to avoid API burst
+  for (let i = 0; i < candidates.length; i += maxConcurrent) {
+    const batch = candidates.slice(i, i + maxConcurrent);
+    await Promise.allSettled(batch.map(async neg => {
+      const file = path.join(candDir, `${neg.id}.json`);
+      let history = { messages: [], ats_result: null };
+      try { history = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+      history.messages = history.messages || [];
+
+      try {
+        // Fetch full message thread (HH supports up to 50 per page; paginate if needed)
+        let allHhMsgs = [];
+        for (let page = 0; ; page++) {
+          const data = await hhApiRequest('GET', `/negotiations/${neg.id}/messages?per_page=50&page=${page}`, accessToken);
+          const items = (data.items || []).filter(m => m.text);
+          allHhMsgs = allHhMsgs.concat(items);
+          if (!data.pages || page >= data.pages - 1) break;
+        }
+        if (!allHhMsgs.length) {
+          // No messages yet — still update last_hh_message_at so we skip next time
+          history.last_hh_message_at = neg.updated_at ? new Date(neg.updated_at).getTime() : Date.now();
+          fs.writeFileSync(file, JSON.stringify(history, null, 2), { mode: 0o600 });
+          synced++;
+          return;
+        }
+
+        const storedIds = new Set(history.messages.map(m => m.hh_id).filter(Boolean));
+        let added = 0;
+        for (const m of allHhMsgs) {
+          if (storedIds.has(m.id)) continue;
+          history.messages.push({
+            hh_id: m.id,
+            role: m.author?.participant_type === 'applicant' ? 'applicant' : 'employer',
+            text: m.text,
+            timestamp: m.created_at,
+          });
+          storedIds.add(m.id);
+          added++;
+        }
+        if (added > 0) {
+          history.messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+          newMessages += added;
+        }
+        history.last_hh_message_at = neg.updated_at ? new Date(neg.updated_at).getTime() : Date.now();
         fs.writeFileSync(file, JSON.stringify(history, null, 2), { mode: 0o600 });
+        synced++;
+      } catch (e) {
+        console.error(`[hh-msg-sync] neg ${neg.id}: ${e.message}`);
       }
-    } catch (e) {
-      console.error(`[hh-msg-sync] neg ${neg.id}: ${e.message}`);
-    }
-  }));
+    }));
+  }
+
+  return { synced, newMessages };
 }
 
 // Background HH scoring: fetch negotiations + score unscored candidates for all users
@@ -396,7 +432,14 @@ async function runHhScoringForUser(username) {
 
     const negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
 
-    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4 });
+    // Sync HH thread messages incrementally — only candidates changed since last sync
+    const msgSync = await syncHhMessagesToHistory(dataDir, username, negotiations, tokenData.access_token, {
+      incremental: true,
+      maxConcurrent: 4,
+    }).catch(e => { console.error(`[hh-bg] msg-sync error for ${username}:`, e.message); return { synced: 0, newMessages: 0 }; });
+    if (msgSync.newMessages > 0) console.log(`[hh-bg] msg-sync ${username}: +${msgSync.newMessages} new messages across ${msgSync.synced} candidates`);
+
+    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4, msgSyncStats: msgSync });
     if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
 
     const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3 });
@@ -1364,8 +1407,19 @@ async function main() {
       try { entries = JSON.parse(fs.readFileSync(path.join(dataDir, 'hh', username, 'sync-log.json'), 'utf8')); } catch {}
       const fmt = ts => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
       const rows = entries.length === 0
-        ? '<tr><td colspan="3" style="text-align:center;color:#94a3b8;padding:24px">Нет данных — скоринг ещё не запускался</td></tr>'
-        : entries.map(e => `<tr><td>${fmt(e.at)}</td><td>${e.checked ?? '—'}</td><td style="color:${e.scored > 0 ? '#16a34a' : '#94a3b8'}">${e.scored > 0 ? '+' + e.scored + ' новых' : 'без изменений'}</td></tr>`).join('');
+        ? '<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:24px">Нет данных — скоринг ещё не запускался</td></tr>'
+        : entries.map(e => {
+            const msgs = e.new_messages_loaded != null ? `+${e.new_messages_loaded} сообщ.` : '—';
+            const msgsColor = (e.new_messages_loaded || 0) > 0 ? '#2563eb' : '#94a3b8';
+            const scoredColor = (e.scored || 0) > 0 ? '#16a34a' : '#94a3b8';
+            return `<tr>
+              <td>${fmt(e.at)}</td>
+              <td>${e.checked ?? '—'}</td>
+              <td style="color:${msgsColor}">${msgs}</td>
+              <td style="color:${scoredColor}">${(e.scored || 0) > 0 ? '+' + e.scored + ' скор.' : 'без изм.'}</td>
+              <td style="color:#64748b">${e.with_new_messages != null ? e.with_new_messages + ' канд.' : '—'}</td>
+            </tr>`;
+          }).join('');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>История скоринга</title>
@@ -1373,7 +1427,7 @@ async function main() {
 </head><body>
 <h1>История скоринга</h1>
 <p class="sub">Последние ${entries.length} запусков фонового скоринга · ${username}</p>
-<table><thead><tr><th>Время (МСК)</th><th>Проверено</th><th>Результат</th></tr></thead><tbody>${rows}</tbody></table>
+<table><thead><tr><th>Время (МСК)</th><th>Проверено</th><th>Новых сообщ.</th><th>Скоринг</th><th>С активностью</th></tr></thead><tbody>${rows}</tbody></table>
 </body></html>`);
     }
 

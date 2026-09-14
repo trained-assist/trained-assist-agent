@@ -327,7 +327,7 @@ function buildResumeText(neg, candidateMessages = []) {
 
 // ─── Batch scoring: GigaChat primary ─────────────────────────────────────────
 
-async function scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent = 5 } = {}) {
+async function scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent = 5, msgSyncStats = null } = {}) {
   const atsConfig = readAtsConfig(workDir);
   if (!atsConfig) return 0;
 
@@ -350,13 +350,23 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
       const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
       const dir = path.join(dataDir, 'hh', String(username));
       fs.mkdirSync(dir, { recursive: true });
+      const entry = {
+        at: Date.now(),
+        checked,
+        scored,
+        // message sync stats from background loop (null when called from tests/manual)
+        ...(msgSyncStats ? {
+          with_new_messages: msgSyncStats.synced,
+          new_messages_loaded: msgSyncStats.newMessages,
+        } : {}),
+      };
       // last-scoring.json — single entry for quick read
-      fs.writeFileSync(path.join(dir, 'last-scoring.json'), JSON.stringify({ at: Date.now(), checked, scored }), { mode: 0o600 });
+      fs.writeFileSync(path.join(dir, 'last-scoring.json'), JSON.stringify(entry), { mode: 0o600 });
       // sync-log.json — rolling last 50 entries
       const logPath = path.join(dir, 'sync-log.json');
       let entries = [];
       try { entries = JSON.parse(fs.readFileSync(logPath, 'utf8')); } catch { /* first run */ }
-      entries.unshift({ at: Date.now(), checked, scored });
+      entries.unshift(entry);
       if (entries.length > 50) entries.length = 50;
       fs.writeFileSync(logPath, JSON.stringify(entries), { mode: 0o600 });
     } catch { /* non-critical */ }
