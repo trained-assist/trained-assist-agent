@@ -3758,6 +3758,10 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       salary: r.salary ? `${(r.salary.amount || '').toLocaleString?.() || r.salary.amount} ${r.salary.currency || ''}`.trim() : null,
       msg_from_candidate: (history.messages || []).filter(m => m.role === 'applicant').length,
       msg_from_us: (history.messages || []).filter(m => m.role === 'employer').length,
+      last_msg_role: (() => {
+        const msgs = history.messages || [];
+        return msgs.length > 0 ? msgs[msgs.length - 1].role : null;
+      })(),
     };
   });
 
@@ -3772,6 +3776,16 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
 
   const sorted = sortCandidates(candidates);
   const waitingCandidates = sortCandidates(candidates.filter(c => c.needs_reply));
+  // We wrote at least once, they haven't replied after our last message
+  const silentCandidates = sortCandidates(candidates.filter(c =>
+    c.msg_from_us > 0 && c.last_msg_role === 'employer' && !c.needs_reply
+  ));
+  // No employer message at all — never initiated contact
+  const noContactCandidates = sortCandidates(candidates.filter(c => c.msg_from_us === 0));
+  // Active dialog: both sides wrote, last was from candidate (or has unread)
+  const dialogCandidates = sortCandidates(candidates.filter(c =>
+    c.msg_from_us > 0 && c.msg_from_candidate > 0 && c.last_msg_role === 'applicant' && !c.needs_reply
+  ));
 
   const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
   const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
@@ -3892,6 +3906,9 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   }
 
   const waitingCardsHtml = buildCardsHtml(waitingCandidates, 0);
+  const silentCardsHtml = buildCardsHtml(silentCandidates, 0);
+  const noContactCardsHtml = buildCardsHtml(noContactCandidates, 0);
+  const dialogCardsHtml = buildCardsHtml(dialogCandidates, 0);
   const allCardsHtml = buildCardsHtml(sorted, 0);
 
   return `<!DOCTYPE html>
@@ -4024,10 +4041,22 @@ h1{font-size:18px}
 </div>
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('waiting',this)">🔴 Неотвеченные (${waitingCandidates.length})</button>
+  <button class="tab-btn" onclick="switchTab('silent',this)">😴 Молчат (${silentCandidates.length})</button>
+  <button class="tab-btn" onclick="switchTab('nocontact',this)">📭 Ещё не писали (${noContactCandidates.length})</button>
+  <button class="tab-btn" onclick="switchTab('dialog',this)">💬 Диалог (${dialogCandidates.length})</button>
   <button class="tab-btn" onclick="switchTab('all',this)">📨 Все (${sorted.length})</button>
 </div>
 <div id="tab-waiting" class="tab-panel active">
   ${waitingCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Все отвечено — нет кандидатов, ожидающих ответа.</p>' : waitingCardsHtml.join('')}
+</div>
+<div id="tab-silent" class="tab-panel">
+  ${silentCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Нет кандидатов, которым написали но они не ответили.</p>' : silentCardsHtml.join('')}
+</div>
+<div id="tab-nocontact" class="tab-panel">
+  ${noContactCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Всем кандидатам уже написали.</p>' : noContactCardsHtml.join('')}
+</div>
+<div id="tab-dialog" class="tab-panel">
+  ${dialogCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Нет активных диалогов без ожидающих ответов.</p>' : dialogCardsHtml.join('')}
 </div>
 <div id="tab-all" class="tab-panel">
   ${allCardsHtml.join('')}
