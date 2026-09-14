@@ -461,8 +461,8 @@ describe('Expand button — forceClaude escalation', () => {
     const sent = tgSent();
     expect(sent.length).toBe(1);
     const body = sent[0].body;
-    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toMatch(/вдумчивее/i);
-    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data).toMatch(/^ask_claude\|/);
+    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toMatch(/проработку/i);
+    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data).toMatch(/^workrun\|/);
   });
 
   it('forceClaude=true skips quick answer and calls Claude', { timeout: 20000 }, async () => {
