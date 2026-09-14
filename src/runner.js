@@ -1190,8 +1190,8 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 // even when they share a workDir (chat + web, or two chats in one project).
 // A brand-new session with no id yet falls back to a per-CHAT lane so two
 // concurrent first-messages in one chat collapse into one session ("one active
-// session per chat"). Session-level context ownership is enforced separately by
-// ownerChatId (see _runTask).
+// session per chat"). Session-level context attachment is enforced separately by
+// liveChatId (see _runTask).
 //
 // The real OOM backstop is no longer the per-username lock (that was a 2019-era
 // blunt instrument that serialised an entire profile). It moved to a GLOBAL
@@ -1903,20 +1903,22 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     activeSessionId = sessionId;
     const existing = sessions.getSession(user.workDir, sessionId);
     if (existing) {
-      // Strict chat isolation: a session belongs to exactly one chat.
-      // If it's owned by a different chat, reject and notify — don't mix contexts.
-      if (existing.ownerChatId && String(existing.ownerChatId) !== String(chatId)) {
-        const msg = `⚠️ Эта сессия перешла в другой чат этого профиля.\n\nЧтобы вернуть её сюда — напишите /sessions и выберите нужную, или просто напишите новый запрос.`;
+      // Strict chat isolation: a live session is attached to exactly one chat.
+      // If it's attached to a different chat, reject and notify — don't mix contexts.
+      // liveChatId (was ownerChatId): read-compat with pre-rename session files.
+      const attachedChatId = existing.liveChatId ?? existing.ownerChatId;
+      if (attachedChatId && String(attachedChatId) !== String(chatId)) {
+        const msg = `⚠️ Эта сессия сейчас закреплена за другим чатом этого профиля.\n\nЧтобы перенести её сюда — напишите /sessions и выберите нужную, или просто напишите новый запрос.`;
         if (initialMsgId) await tgEdit(BOT_TOKEN, chatId, initialMsgId, msg).catch(() => tgSend(BOT_TOKEN, chatId, msg));
         else await tgSend(BOT_TOKEN, chatId, msg);
         clearPendingTask(taskId);
         return;
       }
-      // Legacy / owner-less session (#489): the null ownerChatId short-circuited
+      // Legacy / unattached session (#489): a null liveChatId short-circuited
       // the guard above, letting ANY chat adopt it and mix contexts. Claim it for
       // the current chat on first touch so a foreign chat is rejected next time.
-      if (!existing.ownerChatId && chatId) {
-        sessions.claimOwnerChatId(user.workDir, sessionId, chatId);
+      if (!attachedChatId && chatId) {
+        sessions.claimLiveChatId(user.workDir, sessionId, chatId);
       }
       sessionExists = true;
       const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);

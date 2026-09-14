@@ -2532,7 +2532,12 @@ ${expLines || '—'}
       // cwd from the bound project (projectId passed here, or the session's stored one).
       const cwd = workDir;
 
-      const user = { id: userId, name: username, username, workDir, cwd, telegramUserId: telegramUserId || null };
+      // Owner canonical name = PROFILE (never «user»; see docs/PROFILE-RENAME-SPEC.md).
+      // `profileId` is the owner identifier going forward; the gateway may send it
+      // explicitly, but until it does we alias the existing `username` field (same
+      // string value) so both repos migrate independently — no flag-day break.
+      const profileId = payload.profileId ?? username;
+      const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
       // Save attached file (base64) to workDir and prepend path info to the task.
