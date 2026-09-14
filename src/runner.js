@@ -24,11 +24,24 @@ const { loadUserSiteIntents } = require('./user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
 const persona = require('./persona');
 const answerRouter = require('./answer-router');
+const { formatForTelegram, makeLlmFixer } = require('./tg-format');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
 const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
+
+// Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
+// the last complete assistant turn; only as a last resort the whole accumulated stream
+// (the scratchpad). This stops "Let me confirm… Now writing…" narration leaking as final.
+function pickFinalText(claudeResult, lastAssistantMsg, fullText) {
+  const clean = typeof claudeResult === 'string' ? claudeResult.trim() : '';
+  if (clean) return clean;
+  const last = (lastAssistantMsg || '').trim();
+  if (last) return last;
+  return (fullText || '').trim();
+}
+
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
@@ -91,6 +104,9 @@ const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|спо
 const GDRIVE_NOTIF_OFF_INTENT  = /\/google_drive_sharing_notifications_switch_off|выключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|отключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|не.{0,10}уведомля.{0,30}(?:гугл|google|drive|шаринг|файл)|без.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const GDRIVE_NOTIF_ON_INTENT   = /\/google_drive_sharing_notifications_switch_on|включи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|верн.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
+// /bug_or_feature — FAST capture: last messages + logs + note → GitHub issue, no Claude session.
+// Distinct from the older free-text BUG_REPORT_INTENT (line ~67) which spawns a full session.
+const BUG_OR_FEATURE_INTENT = /^\/(?:bug_or_feature|bug|feature|баг|фича|report|репорт)(?=\s|$)/i;
 // "Подробнее N" / "/session N" / "подробнее о 3" — expand one session from the last /sessions list
 const SESSION_DETAIL_INTENT = /^\/(?:sessions?|диалог)\s*(\d{1,2})\b|^подробнее(?:\s+(?:о|про|по))?\s*(?:диалог[ае]?\s*|сесси[июя]\s*|№\s*)?(\d{1,2})\b|^(\d{1,2})\s*подробнее/i;
 const HH_STATUS_INTENT       = /hh.{0,10}статус|статус.{0,10}hh|статус.{0,10}(?:рекрут|вакансии|оценки|скоринга)|как.{0,15}дела.{0,15}hh|что.{0,15}активн.{0,15}hh|включена.{0,15}оценка|работает.{0,15}(?:скоринг|оценка|hh)|\/hh_status/i;
@@ -886,6 +902,34 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null) {
+  // /bug_or_feature — second step: if a report is awaiting the user's comment, the NEXT
+  // message IS that comment. Capture it and file the issue. Guards: a slash command
+  // cancels capture (don't bury a command as a note); "отмена" cancels explicitly;
+  // a stale flag (>30 min) is ignored so an unrelated later message isn't swallowed.
+  if (workDir) {
+    const ofPending = path.join(workDir, 'contexts', 'bugreport', `or-feature-pending-${chatId || 'default'}.json`);
+    try {
+      if (fs.existsSync(ofPending)) {
+        const p = JSON.parse(fs.readFileSync(ofPending, 'utf8') || '{}');
+        const ageMs = Date.now() - new Date(p.started_at || 0).getTime();
+        const fresh = ageMs >= 0 && ageMs < 30 * 60 * 1000;
+        const trimmed = task.trim();
+        if (!fresh || trimmed.startsWith('/')) {
+          fs.unlinkSync(ofPending); // stale, or a real command follows — drop capture, process normally
+        } else if (/^(отмена|отменить|отмени|cancel|отбой|не надо)$/i.test(trimmed)) {
+          fs.unlinkSync(ofPending);
+          return '❌ Отменил. Отчёт не отправлен.';
+        } else {
+          fs.unlinkSync(ofPending);
+          const { createBugReport } = require('./bug-report');
+          return await createBugReport({ workDir, chatId, userId, note: task });
+        }
+      }
+    } catch (e) {
+      console.warn('[bug_or_feature] pending-consume error:', e.message);
+    }
+  }
+
   // Session summaries (durable artifact) — handled here (async) so we can generate
   // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
   if (workDir) {
@@ -919,6 +963,27 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
       }
       return renderSessionsList(list);
     }
+  }
+
+  // /bug_or_feature — bundle last messages + logs + note into a GitHub issue (async).
+  // Bare invocation (no inline note) → ask the user what's wrong first, then the next
+  // message becomes the note (consumed at the top of runQuickAnswer). Inline note
+  // (`/bug_or_feature текст`) fires immediately — the comment is already there.
+  if (BUG_OR_FEATURE_INTENT.test(task)) {
+    const note = task.replace(BUG_OR_FEATURE_INTENT, '').trim();
+    if (!note && workDir) {
+      const ofPending = path.join(workDir, 'contexts', 'bugreport', `or-feature-pending-${chatId || 'default'}.json`);
+      fs.mkdirSync(path.dirname(ofPending), { recursive: true });
+      fs.writeFileSync(ofPending, JSON.stringify({ started_at: new Date().toISOString() }));
+      return [
+        '📝 Опиши, что случилось или что хочешь улучшить — одним сообщением.',
+        'Приложу к отчёту последние сообщения этой сессии и хвост логов.',
+        '',
+        '(Чтобы отменить — напиши «отмена».)',
+      ].join('\n');
+    }
+    const { createBugReport } = require('./bug-report');
+    return await createBugReport({ workDir, chatId, userId, note });
   }
 
   const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
@@ -1081,11 +1146,13 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 }
 
 // ── Concurrency model (see issues #488 / #489) ──────────────────────────────
-// Unit of parallelism is the SESSION. In practice a chat holds at most one
-// active session at a time ("one active session per chat" invariant), so we
-// serialise per CHAT lane — two messages in the same chat never run at once,
-// but different chats of the same profile (and different profiles) run in
-// parallel. Session-level context ownership is enforced separately by
+// Unit of parallelism is the SESSION. We serialise per SESSION lane — two
+// messages for the same session never run at once (can't have two `claude`
+// processes appending one transcript), but DIFFERENT sessions run in parallel
+// even when they share a workDir (chat + web, or two chats in one project).
+// A brand-new session with no id yet falls back to a per-CHAT lane so two
+// concurrent first-messages in one chat collapse into one session ("one active
+// session per chat"). Session-level context ownership is enforced separately by
 // ownerChatId (see _runTask).
 //
 // The real OOM backstop is no longer the per-username lock (that was a 2019-era
@@ -1093,8 +1160,20 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 // counting semaphore MAX_CONCURRENT_TASKS + a free-RAM watchdog, both of which
 // gate the actual `claude` spawn across every chat/profile at once.
 //
-// Map<chatId(string), Promise> — the tail of each chat's lane.
+// Map<laneKey(string), Promise> — the tail of each lane. laneKey is
+// `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
+
+// Serialization-lane key. The lane exists ONLY to stop two `claude` processes
+// appending the SAME transcript at once, so the key is the SESSION — NOT the
+// workDir (two sessions sharing a workDir must run in parallel: the
+// owner-required "several parallel sessions per profile" invariant) and NOT the
+// profile (that would over-serialize). A brand-new session has no id yet → key
+// on the chat so two concurrent first-messages in one chat collapse into one
+// session instead of spawning two claudes.
+function _laneKey(sessionId, chatId) {
+  return sessionId ? `session:${sessionId}` : `chat:${String(chatId)}`;
+}
 
 // Global concurrency cap on live `claude` processes (across all profiles).
 // RAM is cheap and monitored externally, so this is deliberately generous;
@@ -1122,6 +1201,43 @@ function _releaseSlot() {
   _runningTasks = Math.max(0, _runningTasks - 1);
   const next = _slotWaiters.shift();
   if (next) next();
+}
+
+// Per-profile ("repository") concurrency cap. A single profile can have at most
+// this many live `claude` processes at once — a 5th task for the same profile
+// queues until one of its own frees up. Sits UNDER the global cap as a fairness
+// bound so one profile can't monopolise every global slot and starve others.
+// With one active profile this is the effective ceiling (4 < global 6). Tune via
+// env without a code change.
+const MAX_CONCURRENT_PER_KEY = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS_PER_KEY) || 4);
+const _perKeyRunning = new Map(); // Map<key, count>
+const _perKeyWaiters = new Map(); // Map<key, Array<fn>>
+
+function _acquireKeySlot(key) {
+  return new Promise(resolve => {
+    const grab = () => {
+      const n = _perKeyRunning.get(key) || 0;
+      if (n < MAX_CONCURRENT_PER_KEY) { _perKeyRunning.set(key, n + 1); resolve(); }
+      else {
+        const w = _perKeyWaiters.get(key) || [];
+        w.push(grab);
+        _perKeyWaiters.set(key, w);
+      }
+    };
+    grab();
+  });
+}
+
+function _releaseKeySlot(key) {
+  const n = _perKeyRunning.get(key) || 0;
+  if (n <= 1) _perKeyRunning.delete(key);
+  else _perKeyRunning.set(key, n - 1);
+  const w = _perKeyWaiters.get(key);
+  if (w && w.length) {
+    const next = w.shift();
+    if (!w.length) _perKeyWaiters.delete(key);
+    next();
+  }
 }
 
 // Wait until free RAM is above the floor, or RAM_WAIT_MAX_MS elapses (backstop,
@@ -1275,9 +1391,21 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Lane key = chatId (opts.user.id). One active session per chat; different
-  // chats/profiles run in parallel, bounded by the global semaphore below.
-  const queueKey = String(opts.user.id);
+  // Lane key = the SESSION. The lane's ONLY job is to stop two `claude`
+  // processes appending the SAME transcript at once — that boundary is the
+  // session, not the workDir. Two sessions that share a workDir (chat + web, or
+  // different chats hitting the same project) DO NOT race in practice and MUST
+  // run in parallel — this is the owner-required "several parallel sessions per
+  // profile/workDir" invariant. Serializing on workDir (the old #546 behaviour)
+  // wrongly collapsed those into one lane; keying on the session restores the
+  // model this file already stated: "Unit of parallelism is the SESSION".
+  //   • sessionId present → serialize only same-session messages.
+  //   • no sessionId (brand-new session) → fall back to the chat lane so two
+  //     concurrent first-messages in one chat collapse into one session instead
+  //     of spawning two claudes (the "one active session per chat" invariant).
+  // Cross-session parallelism is bounded only by the per-profile cap (capKey)
+  // and the global slot semaphore below — never by this lane.
+  const queueKey = _laneKey(opts.sessionId, opts.user.id);
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -1319,8 +1447,8 @@ function runTask(opts) {
     const username = opts.user.username;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username);
-    // Clear this chat's lane so the next task doesn't wait behind a stuck one.
-    chatLanes.delete(String(opts.user.id));
+    // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
+    chatLanes.delete(queueKey);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const chatId = opts.user.id;
     const msg = stopped
@@ -1352,16 +1480,27 @@ function runTask(opts) {
     }, 3000);
   }
 
+  // Per-profile cap key ("repository" = one profile's workspace). Falls back to
+  // chatId if a caller has no username (internal/system tasks).
+  const capKey = String(opts.user.username || opts.user.id);
+
   const current = prev.then(async () => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
-    // Global admission control: wait for a free slot + enough RAM before we
-    // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
-    await _waitForRam();
-    await _acquireSlot();
+    // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
+    // profile's 4-slot cap waits here without holding a scarce global slot.
+    await _acquireKeySlot(capKey);
     try {
-      return await _runTask(opts);
+      // Global admission control: wait for a free slot + enough RAM before we
+      // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
+      await _waitForRam();
+      await _acquireSlot();
+      try {
+        return await _runTask(opts);
+      } finally {
+        _releaseSlot();
+      }
     } finally {
-      _releaseSlot();
+      _releaseKeySlot(capKey);
     }
   }).catch(err => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
@@ -1438,47 +1577,64 @@ function buildContextCard(username, workDir) {
 
 const NO_PIN_HINT = '\n\n💡 Дай мне права Admin в группе — буду обновлять без спама. Или /context_off чтобы скрыть.';
 
+// Reads the pin store, keyed per-chat: { chats: { "<chatId>": { msgId, lastCard, noPin } } }.
+// One profile can serve many Telegram chats, so each chat keeps its own pinned card.
+// Migrates the legacy flat format ({ msgId, chatId, lastCard, noPin }) transparently.
+function readPinStore(pinFile) {
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[runner] pin state parse:', e.message);
+  }
+  if (!raw || typeof raw !== 'object') return { chats: {} };
+  if (raw.chats && typeof raw.chats === 'object') return raw;
+  // Legacy flat format → migrate under its chatId (drop it if the chat is unknown).
+  const store = { chats: {} };
+  if (raw.msgId && raw.chatId != null) {
+    store.chats[String(raw.chatId)] = { msgId: raw.msgId, lastCard: raw.lastCard || null, noPin: !!raw.noPin };
+  }
+  return store;
+}
+
 // Creates or silently updates the context pin after task completion.
-// State (msgId + chatId + lastCard + noPin) is stored in workDir/.pin_state.json.
+// State is stored per-chat in workDir/.pin_state.json (see readPinStore).
 // botPinnedMsgId: the pinned message ID known to the bot — used to seed state when we have none.
 async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
   const pinFile = path.join(workDir, '.pin_state.json');
-  let state = null;
-  try { state = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch (e) { console.warn('[runner] pin state parse:', e.message); }
+  const store = readPinStore(pinFile);
+  const key = String(chatId);
+  let entry = store.chats[key] || null;
+  const save = (next) => {
+    store.chats[key] = next;
+    fs.writeFileSync(pinFile, JSON.stringify(store));
+  };
 
-  // Discard state from a different chat (many-chats-one-profile scenario).
-  if (state?.chatId && state.chatId !== chatId) {
-    console.log(`[pin] chatId mismatch (stored=${state.chatId} current=${chatId}), resetting state`);
-    state = null;
-  }
-
-  // Seed from bot's authoritative pinned message when we have no local state.
-  if (!state?.msgId && botPinnedMsgId) {
-    state = { msgId: botPinnedMsgId, chatId, lastCard: null };
+  // Seed from bot's authoritative pinned message when this chat has no local state.
+  if (!entry?.msgId && botPinnedMsgId) {
+    entry = { msgId: botPinnedMsgId, lastCard: null };
   }
 
   // In no-pin mode (bot lacks admin rights): just edit the message in-place with a hint.
   // Never attempt pinChatMessage again — it would fail and spam the chat.
-  if (state?.noPin) {
+  if (entry?.noPin) {
     const cardWithHint = card + NO_PIN_HINT;
-    if (state?.msgId) {
-      const edited = await tgEdit(token, chatId, state.msgId, cardWithHint).catch(() => null);
+    if (entry?.msgId) {
+      const edited = await tgEdit(token, chatId, entry.msgId, cardWithHint).catch(() => null);
       if (edited?.ok || edited?.description?.includes('message is not modified')) {
-        fs.writeFileSync(pinFile, JSON.stringify({ ...state, lastCard: cardWithHint }));
+        save({ ...entry, lastCard: cardWithHint });
         return;
       }
     }
     // Previous message was deleted — send a new one (still no pin attempt).
     const msg = await tgSend(token, chatId, cardWithHint);
     const newId = msg?.result?.message_id;
-    if (newId) fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: cardWithHint, noPin: true }));
+    if (newId) save({ msgId: newId, lastCard: cardWithHint, noPin: true });
     return;
   }
 
-  if (state?.msgId) {
-    const edited = await tgEdit(token, chatId, state.msgId, card).catch(() => null);
+  if (entry?.msgId) {
+    const edited = await tgEdit(token, chatId, entry.msgId, card).catch(() => null);
     if (edited?.ok || edited?.description?.includes('message is not modified')) {
-      fs.writeFileSync(pinFile, JSON.stringify({ msgId: state.msgId, chatId, lastCard: card }));
+      save({ msgId: entry.msgId, lastCard: card });
       return;
     }
     // Edit failed (message deleted) — fall through to create new.
@@ -1490,7 +1646,7 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   if (!newId) return;
 
   // Always save msgId so next run edits in-place instead of sending another new message.
-  fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: card }));
+  save({ msgId: newId, lastCard: card });
 
   const res = await fetch(`${TG_API}/bot${token}/pinChatMessage`, {
     method: 'POST',
@@ -1504,7 +1660,7 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
       // Enter no-pin mode: add hint to the existing message and remember the flag.
       const cardWithHint = card + NO_PIN_HINT;
       await tgEdit(token, chatId, newId, cardWithHint).catch(() => {});
-      fs.writeFileSync(pinFile, JSON.stringify({ msgId: newId, chatId, lastCard: cardWithHint, noPin: true }));
+      save({ msgId: newId, lastCard: cardWithHint, noPin: true });
     }
   }
 }
@@ -1596,20 +1752,65 @@ function ensureSkillDir(workDir, domainPath, description) {
   return dir;
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null }) {
+// §C (#530): дешёвая LLM смотрит финал ГЛУБОКОГО ответа — описан ли в нём ПЛАН
+// дальнейших действий («дальше предлагаю сделать так и так», перечень шагов к
+// реализации). Если да — под ответом покажем «▶️ Действуй дальше по плану». Строго
+// консервативно: сомнение / короткий ответ / нет ключа → false (кнопку не показываем).
+async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
+  const t = String(text || '').trim();
+  if (t.length < 200) return false; // слишком коротко для плана дальнейших шагов
+  const orKey = apiKey || process.env.OPENROUTER_API_KEY;
+  if (!orKey) return false;
+  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
+  const system = [
+    'Ты смотришь на ответ ассистента и решаешь: описан ли в нём ПЛАН дальнейших действий,',
+    'который ассистент предлагает выполнить СЛЕДУЮЩИМ шагом («дальше предлагаю сделать…»,',
+    'перечень конкретных шагов к реализации, «следующие шаги», «дальше нужно…»).',
+    'План = есть конкретные предлагаемые действия ВПЕРЁД, которые можно пойти и выполнить.',
+    'НЕ план: итог/объяснение уже сделанного, ответ на вопрос, список фактов без действий,',
+    'вопрос к пользователю без шагов.',
+    'Ответь СТРОГО одним JSON: {"plan": true|false}. Сомневаешься → false.',
+  ].join(' ');
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, temperature: 0, max_tokens: 20,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: t.slice(0, 3000) },
+        ],
+      }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content || '';
+    const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
+    return obj?.plan === true;
+  } catch (e) {
+    console.warn('[plan-detect]', e.message);
+    return false;
+  }
+}
+
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
 
-  // Кнопки явных действий под ответом. Дефолт → предложить проработку/уточнение.
-  // Если сессия уже deep (проработка идёт) — не предлагаем «Запустить проработку».
+  // Кнопки явных действий под ответом. Единый путь ЗАПУСКА проработки — накопитель
+  // ввода (кнопка «▶️ Запустить проработку» в шлюзе, callback intake_run), поэтому
+  // отдельной кнопки запуска здесь БОЛЬШЕ НЕТ (#530 §B: убран второй путь, что
+  // перезапускал sess.lastUserMessage в обход буфера). Оставляем только «❓ Уточнить».
   // NOTE: новый callback_data-префикс → добавь handler в trained-assist-tg-bot/
   // src/handlers/callbacks.js И префикс в tests/callbacks.test.js.
   const actionButtons = (sid, { deep = false } = {}) => {
     if (!sid || deep) return null;
     return { inline_keyboard: [[
-      { text: '⏻ Запустить проработку', callback_data: `workrun|${sid}` },
-      { text: '❓ Уточнить задачу',    callback_data: `clarify|${sid}` },
+      { text: '❓ Уточнить задачу', callback_data: `clarify|${sid}` },
     ]] };
   };
   const { BOT_TOKEN } = secrets;
@@ -1680,48 +1881,45 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
-  // ── Project binding ─────────────────────────────────────────────────────────
-  // A session lives inside a PROJECT (see projects.js): its cwd is the project folder
-  // and the project's PROFILE.md domain rules are folded into the system prompt.
-  //
-  // OPT-IN per profile: only profiles that already have a projects/ dir use the new
-  // model. Un-migrated profiles (all 11 live ones today) get boundProjectId=null and
-  // behave exactly as before — migration is gradual, "потихонечку, по 1".
+  // ── Project binding (always on — no opt-in gate) ────────────────────────────
+  // Every session lives inside a typed PROJECT (see projects.js): its cwd is the
+  // project folder and the project's PROFILE.md domain rules fold into the system
+  // prompt. This is now the SINGLE project mechanism — the old raw-subfolder picker
+  // (projectDir string) is retired (issue #517, no backward-compat).
   //
   // Continuing session -> keep the project stored on the session (never re-ask).
-  // New session         -> auto-bind the single project, create the first one, or
-  //                        (when several exist) fall back to the active/most-recent
-  //                        project for now — the interactive "which project?" prompt is
-  //                        a follow-up on the gateway side (recorded via projectAskPending).
+  // New session:
+  //   - gateway already resolved the choice -> opts.projectId is passed in -> bind it.
+  //   - otherwise decideNewSessionProject: auto (1 project) / create default (0) /
+  //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
+  //     so we never block silently here.
   let boundProjectId = null;
-  let projectAskPending = false;
-  const projectEnabled = (() => {
-    try { return fs.existsSync(projects.projectsRoot(user.workDir)); } catch { return false; }
-  })();
-  if (projectEnabled) {
-    try {
-      if (sessionExists && activeSessionId) {
-        const s = sessions.getSession(user.workDir, activeSessionId);
-        boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId);
-      } else {
-        const decision = projects.decideNewSessionProject(user.workDir, chatId);
-        if (decision.action === 'auto') {
-          boundProjectId = decision.project.id;
-        } else if (decision.action === 'create') {
-          boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }).id;
-        } else { // 'ask' — pick active/most-recent for now, flag the pending question
-          boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
-          projectAskPending = true;
-        }
+  try {
+    if (sessionExists && activeSessionId) {
+      const s = sessions.getSession(user.workDir, activeSessionId);
+      boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId);
+    } else if (projectId && projects.getProject(user.workDir, projectId)) {
+      boundProjectId = projectId; // explicit choice from the gateway picker
+    } else if (newProjectName) {
+      // gateway "➕ Новый проект" — provisional name derived from the first message
+      boundProjectId = projects.createProject(user.workDir, newProjectName).id;
+    } else {
+      const decision = projects.decideNewSessionProject(user.workDir, chatId);
+      if (decision.action === 'auto') {
+        boundProjectId = decision.project.id;
+      } else if (decision.action === 'create') {
+        boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }).id;
+      } else { // 'ask' — gateway didn't pass a choice; fall back so we never block silently
+        boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
       }
-      if (boundProjectId) {
-        projects.setActiveProjectId(user.workDir, boundProjectId, chatId);
-        const dir = projects.projectDir(user.workDir, boundProjectId);
-        if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
-      }
-    } catch (e) {
-      console.warn('[runner] project binding:', e.message);
     }
+    if (boundProjectId) {
+      projects.setActiveProjectId(user.workDir, boundProjectId, chatId);
+      const dir = projects.projectDir(user.workDir, boundProjectId);
+      if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
+    }
+  } catch (e) {
+    console.warn('[runner] project binding:', e.message);
   }
 
   // forceClaude=true (тап по inline-кнопке): деривируем задачу из сессии и обрамляем её
@@ -1978,9 +2176,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   //  • иначе → one-shot, промпт без изменений.
   try {
     const deepSticky = answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
+    // internalGtd ходы — уже «дожим до конца», им oneshot-гард про research не нужен.
     const block = explicitMode === 'clarify' ? answerRouter.buildClarifyBlock()
                 : deepSticky                  ? answerRouter.buildDeepBlock()
-                : null;
+                : internalGtd                 ? null
+                : answerRouter.buildOneshotBlock();
     if (block) {
       const baseTxt = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
       const merged = baseTxt + '\n' + block + '\n';
@@ -2024,6 +2224,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let lastSent = '';
   let lineBuffer = '';
   let claudeResult = null;  // text from result event
+  let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
   let claudeUsage = null;   // usage from result event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
@@ -2095,9 +2296,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
             console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
           }
         } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+          let turnText = '';
           for (const block of event.message.content) {
             if (block.type === 'text') {
               fullOutput.text += block.text;
+              turnText += block.text;
               if (outputCallback) try { outputCallback(block.text); } catch {}
             } else if (block.type === 'tool_use') {
               lastActivity = formatToolActivity(block.name, block.input);
@@ -2107,6 +2310,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
               }
             }
           }
+          if (turnText.trim()) lastAssistantMsg = turnText; // keep only the latest coherent turn
           scheduleStream();
         }
       } catch {
@@ -2176,6 +2380,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (timedOut) {
       const nextCount = continuationCount + 1;
       const partialText = fullOutput.text.trim();
+      // Durable record keeps the full progress; the Telegram summary shows only the last
+      // coherent turn so the scratchpad narration never leaks to the user.
+      const partialDisplay = pickFinalText(null, lastAssistantMsg, partialText);
 
       // Save partial progress so the next run sees what was done
       if (activeSessionId && partialText) {
@@ -2185,8 +2392,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
       if (continuationCount < MAX_CONTINUATIONS) {
         const statusLine = `⏱ Прервал по 40-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
-        const tgMsg = partialText.length > 20
-          ? `🧠 ${partialText.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
+        const tgMsg = partialDisplay.length > 20
+          ? `🧠 ${partialDisplay.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
           : statusLine;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
         else await tgSend(BOT_TOKEN, chatId, tgMsg);
@@ -2223,8 +2430,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // User pressed Stop — show partial result and exit cleanly
   if (sessionState.userStopped) {
     const partial = fullOutput.text.trim();
-    const stoppedMsg = partial
-      ? `⛔ Остановлено\n\n${partial.slice(-MAX_MSG_LEN)}`
+    const partialDisplay = pickFinalText(null, lastAssistantMsg, partial);
+    const stoppedMsg = partialDisplay
+      ? `⛔ Остановлено\n\n${partialDisplay.slice(-MAX_MSG_LEN)}`
       : '⛔ Остановлено. Можешь задать новый вопрос.';
     const clearMarkup = { reply_markup: { inline_keyboard: [] } };
     if (msgId) {
@@ -2248,7 +2456,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
 
   // Prefer the clean result string from the result event; fall back to accumulated stream text
-  const result = (claudeResult ?? fullOutput.text).trim() || '(нет вывода)';
+  const result = pickFinalText(claudeResult, lastAssistantMsg, fullOutput.text) || '(нет вывода)';
 
   // Detect Claude Code auth failure — set flag and send clear message instead of raw error
   if (isAuthError(result)) {
@@ -2282,7 +2490,21 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // юзер мог запустить проработку по уточнённому ТЗ).
   const finalDeep = explicitMode === 'deep' ||
     answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
-  const finalMarkup = internalGtd ? null : actionButtons(activeSessionId, { deep: finalDeep });
+  // §C (#530): под длинным ГЛУБОКИМ ответом, если в нём описан план дальнейших действий,
+  // показываем «▶️ Действуй дальше по плану» (callback plan|{sid}) — продолжение той же
+  // сессии по озвученному плану, без переспроса. Плана нет → кнопки нет. one-shot/clarify
+  // → прежние actionButtons (только «❓ Уточнить»).
+  let finalMarkup = null;
+  if (!internalGtd) {
+    if (finalDeep && activeSessionId) {
+      const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
+      finalMarkup = hasPlan
+        ? { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] }
+        : null;
+    } else {
+      finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
+    }
+  }
   const finalExtra = { reply_markup: finalMarkup || { inline_keyboard: [] } };
 
   // Send result (clear stop button; attach action buttons unless suppressed)
@@ -2360,22 +2582,41 @@ function formatToolActivity(name, input = {}) {
 
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
+// Lazy singleton cheap-LLM fixer for the formatting ladder (rung 2).
+let _tgFixer;
+function tgFixer() {
+  if (_tgFixer === undefined) _tgFixer = makeLlmFixer(process.env.OPENROUTER_API_KEY);
+  return _tgFixer;
+}
+
+// Run every outgoing message through the Markdown->TG-HTML degradation ladder
+// (converter -> validator -> cheap LLM fix -> plain-text floor) at this single
+// chokepoint, so no callsite can leak raw markdown. A caller that already set
+// parse_mode is trusted and passes through untouched.
+async function tgFormat(text, extra) {
+  if (extra && extra.parse_mode) return { text, extra };
+  const { text: out, parse_mode } = await formatForTelegram(text, { llmFix: tgFixer() });
+  return { text: out, extra: parse_mode ? { ...extra, parse_mode } : extra };
+}
+
 async function tgSend(token, chatId, text, extra = {}) {
+  const f = await tgFormat(text, extra);
   const res = await fetch(`${TG_API}/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, ...extra }),
+    body: JSON.stringify({ chat_id: chatId, text: f.text, ...f.extra }),
     signal: AbortSignal.timeout(10_000),
   });
   return res.json();
 }
 
 async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
+  const f = await tgFormat(text, extra);
   for (let i = 0; i < retries; i++) {
     const res = await fetch(`${TG_API}/bot${token}/editMessageText`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, ...extra }),
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: f.text, ...f.extra }),
       signal: AbortSignal.timeout(10_000),
     });
     const data = await res.json();
@@ -2394,4 +2635,10 @@ module.exports = {
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
+  // Exported for pin-state tests only
+  _pin: { updateContextPin, readPinStore },
+  // Exported for final-text-selection tests only
+  _final: { pickFinalText },
+  // Exported for lane-granularity tests only
+  _laneKey,
 };

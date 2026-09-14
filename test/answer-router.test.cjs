@@ -29,6 +29,11 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   // 5. no classifier surface (removed) — decideMode must be gone
   ok(typeof R.decideMode === 'undefined', 'decideMode removed');
 
+  // 6. oneshot block forbids inline heavy research and routes to проработку
+  ok(/ONE-SHOT/.test(R.buildOneshotBlock()) && /deep-research/.test(R.buildOneshotBlock())
+     && /Запустить проработку/.test(R.buildOneshotBlock()),
+     'oneshot block bars inline research → routes to deep session');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

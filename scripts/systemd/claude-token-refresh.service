@@ -1,0 +1,12 @@
+[Unit]
+Description=Claude Code OAuth token refresh broker (single-owner, flock-guarded)
+Documentation=https://github.com/trained-assist/trained-assist-agent/blob/main/docs/claude-oauth-refresh.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Keep the token fresh well before its ~8h expiry so no `claude --print`
+# subprocess ever refreshes on its own (which would race the rotating refresh token).
+ExecStart=/usr/bin/node %h/trained-assist-agent/scripts/claude-token-refresh.js --margin=10800
+Nice=5

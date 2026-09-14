@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the Claude Code OAuth refresh broker every 30 minutes
+Documentation=https://github.com/trained-assist/trained-assist-agent/blob/main/docs/claude-oauth-refresh.md
+
+[Timer]
+# 30m interval with a 3h margin means ~6 refresh opportunities before the token
+# would ever expire — one missed run (reboot, sleep) never lets it lapse.
+OnBootSec=2min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
