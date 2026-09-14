@@ -1819,6 +1819,60 @@ async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
+// §D (мультикнопочное меню, 2026-09-14): та же дешёвая-LLM механика, что и
+// detectPlanInAnswer, но ловит другой случай — Claude в тексте предлагает
+// пользователю ЯВНЫЙ ВЫБОР из 2-4 самостоятельных альтернатив («вариант А / вариант
+// Б», «можем так, а можем эдак — что выбираешь?»), а не единый план шагов. Claude
+// умеет только говорить текст — никакого отдельного «менюшного» API у него нет,
+// поэтому кнопки строим постобработкой поверх обычной прозы, как и с планом.
+// Тап по кнопке шлёт короткий маркер выбора (без текста варианта — сессия читает
+// СВОЙ ЖЕ последний ответ и знает, что означает вариант N); байт callback_data не
+// тратим на длинные ярлыки. Сомнение / короткий ответ / нет ключа → null (без меню).
+async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
+  const t = String(text || '').trim();
+  if (t.length < 100) return null;
+  const orKey = apiKey || process.env.OPENROUTER_API_KEY;
+  if (!orKey) return null;
+  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
+  const system = [
+    'Ты смотришь на ответ ассистента и решаешь: предлагает ли он пользователю ЯВНЫЙ ВЫБОР',
+    'из 2-4 конкретных самостоятельных альтернатив (напр. "Вариант А: ... Вариант Б: ...",',
+    'или "можем сделать так, а можем эдак — что выбираешь?"). Каждая альтернатива —',
+    'законченный отдельный путь действия, а не шаг одного общего плана.',
+    'НЕ меню: единая последовательность шагов одного плана, вопрос да/нет,',
+    'список фактов без выбора, один рекомендованный вариант без альтернатив.',
+    'Если это меню — верни короткие ярлыки (2-4 слова, БЕЗ номеров и слова "вариант"),',
+    'по одному на альтернативу, в порядке появления в тексте.',
+    'Ответь СТРОГО JSON: {"menu": true, "labels": ["...", "..."]} или {"menu": false}.',
+    'Сомневаешься → menu:false.',
+  ].join(' ');
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, temperature: 0, max_tokens: 150,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: t.slice(0, 3000) },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content || '';
+    const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
+    if (obj?.menu !== true || !Array.isArray(obj.labels)) return null;
+    const labels = obj.labels.map(s => String(s || '').trim()).filter(Boolean).slice(0, 4);
+    return labels.length >= 2 ? labels : null;
+  } catch (e) {
+    console.warn('[menu-detect]', e.message);
+    return null;
+  }
+}
+
 async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
@@ -2528,9 +2582,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   if (!internalGtd) {
     if (activeSessionId) {
       const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
-      finalMarkup = hasPlan
-        ? { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] }
-        : actionButtons(activeSessionId, { deep: finalDeep });
+      if (hasPlan) {
+        finalMarkup = { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] };
+      } else {
+        const menuLabels = await detectMenuInAnswer(final, secrets.OPENROUTER_API_KEY);
+        finalMarkup = menuLabels
+          ? { inline_keyboard: menuLabels.map((label, idx) => [{ text: `${idx + 1}. ${label}`.slice(0, 60), callback_data: `menu|${activeSessionId}|${idx}` }]) }
+          : actionButtons(activeSessionId, { deep: finalDeep });
+      }
     } else {
       finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
     }
