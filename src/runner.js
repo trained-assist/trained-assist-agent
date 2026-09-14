@@ -1184,11 +1184,13 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 }
 
 // ── Concurrency model (see issues #488 / #489) ──────────────────────────────
-// Unit of parallelism is the SESSION. In practice a chat holds at most one
-// active session at a time ("one active session per chat" invariant), so we
-// serialise per CHAT lane — two messages in the same chat never run at once,
-// but different chats of the same profile (and different profiles) run in
-// parallel. Session-level context ownership is enforced separately by
+// Unit of parallelism is the SESSION. We serialise per SESSION lane — two
+// messages for the same session never run at once (can't have two `claude`
+// processes appending one transcript), but DIFFERENT sessions run in parallel
+// even when they share a workDir (chat + web, or two chats in one project).
+// A brand-new session with no id yet falls back to a per-CHAT lane so two
+// concurrent first-messages in one chat collapse into one session ("one active
+// session per chat"). Session-level context ownership is enforced separately by
 // ownerChatId (see _runTask).
 //
 // The real OOM backstop is no longer the per-username lock (that was a 2019-era
@@ -1196,8 +1198,20 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 // counting semaphore MAX_CONCURRENT_TASKS + a free-RAM watchdog, both of which
 // gate the actual `claude` spawn across every chat/profile at once.
 //
-// Map<chatId(string), Promise> — the tail of each chat's lane.
+// Map<laneKey(string), Promise> — the tail of each lane. laneKey is
+// `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
+
+// Serialization-lane key. The lane exists ONLY to stop two `claude` processes
+// appending the SAME transcript at once, so the key is the SESSION — NOT the
+// workDir (two sessions sharing a workDir must run in parallel: the
+// owner-required "several parallel sessions per profile" invariant) and NOT the
+// profile (that would over-serialize). A brand-new session has no id yet → key
+// on the chat so two concurrent first-messages in one chat collapse into one
+// session instead of spawning two claudes.
+function _laneKey(sessionId, chatId) {
+  return sessionId ? `session:${sessionId}` : `chat:${String(chatId)}`;
+}
 
 // Global concurrency cap on live `claude` processes (across all profiles).
 // RAM is cheap and monitored externally, so this is deliberately generous;
@@ -1225,6 +1239,43 @@ function _releaseSlot() {
   _runningTasks = Math.max(0, _runningTasks - 1);
   const next = _slotWaiters.shift();
   if (next) next();
+}
+
+// Per-profile ("repository") concurrency cap. A single profile can have at most
+// this many live `claude` processes at once — a 5th task for the same profile
+// queues until one of its own frees up. Sits UNDER the global cap as a fairness
+// bound so one profile can't monopolise every global slot and starve others.
+// With one active profile this is the effective ceiling (4 < global 6). Tune via
+// env without a code change.
+const MAX_CONCURRENT_PER_KEY = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS_PER_KEY) || 4);
+const _perKeyRunning = new Map(); // Map<key, count>
+const _perKeyWaiters = new Map(); // Map<key, Array<fn>>
+
+function _acquireKeySlot(key) {
+  return new Promise(resolve => {
+    const grab = () => {
+      const n = _perKeyRunning.get(key) || 0;
+      if (n < MAX_CONCURRENT_PER_KEY) { _perKeyRunning.set(key, n + 1); resolve(); }
+      else {
+        const w = _perKeyWaiters.get(key) || [];
+        w.push(grab);
+        _perKeyWaiters.set(key, w);
+      }
+    };
+    grab();
+  });
+}
+
+function _releaseKeySlot(key) {
+  const n = _perKeyRunning.get(key) || 0;
+  if (n <= 1) _perKeyRunning.delete(key);
+  else _perKeyRunning.set(key, n - 1);
+  const w = _perKeyWaiters.get(key);
+  if (w && w.length) {
+    const next = w.shift();
+    if (!w.length) _perKeyWaiters.delete(key);
+    next();
+  }
 }
 
 // Wait until free RAM is above the floor, or RAM_WAIT_MAX_MS elapses (backstop,
@@ -1378,9 +1429,21 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Lane key = chatId (opts.user.id). One active session per chat; different
-  // chats/profiles run in parallel, bounded by the global semaphore below.
-  const queueKey = String(opts.user.id);
+  // Lane key = the SESSION. The lane's ONLY job is to stop two `claude`
+  // processes appending the SAME transcript at once — that boundary is the
+  // session, not the workDir. Two sessions that share a workDir (chat + web, or
+  // different chats hitting the same project) DO NOT race in practice and MUST
+  // run in parallel — this is the owner-required "several parallel sessions per
+  // profile/workDir" invariant. Serializing on workDir (the old #546 behaviour)
+  // wrongly collapsed those into one lane; keying on the session restores the
+  // model this file already stated: "Unit of parallelism is the SESSION".
+  //   • sessionId present → serialize only same-session messages.
+  //   • no sessionId (brand-new session) → fall back to the chat lane so two
+  //     concurrent first-messages in one chat collapse into one session instead
+  //     of spawning two claudes (the "one active session per chat" invariant).
+  // Cross-session parallelism is bounded only by the per-profile cap (capKey)
+  // and the global slot semaphore below — never by this lane.
+  const queueKey = _laneKey(opts.sessionId, opts.user.id);
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -1422,8 +1485,8 @@ function runTask(opts) {
     const username = opts.user.username;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username);
-    // Clear this chat's lane so the next task doesn't wait behind a stuck one.
-    chatLanes.delete(String(opts.user.id));
+    // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
+    chatLanes.delete(queueKey);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const chatId = opts.user.id;
     const msg = stopped
@@ -1455,16 +1518,27 @@ function runTask(opts) {
     }, 3000);
   }
 
+  // Per-profile cap key ("repository" = one profile's workspace). Falls back to
+  // chatId if a caller has no username (internal/system tasks).
+  const capKey = String(opts.user.username || opts.user.id);
+
   const current = prev.then(async () => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
-    // Global admission control: wait for a free slot + enough RAM before we
-    // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
-    await _waitForRam();
-    await _acquireSlot();
+    // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
+    // profile's 4-slot cap waits here without holding a scarce global slot.
+    await _acquireKeySlot(capKey);
     try {
-      return await _runTask(opts);
+      // Global admission control: wait for a free slot + enough RAM before we
+      // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
+      await _waitForRam();
+      await _acquireSlot();
+      try {
+        return await _runTask(opts);
+      } finally {
+        _releaseSlot();
+      }
     } finally {
-      _releaseSlot();
+      _releaseKeySlot(capKey);
     }
   }).catch(err => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
@@ -2603,4 +2677,6 @@ module.exports = {
   _pin: { updateContextPin, readPinStore },
   // Exported for final-text-selection tests only
   _final: { pickFinalText },
+  // Exported for lane-granularity tests only
+  _laneKey,
 };
