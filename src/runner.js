@@ -1247,15 +1247,34 @@ function _releaseSlot() {
 // bound so one profile can't monopolise every global slot and starve others.
 // With one active profile this is the effective ceiling (4 < global 6). Tune via
 // env without a code change.
-const MAX_CONCURRENT_PER_KEY = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS_PER_KEY) || 4);
+// R7 fix: the cap is resolved PER PROFILE, not from a single process-global
+// constant. The env var is only the DEFAULT; a limit scoped to one profile
+// (setKeyCap) must never leak into another. `_perKeyCap` holds per-key overrides;
+// absent → default. This closes the cross-profile leak (S8a) without touching the
+// lane key (see spec §7.9 fix #3 — cap isolation is independent of lane keying).
+const DEFAULT_MAX_CONCURRENT_PER_KEY = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS_PER_KEY) || 4);
 const _perKeyRunning = new Map(); // Map<key, count>
 const _perKeyWaiters = new Map(); // Map<key, Array<fn>>
+const _perKeyCap = new Map();     // Map<key, number> — per-profile override; absent → default
+
+function _capForKey(key) {
+  const v = _perKeyCap.get(String(key));
+  return (Number.isFinite(v) && v >= 1) ? v : DEFAULT_MAX_CONCURRENT_PER_KEY;
+}
+
+// Set (or clear, with limit == null) the concurrency cap for ONE profile key.
+// Scoped strictly to `key`; other profiles keep the default — no cross-profile leak.
+function setKeyCap(key, limit) {
+  const k = String(key);
+  if (limit == null) _perKeyCap.delete(k);
+  else _perKeyCap.set(k, Math.max(1, Number(limit)));
+}
 
 function _acquireKeySlot(key) {
   return new Promise(resolve => {
     const grab = () => {
       const n = _perKeyRunning.get(key) || 0;
-      if (n < MAX_CONCURRENT_PER_KEY) { _perKeyRunning.set(key, n + 1); resolve(); }
+      if (n < _capForKey(key)) { _perKeyRunning.set(key, n + 1); resolve(); }
       else {
         const w = _perKeyWaiters.get(key) || [];
         w.push(grab);
@@ -2679,4 +2698,6 @@ module.exports = {
   _final: { pickFinalText },
   // Exported for lane-granularity tests only
   _laneKey,
+  // Exported for per-profile cap-isolation tests only (R7/S8a)
+  _cap: { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY },
 };
