@@ -156,15 +156,27 @@ function parseLlmJson(content) {
 }
 
 function buildAtsPrompt(config) {
-  // Support both new (must_have/nice_to_have) and legacy (required/preferred) config shapes
-  const mustHave = config.must_have || (config.required || []).map(c => c.name);
-  const niceToHave = config.nice_to_have || (config.preferred || []).map(c => c.name);
+  // Support all config shapes: must_have/nice_to_have, required/preferred, knockout/required_skills/preferred_skills
+  const mustHave = config.must_have?.length ? config.must_have
+    : config.required?.length ? config.required.map(c => c.name || c.criterion || c)
+    : [
+        ...(config.knockout || []).map(k => k.criterion || k),
+        ...(config.required_skills || []).map(s => s.skill || s),
+      ];
+  const niceToHave = config.nice_to_have?.length ? config.nice_to_have
+    : config.preferred?.length ? config.preferred.map(c => c.name || c)
+    : (config.preferred_skills || []).map(s => s.skill || s);
 
-  const mustList = mustHave.map(r => `  - ${r}`).join('\n');
+  const mustList = mustHave.map(r => `  - ${r}`).join('\n') || '  (не указано)';
   const niceList = niceToHave.map(r => `  - ${r}`).join('\n') || '  (не указано)';
 
-  return `Ты — опытный рекрутер. Оцени кандидата для позиции: ${config.vacancy_title}.
-Контекст: ${config.vacancy_context}
+  const expNote = config.experience_min_years
+    ? `\nМинимальный опыт: ${config.experience_min_years} лет — снижай балл если меньше, но не обнуляй за одно это.`
+    : '';
+
+  const ctx = config.vacancy_context || config.profile || '';
+  return `Ты — опытный рекрутер. Оцени кандидата для позиции: ${config.vacancy_title || config.title}.
+Контекст: ${ctx}${expNote}
 
 ОБЯЗАТЕЛЬНЫЕ требования (отсутствие каждого снижает оценку):
 ${mustList}
@@ -192,8 +204,8 @@ ${niceList}
 
 function computeScore(llmResult, config) {
   const score = Math.round(Math.max(0, Math.min(10, llmResult.score || 0)) * 2) / 2;
-  const passThreshold = config.pass_threshold || 7;
-  const reviewThreshold = config.review_threshold || 5;
+  const passThreshold = config.pass_threshold || config.thresholds?.strong || 7;
+  const reviewThreshold = config.review_threshold || config.thresholds?.consider || 5;
   let verdict;
   if (score >= passThreshold) verdict = 'ПРОПУСТИТЬ';
   else if (score >= reviewThreshold) verdict = 'УТОЧНИТЬ';
