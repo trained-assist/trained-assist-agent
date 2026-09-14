@@ -1202,16 +1202,18 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 // `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
 
-// Serialization-lane key. The lane exists ONLY to stop two `claude` processes
-// appending the SAME transcript at once, so the key is the SESSION — NOT the
-// workDir (two sessions sharing a workDir must run in parallel: the
-// owner-required "several parallel sessions per profile" invariant) and NOT the
-// profile (that would over-serialize). A brand-new session has no id yet → key
-// on the chat so two concurrent first-messages in one chat collapse into one
-// session instead of spawning two claudes.
-function _laneKey(sessionId, chatId) {
-  return sessionId ? `session:${sessionId}` : `chat:${String(chatId)}`;
-}
+// Session serialization lane + per-profile cap primitives live in a pure module
+// (runner-lanes.js) so the REAL admission logic is vendorable/testable in staging
+// without pulling in the whole runner (same discipline as intake-routing.js).
+// See that file for why the lane keys on the SESSION, not the workDir/profile.
+const {
+  _laneKey,
+  DEFAULT_MAX_CONCURRENT_PER_KEY,
+  _capForKey,
+  setKeyCap,
+  _acquireKeySlot,
+  _releaseKeySlot,
+} = require('./runner-lanes');
 
 // Global concurrency cap on live `claude` processes (across all profiles).
 // RAM is cheap and monitored externally, so this is deliberately generous;
@@ -1247,56 +1249,6 @@ function _releaseSlot() {
 // bound so one profile can't monopolise every global slot and starve others.
 // With one active profile this is the effective ceiling (4 < global 6). Tune via
 // env without a code change.
-// R7 fix: the cap is resolved PER PROFILE, not from a single process-global
-// constant. The env var is only the DEFAULT; a limit scoped to one profile
-// (setKeyCap) must never leak into another. `_perKeyCap` holds per-key overrides;
-// absent → default. This closes the cross-profile leak (S8a) without touching the
-// lane key (see spec §7.9 fix #3 — cap isolation is independent of lane keying).
-const DEFAULT_MAX_CONCURRENT_PER_KEY = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS_PER_KEY) || 4);
-const _perKeyRunning = new Map(); // Map<key, count>
-const _perKeyWaiters = new Map(); // Map<key, Array<fn>>
-const _perKeyCap = new Map();     // Map<key, number> — per-profile override; absent → default
-
-function _capForKey(key) {
-  const v = _perKeyCap.get(String(key));
-  return (Number.isFinite(v) && v >= 1) ? v : DEFAULT_MAX_CONCURRENT_PER_KEY;
-}
-
-// Set (or clear, with limit == null) the concurrency cap for ONE profile key.
-// Scoped strictly to `key`; other profiles keep the default — no cross-profile leak.
-function setKeyCap(key, limit) {
-  const k = String(key);
-  if (limit == null) _perKeyCap.delete(k);
-  else _perKeyCap.set(k, Math.max(1, Number(limit)));
-}
-
-function _acquireKeySlot(key) {
-  return new Promise(resolve => {
-    const grab = () => {
-      const n = _perKeyRunning.get(key) || 0;
-      if (n < _capForKey(key)) { _perKeyRunning.set(key, n + 1); resolve(); }
-      else {
-        const w = _perKeyWaiters.get(key) || [];
-        w.push(grab);
-        _perKeyWaiters.set(key, w);
-      }
-    };
-    grab();
-  });
-}
-
-function _releaseKeySlot(key) {
-  const n = _perKeyRunning.get(key) || 0;
-  if (n <= 1) _perKeyRunning.delete(key);
-  else _perKeyRunning.set(key, n - 1);
-  const w = _perKeyWaiters.get(key);
-  if (w && w.length) {
-    const next = w.shift();
-    if (!w.length) _perKeyWaiters.delete(key);
-    next();
-  }
-}
-
 // Wait until free RAM is above the floor, or RAM_WAIT_MAX_MS elapses (backstop,
 // os.freemem() undercounts reclaimable page cache — this is a soft guard, not a
 // hard admission controller; external monitoring is the primary control).
