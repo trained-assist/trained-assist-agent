@@ -319,4 +319,43 @@ async function runProactiveSearch(username, workDir) {
   };
 }
 
-module.exports = { runProactiveSearch, SCORING_PROMPT_TEXT };
+// Score any un-enriched candidates in the latest proactive results file.
+// Called by the 5-min background cron so enrichment happens automatically
+// without waiting for the user to open the web page.
+async function scoreUnscoredProactiveCandidates(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  const proactiveDir = path.join(dataDir, 'hh', String(username), 'proactive');
+  if (!fs.existsSync(proactiveDir)) return 0;
+
+  const files = fs.readdirSync(proactiveDir)
+    .filter(f => f.startsWith('search-results-') && f.endsWith('.json'))
+    .sort().reverse();
+  if (!files.length) return 0;
+
+  const file = path.join(proactiveDir, files[0]);
+  let results;
+  try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return 0; }
+
+  const candidates = results.candidates || [];
+  const unscored = candidates.filter(c => !c.plus_tags);
+  if (!unscored.length) return 0;
+
+  const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+  const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
+  const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
+  if (!orKey) return 0;
+
+  const atsConfig = results.ats_config || {};
+  const enriched = await enrichCandidates(unscored, atsConfig, orKey);
+
+  for (const c of enriched) {
+    const idx = candidates.findIndex(x => x.id === c.id);
+    if (idx >= 0) Object.assign(candidates[idx], c);
+  }
+  results.candidates = candidates;
+  fs.writeFileSync(file, JSON.stringify(results, null, 2), 'utf8');
+
+  return enriched.filter(c => c.plus_tags).length;
+}
+
+module.exports = { runProactiveSearch, SCORING_PROMPT_TEXT, scoreUnscoredProactiveCandidates };
