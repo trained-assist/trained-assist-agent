@@ -140,7 +140,7 @@ function makeUser(userId = 111222333) {
   return { id: userId, name: 'Test', username: testUsername, workDir };
 }
 
-async function chat(task, { userId = 111222333, sessionId = null, claudeReply = null } = {}) {
+async function chat(task, { userId = 111222333, sessionId = null, forceNew = false, claudeReply = null } = {}) {
   if (claudeReply !== null) setupFakeClaude(claudeReply);
   await runTask({
     taskId: `t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -148,6 +148,7 @@ async function chat(task, { userId = 111222333, sessionId = null, claudeReply = 
     task,
     context: null,
     sessionId,
+    forceNew,
     contextFromSession: null,
     secrets: { BOT_TOKEN: 'fake:token' },
   });
@@ -329,12 +330,16 @@ describe('Session continuity TTL', () => {
     expect(newCurrent.id, 'expected NEW session after TTL').not.toBe(current.id);
   });
 
-  it('explicit sessionId always wins over auto-continue', { timeout: 25000 }, async () => {
+  it('explicit sessionId always wins over auto-continue (forceNew — gateway intent)', { timeout: 25000 }, async () => {
     await chat('умеешь github?');  // creates S-auto
     const autoId = readCurrentSession().id;
 
+    // A brand-new, not-yet-on-disk id is only ever sent by the gateway with forceNew
+    // intent (NEW_SESSION_SIGNALS or first message — see tg-bot resolveSessionRoute).
+    // Without forceNew, resolveChatSession's sign-split heal would treat this the
+    // same as a stale/diverged id and reattach to the chat's existing pointer instead.
     const explicitId = 's-explicit-123';
-    await chat('работаю в явной сессии', { sessionId: explicitId, claudeReply: 'OK' });
+    await chat('работаю в явной сессии', { sessionId: explicitId, forceNew: true, claudeReply: 'OK' });
 
     const current = readCurrentSession();
     expect(current.id, 'expected explicit session to win').toBe(explicitId);

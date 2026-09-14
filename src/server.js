@@ -2812,7 +2812,7 @@ ${expLines || '—'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
@@ -2876,7 +2876,7 @@ ${expLines || '—'}
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
+      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
