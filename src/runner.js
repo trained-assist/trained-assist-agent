@@ -1865,9 +1865,13 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const ctxMsgCount = forceClaude ? 8 : 6;
 
   if (sessionId) {
-    // Explicit session ID from bot — honor it, but enforce per-chat ownership
-    activeSessionId = sessionId;
-    const existing = sessions.getSession(user.workDir, sessionId);
+    // Explicit session ID from bot — honor it, but enforce per-chat ownership.
+    // Sign-robust: the gateway's remembered id can diverge from disk (chatId
+    // sign-split — KV holds `s-1003…`, real content lives under `s--1003…`).
+    // resolveChatSession falls back to this chat's durable current-session
+    // pointer instead of spawning a blank session and orphaning the ТЗ.
+    activeSessionId = sessions.resolveChatSession(user.workDir, sessionId, chatId) || sessionId;
+    const existing = sessions.getSession(user.workDir, activeSessionId);
     if (existing) {
       // Strict chat isolation: a live session is attached to exactly one chat.
       // If it's attached to a different chat, reject and notify — don't mix contexts.
