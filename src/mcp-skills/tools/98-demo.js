@@ -292,6 +292,14 @@ module.exports = {
         // Write ATS config (used by hh_proactive_search and HH tools)
         hhCtxWrite('ats_config', OGREX_ATS_CONFIG);
 
+        // Set active vacancy so pin card and HH tools see it
+        hhCtxWrite('active_vacancy', {
+          id: 'demo-ogrex',
+          title: OGREX_ATS_CONFIG.vacancy_title,
+          employer: 'ОРГРЭС',
+          demo: true,
+        });
+
         // Seed candidate pool
         ctxWrite('pool', CANDIDATES_POOL.map(c => ({ ...c, delivered: c.wave === 1, replied: false, conversation: [] })));
         ctxWrite('mode', { active: true, vacancy, activated_at: new Date().toISOString(), current_wave: 1 });
