@@ -347,12 +347,12 @@ HH API
 | 1. Синк переписки | ✅ | `syncHhMessagesToHistory()` — инкрементальный синк по `updated_at`+`last_hh_message_at`, пагинация /messages, фоновый loop (PR [#567](https://github.com/trained-assist/trained-assist-agent/pull/567), [#568](https://github.com/trained-assist/trained-assist-agent/pull/568)) |
 | 2. Пересчёт после синка | ✅ | Фоновый loop вызывает синк перед `scoreUnscoredCandidates` — видит ответы кандидатов и пересчитывает (PR [#568](https://github.com/trained-assist/trained-assist-agent/pull/568)) |
 | 3. Score (matched/gaps) | ✅ | `evaluateCandidate()` — matched/gaps/verdict/score/reasoning (PR [#560](https://github.com/trained-assist/trained-assist-agent/pull/560)+) |
-| 4. Генерация сообщения | ⚠️ | `generateDraftMessages()` в фоне после scoring. **Нет:** matched/gaps из ats_result в промпте генерации |
+| 4. Генерация сообщения | ✅ | `generateDraftMessages()` в фоне после scoring. matched/gaps из `ats_result` подаются в промпт. `message_draft` сохраняется с `{ text, generated_at, config_version, prompt_used }` (PR [#572](https://github.com/trained-assist/trained-assist-agent/pull/572)) |
 | 5. Bullshit Guard | ✅ | `hh-bullshit-guard.js` — regex (пустое, placeholder) + LLM (повторный вопрос/intro/шаблон). Вызывается в /hh/send и /hh/send-and-reject (PR [#570](https://github.com/trained-assist/trained-assist-agent/pull/570)) |
 | 6. Список кандидатов | ✅ | 5 табов: Неотвеченные / Молчат / Ещё не писали / Диалог / Все (PR [#565](https://github.com/trained-assist/trained-assist-agent/pull/565), [#569](https://github.com/trained-assist/trained-assist-agent/pull/569)). Нет превью последнего сообщения в карточке |
 | 7. Профиль кандидата | ✅ | `/hh/candidate?neg_id=X` — score, matched/gaps, переписка, отправка сообщения, опыт, сопроводительное (PR [#571](https://github.com/trained-assist/trained-assist-agent/pull/571)) |
-| 8. Лог синка | ⚠️ | `/hh/sync-log` + "Новых сообщ." + "С активностью" (PR [#568](https://github.com/trained-assist/trained-assist-agent/pull/568)). **Нет:** Guard статистика, ошибки API |
-| 9. Промпты в UI | ❌ | Промпты нигде не видны. `prompt_used` не сохраняется |
+| 8. Лог синка | ✅ | `/hh/sync-log` — 6 колонок включая "API ошибки". Секция "Guard — последние блокировки" из `guard-log.json`. `sync_errors` в каждом entry (PR [#572](https://github.com/trained-assist/trained-assist-agent/pull/572)) |
+| 9. Промпты в UI | ✅ | `ats_result.prompt_used` — evaluation промпт. `message_draft.prompt_used` — generation промпт. Сохраняются на диск при каждом скоринге/генерации (PR [#572](https://github.com/trained-assist/trained-assist-agent/pull/572)) |
 
 ### Приоритет реализации
 
