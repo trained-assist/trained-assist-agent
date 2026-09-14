@@ -23,6 +23,7 @@ const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
+const { bullshitGuard } = require('./hh-bullshit-guard');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
@@ -1480,14 +1481,21 @@ async function main() {
       if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
       const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
 
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
+      fs.mkdirSync(histDir, { recursive: true });
+      const histFile = path.join(histDir, `${negotiation_id}.json`);
+      const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
+      history.messages = history.messages || [];
+
+      const guard = await bullshitGuard(message, history.messages, { username });
+      if (!guard.ok) {
+        console.warn(`[hh/send] guard blocked user=${username} neg=${negotiation_id} reason="${guard.reason}"`);
+        return json(res, 200, { ok: false, blocked: true, reason: guard.reason, checks: guard.checks });
+      }
+
       try {
         await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
-        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-        const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
-        fs.mkdirSync(histDir, { recursive: true });
-        const histFile = path.join(histDir, `${negotiation_id}.json`);
-        const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
-        history.messages = history.messages || [];
         history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString() });
         fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
         console.log(`[hh/send] user=${username} neg=${negotiation_id} len=${message.length}`);
@@ -1692,21 +1700,27 @@ async function main() {
       if (!fs.existsSync(tokenFile)) return json(res, 403, { error: 'HH not connected for this user' });
       const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
 
+      const dataDir2 = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const histDir2 = path.join(dataDir2, 'hh', String(username), 'candidates');
+      fs.mkdirSync(histDir2, { recursive: true });
+      const histFile2 = path.join(histDir2, `${negotiation_id}.json`);
+      const history2 = fs.existsSync(histFile2) ? JSON.parse(fs.readFileSync(histFile2, 'utf8')) : { messages: [] };
+      history2.messages = history2.messages || [];
+
+      const guard2 = await bullshitGuard(message, history2.messages, { username });
+      if (!guard2.ok) {
+        console.warn(`[hh/send-and-reject] guard blocked user=${username} neg=${negotiation_id} reason="${guard2.reason}"`);
+        return json(res, 200, { ok: false, blocked: true, reason: guard2.reason, checks: guard2.checks });
+      }
+
       try {
         // Send rejection message first
         await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
         // Then reject in HH
         await hhApiPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData.access_token);
 
-        // Save to history
-        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-        const histDir = path.join(dataDir, 'hh', String(username), 'candidates');
-        fs.mkdirSync(histDir, { recursive: true });
-        const histFile = path.join(histDir, `${negotiation_id}.json`);
-        const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
-        history.messages = history.messages || [];
-        history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString(), type: 'rejection' });
-        fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
+        history2.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString(), type: 'rejection' });
+        fs.writeFileSync(histFile2, JSON.stringify(history2, null, 2), { mode: 0o600 });
 
         console.log(`[hh/send-and-reject] user=${username} neg=${negotiation_id}`);
         return json(res, 200, { ok: true });
@@ -4213,7 +4227,12 @@ async function sendAndRejectOne(i, negId) {
   const btn = event?.currentTarget;
   if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
   try {
-    await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg });
+    const data = await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg });
+    if (data.blocked) {
+      showToast('🚫 Guard: ' + (data.reason || 'сообщение заблокировано'), true);
+      if (btn) { btn.disabled = false; btn.textContent = '✗ Отправить отказ'; }
+      return;
+    }
     markDone(i); onCheck(); showToast('✅ Отказ отправлен');
   } catch(e) {
     showToast('❌ ' + e.message, true);
@@ -4247,7 +4266,12 @@ async function sendOne(i, negId) {
   const btn = event?.currentTarget;
   if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
   try {
-    await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+    const data = await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+    if (data.blocked) {
+      showToast('🚫 Guard: ' + (data.reason || 'сообщение заблокировано'), true);
+      if (btn) { btn.disabled = false; btn.textContent = '✓ Отправить'; }
+      return;
+    }
     markDone(i); onCheck(); showToast('✅ Отправлено!');
   } catch(e) {
     showToast('❌ ' + e.message, true);
@@ -4273,8 +4297,11 @@ async function sendAll() {
     const negId = document.getElementById('card-'+i)?.dataset.neg || '';
     const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
     if (!msg) continue;
-    try { await hhAction('/hh/send', { negotiation_id: negId, message: msg }); markDone(i); ok++; }
-    catch(e) { showToast('❌ ' + e.message, true); }
+    try {
+      const d = await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+      if (d.blocked) { showToast('🚫 Guard: ' + (d.reason || 'заблокировано'), true); continue; }
+      markDone(i); ok++;
+    } catch(e) { showToast('❌ ' + e.message, true); }
   }
   onCheck();
   if (ok > 0) showToast('✅ Отправлено ' + ok + ' сообщений');
