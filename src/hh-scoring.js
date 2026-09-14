@@ -375,7 +375,7 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
         const history = readCandidateHistory(username, neg.id);
         const candMsgs = (history.messages || []).filter(m => m.role === 'applicant');
         const resumeText = buildResumeText(neg, candMsgs);
-        const result = await evaluateCandidate(resumeText, atsConfig, apiKey, gigachatKey);
+        const result = await module.exports.evaluateCandidate(resumeText, atsConfig, apiKey, gigachatKey);
         if (result.score != null) {
           result.scored_at = Date.now();
           history.ats_result = result;
