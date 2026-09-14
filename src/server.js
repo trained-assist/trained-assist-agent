@@ -9,6 +9,7 @@ const { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkP
 const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
+const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
 const { generateSummary } = require('./session-summary');
@@ -2520,8 +2521,10 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid sessionId' });
       if (contextFromSession && !/^[a-zA-Z0-9_-]+$/.test(contextFromSession))
         return json(res, 400, { error: 'invalid contextFromSession' });
-      if (projectId && !/^[a-zA-Z0-9][a-zA-Z0-9_\-.]*$/.test(projectId))
+      if (projectId && !isValidProjectId(projectId)) {
+        console.log('[/run] 400 invalid projectId:', projectId);
         return json(res, 400, { error: 'invalid projectId' });
+      }
       if (newProjectName && (typeof newProjectName !== 'string' || newProjectName.length > 200))
         return json(res, 400, { error: 'invalid newProjectName' });
 
