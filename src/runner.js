@@ -2519,17 +2519,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // юзер мог запустить проработку по уточнённому ТЗ).
   const finalDeep = explicitMode === 'deep' ||
     answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
-  // §C (#530): под длинным ГЛУБОКИМ ответом, если в нём описан план дальнейших действий,
-  // показываем «▶️ Действуй дальше по плану» (callback plan|{sid}) — продолжение той же
-  // сессии по озвученному плану, без переспроса. Плана нет → кнопки нет. one-shot/clarify
-  // → прежние actionButtons (только «❓ Уточнить»).
+  // §C (#530), расширено 2026-09-14: под ЛЮБЫМ ответом (deep И one-shot), если в нём
+  // описан план дальнейших действий, показываем «▶️ Действуй дальше по плану» (callback
+  // plan|{sid}). Тап безопасен из one-shot — callback сам форсирует deep+forceClaude
+  // (см. tg-bot callbacks.js), так что кнопка не обязана ждать явного deep-режима.
+  // Плана нет → кнопки нет (actionButtons/oneshotActionMarkup и так null, §9.2).
   let finalMarkup = null;
   if (!internalGtd) {
-    if (finalDeep && activeSessionId) {
+    if (activeSessionId) {
       const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
       finalMarkup = hasPlan
         ? { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] }
-        : null;
+        : actionButtons(activeSessionId, { deep: finalDeep });
     } else {
       finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
     }
