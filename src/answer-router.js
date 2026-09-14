@@ -113,6 +113,15 @@ function buildDeepBlock() { return DEEP_BLOCK; }
 function buildClarifyBlock() { return CLARIFY_BLOCK; }
 function buildOneshotBlock() { return ONESHOT_BLOCK; }
 
+// Кнопки под быстрым one-shot ответом. Реверс владельца (INTAKE-REFACTOR-SPEC §9.2,
+// 2026-09-14): «❓ Уточнить задачу» — плохая идея, убрана. Единый путь запуска
+// проработки — накопитель шлюза (кнопка «▶️ Запустить проработку», callback intake_run),
+// поэтому под one-shot ответом кнопок больше нет вообще (deep — тоже без кнопок).
+function oneshotActionMarkup(_sid, _opts = {}) {
+  return null;
+}
+
 module.exports = {
   MODES, normalizeMode, readMode, writeMode, buildDeepBlock, buildClarifyBlock, buildOneshotBlock,
+  oneshotActionMarkup,
 };

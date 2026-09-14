@@ -34,6 +34,13 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
      && /Запустить проработку/.test(R.buildOneshotBlock()),
      'oneshot block bars inline research → routes to deep session');
 
+  // 7. §9.2 owner reversal (2026-09-14): «❓ Уточнить задачу» button removed —
+  // one-shot answers carry no action buttons anymore (deep launch lives only in
+  // the gateway's manual accumulator).
+  ok(R.oneshotActionMarkup('s-1') === null, 'oneshot markup has no clarify button');
+  ok(R.oneshotActionMarkup('s-1', { deep: true }) === null, 'oneshot markup null for deep too');
+  ok(R.oneshotActionMarkup(null) === null, 'oneshot markup null without a session id');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

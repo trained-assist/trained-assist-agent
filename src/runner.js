@@ -1825,17 +1825,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const explicitMode = answerRouter.normalizeMode(mode);
 
   // Кнопки явных действий под ответом. Единый путь ЗАПУСКА проработки — накопитель
-  // ввода (кнопка «▶️ Запустить проработку» в шлюзе, callback intake_run), поэтому
-  // отдельной кнопки запуска здесь БОЛЬШЕ НЕТ (#530 §B: убран второй путь, что
-  // перезапускал sess.lastUserMessage в обход буфера). Оставляем только «❓ Уточнить».
-  // NOTE: новый callback_data-префикс → добавь handler в trained-assist-tg-bot/
-  // src/handlers/callbacks.js И префикс в tests/callbacks.test.js.
-  const actionButtons = (sid, { deep = false } = {}) => {
-    if (!sid || deep) return null;
-    return { inline_keyboard: [[
-      { text: '❓ Уточнить задачу', callback_data: `clarify|${sid}` },
-    ]] };
-  };
+  // ввода (кнопка «▶️ Запустить проработку» в шлюзе, callback intake_run). «❓ Уточнить»
+  // убрана реверсом владельца (INTAKE-REFACTOR-SPEC §9.2) — см. answerRouter.oneshotActionMarkup.
+  const actionButtons = answerRouter.oneshotActionMarkup;
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
 
