@@ -156,15 +156,27 @@ function parseLlmJson(content) {
 }
 
 function buildAtsPrompt(config) {
-  // Support both new (must_have/nice_to_have) and legacy (required/preferred) config shapes
-  const mustHave = config.must_have || (config.required || []).map(c => c.name);
-  const niceToHave = config.nice_to_have || (config.preferred || []).map(c => c.name);
+  // Support all config shapes: must_have/nice_to_have, required/preferred, knockout/required_skills/preferred_skills
+  const mustHave = config.must_have?.length ? config.must_have
+    : config.required?.length ? config.required.map(c => c.name || c.criterion || c)
+    : [
+        ...(config.knockout || []).map(k => k.criterion || k),
+        ...(config.required_skills || []).map(s => s.skill || s),
+      ];
+  const niceToHave = config.nice_to_have?.length ? config.nice_to_have
+    : config.preferred?.length ? config.preferred.map(c => c.name || c)
+    : (config.preferred_skills || []).map(s => s.skill || s);
 
-  const mustList = mustHave.map(r => `  - ${r}`).join('\n');
+  const mustList = mustHave.map(r => `  - ${r}`).join('\n') || '  (не указано)';
   const niceList = niceToHave.map(r => `  - ${r}`).join('\n') || '  (не указано)';
 
-  return `Ты — опытный рекрутер. Оцени кандидата для позиции: ${config.vacancy_title}.
-Контекст: ${config.vacancy_context}
+  const expNote = config.experience_min_years
+    ? `\nМинимальный опыт: ${config.experience_min_years} лет — снижай балл если меньше, но не обнуляй за одно это.`
+    : '';
+
+  const ctx = config.vacancy_context || config.profile || '';
+  return `Ты — опытный рекрутер. Оцени кандидата для позиции: ${config.vacancy_title || config.title}.
+Контекст: ${ctx}${expNote}
 
 ОБЯЗАТЕЛЬНЫЕ требования (отсутствие каждого снижает оценку):
 ${mustList}
@@ -181,19 +193,19 @@ ${niceList}
 
 ВАЖНО: Данные HH-резюме могут быть краткими. Если навык не упомянут — ставь низкий балл, но не 0 за одно только отсутствие упоминания. 0 — только явное несоответствие.
 
-Отвечай ТОЛЬКО JSON без markdown:
+Отвечай ТОЛЬКО JSON без markdown. Пиши человекочитаемые фразы, не названия полей:
 {
   "score": 7.5,
-  "strong": ["что сильное в кандидате — конкретно из резюме"],
-  "missing": ["чего не хватает или неясно"],
+  "strong": ["3 года в private banking БКС", "Собственная база 20+ HNWI-клиентов", "AUM 800 млн ₽"],
+  "missing": ["Опыт 3.5 года — требуется от 6", "Не подтверждён средний чек клиента"],
   "reasoning": "2–3 предложения: общее впечатление и главный аргумент за/против"
 }`;
 }
 
 function computeScore(llmResult, config) {
   const score = Math.round(Math.max(0, Math.min(10, llmResult.score || 0)) * 2) / 2;
-  const passThreshold = config.pass_threshold || 7;
-  const reviewThreshold = config.review_threshold || 5;
+  const passThreshold = config.pass_threshold || config.thresholds?.strong || 7;
+  const reviewThreshold = config.review_threshold || config.thresholds?.consider || 5;
   let verdict;
   if (score >= passThreshold) verdict = 'ПРОПУСТИТЬ';
   else if (score >= reviewThreshold) verdict = 'УТОЧНИТЬ';
@@ -278,7 +290,7 @@ function saveCandidateHistory(username, negotiationId, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
-function buildResumeText(neg) {
+function buildResumeText(neg, candidateMessages = []) {
   const r = neg.resume || {};
   const lines = [];
   const name = [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат';
@@ -306,6 +318,10 @@ function buildResumeText(neg) {
     lines.push(`\n**Образование:** ${edu.name || ''}, ${edu.organization || ''} (${edu.year || ''})`);
   }
   if (neg.message) lines.push(`\n**Сопроводительное письмо:**\n${neg.message.slice(0, 600)}`);
+  if (candidateMessages.length) {
+    lines.push('\n**Ответы кандидата в переписке:**');
+    for (const m of candidateMessages) lines.push(`- ${(m.text || '').slice(0, 400)}`);
+  }
   return lines.join('\n');
 }
 
@@ -321,20 +337,47 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
 
   const unscored = negotiations.filter(neg => {
     const history = readCandidateHistory(username, neg.id);
-    return history.ats_result?.score == null;
+    if (history.ats_result?.score == null) return true; // not scored yet
+    // re-score if candidate replied after last scoring
+    const scoredAt = history.ats_result.scored_at || 0;
+    const lastCandMsg = [...(history.messages || [])].reverse().find(m => m.role === 'applicant');
+    if (!lastCandMsg) return false;
+    return new Date(lastCandMsg.timestamp || 0).getTime() > scoredAt;
   });
 
-  if (!unscored.length) return 0;
+  const writeLog = (checked, scored) => {
+    try {
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const dir = path.join(dataDir, 'hh', String(username));
+      fs.mkdirSync(dir, { recursive: true });
+      // last-scoring.json — single entry for quick read
+      fs.writeFileSync(path.join(dir, 'last-scoring.json'), JSON.stringify({ at: Date.now(), checked, scored }), { mode: 0o600 });
+      // sync-log.json — rolling last 50 entries
+      const logPath = path.join(dir, 'sync-log.json');
+      let entries = [];
+      try { entries = JSON.parse(fs.readFileSync(logPath, 'utf8')); } catch { /* first run */ }
+      entries.unshift({ at: Date.now(), checked, scored });
+      if (entries.length > 50) entries.length = 50;
+      fs.writeFileSync(logPath, JSON.stringify(entries), { mode: 0o600 });
+    } catch { /* non-critical */ }
+  };
+
+  if (!unscored.length) {
+    writeLog(negotiations.length, 0);
+    return 0;
+  }
 
   let scored = 0;
   for (let i = 0; i < unscored.length; i += maxConcurrent) {
     const batch = unscored.slice(i, i + maxConcurrent);
     await Promise.all(batch.map(async (neg) => {
       try {
-        const resumeText = buildResumeText(neg);
+        const history = readCandidateHistory(username, neg.id);
+        const candMsgs = (history.messages || []).filter(m => m.role === 'applicant');
+        const resumeText = buildResumeText(neg, candMsgs);
         const result = await evaluateCandidate(resumeText, atsConfig, apiKey, gigachatKey);
         if (result.score != null) {
-          const history = readCandidateHistory(username, neg.id);
+          result.scored_at = Date.now();
           history.ats_result = result;
           saveCandidateHistory(username, neg.id, history);
           scored++;
@@ -345,13 +388,7 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
     }));
   }
 
-  try {
-    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-    const logPath = path.join(dataDir, 'hh', String(username), 'last-scoring.json');
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    fs.writeFileSync(logPath, JSON.stringify({ at: Date.now(), checked: unscored.length, scored }), { mode: 0o600 });
-  } catch { /* non-critical */ }
-
+  writeLog(unscored.length, scored);
   return scored;
 }
 

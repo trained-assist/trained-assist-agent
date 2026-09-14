@@ -25,7 +25,7 @@ const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
-const { runProactiveSearch } = require('./hh-proactive-search');
+const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -345,6 +345,9 @@ async function runHhScoringForUser(username) {
 
     const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3 });
     if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
+
+    const proactiveScored = await scoreUnscoredProactiveCandidates(username);
+    if (proactiveScored > 0) console.log(`[hh-bg] enriched ${proactiveScored} cold-search candidates for ${username}`);
   } catch (e) {
     console.error(`[hh-bg] error for ${username}:`, e.message);
   } finally {
@@ -1280,6 +1283,36 @@ async function main() {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
       return;
+    }
+
+    // GET /hh/sync-log?username=X&token=Y — scoring run history page
+    if (req.method === 'GET' && url.pathname === '/hh/sync-log') {
+      const username = url.searchParams.get('username') || '';
+      const agentSecret = process.env.AGENT_SECRET || '';
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        const expected = createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16);
+        if ((url.searchParams.get('token') || '') !== expected) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end('<!doctype html><html><body style="font-family:system-ui;padding:48px;text-align:center"><h2>Ссылка недействительна.</h2></body></html>');
+        }
+      }
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      let entries = [];
+      try { entries = JSON.parse(fs.readFileSync(path.join(dataDir, 'hh', username, 'sync-log.json'), 'utf8')); } catch {}
+      const fmt = ts => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const rows = entries.length === 0
+        ? '<tr><td colspan="3" style="text-align:center;color:#94a3b8;padding:24px">Нет данных — скоринг ещё не запускался</td></tr>'
+        : entries.map(e => `<tr><td>${fmt(e.at)}</td><td>${e.checked ?? '—'}</td><td style="color:${e.scored > 0 ? '#16a34a' : '#94a3b8'}">${e.scored > 0 ? '+' + e.scored + ' новых' : 'без изменений'}</td></tr>`).join('');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>История скоринга</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:24px}h1{font-size:20px;font-weight:700;margin-bottom:4px}.sub{font-size:13px;color:#64748b;margin-bottom:20px}table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}th{background:#f8fafc;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.04em;padding:10px 16px;text-align:left;border-bottom:1px solid #e2e8f0}td{padding:10px 16px;font-size:14px;border-bottom:1px solid #f1f5f9}tr:last-child td{border-bottom:none}</style>
+</head><body>
+<h1>История скоринга</h1>
+<p class="sub">Последние ${entries.length} запусков фонового скоринга · ${username}</p>
+<table><thead><tr><th>Время (МСК)</th><th>Проверено</th><th>Результат</th></tr></thead><tbody>${rows}</tbody></table>
+</body></html>`);
     }
 
     // GET /hh/ats-editor?username=X&token=Y — serve the ATS Template Editor HTML page
