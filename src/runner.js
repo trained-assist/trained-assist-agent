@@ -2335,7 +2335,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
               }
             }
           }
-          if (turnText.trim()) lastAssistantMsg = turnText; // keep only the latest coherent turn
+          // Only treat as a final-answer candidate if the turn has no tool calls.
+          // Text + tool_use in the same event = narration ("Смотрю X:"), not a conclusion.
+          const turnHasTool = event.message.content.some(b => b.type === 'tool_use');
+          if (turnText.trim() && !turnHasTool) lastAssistantMsg = turnText;
           scheduleStream();
         }
       } catch {
