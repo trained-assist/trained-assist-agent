@@ -310,6 +310,62 @@ async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessTo
   return { negotiations, synced_at };
 }
 
+// Sync HH thread messages to local candidate history.
+// Fetches messages from HH API for negotiations where HH has more messages than we've stored,
+// merges them into local history (deduplicates by HH message ID), stores applicant replies.
+// Capped at 15 negotiations per call to avoid long page loads.
+async function syncHhMessagesToHistory(dataDir, username, negotiations, accessToken) {
+  const candDir = path.join(dataDir, 'hh', String(username), 'candidates');
+  try { fs.mkdirSync(candDir, { recursive: true }); } catch {}
+
+  const toSync = negotiations
+    .filter(n => (n.counters?.messages || 0) > 0)
+    .slice(0, 15);
+
+  await Promise.allSettled(toSync.map(async neg => {
+    const file = path.join(candDir, `${neg.id}.json`);
+    let history = { messages: [], ats_result: null };
+    try { history = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    history.messages = history.messages || [];
+
+    const hhCount = neg.counters?.messages || 0;
+    // Skip if we already have all messages (approximate: compare stored count with HH count)
+    const storedTotal = history.messages.length;
+    // Always sync if there are unread messages; otherwise skip if counts match
+    const hasUnread = (neg.counters?.unread_messages || 0) > 0 || neg.has_updates;
+    if (!hasUnread && storedTotal >= hhCount) return;
+
+    try {
+      const data = await hhApiRequest('GET', `/negotiations/${neg.id}/messages?per_page=50`, accessToken);
+      const hhMsgs = (data.items || []).filter(m => m.text); // skip empty state-change entries
+      if (!hhMsgs.length) return;
+
+      // Build a set of already-stored HH message IDs to deduplicate
+      const storedIds = new Set(history.messages.map(m => m.hh_id).filter(Boolean));
+
+      let added = false;
+      for (const m of hhMsgs) {
+        if (storedIds.has(m.id)) continue;
+        history.messages.push({
+          hh_id: m.id,
+          role: m.author?.participant_type === 'applicant' ? 'applicant' : 'employer',
+          text: m.text,
+          timestamp: m.created_at,
+        });
+        storedIds.add(m.id);
+        added = true;
+      }
+      if (added) {
+        // Sort by timestamp ascending
+        history.messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        fs.writeFileSync(file, JSON.stringify(history, null, 2), { mode: 0o600 });
+      }
+    } catch (e) {
+      console.error(`[hh-msg-sync] neg ${neg.id}: ${e.message}`);
+    }
+  }));
+}
+
 // Background HH scoring: fetch negotiations + score unscored candidates for all users
 // with HH token + active vacancy + ATS config. Runs every 5 min so the review page
 // shows scores immediately without blocking on page open.
@@ -1271,6 +1327,12 @@ async function main() {
         negotiations = result.negotiations;
         syncedAt = result.synced_at;
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
+
+      // Sync HH thread messages into local history before rendering
+      // (capped at 15 negs, ~2-3s max; errors are non-fatal)
+      await syncHhMessagesToHistory(dataDir, username, negotiations, tokenData.access_token).catch(e => {
+        console.error('[hh/review] message sync error:', e.message);
+      });
 
       let lastScoredAt = null;
       try {
@@ -3716,9 +3778,10 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
          </div>`
       : '<span class="verdict-none">не оценён</span>';
 
-    const nameHtml = c.alternate_url
-      ? `<a href="${esc(c.alternate_url)}" target="_blank" rel="noopener" class="resume-link">${esc(c.name)}</a>`
-      : esc(c.name);
+    const hhBtn = c.alternate_url
+      ? ` <a href="${esc(c.alternate_url)}" target="_blank" rel="noopener" class="hh-link-btn" title="Открыть резюме на HH">↗ HH</a>`
+      : '';
+    const nameHtml = `${esc(c.name)}${hhBtn}`;
 
     const hasDraft = !!c.draft_message;
     const msgLabel = c.already_sent ? 'Follow-up (уже писали)' : hasDraft ? 'Черновик сообщения' : 'Сообщение';
@@ -3804,6 +3867,8 @@ h1{font-size:22px;font-weight:700;margin-bottom:4px}
 .name{font-size:17px;font-weight:600}
 .resume-link{color:inherit;text-decoration:none}
 .resume-link:hover{text-decoration:underline}
+.hh-link-btn{display:inline-block;margin-left:8px;padding:2px 8px;font-size:12px;font-weight:600;color:#d6001c;border:1px solid #d6001c;border-radius:4px;text-decoration:none;vertical-align:middle;opacity:.85}
+.hh-link-btn:hover{opacity:1;background:#fff5f5}
 .meta{font-size:12px;color:#94a3b8}
 .score-wrap{display:flex;align-items:center;gap:8px;flex-shrink:0}
 .score-bar{width:80px;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
