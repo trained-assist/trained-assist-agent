@@ -278,7 +278,7 @@ function saveCandidateHistory(username, negotiationId, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
-function buildResumeText(neg) {
+function buildResumeText(neg, candidateMessages = []) {
   const r = neg.resume || {};
   const lines = [];
   const name = [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат';
@@ -306,6 +306,10 @@ function buildResumeText(neg) {
     lines.push(`\n**Образование:** ${edu.name || ''}, ${edu.organization || ''} (${edu.year || ''})`);
   }
   if (neg.message) lines.push(`\n**Сопроводительное письмо:**\n${neg.message.slice(0, 600)}`);
+  if (candidateMessages.length) {
+    lines.push('\n**Ответы кандидата в переписке:**');
+    for (const m of candidateMessages) lines.push(`- ${(m.text || '').slice(0, 400)}`);
+  }
   return lines.join('\n');
 }
 
@@ -321,7 +325,12 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
 
   const unscored = negotiations.filter(neg => {
     const history = readCandidateHistory(username, neg.id);
-    return history.ats_result?.score == null;
+    if (history.ats_result?.score == null) return true; // not scored yet
+    // re-score if candidate replied after last scoring
+    const scoredAt = history.ats_result.scored_at || 0;
+    const lastCandMsg = [...(history.messages || [])].reverse().find(m => m.role === 'applicant');
+    if (!lastCandMsg) return false;
+    return new Date(lastCandMsg.timestamp || 0).getTime() > scoredAt;
   });
 
   const writeLog = (checked, scored) => {
@@ -351,10 +360,12 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
     const batch = unscored.slice(i, i + maxConcurrent);
     await Promise.all(batch.map(async (neg) => {
       try {
-        const resumeText = buildResumeText(neg);
+        const history = readCandidateHistory(username, neg.id);
+        const candMsgs = (history.messages || []).filter(m => m.role === 'applicant');
+        const resumeText = buildResumeText(neg, candMsgs);
         const result = await evaluateCandidate(resumeText, atsConfig, apiKey, gigachatKey);
         if (result.score != null) {
-          const history = readCandidateHistory(username, neg.id);
+          result.scored_at = Date.now();
           history.ats_result = result;
           saveCandidateHistory(username, neg.id, history);
           scored++;
