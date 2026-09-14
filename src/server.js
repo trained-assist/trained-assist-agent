@@ -3625,9 +3625,18 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       history_messages: history.messages || [],
       already_sent: (history.messages || []).some(m => m.role === 'employer'),
       needs_reply: (() => {
+        // Use HH API as source of truth — local history can be out of sync
+        // (messages written locally but not delivered via HH API)
+        if (neg.counters?.unread_messages > 0) return true;
+        if (neg.has_updates) return true;
+        // ≤1 message in HH means only the candidate's cover letter, no reply from us
+        if ((neg.counters?.messages || 0) <= 1) return true;
+        // HH shows 2+ messages — check local history for last sender
         const msgs = history.messages || [];
-        const last = msgs[msgs.length - 1];
-        return !last || last.role !== 'employer';
+        if (msgs.length > 0) {
+          return msgs[msgs.length - 1].role !== 'employer';
+        }
+        return false;
       })(),
       alternate_url: r.alternate_url || null,
       salary: r.salary ? `${(r.salary.amount || '').toLocaleString?.() || r.salary.amount} ${r.salary.currency || ''}`.trim() : null,
