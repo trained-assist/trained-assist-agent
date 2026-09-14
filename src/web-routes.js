@@ -275,4 +275,4 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
   });
 }
 
-module.exports = { handleWebRoute, listSessionsFor, getSessionFor };
+module.exports = { handleWebRoute, listSessionsFor, getSessionFor, streamWebTask };
