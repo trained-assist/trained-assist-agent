@@ -1404,31 +1404,47 @@ async function main() {
         }
       }
       const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const hhDir = path.join(dataDir, 'hh', username);
       let entries = [];
-      try { entries = JSON.parse(fs.readFileSync(path.join(dataDir, 'hh', username, 'sync-log.json'), 'utf8')); } catch {}
+      try { entries = JSON.parse(fs.readFileSync(path.join(hhDir, 'sync-log.json'), 'utf8')); } catch {}
+      let guardEntries = [];
+      try { guardEntries = JSON.parse(fs.readFileSync(path.join(hhDir, 'guard-log.json'), 'utf8')); } catch {}
       const fmt = ts => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
       const rows = entries.length === 0
-        ? '<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:24px">Нет данных — скоринг ещё не запускался</td></tr>'
+        ? '<tr><td colspan="6" style="text-align:center;color:#94a3b8;padding:24px">Нет данных — скоринг ещё не запускался</td></tr>'
         : entries.map(e => {
             const msgs = e.new_messages_loaded != null ? `+${e.new_messages_loaded} сообщ.` : '—';
             const msgsColor = (e.new_messages_loaded || 0) > 0 ? '#2563eb' : '#94a3b8';
             const scoredColor = (e.scored || 0) > 0 ? '#16a34a' : '#94a3b8';
+            const errColor = (e.sync_errors || 0) > 0 ? '#dc2626' : '#94a3b8';
+            const errStr = e.sync_errors != null ? (e.sync_errors > 0 ? `⚠ ${e.sync_errors}` : '—') : '—';
             return `<tr>
               <td>${fmt(e.at)}</td>
               <td>${e.checked ?? '—'}</td>
               <td style="color:${msgsColor}">${msgs}</td>
               <td style="color:${scoredColor}">${(e.scored || 0) > 0 ? '+' + e.scored + ' скор.' : 'без изм.'}</td>
               <td style="color:#64748b">${e.with_new_messages != null ? e.with_new_messages + ' канд.' : '—'}</td>
+              <td style="color:${errColor}">${errStr}</td>
             </tr>`;
           }).join('');
+      const guardRows = guardEntries.length === 0
+        ? '<tr><td colspan="3" style="text-align:center;color:#94a3b8;padding:16px">Guard блокировок не было</td></tr>'
+        : guardEntries.slice(0, 20).map(g => `<tr>
+            <td>${fmt(g.at)}</td>
+            <td style="color:#64748b;font-family:monospace;font-size:12px">${g.neg_id || '—'}</td>
+            <td style="color:#dc2626">${g.reason || '—'}</td>
+          </tr>`).join('');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>История скоринга</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:24px}h1{font-size:20px;font-weight:700;margin-bottom:4px}.sub{font-size:13px;color:#64748b;margin-bottom:20px}table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}th{background:#f8fafc;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.04em;padding:10px 16px;text-align:left;border-bottom:1px solid #e2e8f0}td{padding:10px 16px;font-size:14px;border-bottom:1px solid #f1f5f9}tr:last-child td{border-bottom:none}</style>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;padding:24px}h1{font-size:20px;font-weight:700;margin-bottom:4px}.sub{font-size:13px;color:#64748b;margin-bottom:20px}h2{font-size:16px;font-weight:600;margin:24px 0 8px}table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:8px}th{background:#f8fafc;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.04em;padding:10px 16px;text-align:left;border-bottom:1px solid #e2e8f0}td{padding:10px 16px;font-size:14px;border-bottom:1px solid #f1f5f9}tr:last-child td{border-bottom:none}</style>
 </head><body>
-<h1>История скоринга</h1>
-<p class="sub">Последние ${entries.length} запусков фонового скоринга · ${username}</p>
-<table><thead><tr><th>Время (МСК)</th><th>Проверено</th><th>Новых сообщ.</th><th>Скоринг</th><th>С активностью</th></tr></thead><tbody>${rows}</tbody></table>
+<h1>История скоринга и Guard</h1>
+<p class="sub">Последние запуски · ${username}</p>
+<h2>Фоновый скоринг</h2>
+<table><thead><tr><th>Время (МСК)</th><th>Проверено</th><th>Новых сообщ.</th><th>Скоринг</th><th>С активностью</th><th>API ошибки</th></tr></thead><tbody>${rows}</tbody></table>
+<h2>Bullshit Guard — последние блокировки</h2>
+<table><thead><tr><th>Время</th><th>neg_id</th><th>Причина</th></tr></thead><tbody>${guardRows}</tbody></table>
 </body></html>`);
     }
 
@@ -3679,6 +3695,18 @@ function splitBuffer(buf, sep) {
   }
   parts.push(buf.slice(start));
   return parts.filter(p => p.length > 0);
+}
+
+function appendGuardBlock(username, negId, reason, checks) {
+  try {
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const logPath = path.join(dataDir, 'hh', String(username), 'guard-log.json');
+    let entries = [];
+    try { entries = JSON.parse(fs.readFileSync(logPath, 'utf8')); } catch {}
+    entries.unshift({ at: Date.now(), neg_id: negId, reason, checks });
+    if (entries.length > 100) entries.length = 100;
+    fs.writeFileSync(logPath, JSON.stringify(entries), { mode: 0o600 });
+  } catch { /* non-critical */ }
 }
 
 // ── HH review page ────────────────────────────────────────────────────────────
