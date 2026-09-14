@@ -4,6 +4,11 @@
 
 | Статус | Требование | Описание |
 |--------|-----------|----------|
+| ✅ реализовано | **ATS scoring pipeline fix** (PRs #560, #562, #565) | `buildAtsPrompt` читал `config.required || []` — пустой массив truthy → LLM скорил вслепую. Исправлен чек на `.length`. Добавлен тест с monkey-patch LLM. ATS config tes-recruiter: Private Banking Sales, 3 knockout, thresholds {strong:7, consider:5}. |
+| ✅ реализовано | **needs_reply — HH API как источник правды** (PR #565) | `needs_reply` смотрел на локальную историю, 27 кандидатов ложно помечались "отвеченными". Исправлено: `counters.unread_messages>0 || has_updates || counters.messages<=1`. |
+| ✅ реализовано | **Переписка — синк сообщений из HH** (PR #567) | Локальная история хранила только наши исходящие. Добавлен `syncHhMessagesToHistory` — при каждом открытии /hh/review тянет сообщения из HH API и сохраняет в candidates/*.json. |
+| ✅ реализовано | **Кнопка HH ↗ на карточке кандидата** (PR #567) | Ссылка на резюме была встроена в имя (цвет:inherit, без underline → невидима). Добавлена явная кнопка "↗ HH" красного цвета рядом с именем. |
+| 🔵 планируется | **Стейлые outreach-сообщения** | Batch outreach 11.09 записал employer-сообщения локально, но в HH они не дошли (13 кандидатов с HH messages=1). После PR #567 HH сообщения синхронизируются, нужно проверить что локальные "фантомные" сообщения не конфликтуют с реальными. |
 | ✅ реализовано | **hhFetch/hhPost timeout** (PR #373) | `hhFetch` и `hhPost` в hh-utils.js не имели таймаута — зависший HH API мог заблокировать quick answer хэндлеры. Добавлен `AbortSignal.timeout(15s)`. |
 | ✅ реализовано | **already_sent в review page** (PR #373) | В `generateReviewPageHtml` кандидатский объект не содержал поле `already_sent` → лейбл "Follow-up (уже писали)" никогда не появлялся, первое сообщение всегда генерировалось как "initial". Исправлено. |
 | 🔵 планируется | **Message quality confidence score** (#374) | 0–100% уверенность в качестве каждого сообщения. Зависит от типа (initial/followup), скора кандидата, длины истории. UI: бейдж на карточке + slider "отправить всем ≥N%". |
