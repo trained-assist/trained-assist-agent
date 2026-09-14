@@ -431,6 +431,7 @@ async function runHhScoringForUser(username) {
     const configFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
     if (!fs.existsSync(configFile)) return;
 
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
     const negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
 
     // Sync HH thread messages incrementally — only candidates changed since last sync
