@@ -1564,7 +1564,7 @@ function buildContextCard(username, workDir) {
           const { createHmac } = require('crypto');
           const tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
           const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok})`);
+          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok})`);
         }
       }
     } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
