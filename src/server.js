@@ -25,7 +25,7 @@ const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
-const { runProactiveSearch } = require('./hh-proactive-search');
+const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -345,6 +345,9 @@ async function runHhScoringForUser(username) {
 
     const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3 });
     if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
+
+    const proactiveScored = await scoreUnscoredProactiveCandidates(username);
+    if (proactiveScored > 0) console.log(`[hh-bg] enriched ${proactiveScored} cold-search candidates for ${username}`);
   } catch (e) {
     console.error(`[hh-bg] error for ${username}:`, e.message);
   } finally {
