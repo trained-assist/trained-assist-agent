@@ -1,11 +1,16 @@
-'use strict';
-const assert = require('assert');
-const { isValidProjectId } = require('../../src/valid-project-id');
-
 // Regression for the live "agent /run HTTP 400 → invalid projectId" incident:
 // project auto-naming (#544) mints Cyrillic folder ids via slugify (keeps а-я),
 // but the /run validator was ASCII-only → every task in a chat bound to such a
-// project hard-400ed. These are REAL ids taken from disk under users/*/projects/.
+// project hard-400ed. The VALID ids below are REAL, taken from disk under
+// users/*/projects/. Run under vitest (`describe/it/expect`), like the rest of
+// tests/unit — a bare node-assert script fails vitest with "No test suite found".
+import { describe, it, expect } from 'vitest';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const { isValidProjectId } = require('../../src/valid-project-id');
+
+// Must accept: the exact charset the minter (projects.js slugify) produces.
 const REAL_CYRILLIC_IDS = [
   'generic-работает',
   'generic-qr-коды-оплат',
@@ -15,30 +20,28 @@ const REAL_CYRILLIC_IDS = [
   'generic-https-github-com-kobzevvv-trained-assist',
 ];
 
-// Must reject: path traversal and separators (projectId is a path segment).
+// Must reject: path traversal / separators (projectId is a single path segment),
+// leading dot, empty, over-length, and non-strings.
 const MUST_REJECT = [
   '../etc/passwd',
   '..',
   'a/../b',
   'foo/bar',
   'foo\\bar',
-  '.hidden',        // leading dot
+  '.hidden',
   '',
-  'x'.repeat(201),  // over length cap
+  'x'.repeat(201),
   null,
   undefined,
   42,
 ];
 
-let failed = 0;
-for (const id of REAL_CYRILLIC_IDS) {
-  try { assert.strictEqual(isValidProjectId(id), true, `expected VALID: ${id}`); }
-  catch (e) { failed++; console.error('✗', e.message); }
-}
-for (const id of MUST_REJECT) {
-  try { assert.strictEqual(isValidProjectId(id), false, `expected REJECT: ${JSON.stringify(id)}`); }
-  catch (e) { failed++; console.error('✗', e.message); }
-}
+describe('isValidProjectId', () => {
+  it.each(REAL_CYRILLIC_IDS)('accepts real minted id %s', (id) => {
+    expect(isValidProjectId(id)).toBe(true);
+  });
 
-if (failed) { console.error(`\n${failed} assertion(s) failed`); process.exit(1); }
-console.log(`valid-project-id: ${REAL_CYRILLIC_IDS.length + MUST_REJECT.length} assertions passed`);
+  it.each(MUST_REJECT.map((v) => [v]))('rejects unsafe/invalid id %j', (id) => {
+    expect(isValidProjectId(id)).toBe(false);
+  });
+});
