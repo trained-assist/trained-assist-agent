@@ -154,6 +154,16 @@ async function downloadFile(fileId, sa) {
   return res.text();
 }
 
+async function downloadFileBuffer(fileId, sa) {
+  const token = await getAccessToken(sa);
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+    { headers: { 'Authorization': `Bearer ${token}` }, signal: AbortSignal.timeout(30000) }
+  );
+  if (!res.ok) throw new Error(`Download ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
 const MIME_READABLE = {
   'application/vnd.google-apps.document':     'text/plain',
   'application/vnd.google-apps.spreadsheet':  'text/csv',
@@ -161,6 +171,12 @@ const MIME_READABLE = {
   'text/plain': null, 'text/csv': null, 'application/json': null,
   'text/html': null, 'text/markdown': null,
 };
+
+// Excel MIME types we can parse with the built-in xlsx reader (ZIP-based).
+const EXCEL_MIMES = new Set([
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+  'application/vnd.ms-excel.sheet.macroEnabled.12',                    // .xlsm
+]);
 
 // ── Public files — NO Service Account needed ─────────────────────────────────
 // A Google file shared "anyone with the link" is fetchable over plain HTTP.
@@ -224,6 +240,93 @@ function extractXlsxHyperlinks(buf) {
     }
   }
   return out;
+}
+
+// Decode XML entities in cell text.
+function decodeXmlEntities(s) {
+  return s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+}
+
+// Convert column letters (A, B, AA, …) to 1-based number.
+function colLetterToNum(letters) {
+  let n = 0;
+  for (let i = 0; i < letters.length; i++) n = n * 26 + letters.charCodeAt(i) - 64;
+  return n;
+}
+
+// Parse an xlsx Buffer → multi-sheet CSV text (no external deps, uses readZipEntries).
+function parseXlsxToText(buf) {
+  let entries;
+  try { entries = readZipEntries(buf); } catch (e) { return `Ошибка чтения xlsx: ${e.message}`; }
+
+  // Shared strings table
+  const ss = [];
+  if (entries['xl/sharedStrings.xml']) {
+    const xml = entries['xl/sharedStrings.xml']().toString('utf8');
+    for (const m of xml.matchAll(/<si>([\s\S]*?)<\/si>/g)) {
+      const parts = [...m[1].matchAll(/<t(?:\s[^>]*)?>([^<]*)<\/t>/g)].map(t => decodeXmlEntities(t[1]));
+      ss.push(parts.join(''));
+    }
+  }
+
+  // Sheet names (workbook.xml + rels)
+  const sheetNames = {}, rIdToNum = {};
+  if (entries['xl/workbook.xml']) {
+    const xml = entries['xl/workbook.xml']().toString('utf8');
+    for (const m of xml.matchAll(/<sheet\b[^>]+\bname="([^"]+)"[^>]+\br:id="([^"]+)"/g)) sheetNames[m[2]] = m[1];
+  }
+  if (entries['xl/_rels/workbook.xml.rels']) {
+    const xml = entries['xl/_rels/workbook.xml.rels']().toString('utf8');
+    for (const m of xml.matchAll(/Id="([^"]+)"[^>]*Target="worksheets\/(sheet\d+)\.xml"/g)) rIdToNum[m[1]] = m[2];
+  }
+
+  const sections = [];
+  for (let idx = 1; entries[`xl/worksheets/sheet${idx}.xml`]; idx++) {
+    const xml = entries[`xl/worksheets/sheet${idx}.xml`]().toString('utf8');
+    const rId = Object.keys(rIdToNum).find(k => rIdToNum[k] === `sheet${idx}`);
+    const name = (rId && sheetNames[rId]) || `Sheet${idx}`;
+
+    const rowsMap = new Map();
+    let maxCol = 0;
+
+    for (const rm of xml.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
+      const rowNum = parseInt(rm[1]);
+      const cells = new Map();
+      for (const cm of rm[2].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+        const attrs = cm[1], inner = cm[2];
+        const ref = (attrs.match(/\br="([A-Z]+\d+)"/) || [])[1];
+        if (!ref) continue;
+        const col = colLetterToNum(ref.replace(/\d+/g, ''));
+        maxCol = Math.max(maxCol, col);
+        const type = (attrs.match(/\bt="([^"]+)"/) || [])[1] || 'n';
+        const vMatch = inner.match(/<v>([^<]*)<\/v>/);
+        let value = '';
+        if (type === 's' && vMatch) value = ss[parseInt(vMatch[1])] ?? '';
+        else if (type === 'inlineStr') { const t = inner.match(/<t[^>]*>([^<]*)<\/t>/); value = t ? decodeXmlEntities(t[1]) : ''; }
+        else if (type === 'b' && vMatch) value = vMatch[1] === '1' ? 'TRUE' : 'FALSE';
+        else if (type === 'e') value = vMatch ? vMatch[1] : '#ERR';
+        else if (vMatch) value = type === 'str' ? decodeXmlEntities(vMatch[1]) : vMatch[1];
+        cells.set(col, value);
+      }
+      if (cells.size > 0) rowsMap.set(rowNum, cells);
+    }
+
+    if (rowsMap.size > 0) {
+      const maxRow = Math.max(...rowsMap.keys());
+      const lines = [];
+      for (let r = 1; r <= maxRow; r++) {
+        const c = rowsMap.get(r) || new Map();
+        const row = [];
+        for (let ci = 1; ci <= maxCol; ci++) {
+          const v = c.get(ci) || '';
+          row.push(v.includes(',') || v.includes('"') || v.includes('\n') ? `"${v.replace(/"/g, '""')}"` : v);
+        }
+        lines.push(row.join(','));
+      }
+      sections.push(`=== ${name} ===\n${lines.join('\n')}`);
+    }
+  }
+  return sections.length ? sections.join('\n\n') : '(пустой файл)';
 }
 
 // Pull a Google file ID out of any Drive/Docs/Sheets URL (or return the raw ID).
@@ -500,7 +603,11 @@ module.exports = {
     },
 
     gdrive_read_file: {
-      description: 'Read content of a Drive file (requires gdrive_setup / SA access). Google Docs → plain text, Sheets → CSV, plain text → as is. Returns first 8000 chars. NOTE: for a PUBLIC sheet, or when the user wants hyperlinks embedded inside cells, use gdrive_public_sheet instead — CSV export here drops in-cell links.',
+      description: 'Read content of a Drive file (requires gdrive_setup / SA access). ' +
+        'Supports: Google Docs → plain text, Google Sheets → CSV, Excel .xlsx/.xlsm → parsed CSV (all sheets), plain text/CSV/JSON/HTML/Markdown → as is. ' +
+        'IMPORTANT: ALWAYS try this tool for Excel files — never say "I can\'t read Excel". ' +
+        'For old .xls format, suggest the user open it in Google Sheets first. ' +
+        'NOTE: for a PUBLIC sheet, or when the user wants hyperlinks embedded inside cells, use gdrive_public_sheet instead.',
       inputSchema: {
         type: 'object',
         required: ['file_id'],
@@ -514,9 +621,22 @@ module.exports = {
         const meta = await driveApi('GET', `/drive/v3/files/${file_id}?fields=id,name,mimeType,size&supportsAllDrives=true`, null, sa);
         const mime = meta.mimeType;
         let content;
-        if (MIME_READABLE[mime] === null)  content = await downloadFile(file_id, sa);
-        else if (MIME_READABLE[mime])      content = await exportFile(file_id, MIME_READABLE[mime], sa);
-        else return { error: `Тип файла не поддерживается: ${mime}`, supported: 'Google Docs, Sheets, Slides, text/plain, CSV, JSON, HTML, Markdown' };
+        if (EXCEL_MIMES.has(mime)) {
+          const buf = await downloadFileBuffer(file_id, sa);
+          content = parseXlsxToText(buf);
+        } else if (mime === 'application/vnd.ms-excel') {
+          return {
+            error: 'Формат .xls (старый Excel) не поддерживается напрямую.',
+            hint: 'Открой файл в Drive → правый клик → Открыть с помощью → Google Таблицы. Затем вызови gdrive_read_file с ID новой таблицы.',
+            file_id, name: meta.name, mime_type: mime,
+          };
+        } else if (MIME_READABLE[mime] === null) {
+          content = await downloadFile(file_id, sa);
+        } else if (MIME_READABLE[mime]) {
+          content = await exportFile(file_id, MIME_READABLE[mime], sa);
+        } else {
+          return { error: `Тип файла не поддерживается: ${mime}`, supported: 'Google Docs, Sheets, Excel (.xlsx/.xlsm), Slides, text, CSV, JSON, HTML, Markdown' };
+        }
         const truncated = content.length > max_chars;
         return { file_id, name: meta.name, mime_type: mime, content: truncated ? content.slice(0, max_chars) : content, truncated, total_chars: content.length };
       },
