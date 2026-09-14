@@ -34,6 +34,7 @@ Environment=TELEGRAM_API_URL=https://136-65-7-197.sslip.io/tg-proxy
 
 # Route Anthropic API through GCP proxy (Anthropic blocks Russian IPs)
 Environment=ANTHROPIC_BASE_URL=https://136-65-7-197.sslip.io/anthropic-proxy
+Environment=ANTHROPIC_MODEL=claude-sonnet-5
 
 # Secrets loaded from /home/vova/secrets.env (not in git — set manually on the VM)
 # Format: KEY=value lines (no quotes, no export)
