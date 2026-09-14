@@ -49,14 +49,30 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Cheap-model auto-fix attempt (OpenRouter)
+        id: openrouter
         if: steps.guard.outputs.skip == 'false'
+        continue-on-error: true
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: node scripts/autofix-openrouter.mjs
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.guard.outputs.skip == 'false' && steps.openrouter.outcome != 'success'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             GitHub Actions run ${{ github.event.workflow_run.id }} ("${{ github.event.workflow_run.name }}")
             failed for PR #${{ steps.pr.outputs.number }} in ${{ github.repository }}, branch
             ${{ steps.pr.outputs.branch }} (you are already checked out on it).
+
+            A cheaper OpenRouter model already tried and failed to confidently fix this
+            (see the "Cheap-model auto-fix attempt" step above) — you are the fallback for
+            cases that need deeper reasoning.
 
             1. Inspect the failure: `gh run view ${{ github.event.workflow_run.id }} --log-failed -R ${{ github.repository }}`.
             2. Diagnose the root cause from the logs and the current diff on this branch.
