@@ -1,0 +1,72 @@
+name: Auto-fix CI failure
+
+on:
+  workflow_run:
+    workflows: ["CI + Deploy"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  autofix:
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve source PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          PR_NUMBER=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" --jq '.pull_requests[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            PR_NUMBER=$(gh pr list -R "${{ github.repository }}" --head "${{ github.event.workflow_run.head_branch }}" --json number -q '.[0].number')
+          fi
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+            echo "No open PR found for branch ${{ github.event.workflow_run.head_branch }}, skipping." >&2
+            exit 1
+          fi
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Guard against retry loops
+        id: guard
+        run: |
+          if git log -3 --pretty=%B | grep -qi '\[autofix\]'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Last commits already contain an [autofix] attempt on this branch — stopping to avoid a loop." >&2
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.guard.outputs.skip == 'false'
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            GitHub Actions run ${{ github.event.workflow_run.id }} ("${{ github.event.workflow_run.name }}")
+            failed for PR #${{ steps.pr.outputs.number }} in ${{ github.repository }}, branch
+            ${{ steps.pr.outputs.branch }} (you are already checked out on it).
+
+            1. Inspect the failure: `gh run view ${{ github.event.workflow_run.id }} --log-failed -R ${{ github.repository }}`.
+            2. Diagnose the root cause from the logs and the current diff on this branch.
+            3. Apply the minimal, targeted fix in the working tree — no unrelated refactors or drive-by cleanup.
+            4. If the repo has a test/lint/check script (see package.json), run it to confirm the fix locally.
+            5. If you are confident in the fix: commit as "fix: auto-fix CI failure [autofix]" and push to
+               ${{ steps.pr.outputs.branch }}, then comment on PR #${{ steps.pr.outputs.number }} with a short
+               explanation of what broke and what you changed.
+            6. If you cannot confidently diagnose or fix it, do NOT guess or push anything — instead post a PR
+               comment on #${{ steps.pr.outputs.number }} explaining what you found and why you're stopping.
+          claude_args: |
+            --max-turns 25
+            --allowedTools Edit,Read,Write,Bash,Grep,Glob
