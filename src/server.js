@@ -1324,7 +1324,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/candidate' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1386,6 +1386,55 @@ async function main() {
 
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
       const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { syncedAt, vacancyId: vacancy.id, lastScoredAt });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+      return;
+    }
+
+    // GET /hh/candidate?neg_id=X&username=Y&token=Z — candidate profile page
+    if (req.method === 'GET' && url.pathname === '/hh/candidate') {
+      const username = url.searchParams.get('username') || '';
+      const neg_id = url.searchParams.get('neg_id') || '';
+      const errPage = (msg) => {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Профиль кандидата</title>
+<style>body{font-family:system-ui;padding:48px;text-align:center;background:#f1f5f9;color:#1e293b}</style>
+</head><body><h2>${msg}</h2></body></html>`);
+      };
+      const agentSecret = process.env.AGENT_SECRET || '';
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        const expected = createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16);
+        if ((url.searchParams.get('token') || '') !== expected) return errPage('Ссылка недействительна.');
+      }
+      if (!username || !neg_id) return errPage('Не указан username или neg_id.');
+      const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+      if (!fs.existsSync(tokenFile)) return errPage('HH не подключён.');
+      let tokenData;
+      try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return errPage('Ошибка чтения токена.'); }
+
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const candFile = path.join(dataDir, 'hh', String(username), 'candidates', `${neg_id}.json`);
+      const history = fs.existsSync(candFile)
+        ? (() => { try { return JSON.parse(fs.readFileSync(candFile, 'utf8')); } catch { return {}; } })()
+        : {};
+
+      // Fetch single negotiation from HH API for resume + cover letter
+      let neg = null;
+      try {
+        neg = await hhApiRequest('GET', `/negotiations/${neg_id}`, tokenData.access_token);
+      } catch (e) {
+        console.error(`[hh/candidate] fetch neg ${neg_id}:`, e.message);
+      }
+
+      const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      const reviewToken = agentSecret
+        ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16)
+        : '';
+      const reviewUrl = `${callbackBase}/hh/review?username=${encodeURIComponent(username)}&token=${reviewToken}`;
+
+      const html = generateCandidateProfileHtml(neg, history, username, callbackBase, reviewUrl);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
       return;
@@ -3683,6 +3732,219 @@ function splitBuffer(buf, sep) {
 
 // ── HH review page ────────────────────────────────────────────────────────────
 
+function generateCandidateProfileHtml(neg, history, username, callbackBase, reviewUrl) {
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const r = neg?.resume || {};
+  const ats = history?.ats_result || null;
+  const msgs = history?.messages || [];
+  const draft = history?.message_draft?.text || ats?.draft_message || '';
+
+  const name = [r.last_name, r.first_name].filter(Boolean).join(' ') || neg?.applicant?.name || 'Кандидат';
+  const jobTitle = r.title || '';
+  const expMonths = r.total_experience?.months || 0;
+  const expStr = expMonths ? `${Math.floor(expMonths / 12)} лет ${expMonths % 12 ? (expMonths % 12) + ' мес' : ''}`.trim() : '';
+  const location = r.area?.name || '';
+  const salary = r.salary ? `${r.salary.amount?.toLocaleString('ru-RU')} ${r.salary.currency}` : '';
+  const hhLink = neg?.alternate_url || r.alternate_url || '';
+  const coverLetter = neg?.message || '';
+
+  const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#ca8a04', 'ОТКЛОНИТЬ': '#dc2626' };
+  const col = colorMap[ats?.verdict] || '#64748b';
+  const scorePct = ats?.score != null ? Math.round(ats.score * 10) : 0;
+
+  const metaItems = [jobTitle, expStr, location, salary].filter(Boolean);
+
+  // Resume section
+  const expHtml = (r.experience || []).map(j => {
+    const start = (j.start || '').slice(0, 7);
+    const end = (j.end || '').slice(0, 7) || 'н.в.';
+    return `<div class="job"><div class="job-header"><strong>${esc(j.position || '')}</strong> · ${esc(j.company || '')} <span class="job-dates">${start}–${end}</span></div>${j.description ? `<p class="job-desc">${esc(j.description)}</p>` : ''}</div>`;
+  }).join('');
+  const skillsHtml = (r.skill_set || []).slice(0, 30).map(s => `<span class="skill-tag">${esc(s)}</span>`).join('');
+  const eduList = (r.education?.primary || []).slice(0, 2).map(e => `<li>${esc(e.name || '')} (${esc(e.year || '')})</li>`).join('');
+
+  // ATS section
+  const matchedHtml = (ats?.matched || []).map(m => `<span class="tag tag-ok">${esc(m)}</span>`).join('');
+  const gapsHtml = (ats?.gaps || []).map(g => `<span class="tag tag-gap">${esc(g)}</span>`).join('');
+
+  // Message history
+  const histHtml = msgs.length === 0
+    ? '<p class="no-msgs">Переписки ещё не было</p>'
+    : msgs.map(m => `<div class="msg-bubble msg-${esc(m.role || 'employer')}">
+        <div class="msg-meta-row"><span class="msg-who">${m.role === 'employer' ? '👔 Рекрутер' : '👤 Кандидат'}</span><span class="msg-time">${(m.timestamp || '').slice(0, 10)}</span></div>
+        <div class="msg-body">${esc(m.text || '').replace(/\n/g, '<br>')}</div>
+      </div>`).join('');
+
+  const neg_id = neg?.id || history?.neg_id || '';
+
+  return `<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(name)} — профиль кандидата</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#f1f5f9;color:#1e293b;min-height:100vh}
+.topbar{background:#1e293b;color:#f8fafc;padding:12px 24px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:10}
+.topbar a{color:#94a3b8;text-decoration:none;font-size:14px}
+.topbar a:hover{color:#f8fafc}
+.topbar .cname{font-size:18px;font-weight:700;color:#fff;flex:1}
+.page{max-width:860px;margin:0 auto;padding:24px 16px;display:grid;gap:16px}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card h2{font-size:16px;font-weight:600;color:#64748b;margin-bottom:16px;border-bottom:1px solid #f1f5f9;padding-bottom:8px}
+.hero-meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.hero-meta span{font-size:14px;color:#64748b}
+.hero-meta .sep{color:#cbd5e1}
+.hh-btn{display:inline-flex;align-items:center;gap:4px;padding:6px 12px;background:#d6001c;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600}
+.hh-btn:hover{background:#b0001a}
+.score-section{display:flex;align-items:center;gap:16px;padding:16px;background:#f8fafc;border-radius:8px;margin-bottom:16px}
+.score-big{font-size:36px;font-weight:800;line-height:1}
+.score-details{flex:1}
+.score-bar{height:8px;background:#e2e8f0;border-radius:4px;margin-bottom:6px}
+.score-fill{height:100%;border-radius:4px}
+.verdict-big{font-size:13px;font-weight:700;padding:4px 10px;border-radius:20px;color:#fff;display:inline-block}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.tag{padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.tag-ok{background:#dcfce7;color:#166534}
+.tag-gap{background:#fee2e2;color:#991b1b}
+.reasoning{font-size:14px;color:#475569;margin-top:12px;font-style:italic;line-height:1.5}
+.job{padding:12px 0;border-bottom:1px solid #f1f5f9}
+.job:last-child{border-bottom:none}
+.job-header{font-size:14px;margin-bottom:4px}
+.job-dates{color:#94a3b8;font-size:12px;font-weight:400}
+.job-desc{font-size:13px;color:#64748b;margin-top:4px;line-height:1.5}
+.skills{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.skill-tag{background:#f1f5f9;color:#475569;padding:4px 10px;border-radius:20px;font-size:12px}
+.edu-list{font-size:13px;color:#64748b;margin-top:8px;padding-left:16px}
+.cover{font-size:14px;line-height:1.7;white-space:pre-wrap;color:#374151;background:#fefce8;padding:16px;border-radius:8px;border-left:3px solid #ca8a04}
+.msg-bubble{padding:12px 16px;border-radius:8px;margin-bottom:10px}
+.msg-employer{background:#eff6ff;border-left:3px solid #3b82f6}
+.msg-applicant{background:#f0fdf4;border-left:3px solid #22c55e}
+.msg-meta-row{display:flex;justify-content:space-between;margin-bottom:4px}
+.msg-who{font-size:12px;font-weight:700;color:#64748b}
+.msg-time{font-size:11px;color:#94a3b8}
+.msg-body{font-size:14px;line-height:1.6;white-space:pre-wrap}
+.no-msgs{color:#94a3b8;font-style:italic;padding:12px 0}
+.draft-area{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:14px;font-family:inherit;resize:vertical;min-height:120px;color:#1e293b;background:#fff;margin-bottom:12px}
+.btn-send{background:#2563eb;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.btn-send:hover{background:#1d4ed8}
+.btn-send:disabled{background:#94a3b8;cursor:default}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e293b;color:#fff;padding:10px 20px;border-radius:8px;font-size:14px;display:none;z-index:100}
+.toast.err{background:#dc2626}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <a href="${esc(reviewUrl)}">← Назад к ревью</a>
+  <span class="cname">${esc(name)}</span>
+  ${hhLink ? `<a class="hh-btn" href="${esc(hhLink)}" target="_blank" rel="noopener">↗ HH</a>` : ''}
+</div>
+
+<div class="page">
+
+  <!-- Hero: meta info -->
+  <div class="card">
+    <h2>Основная информация</h2>
+    <div class="hero-meta">
+      ${metaItems.map((x, i) => `<span>${esc(x)}</span>${i < metaItems.length - 1 ? '<span class="sep">·</span>' : ''}`).join('')}
+    </div>
+  </div>
+
+  <!-- ATS Score -->
+  ${ats ? `<div class="card">
+    <h2>Оценка ATS</h2>
+    <div class="score-section">
+      <div class="score-big" style="color:${col}">${ats.score != null ? ats.score.toFixed(1) : '—'}</div>
+      <div class="score-details">
+        <div class="score-bar"><div class="score-fill" style="width:${scorePct}%;background:${col}"></div></div>
+        <span class="verdict-big" style="background:${col}">${esc(ats.verdict || '')}</span>
+      </div>
+    </div>
+    ${matchedHtml || gapsHtml ? `<div class="tags">${matchedHtml}${gapsHtml}</div>` : ''}
+    ${ats.reasoning ? `<p class="reasoning">${esc(ats.reasoning)}</p>` : ''}
+  </div>` : ''}
+
+  <!-- Message history -->
+  <div class="card">
+    <h2>История переписки (${msgs.length} сообщ.)</h2>
+    ${histHtml}
+  </div>
+
+  <!-- Draft / send -->
+  <div class="card">
+    <h2>${msgs.some(m => m.role === 'employer') ? 'Follow-up' : 'Новое сообщение'}</h2>
+    <textarea class="draft-area" id="draft-msg">${esc(draft)}</textarea>
+    <div style="display:flex;gap:8px">
+      <button class="btn-send" id="sendBtn" onclick="doSend()" ${!neg_id ? 'disabled' : ''}>✓ Отправить в HH</button>
+    </div>
+  </div>
+
+  <!-- Experience -->
+  ${expHtml || skillsHtml ? `<div class="card">
+    <h2>Опыт и навыки</h2>
+    ${expHtml}
+    ${skillsHtml ? `<div class="skills">${skillsHtml}</div>` : ''}
+    ${eduList ? `<ul class="edu-list">${eduList}</ul>` : ''}
+  </div>` : ''}
+
+  <!-- Cover letter -->
+  ${coverLetter ? `<div class="card">
+    <h2>Сопроводительное письмо</h2>
+    <div class="cover">${esc(coverLetter)}</div>
+  </div>` : ''}
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const NEG_ID = '${esc(String(neg_id))}';
+const HH_USER = '${esc(String(username))}';
+const CALLBACK_BASE = '${esc(callbackBase)}';
+const HH_SECRET = '${esc(process.env.AGENT_SECRET || '')}';
+
+function showToast(msg, err) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast' + (err ? ' err' : '');
+  t.style.display = 'block';
+  setTimeout(() => { t.style.display = 'none'; }, 4000);
+}
+
+async function doSend() {
+  const msg = document.getElementById('draft-msg').value.trim();
+  if (!msg) { showToast('Сообщение пустое', true); return; }
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true; btn.textContent = '⏳...';
+  try {
+    const r = await fetch(CALLBACK_BASE + '/hh/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
+      body: JSON.stringify({ username: HH_USER, negotiation_id: NEG_ID, message: msg }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (data.blocked) {
+      showToast('🚫 Guard: ' + (data.reason || 'заблокировано'), true);
+      btn.disabled = false; btn.textContent = '✓ Отправить в HH';
+    } else if (!r.ok) {
+      showToast('❌ ' + (data.error || r.statusText), true);
+      btn.disabled = false; btn.textContent = '✓ Отправить в HH';
+    } else {
+      showToast('✅ Отправлено!');
+      btn.textContent = '✓ Отправлено';
+      // Reload to show new message in history
+      setTimeout(() => location.reload(), 1500);
+    }
+  } catch(e) {
+    showToast('❌ ' + e.message, true);
+    btn.disabled = false; btn.textContent = '✓ Отправить в HH';
+  }
+}
+</script>
+</body>
+</html>`;
+}
+
 function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir, opts = {}) {
   const { syncedAt, vacancyId, lastScoredAt } = opts;
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -3863,7 +4125,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const hhBtn = c.alternate_url
       ? ` <a href="${esc(c.alternate_url)}" target="_blank" rel="noopener" class="hh-link-btn" title="Открыть резюме на HH">↗ HH</a>`
       : '';
-    const nameHtml = `${esc(c.name)}${hhBtn}`;
+    const profileToken = agentSecret
+      ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16)
+      : '';
+    const profileBtn = ` <a href="${esc(callbackBase)}/hh/candidate?neg_id=${esc(c.negotiation_id)}&username=${esc(username)}&token=${profileToken}" target="_blank" class="hh-link-btn" title="Открыть профиль кандидата">👤 Профиль</a>`;
+    const nameHtml = `${esc(c.name)}${hhBtn}${profileBtn}`;
 
     const hasDraft = !!c.draft_message;
     const msgLabel = c.already_sent ? 'Follow-up (уже писали)' : hasDraft ? 'Черновик сообщения' : 'Сообщение';
