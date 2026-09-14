@@ -324,7 +324,19 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
     return history.ats_result?.score == null;
   });
 
-  if (!unscored.length) return 0;
+  const writeLog = (checked, scored) => {
+    try {
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const logPath = path.join(dataDir, 'hh', String(username), 'last-scoring.json');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.writeFileSync(logPath, JSON.stringify({ at: Date.now(), checked, scored }), { mode: 0o600 });
+    } catch { /* non-critical */ }
+  };
+
+  if (!unscored.length) {
+    writeLog(negotiations.length, 0);
+    return 0;
+  }
 
   let scored = 0;
   for (let i = 0; i < unscored.length; i += maxConcurrent) {
@@ -345,13 +357,7 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
     }));
   }
 
-  try {
-    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-    const logPath = path.join(dataDir, 'hh', String(username), 'last-scoring.json');
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    fs.writeFileSync(logPath, JSON.stringify({ at: Date.now(), checked: unscored.length, scored }), { mode: 0o600 });
-  } catch { /* non-critical */ }
-
+  writeLog(unscored.length, scored);
   return scored;
 }
 
