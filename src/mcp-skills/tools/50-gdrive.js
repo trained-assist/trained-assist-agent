@@ -370,9 +370,9 @@ async function deleteServiceAccount(userId) {
 
 module.exports = {
   isReady: () => !!parseSaJson(USER_ID),
-  // gdrive_public_sheet needs no SA — keep it exposed even before setup so the
-  // agent never reflexively calls gdrive_setup for a public "anyone with link" sheet.
-  setupTools: ['gdrive_setup', 'gdrive_status', 'gdrive_public_sheet'],
+  // These tools need no SA — expose them before gdrive_setup so Claude never
+  // reflexively calls gdrive_setup for public files/folders.
+  setupTools: ['gdrive_setup', 'gdrive_status', 'gdrive_public_sheet', 'gdrive_public_folder'],
   deleteServiceAccount,
 
   tools: {
@@ -554,19 +554,60 @@ module.exports = {
     },
 
     gdrive_public_sheet: {
-      description: 'Read a PUBLIC Google Sheet (shared "anyone with the link") over plain HTTP — NO Service Account, NO gdrive_setup needed. Returns both the CSV cell text AND every in-cell hyperlink (cell → URL). Use this whenever a user hands you a public Google Sheets link, ESPECIALLY when they care about links embedded inside cells (CSV export silently drops those). Only fall back to gdrive_read_file / gdrive_setup when the file is private (403).',
+      description: 'Read a PUBLIC Google file (shared "anyone with the link") — NO Service Account, NO gdrive_setup needed.\n\n' +
+        'Handles two cases automatically:\n' +
+        '• Google Sheets URL (docs.google.com/spreadsheets/…) → exports as CSV + extracts in-cell hyperlinks\n' +
+        '• Raw Drive file URL (drive.google.com/file/d/…) — e.g. an Excel .xlsx uploaded to Drive → downloads the binary and parses all sheets as CSV\n\n' +
+        'ALWAYS try this tool first when the user gives you ANY Google Drive or Docs link and you do NOT have SA configured. ' +
+        'Only fall back to gdrive_read_file / gdrive_setup when the file is private (403).',
       inputSchema: {
         type: 'object',
         required: ['url_or_id'],
         properties: {
-          url_or_id: { type: 'string', description: 'Full Google Sheets URL or the bare file ID' },
-          gid:       { type: 'string', description: 'Sheet/tab gid for the CSV export (optional; default first tab)' },
-          max_chars: { type: 'number', description: 'Max CSV chars to return (default 8000)' },
+          url_or_id: { type: 'string', description: 'Full Google Sheets/Drive URL or the bare file ID' },
+          gid:       { type: 'string', description: 'Sheet/tab gid for CSV export (Google Sheets only; default first tab)' },
+          max_chars: { type: 'number', description: 'Max chars to return (default 8000)' },
         },
       },
       handler: async ({ url_or_id, gid, max_chars = 8000 }) => {
         const id = parseFileId(url_or_id);
         if (!id) return { error: 'Не смог извлечь file ID из ввода', input: url_or_id };
+
+        // Detect raw Drive file vs Google Sheet by URL pattern.
+        const urlStr = String(url_or_id);
+        const isRawDriveFile = /drive\.google\.com\/file\//i.test(urlStr) ||
+          /drive\.usercontent\.google\.com/i.test(urlStr);
+        const isGoogleSheet = /docs\.google\.com\/spreadsheets/i.test(urlStr);
+
+        // Raw Drive file (e.g. xlsx uploaded to Drive) — download binary, parse.
+        if (isRawDriveFile && !isGoogleSheet) {
+          try {
+            const downloadUrl = `https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t`;
+            const r = await fetch(downloadUrl, { signal: AbortSignal.timeout(30000) });
+            if (r.status === 403 || r.status === 401) {
+              return { error: 'private_file', message: 'Файл не публичный (403). Нужен gdrive_setup — расшарь файл с SA email.' };
+            }
+            if (!r.ok) throw new Error(`Download ${r.status}`);
+            const ct = r.headers.get('content-type') || '';
+            if (ct.includes('text/html')) {
+              return { error: 'html_response', message: 'Google Drive вернул HTML-страницу (возможно требует подтверждения или файл приватный). Попробуй gdrive_setup.' };
+            }
+            const buf = Buffer.from(await r.arrayBuffer());
+            const text = parseXlsxToText(buf);
+            const truncated = text.length > max_chars;
+            return {
+              file_id: id,
+              source: 'drive_file_download',
+              csv: truncated ? text.slice(0, max_chars) : text,
+              csv_truncated: truncated,
+              hyperlinks: [],
+              hyperlink_count: 0,
+            };
+          } catch (e) {
+            return { error: `download_failed: ${e.message}` };
+          }
+        }
+
         const base = `https://docs.google.com/spreadsheets/d/${id}/export`;
 
         // CSV — visible cell text (fast, but drops in-cell hyperlinks).
@@ -575,7 +616,7 @@ module.exports = {
           const csvUrl = `${base}?format=csv${gid ? `&gid=${encodeURIComponent(gid)}` : ''}`;
           const r = await fetch(csvUrl, { signal: AbortSignal.timeout(15000) });
           if (r.status === 403 || r.status === 401) {
-            return { error: 'private_file', message: 'Файл не публичный (403). Это приватный файл — тогда нужен gdrive_setup: расшарь его с SA email (gdrive_status покажет email).' };
+            return { error: 'private_file', message: 'Файл не публичный (403). Это приватный файл — нужен gdrive_setup: расшарь его с SA email (gdrive_status покажет email).' };
           }
           if (!r.ok) throw new Error(`CSV ${r.status}`);
           csv = await r.text();
@@ -602,12 +643,64 @@ module.exports = {
       },
     },
 
+    gdrive_public_folder: {
+      description: 'List files in a PUBLIC Google Drive folder (shared "anyone with the link") — NO Service Account needed.\n\n' +
+        'Use this when the user shares a Drive FOLDER link (drive.google.com/drive/folders/…). ' +
+        'Returns a list of files with their IDs and names. After getting the list, use gdrive_public_sheet to read individual xlsx/csv files.',
+      inputSchema: {
+        type: 'object',
+        required: ['folder_url_or_id'],
+        properties: {
+          folder_url_or_id: { type: 'string', description: 'Google Drive folder URL or folder ID' },
+        },
+      },
+      handler: async ({ folder_url_or_id }) => {
+        const urlStr = String(folder_url_or_id);
+        // Extract folder ID from URL like drive.google.com/drive/folders/{id} or drive.google.com/drive/u/0/folders/{id}
+        const fmatch = urlStr.match(/\/folders\/([A-Za-z0-9_-]{20,})/) || urlStr.match(/^([A-Za-z0-9_-]{20,})$/);
+        const folderId = fmatch ? fmatch[1] : null;
+        if (!folderId) return { error: 'Не смог извлечь folder ID из ввода', input: folder_url_or_id };
+
+        // Try listing via SA if available, otherwise explain the limitation.
+        const sa = parseSaJson();
+        if (sa) {
+          try {
+            const q = `'${folderId}' in parents and trashed=false`;
+            const fields = 'files(id,name,mimeType,size,modifiedTime,webViewLink)';
+            const data = await driveApi('GET', `/drive/v3/files?pageSize=50&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}&supportsAllDrives=true&includeItemsFromAllDrives=true`, null, sa);
+            return {
+              folder_id: folderId,
+              files: data.files?.map(f => ({
+                id: f.id, name: f.name, type: f.mimeType,
+                size_kb: f.size ? Math.round(f.size / 1024) : null,
+                modified: f.modifiedTime, url: f.webViewLink,
+              })) ?? [],
+              count: data.files?.length ?? 0,
+            };
+          } catch (e) {
+            return { error: e.message, folder_id: folderId };
+          }
+        }
+
+        // No SA — Drive API requires auth even for public folders.
+        // Return a helpful message with the folder ID so the user can open it.
+        return {
+          folder_id: folderId,
+          files: null,
+          note: 'Google Drive API требует аутентификацию для листинга папок даже у публичных. ' +
+            'Запусти gdrive_setup один раз и расшарь эту папку с SA email — после этого gdrive_list_files заработает. ' +
+            'Если знаешь ID конкретного файла внутри — можешь попробовать gdrive_public_sheet(file_id).',
+          folder_url: `https://drive.google.com/drive/folders/${folderId}`,
+        };
+      },
+    },
+
     gdrive_read_file: {
       description: 'Read content of a Drive file (requires gdrive_setup / SA access). ' +
         'Supports: Google Docs → plain text, Google Sheets → CSV, Excel .xlsx/.xlsm → parsed CSV (all sheets), plain text/CSV/JSON/HTML/Markdown → as is. ' +
         'IMPORTANT: ALWAYS try this tool for Excel files — never say "I can\'t read Excel". ' +
         'For old .xls format, suggest the user open it in Google Sheets first. ' +
-        'NOTE: for a PUBLIC sheet, or when the user wants hyperlinks embedded inside cells, use gdrive_public_sheet instead.',
+        'NOTE: for public files without SA, use gdrive_public_sheet (for file URLs) or gdrive_public_folder (for folders).',
       inputSchema: {
         type: 'object',
         required: ['file_id'],
