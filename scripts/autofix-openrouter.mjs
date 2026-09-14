@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-// Cheap-first CI auto-fix: ask an OpenRouter model for a unified diff patch
-// fixing a failed PR check. Exits 0 (fix committed+pushed) or 1 (couldn't
-// confidently fix — caller should fall back to the Claude step).
-// See docs/free-llm-credentials.md for the model/fallback policy this follows.
+// CI auto-fix: ask an OpenRouter model for a unified diff patch fixing a
+// failed PR check. Exits 0 (fix committed+pushed) or 1 (couldn't confidently
+// fix — caller should fall back to the next, stronger step). MODEL/MAX_ATTEMPTS
+// are overridable via env so the same script runs the cheap pass and the
+// stronger fallback pass. See docs/free-llm-credentials.md for the policy.
 
 import { execSync, execFileSync } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
 
-const MODEL = 'deepseek/deepseek-chat';
-const MAX_ATTEMPTS = 2;
+const MODEL = process.env.MODEL || 'deepseek/deepseek-chat';
+const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 2);
 const LOG_CHAR_LIMIT = 15000;
 const DIFF_CHAR_LIMIT = 15000;
 
@@ -128,7 +129,7 @@ sh('git add -A');
 sh(`git commit -m "fix: auto-fix CI failure via OpenRouter (${MODEL}) [autofix]"`);
 sh('git push');
 
-const commentBody = `🤖 Auto-fixed by OpenRouter (\`${MODEL}\`) — cheap-model pass, no Claude call needed.\n\nFix applied for the failure in run ${RUN_ID}, tests pass locally.`;
+const commentBody = `🤖 Auto-fixed by OpenRouter (\`${MODEL}\`).\n\nFix applied for the failure in run ${RUN_ID}, tests pass locally.`;
 writeFileSync('autofix-comment.txt', commentBody);
 sh(`gh pr comment ${PR_NUMBER} -R ${REPO} --body-file autofix-comment.txt`);
 unlinkSync('autofix-comment.txt');
