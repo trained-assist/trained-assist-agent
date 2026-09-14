@@ -320,6 +320,18 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       return `✅ Проект создан и выбран: «${meta.name}» (${meta.label}).\nНовые сессии пойдут в него. Список: \`/project\``;
     }
 
+    // rename: /project rename <номер|часть названия> = Новое имя  (locks against auto-naming)
+    const renameMatch = rest.match(/^(?:rename|переименуй|переименовать|назови)\s+(.+?)\s*[=:]\s*(.+)$/i);
+    if (renameMatch) {
+      const q = renameMatch[1].trim(); const newName = renameMatch[2].trim();
+      const num = /^\d+$/.test(q) ? parseInt(q, 10) : null;
+      const tgt = (num && num >= 1 && num <= list.length) ? list[num - 1]
+        : list.find(p => (p.name || '').toLowerCase().includes(q.toLowerCase()) || p.id.toLowerCase().includes(q.toLowerCase()));
+      if (!tgt) return `Проект «${q}» не найден. Список: \`/project\``;
+      const meta = projects.renameProject(workDir, tgt.id, newName);
+      return `✏️ Переименовал: «${meta.name}». Авто-переименование для него теперь отключено.`;
+    }
+
     if (!rest) {
       if (list.length === 0) {
         return [
@@ -328,12 +340,22 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
           'Создать: `/project new recruiting: Название` (тип задаётся префиксом — recruiting, generic).',
         ].join('\n');
       }
-      const lines = list.map((p, i) => `${p.id === activeId ? '▶️' : '     '} ${i + 1}. ${p.name} — ${p.label}`);
+      // Rich rendering: name + the 3-sense summary (start → middle → end) so a long,
+      // meandering project reads clearly. Falls back to the type label when no summary yet.
+      const lines = list.map((p, i) => {
+        const head = `${p.id === activeId ? '▶️' : '  '} ${i + 1}. ${p.name}${p.type && p.type !== 'generic' ? ` · ${p.label}` : ''}`;
+        const s = p.summary;
+        if (!s || !s.start) return head;
+        const parts = [s.start, s.middle, s.end].filter(Boolean).map(x => `      ${x}`);
+        return [head, ...parts].join('\n');
+      });
       return [
         '📁 Проекты (▶️ — активный, новые сессии идут в него):',
-        ...lines,
+        '',
+        lines.join('\n\n'),
         '',
         'Сменить: `/project <номер или часть названия>`',
+        'Переименовать: `/project rename <номер> = Новое имя`',
         'Создать: `/project new recruiting: Название`',
       ].join('\n');
     }
@@ -961,6 +983,22 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
         }));
         list = sessions.listSessions(workDir, 10); // reload with fresh summaries
       }
+      // Also refresh the ACTIVE project's name + 3-sense summary if it's stale (session
+      // count grew). Cheap: one gemini-2.5-flash call, only when needed. This is how a
+      // project "matures" — born with a provisional name, renamed from its real work.
+      try {
+        const orK = openrouterKey || process.env.OPENROUTER_API_KEY;
+        const activePid = projects.getActiveProjectId(workDir, chatId);
+        if (orK && activePid) {
+          const meta = projects.getProject(workDir, activePid);
+          const projSess = sessions.listSessions(workDir, 1000).filter(s => s.projectId === activePid);
+          if (meta && projects.needsSummary(meta, projSess.length)) {
+            const { generateProjectSummary } = require('./project-summary');
+            const res = await generateProjectSummary(projSess, { apiKey: orK });
+            if (res) projects.setProjectSummary(workDir, activePid, res, projSess.length);
+          }
+        }
+      } catch (e) { console.warn('[runner] project summary refresh:', e.message); }
       return renderSessionsList(list);
     }
   }
