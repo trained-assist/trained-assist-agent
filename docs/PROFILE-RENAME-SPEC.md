@@ -46,11 +46,22 @@ in this repo. Only bucket A renames:
     Additive: the gateway need not change yet; internal code may start reading
     `user.profileId` as the canonical owner id.
 
-- **L2 — internal reader sweep (agent-only, no wire/env change):** replace owner-meaning
-  `user.username`/`user.userId` reads with `user.profileId` in internal modules
-  (`runner.js`, `data-paths.js` param names, `session-store`, hh/*, mcp-skills that read
-  the owner from the `user` object — NOT the snake_case `user_id` API params). Verify each
-  file with `node -c` + tests; keep values identical.
+- **L2 — internal reader sweep (agent-only, no wire/env change) — DONE (this PR):**
+  Traced all 17 owner-meaning `user.username`/`user.userId` reads in `src/`. **Finding:
+  the reader sweep is intentionally near-empty** — in this codebase owner-identity and
+  the on-disk key are the *same variable* almost everywhere: 15 of 17 reads feed a path,
+  env, token dir, marker file, or MCP config (`agent-tokens/<username>/…`,
+  `AGENT_USER_ID`/`AGENT_USER_HANDLE`, `writeMcpConfig`, `buildContextCard`'s
+  `agent-tokens/<username>` lookup, `loadUserTokens`, the `.username` chat-owner marker).
+  Those MUST keep the `username` *value* (the dir/env is out-of-scope forever or migrates
+  in L3), so swapping them to `profileId` would silently diverge once the gateway sends a
+  distinct `profileId`. Only **one** read is pure in-memory owner *identity* logic and not
+  a disk/env key: the **per-profile concurrency `capKey`** (`runner.js`), a `Map` key for
+  the 4-slot cap. Swapped it to `opts.user.profileId || opts.user.username || opts.user.id`
+  — canonical, value-identical today, and end-to-end validates the L1 shim (profileId now
+  actually flows into the runner and is used). Lesson: the mass migration people imagine
+  for L2 is really **L3** (the `USER_ID` env boundary) plus the forever-out-of-scope disk
+  dir — not a `user.*` reader sweep. Verified: `node -c` + tests green.
 
 - **L3 — env boundary:** `browser.js` spawn exports `PROFILE_ID` (= profileId) alongside
   `USER_ID`; MCP tools read `process.env.PROFILE_ID || process.env.USER_ID`. Drop

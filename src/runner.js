@@ -1537,9 +1537,11 @@ function runTask(opts) {
     }, 3000);
   }
 
-  // Per-profile cap key ("repository" = one profile's workspace). Falls back to
-  // chatId if a caller has no username (internal/system tasks).
-  const capKey = String(opts.user.username || opts.user.id);
+  // Per-profile cap key ("repository" = one profile's workspace). The owner is a
+  // PROFILE (L1 shim sets user.profileId = payload.profileId ?? username), so key on
+  // profileId; fall back to username, then chatId for internal/system callers that
+  // build a bare user object. In-memory Map key only — never a path/env key.
+  const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
 
   const current = prev.then(async () => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
