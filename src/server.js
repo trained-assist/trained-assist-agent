@@ -1269,13 +1269,16 @@ async function main() {
         syncedAt = result.synced_at;
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
 
+      let lastScoredAt = null;
+      try {
+        const logPath = path.join(dataDir, 'hh', String(username), 'last-scoring.json');
+        if (fs.existsSync(logPath)) lastScoredAt = JSON.parse(fs.readFileSync(logPath, 'utf8')).at || null;
+      } catch { /* non-critical */ }
+
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { syncedAt, vacancyId: vacancy.id });
+      const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { syncedAt, vacancyId: vacancy.id, lastScoredAt });
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
-
-      // Score any unscored candidates in the background after page is already served
-      runHhScoringForUser(username).catch(e => console.error('[hh/review] bg-score error:', e.message));
       return;
     }
 
@@ -3518,7 +3521,7 @@ function splitBuffer(buf, sep) {
 // ── HH review page ────────────────────────────────────────────────────────────
 
 function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir, opts = {}) {
-  const { syncedAt, vacancyId } = opts;
+  const { syncedAt, vacancyId, lastScoredAt } = opts;
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const candDir = path.join(dataDir || path.join(os.homedir(), 'agent-data'), 'hh', String(username), 'candidates');
@@ -3594,6 +3597,9 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
         return !last || last.role !== 'employer';
       })(),
       alternate_url: r.alternate_url || null,
+      salary: r.salary ? `${(r.salary.amount || '').toLocaleString?.() || r.salary.amount} ${r.salary.currency || ''}`.trim() : null,
+      msg_from_candidate: (history.messages || []).filter(m => m.role === 'applicant').length,
+      msg_from_us: (history.messages || []).filter(m => m.role === 'employer').length,
     };
   });
 
@@ -3618,6 +3624,8 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
 
   const ageMin = syncedAt ? Math.round((Date.now() - syncedAt) / 60000) : null;
   const ageText = ageMin === null ? '' : ageMin === 0 ? 'только что' : `${ageMin} мин назад`;
+  const scoredMin = lastScoredAt ? Math.round((Date.now() - lastScoredAt) / 60000) : null;
+  const scoredText = scoredMin === null ? '' : scoredMin === 0 ? 'скоринг только что' : scoredMin < 60 ? `скоринг ${scoredMin} мин назад` : `скоринг ${Math.round(scoredMin/60)} ч назад`;
 
   function buildCardsHtml(list, idxOffset) {
     return list.map((c, localIdx) => {
@@ -3672,8 +3680,12 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
 
     const hasDraft = !!c.draft_message;
     const msgLabel = c.already_sent ? 'Follow-up (уже писали)' : hasDraft ? 'Черновик сообщения' : 'Сообщение';
+    const msgMeta = (c.msg_from_candidate || c.msg_from_us)
+      ? `<div class="msg-meta">${c.msg_from_candidate} от кандидата · ${c.msg_from_us} от нас</div>`
+      : '';
     const msgSection = isReject
       ? `<div class="msg-section">
+           ${msgMeta}
            <div class="msg-label-row">
              <label class="msg-label" style="color:#dc2626">Сообщение об отказе</label>
              <button class="btn btn-gen" id="gen-${i}" onclick="generateRejection(${i},'${esc(c.negotiation_id)}','${esc(c.name)}')" title="Сгенерировать отказное сообщение">✦ Сгенерировать отказ</button>
@@ -3681,10 +3693,12 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            <textarea class="msg-area" id="msg-${i}" rows="4">${hasDraft ? esc(c.draft_message) : ''}</textarea>
            <div class="btns">
              <button class="btn btn-send-reject" onclick="sendAndRejectOne(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
+             <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
              <button class="btn btn-skip" onclick="skipOne(${i})">Пропустить</button>
            </div>
          </div>`
       : `<div class="msg-section">
+           ${msgMeta}
            <div class="msg-label-row">
              <label class="msg-label">${msgLabel}</label>
              <button class="btn btn-gen" id="gen-${i}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
@@ -3692,17 +3706,19 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            <textarea class="msg-area" id="msg-${i}" rows="5">${hasDraft ? esc(c.draft_message) : ''}</textarea>
            <div class="btns">
              <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
+             <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
              <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
            </div>
          </div>`;
 
+    const salaryNote = c.salary ? `<span class="meta"> · зп ${esc(c.salary)}</span>` : '';
     return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
   <div class="card-header">
     <div class="card-header-left">
       ${checkboxHtml}
       <div>
         <span class="name">${nameHtml}</span>
-        ${daysNote}
+        ${daysNote}${salaryNote}
       </div>
     </div>
     ${scoreHtml}
@@ -3716,7 +3732,8 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     });
   }
 
-  const cardsHtml = buildCardsHtml(waitingCandidates, 0);
+  const waitingCardsHtml = buildCardsHtml(waitingCandidates, 0);
+  const allCardsHtml = buildCardsHtml(sorted, 0);
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -3815,11 +3832,19 @@ h1{font-size:18px}
 .sync-btn{background:none;border:none;color:#6366f1;font-size:13px;cursor:pointer;font-weight:500;padding:0;text-decoration:underline;text-underline-offset:2px}
 .sync-btn:hover{opacity:.75}
 .sync-btn:disabled{opacity:.5;cursor:not-allowed;text-decoration:none}
+.tabs{display:flex;gap:4px;margin-bottom:20px}
+.tab-btn{padding:6px 16px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;background:#fff;color:#64748b;transition:all .15s}
+.tab-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.msg-meta{font-size:12px;color:#94a3b8;margin-bottom:6px}
+.btn-copy{background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;font-weight:500;padding:6px 12px;cursor:pointer}
+.btn-copy:hover{background:#e2e8f0}
 </style>
 </head>
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
-<p class="subtitle">${sorted.length} откликов · ${waitingCandidates.length} ждут ответа${ageText ? ` · обновлено ${ageText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
+<p class="subtitle">${sorted.length} откликов · ${waitingCandidates.length} ждут ответа${ageText ? ` · обновлено ${ageText}` : ''}${scoredText ? ` · ${scoredText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
   <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
@@ -3836,8 +3861,15 @@ h1{font-size:18px}
   <button class="tb-btn" onclick="selectAll(true)">✓ Выбрать все</button>
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
-<div id="cards-container">
-  ${cardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Все отвечено — нет кандидатов, ожидающих ответа.</p>' : cardsHtml.join('')}
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('waiting',this)">🔴 Неотвеченные (${waitingCandidates.length})</button>
+  <button class="tab-btn" onclick="switchTab('all',this)">📨 Все (${sorted.length})</button>
+</div>
+<div id="tab-waiting" class="tab-panel active">
+  ${waitingCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Все отвечено — нет кандидатов, ожидающих ответа.</p>' : waitingCardsHtml.join('')}
+</div>
+<div id="tab-all" class="tab-panel">
+  ${allCardsHtml.join('')}
 </div>
 <div class="footer">
   <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
@@ -3850,6 +3882,21 @@ const HH_USER = '${esc(username)}';
 const HH_SECRET = '${esc(agentSecret)}';
 const HH_VACANCY_ID = '${esc(String(vacancyId || ''))}';
 const done = new Set();
+
+function switchTab(id, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  btn.classList.add('active');
+}
+
+function copyMsg(i) {
+  const ta = document.getElementById('msg-' + i);
+  if (!ta) return;
+  navigator.clipboard.writeText(ta.value).then(() => showToast('📋 Скопировано')).catch(() => {
+    ta.select(); document.execCommand('copy'); showToast('📋 Скопировано');
+  });
+}
 
 async function syncNow() {
   const btn = document.getElementById('syncBtn');
