@@ -1819,7 +1819,7 @@ async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -1841,7 +1841,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   savePendingTask(taskId, {
     taskId, userId: user.id, username: user.username, workDir: user.workDir,
-    task, context, sessionId, contextFromSession, forceClaude,
+    task, context, sessionId, contextFromSession, forceClaude, forceNew,
     initialMsgId, pinnedMsgId,
     startedAt: Date.now(),
   });
@@ -1865,9 +1865,18 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const ctxMsgCount = forceClaude ? 8 : 6;
 
   if (sessionId) {
-    // Explicit session ID from bot — honor it, but enforce per-chat ownership
-    activeSessionId = sessionId;
-    const existing = sessions.getSession(user.workDir, sessionId);
+    // Explicit session ID from bot — honor it, but enforce per-chat ownership.
+    // Sign-robust: the gateway's remembered id can diverge from disk (chatId
+    // sign-split — KV holds `s-1003…`, real content lives under `s--1003…`).
+    // resolveChatSession falls back to this chat's durable current-session
+    // pointer instead of spawning a blank session and orphaning the ТЗ.
+    // forceNew is the gateway's explicit "start a fresh session" intent (e.g.
+    // the /sessions "new" flow, or a NEW_SESSION_SIGNALS phrase) — that id is
+    // SUPPOSED to have no file on disk yet, so it must never heal back onto
+    // the chat's old pointer, or "start new session" would silently reattach
+    // to the stale one.
+    activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId) || sessionId);
+    const existing = sessions.getSession(user.workDir, activeSessionId);
     if (existing) {
       // Strict chat isolation: a live session is attached to exactly one chat.
       // If it's attached to a different chat, reject and notify — don't mix contexts.

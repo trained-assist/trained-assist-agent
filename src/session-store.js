@@ -235,6 +235,32 @@ function claimLiveChatId(workDir, id, chatId) {
   }
 }
 
+/**
+ * Sign-robust session resolution (chatId sign-split heal, issue: chatId-sign-split-session-loss).
+ * The gateway remembers `lastSessionId` in its own KV and passes it back on the next
+ * message. That id can diverge from what's actually on disk — historically the gateway
+ * built ids with `Math.abs(chatId)` (`s-1003…`) while older sessions were keyed by the
+ * raw negative chatId (`s--1003…`), so a group ended up with two session families. When
+ * the passed id has no file on disk, blindly honoring it spawns a BLANK session and
+ * orphans the accumulated ТЗ ("fresh session held only bare link → agent saw a fragment").
+ *
+ * The current-session pointer is keyed by the real chatId WITH its sign preserved
+ * (`current-session--1003….json`), so it is the durable source of truth for "which
+ * session does this chat continue". Resolution order:
+ *   1. the explicit id, if its session file exists (normal path — no divergence);
+ *   2. otherwise the chat's current-session pointer, if it resolves to a real session;
+ *   3. otherwise null — caller creates a fresh session.
+ * Returns the id to use, or null.
+ */
+function resolveChatSession(workDir, sessionId, chatId) {
+  if (sessionId && getSession(workDir, sessionId)) return sessionId;
+  if (chatId) {
+    const pointerId = getCurrentSessionId(workDir, chatId);
+    if (pointerId && getSession(workDir, pointerId)) return pointerId;
+  }
+  return null;
+}
+
 /** Persist a durable summary object onto a session (both index + full file).
  *  `atMsgCount` records the message count the summary reflects, so we know when
  *  it goes stale (see needsSummary). Idempotent; safe to call repeatedly. */
@@ -292,7 +318,7 @@ function archiveSessions(workDir, sessionIds) {
 
 module.exports = {
   createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
-  getCurrentSessionId, setCurrentSessionId, claimLiveChatId, archiveSessions, setSummary, needsSummary,
+  getCurrentSessionId, setCurrentSessionId, claimLiveChatId, resolveChatSession, archiveSessions, setSummary, needsSummary,
   // Back-compat alias for the pre-rename name (see PROFILE-RENAME-SPEC.md); remove once no caller uses it.
   claimOwnerChatId: claimLiveChatId,
 };

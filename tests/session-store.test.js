@@ -9,6 +9,7 @@ import {
   listSessions,
   getSession,
   buildContext,
+  resolveChatSession,
 } from '../src/session-store.js';
 
 let tmpDir;
@@ -119,5 +120,34 @@ describe('buildContext', () => {
 
   it('returns null for missing session', () => {
     expect(buildContext(tmpDir, 'no-such-id')).toBeNull();
+  });
+});
+
+describe('resolveChatSession — chatId sign-split heal', () => {
+  const CHAT = -1003814002203; // real group chatId (negative, sign preserved on the pointer)
+
+  it('returns the explicit id unchanged when its session file exists', () => {
+    const id = createSession(tmpDir, { task: 'real task', chatId: CHAT });
+    expect(resolveChatSession(tmpDir, id, CHAT)).toBe(id);
+  });
+
+  it('heals a divergent id by falling back to the chat current-session pointer', () => {
+    // The chat's real, content-bearing session (created with the raw negative chatId).
+    const realId = createSession(tmpDir, { task: 'links + doc + full ТЗ', id: `s--1003814002203-1000`, chatId: CHAT });
+    // The gateway hands back a sign-lost id (Math.abs) that has NO file on disk.
+    const staleId = `s-1003814002203-2000`;
+    expect(getSession(tmpDir, staleId)).toBeNull();
+    // Must resolve to the real session, not spawn a blank one.
+    expect(resolveChatSession(tmpDir, staleId, CHAT)).toBe(realId);
+  });
+
+  it('returns null (→ caller creates fresh) when neither id nor pointer resolve', () => {
+    expect(resolveChatSession(tmpDir, 's-1003814002203-2000', CHAT)).toBeNull();
+  });
+
+  it('does not cross chats: an unknown id with no pointer for that chat stays unresolved', () => {
+    createSession(tmpDir, { task: 'other chat', chatId: -42 });
+    // CHAT has no session / pointer of its own → no accidental adoption of chat -42's session.
+    expect(resolveChatSession(tmpDir, 's-1003814002203-9999', CHAT)).toBeNull();
   });
 });
