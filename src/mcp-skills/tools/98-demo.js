@@ -1,15 +1,61 @@
 'use strict';
 
-// Demo mode for recruitment showcases.
-// Simulates a live recruiting session: seeded candidates flow in waves, candidate
-// replies are generated via Haiku so the recruiter can show end-to-end flow to a client.
+// Demo mode — populates real HH data files (negotiations cache + candidate history)
+// so the standard /hh/review page works without a real HH account.
 
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 const https = require('https');
+const { createHmac } = require('crypto');
 
-// ── ATS config for the ОРГРЭС vacancy ────────────────────────────────────────
+function dataDir() {
+  return process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+}
+function tokensDir() {
+  return process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+}
+function userId() {
+  return process.env.USER_ID || process.env.AGENT_USER_ID || '';
+}
+
+function hhDir(username) {
+  return path.join(dataDir(), 'hh', String(username));
+}
+function candDir(username) {
+  return path.join(hhDir(username), 'candidates');
+}
+function cacheFile(username) {
+  return path.join(hhDir(username), 'negotiations-cache.json');
+}
+function workDir(username) {
+  const base = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(base, 'sessions', String(username));
+}
+
+function writeJson(filePath, data, mode = 0o600) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode });
+}
+
+function writeCtx(username, skill, key, value) {
+  const p = path.join(workDir(username), 'contexts', skill, `${key}.json`);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const tmp = `${p}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ value, updated_at: new Date().toISOString() }, null, 2));
+  fs.renameSync(tmp, p);
+}
+
+function reviewUrl(username) {
+  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+  const secret = process.env.AGENT_SECRET || '';
+  const tok = secret
+    ? createHmac('sha256', secret).update(String(username)).digest('hex').slice(0, 16)
+    : 'demo';
+  return `${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}`;
+}
+
+// ── ATS config (0–10 scale thresholds) ───────────────────────────────────────
 
 const OGREX_ATS_CONFIG = {
   knockout: [],
@@ -25,8 +71,8 @@ const OGREX_ATS_CONFIG = {
     'работа с сосудами под давлением',
     'готовность к командировкам по РФ',
   ],
-  pass_threshold: 50,
-  review_threshold: 30,
+  pass_threshold: 7,
+  review_threshold: 5,
   vacancy_title: 'Ведущий инженер-наладчик турбинного оборудования',
   vacancy_context:
     'ОРГРЭС — ЕРС-подрядчик в энергетике (ТЭС, тепловые сети). Клиенты: Минэнерго РФ, Росатом, Роснефть, Чукоэнерго. ' +
@@ -34,201 +80,357 @@ const OGREX_ATS_CONFIG = {
     'Формат: офис Краснодар + командировки по РФ. Суточные 1200 руб.',
 };
 
-// ── Mock candidate pool ───────────────────────────────────────────────────────
+// ── Candidate pool (HH negotiations format) ───────────────────────────────────
 
-const CANDIDATES_POOL = [
-  // Wave 1
+const now = Date.now();
+const hoursAgo = (h) => new Date(now - h * 3600 * 1000).toISOString();
+
+const CANDIDATES = [
   {
-    id: 'morozov',
     wave: 1,
-    name: 'Морозов Алексей Викторович',
-    age: 42,
-    city: 'Краснодар',
-    score: 82,
-    tag: 'PASS',
-    headline: 'Ведущий инженер-наладчик, Ростовская ТЭС-2',
-    experience: '15 лет в пусконаладке паровых турбин и вспомогательного оборудования на ТЭС. ' +
-      'Последние 5 лет — ведущий инженер на Ростовской ТЭС-2. ' +
-      'Участвовал в ПНР блоков 310 МВт, разработке рабочих программ и проведении режимных наладок.',
-    skills: ['ПНР паровых турбин', 'котлотурбинное оборудование', 'режимная наладка', 'AutoCAD', 'ПТЭ', 'командировки'],
-    personality: 'деловой, конкретный, ценит стабильность',
-    resume_url: 'https://hh.ru/resume/demo-morozov',
-    apply_date: '2 часа назад',
+    negotiation: {
+      id: 'demo-neg-morozov',
+      _state: 'response',
+      updated_at: hoursAgo(2),
+      message: 'Добрый день! Откликаюсь на вашу вакансию. 15 лет в ПНР паровых турбин, последние 5 — ведущий инженер на Ростовской ТЭС-2. Готов к обсуждению.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-morozov',
+        first_name: 'Алексей', last_name: 'Морозов',
+        title: 'Ведущий инженер-наладчик турбинного оборудования',
+        area: { name: 'Краснодар' },
+        total_experience: { months: 180 },
+        salary: { amount: 180000, currency: 'RUR' },
+        skill_set: ['ПНР паровых турбин', 'котлотурбинное оборудование', 'режимная наладка', 'AutoCAD', 'ПТЭ', 'сосуды под давлением'],
+        alternate_url: 'https://hh.ru/resume/demo-morozov',
+        experience: [
+          { start: '2019-03', end: null, company: 'Ростовская ТЭС-2', position: 'Ведущий инженер-наладчик', description: 'ПНР паровых турбин 310 МВт, разработка рабочих программ, режимная наладка.' },
+          { start: '2009-06', end: '2019-02', company: 'Энергопром-Юг', position: 'Инженер-наладчик', description: 'ПНР котлотурбинного оборудования на объектах ЮФО.' },
+        ],
+        education: { primary: [{ name: 'Теплоэнергетика', organization: 'ЮРГТУ (НПИ)', year: 2007 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 8.2,
+        verdict: 'ПРОПУСТИТЬ',
+        matched: ['15 лет ПНР паровых турбин', 'Опыт ТЭС блоки 310 МВт', 'AutoCAD, ПТЭ', 'Краснодар — совпадает с офисом'],
+        gaps: ['Угольный котёл промышленного объекта — уточнить опыт именно с ним'],
+        reasoning: 'Сильный профильный кандидат. Опыт полностью совпадает с требованиями, живёт в Краснодаре. Стоит приоритетно пригласить.',
+        scored_at: now,
+        draft_message: 'Алексей, добрый день! Изучили ваше резюме — опыт с турбинами ТЭС очень подходит. Уточните: работали ли с угольными котлами промышленных объектов? И насколько активно готовы к командировкам в первые месяцы?',
+      },
+    },
   },
   {
-    id: 'krasnov',
     wave: 1,
-    name: 'Краснов Сергей Алексеевич',
-    age: 35,
-    city: 'Новосибирск',
-    score: 44,
-    tag: 'REVIEW',
-    headline: 'Инженер-энергетик, опыт ГЭС и малых ТЭС',
-    experience: '8 лет в энергетике, преимущественно ГЭС (Новосибирская ГЭС). ' +
-      'Имеет базовый опыт работы с паровыми турбинами на малой ТЭС (300 МВт). ' +
-      'AutoCAD знает уверенно. Готов к переобучению на тепловые станции.',
-    skills: ['паровые турбины (базовый)', 'AutoCAD', 'ПТЭ', 'ГЭС', 'готовность к командировкам'],
-    personality: 'открытый, готов учиться, немного неуверен в теме ТЭС',
-    resume_url: 'https://hh.ru/resume/demo-krasnov',
-    apply_date: '3 часа назад',
+    negotiation: {
+      id: 'demo-neg-krasnov',
+      _state: 'response',
+      updated_at: hoursAgo(3),
+      message: 'Здравствуйте. Рассматриваю смену специализации с ГЭС на ТЭС. Базовый опыт с паровыми турбинами есть.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-krasnov',
+        first_name: 'Сергей', last_name: 'Краснов',
+        title: 'Инженер-энергетик (ГЭС)',
+        area: { name: 'Новосибирск' },
+        total_experience: { months: 96 },
+        salary: { amount: 140000, currency: 'RUR' },
+        skill_set: ['паровые турбины', 'AutoCAD', 'ПТЭ', 'ГЭС', 'командировки'],
+        alternate_url: 'https://hh.ru/resume/demo-krasnov',
+        experience: [
+          { start: '2018-05', end: null, company: 'Новосибирская ГЭС', position: 'Инженер-наладчик', description: 'Наладка гидрогенераторов и вспомогательного оборудования. Краткосрочные ПНР на малой ТЭС (300 МВт).' },
+        ],
+        education: { primary: [{ name: 'Электроэнергетика', organization: 'НГТУ', year: 2018 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 5.5,
+        verdict: 'УТОЧНИТЬ',
+        matched: ['AutoCAD', 'ПТЭ', 'готов к командировкам', 'базовый опыт паровых турбин'],
+        gaps: ['Основной опыт — ГЭС, не ТЭС', 'Нет опыта разработки ПНР документации', 'Нет опыта с котлами'],
+        reasoning: 'Мотивирован перейти в тепловую энергетику. Базовые знания есть, но требуется переобучение. Стоит уточнить серьёзность намерений.',
+        scored_at: now,
+        draft_message: 'Сергей, добрый день! Вы упомянули переход с ГЭС на ТЭС — это требует переобучения. Расскажите подробнее о вашем опыте с паровыми турбинами и как быстро готовы освоить новую специфику?',
+      },
+    },
   },
   {
-    id: 'kovaleva',
     wave: 1,
-    name: 'Ковалёва Ирина Петровна',
-    age: 29,
-    city: 'Москва',
-    score: 18,
-    tag: 'PASS_LATER',
-    headline: 'Инженер-проектировщик тепловых сетей',
-    experience: '4 года в проектировании тепловых сетей (ИПТ, г. Москва). ' +
-      'ПНР не делала, работает только с проектной документацией. ' +
-      'Теплотехническое образование есть, нет опыта с паровыми турбинами.',
-    skills: ['проектирование тепловых сетей', 'nanoCAD', 'КОМПАС', 'теплоэнергетика (проект)'],
-    personality: 'вежливая, аккуратная, честна насчёт пробелов',
-    resume_url: 'https://hh.ru/resume/demo-kovaleva',
-    apply_date: '5 часов назад',
+    negotiation: {
+      id: 'demo-neg-kovaleva',
+      _state: 'response',
+      updated_at: hoursAgo(5),
+      message: 'Добрый день! Интересна вакансия, имею теплоэнергетическое образование.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-kovaleva',
+        first_name: 'Ирина', last_name: 'Ковалёва',
+        title: 'Инженер-проектировщик тепловых сетей',
+        area: { name: 'Москва' },
+        total_experience: { months: 48 },
+        salary: { amount: 110000, currency: 'RUR' },
+        skill_set: ['проектирование тепловых сетей', 'nanoCAD', 'КОМПАС'],
+        alternate_url: 'https://hh.ru/resume/demo-kovaleva',
+        experience: [
+          { start: '2022-09', end: null, company: 'ИПТ Москва', position: 'Инженер-проектировщик', description: 'Проектирование тепловых сетей жилых кварталов, расчёты теплопотерь.' },
+        ],
+        education: { primary: [{ name: 'Теплоэнергетика', organization: 'МЭИ', year: 2022 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 2.5,
+        verdict: 'ОТКЛОНИТЬ',
+        matched: ['Высшее теплоэнергетическое образование', 'nanoCAD, КОМПАС'],
+        gaps: ['Нет опыта ПНР — только проектирование', 'Нет опыта с паровыми турбинами', 'Не работала на ТЭС или промышленных объектах'],
+        reasoning: 'Образование подходит, но весь опыт — проектирование сетей, а не ПНР оборудования. Не соответствует позиции ведущего инженера-наладчика.',
+        scored_at: now,
+        draft_message: null,
+      },
+    },
   },
 
   // Wave 2
   {
-    id: 'smirnov',
     wave: 2,
-    name: 'Смирнов Дмитрий Андреевич',
-    age: 38,
-    city: 'Москва',
-    score: 76,
-    tag: 'PASS',
-    headline: 'Инженер-наладчик турбинного оборудования, ЭНКОМ',
-    experience: '12 лет ПНР паровых турбин и котлотурбинного оборудования. ' +
-      'Работал на Калининградской ТЭЦ-2, Тверской ТЭЦ-4. ' +
-      'Разрабатывал программы испытаний и режимной наладки. Знает ПТЭ и ФНП по промбезопасности.',
-    skills: ['ПНР паровых турбин', 'котлотурбинное оборудование', 'ПТЭ', 'ФНП промбезопасность', 'командировки'],
-    personality: 'профессиональный, немногословный, ценит чёткие условия',
-    resume_url: 'https://hh.ru/resume/demo-smirnov',
-    apply_date: '1 день назад',
+    negotiation: {
+      id: 'demo-neg-smirnov',
+      _state: 'response',
+      updated_at: hoursAgo(26),
+      message: 'Добрый день. Рассматриваю предложение. 12 лет в ПНР турбинного оборудования, работал на ТЭЦ-2 и ТЭЦ-4.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-smirnov',
+        first_name: 'Дмитрий', last_name: 'Смирнов',
+        title: 'Инженер-наладчик турбинного оборудования',
+        area: { name: 'Москва' },
+        total_experience: { months: 144 },
+        salary: { amount: 200000, currency: 'RUR' },
+        skill_set: ['ПНР паровых турбин', 'котлотурбинное оборудование', 'ПТЭ', 'ФНП промбезопасность', 'командировки'],
+        alternate_url: 'https://hh.ru/resume/demo-smirnov',
+        experience: [
+          { start: '2018-01', end: null, company: 'ЭНКОМ', position: 'Ведущий инженер-наладчик', description: 'ПНР паровых турбин на Калининградской ТЭЦ-2 и Тверской ТЭЦ-4. Разработка программ испытаний.' },
+          { start: '2012-06', end: '2017-12', company: 'Теплоэнергомонтаж', position: 'Инженер-наладчик', description: 'ПНР котлотурбинного оборудования на объектах ЦФО.' },
+        ],
+        education: { primary: [{ name: 'Теплоэнергетика', organization: 'МЭИ', year: 2012 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 7.6,
+        verdict: 'ПРОПУСТИТЬ',
+        matched: ['12 лет ПНР паровых турбин', 'ТЭЦ крупные объекты', 'ПТЭ, ФНП промбезопасность', 'Командировки — опыт есть'],
+        gaps: ['Ожидает 200к — уточнить вилку', 'Москва, потребуется переезд или вахта'],
+        reasoning: 'Сильный кандидат с подходящим опытом. Высокий зарплатный запрос, нужно обсудить условия и готовность к переезду.',
+        scored_at: now,
+        draft_message: 'Дмитрий, добрый день! Ваш опыт на ТЭЦ очень релевантен. Обсудим детали: по условиям мы предлагаем офис Краснодар + командировки по РФ. Готовы рассмотреть ваши ожидания по компенсации?',
+      },
+    },
   },
   {
-    id: 'volkov',
     wave: 2,
-    name: 'Волков Андрей Олегович',
-    age: 40,
-    city: 'Санкт-Петербург',
-    score: 38,
-    tag: 'REVIEW',
-    headline: 'Инженер-наладчик электросетевого оборудования',
-    experience: '10 лет ПНР в электросетях (Ленэнерго). ' +
-      'С паровыми турбинами не работал, но имеет общетехническое понимание ТЭС. ' +
-      'Образование: энергетика и электротехника. Ищет переход в тепловую генерацию.',
-    skills: ['ПНР электросетей', 'AutoCAD', 'энергетика (электро)', 'командировки'],
-    personality: 'мотивированный, честный про отсутствие опыта с турбинами',
-    resume_url: 'https://hh.ru/resume/demo-volkov',
-    apply_date: '1 день назад',
+    negotiation: {
+      id: 'demo-neg-volkov',
+      _state: 'response',
+      updated_at: hoursAgo(28),
+      message: 'Здравствуйте! Хочу перейти из электросетей в тепловую генерацию.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-volkov',
+        first_name: 'Андрей', last_name: 'Волков',
+        title: 'Инженер-наладчик электросетевого оборудования',
+        area: { name: 'Санкт-Петербург' },
+        total_experience: { months: 120 },
+        salary: { amount: 150000, currency: 'RUR' },
+        skill_set: ['ПНР электросетей', 'AutoCAD', 'энергетика', 'командировки'],
+        alternate_url: 'https://hh.ru/resume/demo-volkov',
+        experience: [
+          { start: '2014-09', end: null, company: 'Ленэнерго', position: 'Инженер-наладчик', description: 'ПНР трансформаторов, коммутационного оборудования, кабельных сетей 110–750 кВ.' },
+        ],
+        education: { primary: [{ name: 'Электроэнергетика и электротехника', organization: 'СПбГЭТУ', year: 2014 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 5.2,
+        verdict: 'УТОЧНИТЬ',
+        matched: ['10 лет ПНР опыт', 'AutoCAD', 'командировки'],
+        gaps: ['Специализация — электросети, не тепловая генерация', 'Нет опыта паровых турбин', 'Нет ПТЭ для ТЭС'],
+        reasoning: 'Опытный наладчик, но из другой специализации. Требуется значительная переподготовка. Стоит уточнить мотивацию перехода.',
+        scored_at: now,
+        draft_message: null,
+      },
+    },
   },
   {
-    id: 'zaitsev',
     wave: 2,
-    name: 'Зайцев Павел Николаевич',
-    age: 50,
-    city: 'Краснодар',
-    score: 22,
-    tag: 'PASS_LATER',
-    headline: 'Ведущий инженер, атомная энергетика (Росатом)',
-    experience: '20 лет в атомной энергетике (НВАЭС). ' +
-      'Опыт с турбинами есть, но по стандартам АЭС (ПНАЭ), а не ПТЭ ТЭС. ' +
-      'Отличное знание ядерных стандартов, но тепловая энергетика требует переобучения.',
-    skills: ['паровые турбины (АЭС)', 'ПНАЭ', 'ядерные регламенты', 'AutoCAD'],
-    personality: 'авторитетный, уверенный в себе, ожидает высокий оффер',
-    resume_url: 'https://hh.ru/resume/demo-zaitsev',
-    apply_date: '2 дня назад',
+    negotiation: {
+      id: 'demo-neg-zaitsev',
+      _state: 'response',
+      updated_at: hoursAgo(48),
+      message: 'Добрый день. 20 лет в атомной энергетике, опыт с паровыми турбинами. Рассматриваю гражданскую энергетику.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-zaitsev',
+        first_name: 'Павел', last_name: 'Зайцев',
+        title: 'Ведущий инженер, атомная энергетика',
+        area: { name: 'Краснодар' },
+        total_experience: { months: 240 },
+        salary: { amount: 230000, currency: 'RUR' },
+        skill_set: ['паровые турбины (АЭС)', 'ПНАЭ', 'ядерные регламенты', 'AutoCAD'],
+        alternate_url: 'https://hh.ru/resume/demo-zaitsev',
+        experience: [
+          { start: '2004-08', end: null, company: 'НВАЭС (Нововоронежская АЭС)', position: 'Ведущий инженер-наладчик', description: 'ПНР паровых турбин реакторных блоков по стандартам ПНАЭ.' },
+        ],
+        education: { primary: [{ name: 'Ядерные реакторы и материалы', organization: 'МИФИ', year: 2004 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 3.0,
+        verdict: 'ОТКЛОНИТЬ',
+        matched: ['Опыт паровых турбин', 'AutoCAD', 'Краснодар'],
+        gaps: ['Опыт строго по ПНАЭ (атомные), а не ПТЭ (тепловые)', 'Зарплатный запрос 230к — выше рынка ТЭС', 'Переобучение под другие регламенты займёт время'],
+        reasoning: 'Богатый опыт, но в другой нормативной базе. Переход из АЭС в тепловые требует значительного переобучения, плюс высокий зарплатный запрос.',
+        scored_at: now,
+        draft_message: null,
+      },
+    },
   },
 
   // Wave 3
   {
-    id: 'petrov',
     wave: 3,
-    name: 'Петров Николай Иванович',
-    age: 45,
-    city: 'Екатеринбург',
-    score: 88,
-    tag: 'PASS',
-    headline: 'Начальник группы наладки, Рефтинская ГРЭС',
-    experience: '20 лет в теплоэнергетике, последние 7 лет — начальник группы наладки котлотурбинного цеха. ' +
-      'Рефтинская ГРЭС (4000 МВт) — крупнейшая тепловая станция на угле. ' +
-      'Разрабатывал все виды ПНР документации, проводил испытания. Знает AutoCAD, КОМПАС.',
-    skills: ['ПНР паровых турбин', 'котлотурбинное оборудование', 'режимная наладка', 'AutoCAD', 'КОМПАС', 'ПТЭ', 'угольные котлы', 'командировки'],
-    personality: 'солидный, осторожный, рассматривает предложения конкретно',
-    resume_url: 'https://hh.ru/resume/demo-petrov',
-    apply_date: '3 дня назад',
+    negotiation: {
+      id: 'demo-neg-petrov',
+      _state: 'consider',
+      updated_at: hoursAgo(74),
+      message: 'Рассматриваю предложение. Руководил группой наладки на Рефтинской ГРЭС 7 лет.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-petrov',
+        first_name: 'Николай', last_name: 'Петров',
+        title: 'Начальник группы наладки котлотурбинного цеха',
+        area: { name: 'Екатеринбург' },
+        total_experience: { months: 240 },
+        salary: { amount: 220000, currency: 'RUR' },
+        skill_set: ['ПНР паровых турбин', 'угольные котлы', 'режимная наладка', 'AutoCAD', 'КОМПАС', 'ПТЭ', 'командировки'],
+        alternate_url: 'https://hh.ru/resume/demo-petrov',
+        experience: [
+          { start: '2017-02', end: null, company: 'Рефтинская ГРЭС (4000 МВт)', position: 'Начальник группы наладки', description: 'Руководство группой 8 человек. ПНР и режимная наладка котлотурбинного оборудования на угле.' },
+          { start: '2006-09', end: '2017-01', company: 'Свердловэнерго', position: 'Инженер-наладчик', description: 'ПНР турбин и вспомогательного оборудования Среднеуральской ГРЭС.' },
+        ],
+        education: { primary: [{ name: 'Теплоэнергетика', organization: 'УрФУ', year: 2006 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 8.8,
+        verdict: 'ПРОПУСТИТЬ',
+        matched: ['20 лет в теплоэнергетике', 'Угольные котлы — прямое попадание', 'Режимная наладка', 'AutoCAD, КОМПАС, ПТЭ', 'Руководящий опыт — рост до начальника участка возможен'],
+        gaps: ['Екатеринбург — потребуется обсудить переезд или условия', 'Зарплатный запрос 220к'],
+        reasoning: 'Лучший кандидат в выборке. Угольный котёл — именно то, что нужно. Руководящий опыт открывает карьерный трек. Приоритетно выйти на связь.',
+        scored_at: now,
+        draft_message: 'Николай, добрый день! Ваш опыт на Рефтинской ГРЭС с угольным котлом — именно то, что мы ищем. Готовы обсудить ваши условия по переезду и компенсации. Когда удобно созвониться?',
+      },
+    },
   },
   {
-    id: 'lebedev',
     wave: 3,
-    name: 'Лебедев Виктор Сергеевич',
-    age: 33,
-    city: 'Ростов-на-Дону',
-    score: 55,
-    tag: 'PASS',
-    headline: 'Инженер-наладчик 2 категории, ТЭЦ Ростова',
-    experience: '7 лет на Ростовской ТЭЦ, специализация — паровые турбины 100-200 МВт. ' +
-      'Участвовал в ПНР и режимных наладках, но самостоятельно программы не разрабатывал. ' +
-      'Готов развиваться до ведущего инженера.',
-    skills: ['ПНР паровых турбин', 'котлотурбинное оборудование', 'режимная наладка', 'AutoCAD', 'командировки'],
-    personality: 'амбициозный, молодой специалист, хочет расти',
-    resume_url: 'https://hh.ru/resume/demo-lebedev',
-    apply_date: '3 дня назад',
+    negotiation: {
+      id: 'demo-neg-lebedev',
+      _state: 'response',
+      updated_at: hoursAgo(75),
+      message: 'Добрый день! Ищу позицию с ростом. Готов развиваться.',
+      counters: { messages: 1, unread_messages: 0 },
+      has_updates: false,
+      resume: {
+        id: 'demo-res-lebedev',
+        first_name: 'Виктор', last_name: 'Лебедев',
+        title: 'Инженер-наладчик 2 категории',
+        area: { name: 'Ростов-на-Дону' },
+        total_experience: { months: 84 },
+        salary: { amount: 130000, currency: 'RUR' },
+        skill_set: ['ПНР паровых турбин', 'котлотурбинное оборудование', 'режимная наладка', 'AutoCAD', 'командировки'],
+        alternate_url: 'https://hh.ru/resume/demo-lebedev',
+        experience: [
+          { start: '2019-07', end: null, company: 'Ростовская ТЭЦ', position: 'Инженер-наладчик 2 категории', description: 'ПНР паровых турбин 100–200 МВт. Участие в режимных наладках.' },
+        ],
+        education: { primary: [{ name: 'Теплоэнергетика', organization: 'ДГТУ', year: 2019 }] },
+      },
+    },
+    history: {
+      messages: [],
+      ats_result: {
+        score: 6.5,
+        verdict: 'УТОЧНИТЬ',
+        matched: ['7 лет ПНР паровых турбин на ТЭС', 'AutoCAD', 'командировки', 'Ростов — близко к Краснодару'],
+        gaps: ['Самостоятельно не разрабатывал ПНР документацию', 'Нет опыта с котлами (только турбины)'],
+        reasoning: 'Растущий специалист с профильным опытом. Для позиции «ведущего» немного не хватает самостоятельности, но потенциал есть. Уточнить.',
+        scored_at: now,
+        draft_message: 'Виктор, добрый день! Хороший опыт с турбинами на ТЭС. Уточните: участвовали ли самостоятельно в разработке рабочих программ ПНР? И как быстро готовы к переезду в Краснодар?',
+      },
+    },
   },
 ];
 
-// ── Context store helpers ─────────────────────────────────────────────────────
+// ── Wave helpers ──────────────────────────────────────────────────────────────
 
-function ctxPath(key) {
-  return path.join(process.cwd(), 'contexts', 'demo', `${key}.json`);
+function waveCachePath(username) {
+  return path.join(hhDir(username), 'demo-wave.json');
 }
 
-function ctxRead(key, def = null) {
-  const p = ctxPath(key);
-  if (!fs.existsSync(p)) return def;
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')).value; } catch { return def; }
+function currentWave(username) {
+  try { return JSON.parse(fs.readFileSync(waveCachePath(username), 'utf8')).wave || 1; } catch { return 1; }
 }
 
-function ctxWrite(key, value) {
-  const p = ctxPath(key);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  const tmp = `${p}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ value, updated_at: new Date().toISOString() }, null, 2));
-  fs.renameSync(tmp, p);
+function setWave(username, wave) {
+  writeJson(waveCachePath(username), { wave });
 }
 
-function hhCtxWrite(key, value) {
-  const p = path.join(process.cwd(), 'contexts', 'hh', `${key}.json`);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  const tmp = `${p}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ value, updated_at: new Date().toISOString() }, null, 2));
-  fs.renameSync(tmp, p);
+function activeNegotiations(username) {
+  const wave = currentWave(username);
+  return CANDIDATES.filter(c => c.wave <= wave).map(c => c.negotiation);
 }
 
-// ── OpenRouter call for candidate response ─────────────────────────────────
+// ── OpenRouter helper ─────────────────────────────────────────────────────────
 
-async function generateCandidateReply(candidate, recruiterMessage, userId) {
-  const keyPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'openrouter');
+async function generateCandidateReply(candidate, recruiterMessage, username) {
+  const keyPath = path.join(tokensDir(), String(username), 'openrouter');
   let apiKey = '';
   try { apiKey = fs.readFileSync(keyPath, 'utf8').trim(); } catch {}
   if (!apiKey) return null;
 
+  const r = candidate.negotiation.resume;
   const system = [
-    `Ты — ${candidate.name}, ${candidate.age} лет, ${candidate.city}.`,
-    `Должность: ${candidate.headline}`,
-    `Опыт: ${candidate.experience}`,
-    `Характер: ${candidate.personality}`,
+    `Ты — ${r.first_name} ${r.last_name}, кандидат на вакансию. Твой профиль:`,
+    `Должность: ${r.title}, ${r.area?.name}`,
+    `Опыт: ${Math.floor((r.total_experience?.months || 0) / 12)} лет`,
     '',
-    'Тебе написал рекрутер. Ответь коротко (2-4 предложения) по-деловому, по-русски.',
-    'Не начинай с "Здравствуйте" — уже поздоровались. Не выдумывай факты сверх профиля.',
+    'Тебе написал рекрутер. Ответь коротко (2-4 предложения), по-деловому, по-русски.',
+    'Не начинай с "Здравствуйте". Не выдумывай факты сверх профиля.',
   ].join('\n');
 
   const body = JSON.stringify({
     model: 'anthropic/claude-haiku-4-5',
-    max_tokens: 256,
+    max_tokens: 200,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: recruiterMessage },
@@ -236,34 +438,20 @@ async function generateCandidateReply(candidate, recruiterMessage, userId) {
   });
 
   return new Promise((resolve) => {
-    const req = https.request(
-      {
-        hostname: 'openrouter.ai',
-        path: '/api/v1/chat/completions',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Length': Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        const chunks = [];
-        res.on('data', d => chunks.push(d));
-        res.on('end', () => {
-          try {
-            const data = JSON.parse(Buffer.concat(chunks).toString());
-            resolve(data?.choices?.[0]?.message?.content || null);
-          } catch {
-            resolve(null);
-          }
-        });
-      }
-    );
+    const req = https.request({
+      hostname: 'openrouter.ai', path: '/api/v1/chat/completions', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', d => chunks.push(d));
+      res.on('end', () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString())?.choices?.[0]?.message?.content || null); }
+        catch { resolve(null); }
+      });
+    });
     req.on('error', () => resolve(null));
     req.setTimeout(20000, () => { req.destroy(); resolve(null); });
-    req.write(body);
-    req.end();
+    req.write(body); req.end();
   });
 }
 
@@ -274,274 +462,201 @@ module.exports = {
 
     demo_activate: {
       description:
-        'Активирует демо-режим для вакансии ОРГРЭС. ' +
-        'Загружает ATS конфиг, инициализирует пул из 8 кандидатов, доставляет первую волну. ' +
-        'После активации доступны: demo_next_wave, demo_reply, hh_proactive_search.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          vacancy: {
-            type: 'string',
-            description: 'Код демо-вакансии. Сейчас доступна только "ogrex".',
-            enum: ['ogrex'],
-            default: 'ogrex',
-          },
-        },
-      },
-      handler: async ({ vacancy = 'ogrex' } = {}) => {
-        // Write ATS config (used by hh_proactive_search and HH tools)
-        hhCtxWrite('ats_config', OGREX_ATS_CONFIG);
+        'Активирует демо-режим для вакансии ОРГРЭС: записывает реальные файлы кандидатов ' +
+        'в формат HH так, чтобы страница /hh/review показывала их сразу. ' +
+        'Записывает ATS конфиг, активную вакансию, фиктивный HH-токен (чтобы страница открылась) ' +
+        'и 3 кандидата первой волны с оценками и черновиками сообщений.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const uid = userId();
+        if (!uid) return { error: 'USER_ID не задан' };
 
-        // Set active vacancy so pin card and HH tools see it
-        hhCtxWrite('active_vacancy', {
+        // 1. Fake HH token so /hh/review doesn't 404
+        const tokenPath = path.join(tokensDir(), uid, 'hh');
+        if (!fs.existsSync(tokenPath)) {
+          writeJson(tokenPath, { access_token: 'demo-token', token_type: 'Bearer', expires_in: 9999999 });
+        }
+
+        // 2. ATS config
+        writeCtx(uid, 'hh', 'ats_config', OGREX_ATS_CONFIG);
+
+        // 3. Active vacancy
+        writeCtx(uid, 'hh', 'active_vacancy', {
           id: 'demo-ogrex',
           title: OGREX_ATS_CONFIG.vacancy_title,
           employer: 'ОРГРЭС',
           demo: true,
         });
 
-        // Seed candidate pool
-        ctxWrite('pool', CANDIDATES_POOL.map(c => ({ ...c, delivered: c.wave === 1, replied: false, conversation: [] })));
-        ctxWrite('mode', { active: true, vacancy, activated_at: new Date().toISOString(), current_wave: 1 });
+        // 4. Set wave 1 and write negotiations cache
+        setWave(uid, 1);
+        const negotiations = activeNegotiations(uid);
+        writeJson(cacheFile(uid), { synced_at: Date.now(), vacancy_id: 'demo-ogrex', negotiations });
 
-        const wave1 = CANDIDATES_POOL.filter(c => c.wave === 1);
-        const passCount = wave1.filter(c => c.tag === 'PASS').length;
-        const reviewCount = wave1.filter(c => c.tag === 'REVIEW').length;
+        // 5. Write candidate history files (scores + drafts)
+        CANDIDATES.forEach(c => {
+          writeJson(path.join(candDir(uid), `${c.negotiation.id}.json`), c.history);
+        });
+
+        const wave1 = CANDIDATES.filter(c => c.wave === 1);
+        const url = reviewUrl(uid);
 
         return {
           ok: true,
           vacancy: OGREX_ATS_CONFIG.vacancy_title,
-          ats_loaded: true,
-          candidates_in_pool: CANDIDATES_POOL.length,
-          wave_delivered: 1,
-          first_wave: wave1.map(c => ({ id: c.id, name: c.name, score: c.score, tag: c.tag, headline: c.headline })),
+          wave: 1,
+          candidates_loaded: negotiations.length,
+          review_url: url,
           message:
             `Демо активировано!\n\n` +
             `📋 Вакансия: ${OGREX_ATS_CONFIG.vacancy_title} (ОРГРЭС)\n` +
-            `👥 Первая волна: ${wave1.length} кандидата (PASS: ${passCount}, REVIEW: ${reviewCount})\n` +
-            `📦 Всего в пуле: ${CANDIDATES_POOL.length} кандидатов в 3 волнах\n\n` +
-            `Доступные действия:\n` +
-            `• Посмотреть кандидатов: demo_candidates\n` +
-            `• Следующая волна откликов: demo_next_wave\n` +
-            `• Написать кандидату: demo_reply\n` +
-            `• Холодный поиск: hh_proactive_search`,
-        };
-      },
-    },
-
-    demo_status: {
-      description: 'Возвращает статус демо-режима: активен ли, какая вакансия, сколько кандидатов доставлено.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => {
-        const mode = ctxRead('mode');
-        if (!mode?.active) return { active: false, message: 'Демо-режим не активирован. Используй demo_activate.' };
-
-        const pool = ctxRead('pool', []);
-        const delivered = pool.filter(c => c.delivered);
-        const replied = pool.filter(c => c.replied);
-
-        return {
-          active: true,
-          vacancy: OGREX_ATS_CONFIG.vacancy_title,
-          current_wave: mode.current_wave,
-          total_candidates: pool.length,
-          delivered_count: delivered.length,
-          replied_count: replied.length,
-          next_wave_available: pool.some(c => !c.delivered),
-          activated_at: mode.activated_at,
-        };
-      },
-    },
-
-    demo_candidates: {
-      description:
-        'Возвращает список доставленных кандидатов с оценками и историей переписки. ' +
-        'Вызывай когда рекрутер хочет посмотреть отклики или выбрать кому написать.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          tag: {
-            type: 'string',
-            enum: ['PASS', 'REVIEW', 'PASS_LATER', 'all'],
-            description: 'Фильтр по тегу. По умолчанию — все.',
-            default: 'all',
-          },
-        },
-      },
-      handler: async ({ tag = 'all' } = {}) => {
-        const mode = ctxRead('mode');
-        if (!mode?.active) return { error: 'Демо-режим не активен. Сначала вызови demo_activate.' };
-
-        const pool = ctxRead('pool', []);
-        let candidates = pool.filter(c => c.delivered);
-        if (tag !== 'all') candidates = candidates.filter(c => c.tag === tag);
-
-        return {
-          ok: true,
-          count: candidates.length,
-          candidates: candidates.map(c => ({
-            id: c.id,
-            name: c.name,
-            age: c.age,
-            city: c.city,
-            score: c.score,
-            tag: c.tag,
-            headline: c.headline,
-            apply_date: c.apply_date,
-            has_conversation: c.conversation?.length > 0,
-            last_message: c.conversation?.length > 0
-              ? c.conversation[c.conversation.length - 1]
-              : null,
-          })),
-          tip: 'Чтобы написать кандидату — demo_reply(candidate_id, message)',
+            `👥 Первая волна: ${wave1.length} кандидата с оценками и черновиками\n` +
+            `🔗 Страница с кандидатами: ${url}\n\n` +
+            `Следующая волна: demo_next_wave\n` +
+            `Написать кандидату: demo_reply(negotiation_id, message)`,
         };
       },
     },
 
     demo_next_wave: {
-      description:
-        'Доставляет следующую волну откликов от кандидатов (2-3 новых). ' +
-        'Имитирует поступление новых резюме. Вызывай когда рекрутер ждёт новых кандидатов.',
+      description: 'Доставляет следующую волну кандидатов (+2-3 новых). Обновляет кэш HH.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
-        const mode = ctxRead('mode');
-        if (!mode?.active) return { error: 'Демо-режим не активен.' };
+        const uid = userId();
+        if (!uid) return { error: 'USER_ID не задан' };
 
-        const pool = ctxRead('pool', []);
-        const nextWave = mode.current_wave + 1;
-        const toDeliver = pool.filter(c => c.wave === nextWave && !c.delivered);
+        const wave = currentWave(uid);
+        const nextWave = wave + 1;
+        const maxWave = Math.max(...CANDIDATES.map(c => c.wave));
 
-        if (!toDeliver.length) {
-          return {
-            ok: false,
-            message: 'Все волны кандидатов уже доставлены. Пул исчерпан.',
-            total_delivered: pool.filter(c => c.delivered).length,
-          };
+        if (nextWave > maxWave) {
+          return { ok: false, message: 'Все волны доставлены, пул исчерпан.', total: CANDIDATES.length };
         }
 
-        const updated = pool.map(c =>
-          c.wave === nextWave ? { ...c, delivered: true } : c
-        );
-        ctxWrite('pool', updated);
-        ctxWrite('mode', { ...mode, current_wave: nextWave });
+        setWave(uid, nextWave);
+        const negotiations = activeNegotiations(uid);
+        writeJson(cacheFile(uid), { synced_at: Date.now(), vacancy_id: 'demo-ogrex', negotiations });
 
-        const passCount = toDeliver.filter(c => c.tag === 'PASS').length;
-        const reviewCount = toDeliver.filter(c => c.tag === 'REVIEW').length;
-
+        const newOnes = CANDIDATES.filter(c => c.wave === nextWave);
         return {
           ok: true,
           wave: nextWave,
-          new_candidates: toDeliver.map(c => ({
-            id: c.id,
-            name: c.name,
-            age: c.age,
-            city: c.city,
-            score: c.score,
-            tag: c.tag,
-            headline: c.headline,
-            apply_date: c.apply_date,
+          new_count: newOnes.length,
+          new_candidates: newOnes.map(c => ({
+            id: c.negotiation.id,
+            name: `${c.negotiation.resume.last_name} ${c.negotiation.resume.first_name}`,
+            score: c.history.ats_result?.score,
+            verdict: c.history.ats_result?.verdict,
           })),
-          summary: `Новая волна откликов! +${toDeliver.length} кандидата (PASS: ${passCount}, REVIEW: ${reviewCount})`,
-          total_delivered: updated.filter(c => c.delivered).length,
-        };
-      },
-    },
-
-    demo_candidate_profile: {
-      description: 'Возвращает полный профиль конкретного кандидата: опыт, навыки, переписку.',
-      inputSchema: {
-        type: 'object',
-        required: ['candidate_id'],
-        properties: {
-          candidate_id: { type: 'string', description: 'ID кандидата (morozov, smirnov, petrov, и т.д.)' },
-        },
-      },
-      handler: async ({ candidate_id }) => {
-        const mode = ctxRead('mode');
-        if (!mode?.active) return { error: 'Демо-режим не активен.' };
-
-        const pool = ctxRead('pool', []);
-        const candidate = pool.find(c => c.id === candidate_id);
-        if (!candidate) return { error: `Кандидат ${candidate_id} не найден.` };
-        if (!candidate.delivered) return { error: `Кандидат ${candidate_id} ещё не доставлен (wave ${candidate.wave}).` };
-
-        return {
-          ok: true,
-          ...candidate,
-          conversation_count: candidate.conversation?.length || 0,
+          total_now: negotiations.length,
+          review_url: reviewUrl(uid),
         };
       },
     },
 
     demo_reply: {
       description:
-        'Отправляет сообщение кандидату (симуляция) и возвращает ответ кандидата, ' +
-        'сгенерированный через AI. Используй для демонстрации переписки рекрутера с кандидатом.',
+        'Отправляет сообщение кандидату (симуляция): пишет в history-файл и генерирует ответ кандидата через AI. ' +
+        'После вызова кандидат появится в табе "ждут ответа" с его репликой.',
       inputSchema: {
         type: 'object',
-        required: ['candidate_id', 'message'],
+        required: ['negotiation_id', 'message'],
         properties: {
-          candidate_id: { type: 'string', description: 'ID кандидата' },
-          message: { type: 'string', description: 'Сообщение от рекрутера кандидату' },
+          negotiation_id: { type: 'string', description: 'ID переговора (demo-neg-morozov и т.д.)' },
+          message: { type: 'string', description: 'Текст сообщения от рекрутера' },
         },
       },
-      handler: async ({ candidate_id, message }) => {
-        const mode = ctxRead('mode');
-        if (!mode?.active) return { error: 'Демо-режим не активен.' };
+      handler: async ({ negotiation_id, message }) => {
+        const uid = userId();
+        if (!uid) return { error: 'USER_ID не задан' };
 
-        const pool = ctxRead('pool', []);
-        const idx = pool.findIndex(c => c.id === candidate_id);
-        if (idx === -1) return { error: `Кандидат ${candidate_id} не найден.` };
-        const candidate = pool[idx];
-        if (!candidate.delivered) return { error: `Кандидат ${candidate_id} ещё не в списке.` };
+        const candidate = CANDIDATES.find(c => c.negotiation.id === negotiation_id);
+        if (!candidate) return { error: `Кандидат ${negotiation_id} не найден.` };
 
-        // Store recruiter message
-        const conversation = [...(candidate.conversation || []), {
-          role: 'recruiter',
-          text: message,
-          at: new Date().toISOString(),
-        }];
+        const histPath = path.join(candDir(uid), `${negotiation_id}.json`);
+        let history = { messages: [], ats_result: null };
+        try { history = JSON.parse(fs.readFileSync(histPath, 'utf8')); } catch {}
 
-        // Generate candidate response
-        const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
-        const candidateReply = await generateCandidateReply(candidate, message, userId);
+        const ts = new Date().toISOString();
+        history.messages.push({ role: 'employer', text: message, timestamp: ts });
 
-        if (candidateReply) {
-          conversation.push({
-            role: 'candidate',
-            text: candidateReply,
-            at: new Date().toISOString(),
-          });
+        // Generate candidate reply
+        const reply = await generateCandidateReply(candidate, message, uid);
+        if (reply) {
+          history.messages.push({ role: 'applicant', text: reply, timestamp: new Date().toISOString() });
         }
 
-        // Update pool
-        const updated = pool.map((c, i) => i === idx
-          ? { ...c, conversation, replied: candidateReply != null }
-          : c
-        );
-        ctxWrite('pool', updated);
+        writeJson(histPath, history);
+
+        // Update negotiations cache: bump messages count so page shows new activity
+        try {
+          const cache = JSON.parse(fs.readFileSync(cacheFile(uid), 'utf8'));
+          cache.negotiations = cache.negotiations.map(n =>
+            n.id === negotiation_id
+              ? { ...n, counters: { messages: reply ? 3 : 2, unread_messages: reply ? 1 : 0 }, has_updates: !!reply }
+              : n
+          );
+          cache.synced_at = Date.now();
+          writeJson(cacheFile(uid), cache);
+        } catch {}
 
         return {
           ok: true,
-          message_sent: true,
-          candidate_name: candidate.name,
+          sent: true,
+          candidate: `${candidate.negotiation.resume.last_name} ${candidate.negotiation.resume.first_name}`,
           your_message: message,
-          candidate_reply: candidateReply || null,
-          has_reply: candidateReply != null,
-          note: candidateReply
-            ? 'Кандидат ответил (симуляция)'
-            : 'Ответ кандидата не сгенерирован (OpenRouter ключ не найден)',
+          candidate_reply: reply || null,
+          review_url: reviewUrl(uid),
+        };
+      },
+    },
+
+    demo_status: {
+      description: 'Показывает статус демо-режима: активен ли, сколько кандидатов загружено, ссылка на страницу.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const uid = userId();
+        if (!uid) return { error: 'USER_ID не задан' };
+
+        const tokenPath = path.join(tokensDir(), uid, 'hh');
+        const active = fs.existsSync(tokenPath) && (() => {
+          try { return JSON.parse(fs.readFileSync(tokenPath, 'utf8'))?.access_token === 'demo-token'; } catch { return false; }
+        })();
+
+        if (!active) return { active: false, message: 'Демо не активировано. Используй demo_activate.' };
+
+        const wave = currentWave(uid);
+        const loaded = CANDIDATES.filter(c => c.wave <= wave).length;
+
+        return {
+          active: true,
+          wave,
+          candidates_loaded: loaded,
+          candidates_total: CANDIDATES.length,
+          review_url: reviewUrl(uid),
         };
       },
     },
 
     demo_deactivate: {
-      description: 'Выключает демо-режим и очищает демо-данные. ATS конфиг не трогает.',
+      description: 'Выключает демо: удаляет фиктивный HH-токен и очищает кэш переговоров. ATS конфиг не трогает.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
-        ctxWrite('mode', { active: false });
-        ctxWrite('pool', []);
-        return { ok: true, message: 'Демо-режим отключён.' };
+        const uid = userId();
+        if (!uid) return { error: 'USER_ID не задан' };
+
+        // Remove fake token only (real token would have a different access_token)
+        const tokenPath = path.join(tokensDir(), uid, 'hh');
+        try {
+          const tok = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+          if (tok?.access_token === 'demo-token') fs.unlinkSync(tokenPath);
+        } catch {}
+
+        // Remove demo cache
+        try { fs.unlinkSync(cacheFile(uid)); } catch {}
+        try { fs.unlinkSync(waveCachePath(uid)); } catch {}
+
+        return { ok: true, message: 'Демо-режим отключён. HH токен удалён (если был демо).' };
       },
     },
 
