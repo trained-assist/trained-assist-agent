@@ -224,3 +224,81 @@ describe('scoreUnscoredCandidates — skip and guard conditions', () => {
     expect(scored).toBe(0);
   });
 });
+
+// ── Test 4: scoreUnscoredCandidates — actual scoring with mock LLM ────────────
+//
+// This is the regression test for the {value:...} wrapper bug:
+// readAtsConfig returned null because the file was written without a wrapper,
+// which caused scoreUnscoredCandidates to return 0 even with valid candidates.
+
+describe('scoreUnscoredCandidates — actual scoring (monkey-patched LLM)', () => {
+  let originalEvaluate;
+
+  beforeEach(() => {
+    writeAtsConfig(WORK_DIR, {
+      knockout: [{ criterion: 'Нет опыта в private banking', auto_reject: true }],
+      required_skills: [{ skill: 'Private Banking', weight: 30 }],
+      preferred_skills: [{ skill: 'Английский язык', weight: 10 }],
+      experience_min_years: 4,
+      thresholds: { strong: 7, consider: 5, reject: 3 },
+      vacancy_context: 'Test vacancy',
+    });
+    // Monkey-patch via module.exports — scoreUnscoredCandidates calls module.exports.evaluateCandidate
+    originalEvaluate = scoring.evaluateCandidate;
+    scoring.evaluateCandidate = async () => ({
+      score: 7.5,
+      verdict: 'pass',
+      reasoning: 'Mock score',
+      matched: ['4 года в private banking'],
+      gaps: ['Нет клиентской базы'],
+      strong: ['Private Banking'],
+      missing: [],
+    });
+  });
+
+  afterEach(() => {
+    scoring.evaluateCandidate = originalEvaluate;
+  });
+
+  it('scores 3 unscored candidates and writes ats_result to disk', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-or-key';
+    const scored = await scoring.scoreUnscoredCandidates(DEFAULT_NEGOTIATIONS, TEST_USER, WORK_DIR, { maxConcurrent: 2 });
+    expect(scored).toBe(DEFAULT_NEGOTIATIONS.length);
+
+    for (const neg of DEFAULT_NEGOTIATIONS) {
+      const h = scoring.readCandidateHistory(TEST_USER, neg.id);
+      expect(h.ats_result).not.toBeNull();
+      expect(h.ats_result.score).toBe(7.5);
+      expect(Array.isArray(h.ats_result.matched)).toBe(true);
+      expect(Array.isArray(h.ats_result.gaps)).toBe(true);
+      expect(typeof h.ats_result.scored_at).toBe('number');
+    }
+    delete process.env.OPENROUTER_API_KEY;
+  });
+
+  it('knockout/required_skills/preferred_skills schema is readable by buildAtsPrompt', () => {
+    const config = scoring.readAtsConfig(WORK_DIR);
+    expect(config).not.toBeNull();
+    // buildAtsPrompt must read knockout[].criterion and required_skills[].skill
+    // (regression: old code read config.required which was empty → no criteria)
+    const prompt = scoring.buildAtsPrompt(config);
+    expect(prompt).toContain('Нет опыта в private banking');
+    expect(prompt).toContain('Private Banking');
+  });
+
+  it('writes last-scoring.json after scoring', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-or-key';
+    const { existsSync, readFileSync } = require('fs');
+    const { join } = require('path');
+    const { homedir } = require('os');
+    const logFile = join(homedir(), 'agent-data', 'hh', TEST_USER, 'last-scoring.json');
+
+    await scoring.scoreUnscoredCandidates(DEFAULT_NEGOTIATIONS, TEST_USER, WORK_DIR, { maxConcurrent: 2 });
+
+    expect(existsSync(logFile)).toBe(true);
+    const log = JSON.parse(readFileSync(logFile, 'utf8'));
+    expect(log.scored).toBe(DEFAULT_NEGOTIATIONS.length);
+    expect(typeof log.at).toBe('number');
+    delete process.env.OPENROUTER_API_KEY;
+  });
+});
