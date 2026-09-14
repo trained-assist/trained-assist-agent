@@ -270,6 +270,12 @@ async function generateCandidateReply(candidate, recruiterMessage, userId) {
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: () => {
+    const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+    if (!userId) return false;
+    return fs.existsSync(path.join(os.homedir(), 'agent-tokens', userId, 'hh'));
+  },
+
   tools: {
 
     demo_activate: {
