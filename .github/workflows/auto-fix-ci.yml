@@ -59,30 +59,30 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MODEL: deepseek/deepseek-chat
         run: node scripts/autofix-openrouter.mjs
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Strong-model auto-fix attempt (OpenRouter fallback)
+        id: openrouter-strong
         if: steps.guard.outputs.skip == 'false' && steps.openrouter.outcome != 'success'
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            GitHub Actions run ${{ github.event.workflow_run.id }} ("${{ github.event.workflow_run.name }}")
-            failed for PR #${{ steps.pr.outputs.number }} in ${{ github.repository }}, branch
-            ${{ steps.pr.outputs.branch }} (you are already checked out on it).
+        continue-on-error: true
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MODEL: qwen/qwen3-coder
+          MAX_ATTEMPTS: 3
+        run: node scripts/autofix-openrouter.mjs
 
-            A cheaper OpenRouter model already tried and failed to confidently fix this
-            (see the "Cheap-model auto-fix attempt" step above) — you are the fallback for
-            cases that need deeper reasoning.
-
-            1. Inspect the failure: `gh run view ${{ github.event.workflow_run.id }} --log-failed -R ${{ github.repository }}`.
-            2. Diagnose the root cause from the logs and the current diff on this branch.
-            3. Apply the minimal, targeted fix in the working tree — no unrelated refactors or drive-by cleanup.
-            4. If the repo has a test/lint/check script (see package.json), run it to confirm the fix locally.
-            5. If you are confident in the fix: commit as "fix: auto-fix CI failure [autofix]" and push to
-               ${{ steps.pr.outputs.branch }}, then comment on PR #${{ steps.pr.outputs.number }} with a short
-               explanation of what broke and what you changed.
-            6. If you cannot confidently diagnose or fix it, do NOT guess or push anything — instead post a PR
-               comment on #${{ steps.pr.outputs.number }} explaining what you found and why you're stopping.
-          claude_args: |
-            --max-turns 25
-            --allowedTools Edit,Read,Write,Bash,Grep,Glob
+      - name: Report unfixed failure
+        if: >
+          steps.guard.outputs.skip == 'false' &&
+          steps.openrouter.outcome != 'success' &&
+          steps.openrouter-strong.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ steps.pr.outputs.number }} -R ${{ github.repository }} --body \
+            "🤖 Auto-fix could not confidently resolve the failure in run ${{ github.event.workflow_run.id }} (tried \`deepseek/deepseek-chat\` then \`qwen/qwen3-coder\` via OpenRouter). Needs a human look."
