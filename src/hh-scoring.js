@@ -345,6 +345,13 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
     }));
   }
 
+  try {
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const logPath = path.join(dataDir, 'hh', String(username), 'last-scoring.json');
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.writeFileSync(logPath, JSON.stringify({ at: Date.now(), checked: unscored.length, scored }), { mode: 0o600 });
+  } catch { /* non-critical */ }
+
   return scored;
 }
 

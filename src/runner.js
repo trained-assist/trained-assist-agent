@@ -1559,6 +1559,13 @@ function buildContextCard(username, workDir) {
         const hasAts = fs.existsSync(atsFile);
         lines.push(`💼 ${vac.title}`);
         lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
+        const agentSecret = process.env.AGENT_SECRET || '';
+        if (agentSecret && vac.id) {
+          const { createHmac } = require('crypto');
+          const tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
+          const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok})`);
+        }
       }
     } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
   }
