@@ -327,9 +327,17 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
   const writeLog = (checked, scored) => {
     try {
       const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const logPath = path.join(dataDir, 'hh', String(username), 'last-scoring.json');
-      fs.mkdirSync(path.dirname(logPath), { recursive: true });
-      fs.writeFileSync(logPath, JSON.stringify({ at: Date.now(), checked, scored }), { mode: 0o600 });
+      const dir = path.join(dataDir, 'hh', String(username));
+      fs.mkdirSync(dir, { recursive: true });
+      // last-scoring.json — single entry for quick read
+      fs.writeFileSync(path.join(dir, 'last-scoring.json'), JSON.stringify({ at: Date.now(), checked, scored }), { mode: 0o600 });
+      // sync-log.json — rolling last 50 entries
+      const logPath = path.join(dir, 'sync-log.json');
+      let entries = [];
+      try { entries = JSON.parse(fs.readFileSync(logPath, 'utf8')); } catch { /* first run */ }
+      entries.unshift({ at: Date.now(), checked, scored });
+      if (entries.length > 50) entries.length = 50;
+      fs.writeFileSync(logPath, JSON.stringify(entries), { mode: 0o600 });
     } catch { /* non-critical */ }
   };
 
