@@ -2254,7 +2254,7 @@ ${expLines || '—'}
     }
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get') {
+    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' && url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer') {
       if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
@@ -2382,6 +2382,49 @@ ${expLines || '—'}
       } catch (e) {
         return json(res, 500, { error: 'session read failed' });
       }
+    }
+
+    // ── POST /web/run-bearer — start a task from an external frontend (bearer) ─
+    // The write-side twin of /web/sessions-list: an external UI (the Cloudflare
+    // session-manager worker at app.trainedassist.store) can't hold a WEB_JWT
+    // cookie, so it POSTs {username, task} + the shared bearer secret and we run a
+    // REAL task for that profile, streaming SSE back exactly like the cookie-authed
+    // /web/run. Without this the worker had no way to WRITE to the agent — its
+    // reply/run went to a local demo echo — so a user's message on the web UI never
+    // reached the agent ("agent doesn't answer"). checkOrigin is skipped on purpose:
+    // the request comes server-to-server from the worker, not a browser, and the
+    // bearer secret is the trust boundary here (same as verify/sessions-list).
+    if (req.method === 'POST' && url.pathname === '/web/run-bearer') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, task, sessionId } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      if (!task || typeof task !== 'string' || !task.trim()) return json(res, 400, { error: 'task required' });
+      const { streamWebTask } = require('./web-routes');
+      const sid = (sessionId && /^[a-zA-Z0-9_-]+$/.test(sessionId)) ? sessionId : null;
+      return streamWebTask({ req, res, secrets, username, task: task.trim(), sessionId: sid });
+    }
+
+    // ── POST /web/reply-bearer — resume a session from an external frontend ────
+    // Same as /web/run-bearer but targets an existing session id. This is the exact
+    // path that fixes the reported bug: replying to a real Telegram/agent session
+    // from the web UI (that session lives on the agent's disk, never in the worker's
+    // Durable Object, so the worker's local lookup 404'd and the user saw nothing).
+    if (req.method === 'POST' && url.pathname === '/web/reply-bearer') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, id, message } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return json(res, 400, { error: 'invalid session id' });
+      if (!message || typeof message !== 'string' || !message.trim()) return json(res, 400, { error: 'message required' });
+      const { streamWebTask } = require('./web-routes');
+      return streamWebTask({ req, res, secrets, username, task: message.trim(), sessionId: id });
     }
 
     // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
