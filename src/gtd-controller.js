@@ -203,7 +203,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       }
       writeGtd(workDir, rec);
 
-      const chatId = rec.chatId || session.ownerChatId;
+      const chatId = rec.chatId || session.liveChatId || session.ownerChatId; // liveChatId (was ownerChatId); read-compat
       if (!chatId) { // некому отвечать — не будим сессию вслепую
         rec.status = 'closed'; rec.closedReason = 'no-owner-chat';
         writeGtd(workDir, rec);

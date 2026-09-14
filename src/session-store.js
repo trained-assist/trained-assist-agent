@@ -68,7 +68,7 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
   fs.mkdirSync(dir, { recursive: true });
   const full = {
     ...meta,
-    ownerChatId: chatId || null,
+    liveChatId: chatId || null, // chat the session is currently attached to (renamed from ownerChatId; roams via /sessions)
     projectId: projectId || null,
     messages: [{ role: 'user', content: task, at: now }],
   };
@@ -193,13 +193,15 @@ function setCurrentSessionId(workDir, id, chatId) {
     const dir = path.join(workDir, SESSIONS_DIR);
     fs.mkdirSync(dir, { recursive: true });
     atomicWrite(path.join(dir, _currentSessionFile(chatId)), JSON.stringify({ id, lastAt: Date.now() }));
-    // Update ownerChatId in the session file so it knows which chat it belongs to
+    // Update liveChatId in the session file so it knows which chat it's attached to
     if (id && chatId) {
       const fp = sessionFilePath(workDir, id);
       if (fs.existsSync(fp)) {
         const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
-        if (full.ownerChatId !== chatId) {
-          full.ownerChatId = chatId;
+        const current = full.liveChatId ?? full.ownerChatId; // read-compat: pre-rename files store ownerChatId
+        if (current !== chatId) {
+          full.liveChatId = chatId;
+          delete full.ownerChatId; // lazily migrate the field name on the durable record
           atomicWrite(fp, JSON.stringify(full, null, 2));
         }
       }
@@ -210,23 +212,25 @@ function setCurrentSessionId(workDir, id, chatId) {
 }
 
 /**
- * First-touch ownership claim for legacy / owner-less sessions (issue #489).
- * Persists ownerChatId ONLY when it is currently unset — never overwrites an
- * existing owner. Returns the effective owner chatId (existing or newly set),
+ * First-touch attachment claim for legacy / unattached sessions (issue #489).
+ * Persists liveChatId ONLY when it is currently unset — never overwrites an
+ * existing attachment. Returns the effective chatId (existing or newly set),
  * or null on failure / when chatId is falsy.
+ * (Renamed from claimOwnerChatId; reads the pre-rename ownerChatId as a fallback.)
  */
-function claimOwnerChatId(workDir, id, chatId) {
+function claimLiveChatId(workDir, id, chatId) {
   if (!id || !chatId) return null;
   try {
     const fp = sessionFilePath(workDir, id);
     if (!fs.existsSync(fp)) return null;
     const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
-    if (full.ownerChatId) return full.ownerChatId; // already owned — leave as-is
-    full.ownerChatId = chatId;
+    const current = full.liveChatId ?? full.ownerChatId; // read-compat: pre-rename files store ownerChatId
+    if (current) return current; // already attached — leave as-is
+    full.liveChatId = chatId;
     atomicWrite(fp, JSON.stringify(full, null, 2));
     return chatId;
   } catch (e) {
-    console.warn('[session-store] claimOwnerChatId:', e.message);
+    console.warn('[session-store] claimLiveChatId:', e.message);
     return null;
   }
 }
@@ -286,4 +290,9 @@ function archiveSessions(workDir, sessionIds) {
   return archived;
 }
 
-module.exports = { createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext, getCurrentSessionId, setCurrentSessionId, claimOwnerChatId, archiveSessions, setSummary, needsSummary };
+module.exports = {
+  createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
+  getCurrentSessionId, setCurrentSessionId, claimLiveChatId, archiveSessions, setSummary, needsSummary,
+  // Back-compat alias for the pre-rename name (see PROFILE-RENAME-SPEC.md); remove once no caller uses it.
+  claimOwnerChatId: claimLiveChatId,
+};
