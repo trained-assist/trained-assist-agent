@@ -461,8 +461,11 @@ describe('Expand button — forceClaude escalation', () => {
     const sent = tgSent();
     expect(sent.length).toBe(1);
     const body = sent[0].body;
-    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toMatch(/вдумчивее/i);
-    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data).toMatch(/^ask_claude\|/);
+    // #530 §B: the launch path moved to the gateway accumulator («▶️ Запустить
+    // проработку» → callback intake_run); the only button under a quick answer now
+    // is «❓ Уточнить задачу» (callback clarify|<sid>). See runner.js actionButtons().
+    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.text).toMatch(/Уточнить задачу/);
+    expect(body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data).toMatch(/^clarify\|/);
   });
 
   it('forceClaude=true skips quick answer and calls Claude', { timeout: 20000 }, async () => {

@@ -10,7 +10,8 @@ const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
+const { generateSummary } = require('./session-summary');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
 const { nalogFormHtml, nalogCodeFormHtml } = require('./connect-forms/nalog');
@@ -41,14 +42,6 @@ const NARROW_BOTS = {
 const VM_NAME = process.env.VM_NAME || 'unknown';
 let GIT_COMMIT = 'unknown';
 try { GIT_COMMIT = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
-
-function trackProjectUsage(workDir, projectName) {
-  const file = path.join(workDir, '.project-usage.json');
-  let usage = {};
-  try { usage = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-  usage[projectName] = (usage[projectName] || 0) + 1;
-  try { fs.writeFileSync(file, JSON.stringify(usage)); } catch {}
-}
 
 const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 // Matches assistant replies that signal task completion — session should not be reused
@@ -369,6 +362,20 @@ function scheduleHhBackgroundScoring() {
   }
   setTimeout(() => run().catch(() => {}), 3 * 60 * 1000); // first run 3 min after start
   setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
+}
+
+// GTD controller tick: fire due check-backs for workrun tasks the user asked us
+// to see through to done. Re-entrancy + hard-cap live in the module; here we just
+// inject deps.
+function scheduleGtdController(secrets) {
+  const gtd = require('./gtd-controller');
+  const { isTaskRunning } = require('./runner');
+  const { getSession } = require('./session-store');
+  const run = () => gtd.runDue({
+    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning, runTask, getSession,
+  }).catch(err => console.error('[gtd] tick error:', err.message));
+  setTimeout(run, 2 * 60 * 1000);      // first tick 2 min after start
+  setInterval(run, 5 * 60 * 1000);     // then every 5 min
 }
 
 async function resumePendingTasks(secrets) {
@@ -2069,6 +2076,39 @@ ${expLines || '—'}
       }
     }
 
+    // ── POST /web/project-create — create a project from an external frontend ──
+    // Symmetric to POST /web/projects (list): the Cloudflare session-manager worker
+    // POSTs {username, name, type?} + shared bearer, and we create the project on the
+    // SINGLE source of truth (projects.js / on-disk projects/ folder). This is also
+    // the opt-in action — creating the first project rolls out the projects/ folder,
+    // switching the profile onto the project model. Deliberate and reversible (rm the
+    // folder). type must be a known key (recruiting|expo|generic); a bare name with a
+    // "recruiting: X" prefix is also parsed by createProject. Empty type → generic.
+    if (req.method === 'POST' && url.pathname === '/web/project-create') {
+      const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+      const auth = req.headers['authorization'] || '';
+      if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, name, type } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      const trimmed = (name || '').trim();
+      if (!trimmed || trimmed.length > 120) return json(res, 400, { error: 'invalid name' });
+      const ALLOWED_TYPES = ['recruiting', 'expo', 'generic'];
+      if (type && !ALLOWED_TYPES.includes(type)) return json(res, 400, { error: 'invalid type' });
+      try {
+        const { createProject } = require('./projects');
+        const { userWorkDir } = require('./data-paths');
+        // type given → structured {type,name}; otherwise let createProject parse any
+        // "recruiting: X"-style prefix out of the bare name (defaults to generic).
+        const input = type ? { type, name: trimmed } : trimmed;
+        const meta = createProject(userWorkDir(username), input);
+        return json(res, 200, { project: { id: meta.id, name: meta.name, type: meta.type, label: meta.label, lastAt: meta.lastAt || 0 } });
+      } catch (e) {
+        return json(res, 500, { error: 'project create failed', detail: String(e && e.message || e) });
+      }
+    }
+
     // ── POST /web/sessions-list — authoritative session list for external UIs ─
     // Same delegation pattern as /web/verify & /web/projects. The Cloudflare
     // session-manager worker (app.trainedassist.store) POSTs {username, limit} +
@@ -2398,30 +2438,61 @@ ${expLines || '—'}
       return json(res, 200, { ok: true, killed });
     }
 
-    // GET /projects?username=xxx — list project subdirs sorted by session frequency
+    // GET /tasks/running?username=xxx — ground truth for whether a Claude
+    // session is live for this user. The gateway IntakeBuffer polls this to
+    // hold new messages for the REAL duration of a run (not just the /run
+    // enqueue, which returns 202 immediately). Reading live state here — rather
+    // than trusting a fire-and-forget completion callback — means a dropped
+    // packet can't trap the buffer; the next poll self-heals.
+    if (req.method === 'GET' && url.pathname === '/tasks/running') {
+      const username = url.searchParams.get('username');
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
+      const { isTaskRunning } = require('./runner');
+      return json(res, 200, { running: isTaskRunning(username) });
+    }
+
+    // GET /projects?username=xxx — TYPED project list (projects.js), most-recent first.
+    // Single source of truth: the on-disk projects/ folder. Replaces the old raw-subdir
+    // listing (issue #517 convergence — no more folder-name picker).
     if (req.method === 'GET' && url.pathname === '/projects') {
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
-      let usage = {};
-      try { usage = JSON.parse(fs.readFileSync(path.join(workDir, '.project-usage.json'), 'utf8')); } catch {}
-
-      let subdirs = [];
       try {
-        subdirs = fs.readdirSync(workDir, { withFileTypes: true })
-          .filter(e => e.isDirectory() && !e.name.startsWith('.'))
-          .map(e => e.name);
-      } catch {}
+        const { listProjects } = require('./projects');
+        const projects = listProjects(workDir).map(p => ({
+          id: p.id, name: p.name, type: p.type, label: p.label || p.name, lastAt: p.lastAt || 0,
+        }));
+        return json(res, 200, { projects });
+      } catch (e) {
+        return json(res, 200, { projects: [], note: 'projects model unavailable' });
+      }
+    }
 
-      // Root dir always first in candidates; sort by count desc then name asc
-      const projects = [
-        { name: '', label: '🏠 Корень', count: usage[''] || 0 },
-        ...subdirs.map(name => ({ name, label: name, count: usage[name] || 0 })),
-      ].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    // GET /project-decision?username=xxx&chatId=yyy — what the gateway should do when a
+    // NEW dialog starts (issue #517): {action:'auto'|'create'|'ask', choices:[{id,name,label}], active}.
+    // 'ask' -> gateway renders the inline picker and defers the task until the user chooses.
+    if (req.method === 'GET' && url.pathname === '/project-decision') {
+      const username = url.searchParams.get('username');
+      const chatId = url.searchParams.get('chatId') || null;
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 400, { error: 'invalid username' });
 
-      return json(res, 200, { projects });
+      const workDir = path.join(BASE_USERS_DIR, username);
+      try {
+        const { decideNewSessionProject } = require('./projects');
+        const d = decideNewSessionProject(workDir, chatId);
+        const out = { action: d.action, active: d.active || null };
+        if (d.action === 'auto') out.choices = [{ id: d.project.id, name: d.project.name, label: d.project.label || d.project.name }];
+        else if (d.action === 'ask') out.choices = d.choices.map(p => ({ id: p.id, name: p.name, label: p.label || p.name }));
+        else out.choices = [];
+        return json(res, 200, out);
+      } catch (e) {
+        return json(res, 200, { action: 'create', choices: [], active: null, note: 'projects model unavailable' });
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/run') {
@@ -2429,7 +2500,7 @@ ${expLines || '—'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectDir, fileBase64, fileName, fileMimeType } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
@@ -2449,19 +2520,17 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid sessionId' });
       if (contextFromSession && !/^[a-zA-Z0-9_-]+$/.test(contextFromSession))
         return json(res, 400, { error: 'invalid contextFromSession' });
-      if (projectDir && !/^[a-zA-Z0-9][a-zA-Z0-9_\-.]*$/.test(projectDir))
-        return json(res, 400, { error: 'invalid projectDir' });
+      if (projectId && !/^[a-zA-Z0-9][a-zA-Z0-9_\-.]*$/.test(projectId))
+        return json(res, 400, { error: 'invalid projectId' });
+      if (newProjectName && (typeof newProjectName !== 'string' || newProjectName.length > 200))
+        return json(res, 400, { error: 'invalid newProjectName' });
 
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
 
-      // cwd = project subdir for Claude; workDir stays as data dir for sessions/logs
-      const cwd = projectDir ? path.resolve(path.join(workDir, projectDir)) : workDir;
-      if (!cwd.startsWith(workDir)) return json(res, 400, { error: 'invalid projectDir' });
-      if (projectDir) {
-        fs.mkdirSync(cwd, { recursive: true });
-        trackProjectUsage(workDir, projectDir);
-      }
+      // cwd defaults to workDir; the runner's project-binding block resolves the real
+      // cwd from the bound project (projectId passed here, or the session's stored one).
+      const cwd = workDir;
 
       const user = { id: userId, name: username, username, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
@@ -2488,7 +2557,7 @@ ${expLines || '—'}
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets }).catch(err =>
+      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
@@ -2756,7 +2825,39 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid username' });
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '10', 10), 50);
       const workDir = path.join(BASE_USERS_DIR, username);
-      return json(res, 200, { sessions: listSessions(workDir, limit) });
+      let sessionList = listSessions(workDir, limit);
+      // Lazily backfill durable summaries so external consumers (Telegram gateway,
+      // web UI) get a meaningful {title, gist} — not a raw first-message truncation.
+      // Mirrors the /sessions lazy-generation in runner.runQuickAnswer; this is the
+      // HTTP entry point those UIs actually hit, so the class lives here too.
+      const orKey = secrets.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY;
+      const stale = sessionList.filter(s => needsSummary(s));
+      if (stale.length && orKey) {
+        await Promise.all(stale.map(async (s) => {
+          try {
+            const full = getSessionData(workDir, s.id);
+            if (!full) return;
+            const sum = await generateSummary(full.messages, { apiKey: orKey });
+            if (sum) setSummary(workDir, s.id, sum, s.messageCount);
+          } catch { /* best-effort; fall back to raw topic */ }
+        }));
+        sessionList = listSessions(workDir, limit); // reload with fresh summaries
+      }
+      // Resolve projectId -> projectName so the gateway/web session lists can label
+      // each dialog by its typed project (issue #517).
+      try {
+        const { getProject } = require('./projects');
+        const nameCache = {};
+        sessionList = sessionList.map(s => {
+          if (!s.projectId) return s;
+          if (!(s.projectId in nameCache)) {
+            const p = getProject(workDir, s.projectId);
+            nameCache[s.projectId] = p ? p.name : null;
+          }
+          return { ...s, projectName: nameCache[s.projectId] };
+        });
+      } catch { /* projects model unavailable — leave list as-is */ }
+      return json(res, 200, { sessions: sessionList });
     }
 
     // POST /sessions/archive — remove sessions from the index
@@ -3274,6 +3375,7 @@ ${recent || '(пока нет)'}
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
+  scheduleGtdController(secrets);
   resumePendingTasks(secrets).catch(err => console.error('[resume] startup error:', err.message));
 
   // Deploys restart this service frequently (every few minutes during an
