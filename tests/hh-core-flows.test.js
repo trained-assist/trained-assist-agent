@@ -285,3 +285,114 @@ describe('Flow 4 — hh_batch_evaluate message_draft persistence', () => {
     }
   });
 });
+
+// ── Flow 5: hh_regenerate_messages — force bulk regeneration ─────────────────
+
+describe('Flow 5 — hh_regenerate_messages', () => {
+  const DATA_DIR = join(homedir(), 'agent-data');
+  const CAND_DIR = join(DATA_DIR, 'hh', TEST_USER_ID, 'candidates');
+
+  const ATS_CONFIG = {
+    vacancy_title: 'Backend Developer',
+    required: ['Node.js'],
+    preferred: ['PostgreSQL'],
+    knockout: [],
+    pass_threshold: 50,
+    review_threshold: 30,
+    vacancy_context: 'Test vacancy',
+    updated_at: '2026-09-08T10:00:00.000Z',
+  };
+
+  const SCORED_PASS = { score: 80, verdict: 'ПРОПУСТИТЬ', reasoning: 'Good candidate', matched: ['Node.js'], gaps: [] };
+  const SCORED_REJECT = { score: 10, verdict: 'ОТКЛОНИТЬ', reasoning: 'No match', matched: [], gaps: ['Node.js'] };
+
+  function writeCandidateHistory(negId, data) {
+    mkdirSync(CAND_DIR, { recursive: true });
+    writeFileSync(join(CAND_DIR, `${negId}.json`), JSON.stringify(data), { mode: 0o600 });
+  }
+
+  function readCandidateHistoryFile(negId) {
+    const file = join(CAND_DIR, `${negId}.json`);
+    if (!existsSync(file)) return null;
+    return JSON.parse(readFileSync(file, 'utf8'));
+  }
+
+  beforeEach(() => {
+    if (existsSync(CAND_DIR)) {
+      const { readdirSync, unlinkSync } = require('fs');
+      for (const f of readdirSync(CAND_DIR)) {
+        try { unlinkSync(join(CAND_DIR, f)); } catch {}
+      }
+    }
+    process.env.AGENT_DATA_DIR = DATA_DIR;
+    // Fake OR key: LLM call fails gracefully — enough to prove the handler still
+    // ATTEMPTS regeneration for these candidates (unlike hh_batch_evaluate's cache skip).
+    process.env.OPENROUTER_API_KEY = 'test-or-key-fake';
+  });
+
+  afterEach(() => {
+    delete process.env.AGENT_DATA_DIR;
+    delete process.env.OPENROUTER_API_KEY;
+  });
+
+  it('attempts regeneration even when message_draft.config_version already matches — no cache skip', async () => {
+    const negId = 'neg-001';
+    const staleLookingButCurrentDraft = {
+      text: 'Старый черновик, но config_version совпадает с текущим конфигом.',
+      generated_at: '2026-09-08T10:00:00.000Z',
+      config_version: ATS_CONFIG.updated_at,
+    };
+    writeCandidateHistory(negId, {
+      messages: [],
+      ats_result: { ...SCORED_PASS, draft_message: staleLookingButCurrentDraft.text },
+      message_draft: staleLookingButCurrentDraft,
+    });
+
+    const result = await tools.hh_regenerate_messages.handler({ vacancy_id: 'vac-001', ats_config: ATS_CONFIG });
+
+    expect(result.error).toBeUndefined();
+    // Not silently reused (that would put it in neither list, or leave regenerated=0/skipped=0) —
+    // with a fake LLM key generation fails, so it must show up as an attempted-and-failed skip,
+    // proving the handler did NOT take the "config_version matches → reuse" shortcut.
+    const skippedEntry = result.skipped_list.find(s => s.id === negId);
+    expect(skippedEntry).toBeDefined();
+    expect(skippedEntry.reason).toMatch(/ошибка генерации|пустой текст/);
+  });
+
+  it('skips candidates with verdict ОТКЛОНИТЬ', async () => {
+    const negId = 'neg-002';
+    writeCandidateHistory(negId, { messages: [], ats_result: SCORED_REJECT });
+
+    const result = await tools.hh_regenerate_messages.handler({ vacancy_id: 'vac-001', ats_config: ATS_CONFIG });
+
+    const skippedEntry = result.skipped_list.find(s => s.id === negId);
+    expect(skippedEntry).toBeDefined();
+    expect(skippedEntry.reason).toMatch(/ОТКЛОНИТЬ/);
+  });
+
+  it('skips candidates with no ats_result yet', async () => {
+    const negId = 'neg-001';
+    writeCandidateHistory(negId, { messages: [], ats_result: null });
+
+    const result = await tools.hh_regenerate_messages.handler({ vacancy_id: 'vac-001', ats_config: ATS_CONFIG });
+
+    const skippedEntry = result.skipped_list.find(s => s.id === negId);
+    expect(skippedEntry).toBeDefined();
+    expect(skippedEntry.reason).toMatch(/не оценён/);
+  });
+
+  it('errors clearly when vacancy_id and active_vacancy context are both missing', async () => {
+    const result = await tools.hh_regenerate_messages.handler({ ats_config: ATS_CONFIG });
+    expect(result.error).toBeTruthy();
+  });
+
+  it('never writes to history.messages — draft-only, does not send anything', async () => {
+    const negId = 'neg-001';
+    writeCandidateHistory(negId, { messages: [], ats_result: SCORED_PASS });
+
+    await tools.hh_regenerate_messages.handler({ vacancy_id: 'vac-001', ats_config: ATS_CONFIG });
+
+    const saved = readCandidateHistoryFile(negId);
+    expect(saved.messages).toEqual([]);
+  });
+});

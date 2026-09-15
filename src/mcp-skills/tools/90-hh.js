@@ -1099,6 +1099,120 @@ module.exports = {
       },
     },
 
+    hh_regenerate_messages: {
+      description:
+        'Force-regenerate the draft message for ALL already-evaluated candidates on a vacancy using the CURRENT ats_config/interview_config. ' +
+        'Use this right after editing the message prompt/interview_config (e.g. in the ATS editor) so every candidate draft reflects the new rules — ' +
+        'this is the "update all written candidate messages" trigger. Unlike hh_batch_evaluate, it ignores config_version caching and overwrites ' +
+        'existing drafts unconditionally. Does NOT send anything — drafts only, review/send separately via hh_draft_review_page or /hh/review. ' +
+        'Skips candidates with verdict ОТКЛОНИТЬ (rejections use a separate flow) and candidates with no ats_result yet (run hh_batch_evaluate first). ' +
+        'If vacancy_id is omitted — reads from context (set with hh_set_active_vacancy).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          vacancy_id: {
+            type: 'string',
+            description: 'Vacancy ID. Omit to use the active vacancy from context (hh_set_active_vacancy).',
+          },
+          ats_config: {
+            type: 'object',
+            description: 'ATS config override. Omit to use saved config from context — this is what you want right after editing the config.',
+          },
+        },
+      },
+      handler: async ({ vacancy_id, ats_config } = {}) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+        const apiKey = readOrKey(USER_ID);
+        if (!apiKey) return { error: 'OpenRouter API key не найден.' };
+
+        if (!vacancy_id) {
+          const ctx = readContext('hh', 'active_vacancy');
+          if (!ctx?.value?.id) {
+            return { error: 'Вакансия не задана. Используй hh_set_active_vacancy чтобы выбрать вакансию.' };
+          }
+          vacancy_id = ctx.value.id;
+        }
+        if (!ats_config) {
+          const ctx = readContext('hh', 'ats_config');
+          if (!ctx?.value) {
+            return { error: 'ATS конфиг не задан. Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config",...).' };
+          }
+          ats_config = ctx.value;
+        }
+        if (typeof ats_config === 'string') {
+          try { ats_config = JSON.parse(ats_config); } catch { return { error: 'ATS конфиг повреждён: не удалось распарсить JSON.' }; }
+        }
+
+        try {
+          const data = await hhGet(
+            `/negotiations/response?vacancy_id=${vacancy_id}&per_page=50&page=0`,
+            token,
+          );
+
+          const configVersion = ats_config.updated_at || null;
+          const regenerated = [];
+          const skipped = [];
+
+          for (const neg of (data.items || [])) {
+            const history = readCandidateHistory(USER_ID, neg.id);
+            const atsResult = history.ats_result;
+
+            if (atsResult?.score == null) {
+              skipped.push({ id: neg.id, reason: 'не оценён — сначала hh_batch_evaluate' });
+              continue;
+            }
+            if (atsResult.verdict === 'ОТКЛОНИТЬ') {
+              skipped.push({ id: neg.id, reason: 'ОТКЛОНИТЬ — отказные сообщения здесь не перегенерируются' });
+              continue;
+            }
+
+            const { name, text: candidateContext } = formatCandidateContext(neg);
+            const alreadySent = (history.messages || []).some(m => m.role === 'employer');
+            const msgType = atsResult.verdict === 'ПРОПУСТИТЬ' ? 'invite_call'
+              : alreadySent ? 'followup'
+              : 'initial';
+
+            try {
+              const draftText = await generateMessage(
+                candidateContext,
+                atsResult,
+                name,
+                apiKey,
+                msgType,
+                history.messages || [],
+                USER_ID,
+                ats_config,
+              );
+              if (draftText) {
+                history.message_draft = { text: draftText, generated_at: new Date().toISOString(), config_version: configVersion };
+                // /hh/review reads ats_result.draft_message, not message_draft — keep both in sync so the
+                // regenerated text is actually visible regardless of which code path last wrote a draft.
+                history.ats_result.draft_message = draftText;
+                saveCandidateHistory(USER_ID, neg.id, history);
+                regenerated.push({ negotiation_id: neg.id, name });
+              } else {
+                skipped.push({ id: neg.id, reason: 'генерация вернула пустой текст' });
+              }
+            } catch (e) {
+              skipped.push({ id: neg.id, reason: `ошибка генерации: ${e.message}` });
+            }
+          }
+
+          return {
+            vacancy_id,
+            regenerated: regenerated.length,
+            regenerated_list: regenerated,
+            skipped: skipped.length,
+            skipped_list: skipped,
+            note: 'Черновики обновлены. Ничего не отправлено — открой hh_draft_review_page или /hh/review чтобы проверить и отправить.',
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
+      },
+    },
+
     hh_draft_review_page: {
       description: 'Generate HTML review page with all evaluated candidates, their scores, and draft messages for recruiter approval. Opens for review. Returns file path.',
       inputSchema: {
