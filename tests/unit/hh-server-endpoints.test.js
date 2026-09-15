@@ -232,6 +232,30 @@ describe('POST /hh/send', () => {
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('guard blocks a message with an unfilled placeholder', async () => {
+    const r = await post(
+      `http://127.0.0.1:${serverPort}/hh/send`,
+      { username: TEST_UID, negotiation_id: 'neg-004', message: 'Здравствуйте, [Имя кандидата]!' },
+      authHeader(),
+    );
+    expect(r.status).toBe(200);
+    expect(r.body.blocked).toBe(true);
+    expect(r.body.reason).toBeTruthy();
+    expect(mockHh.state.messages['neg-004']).toBeUndefined();
+  });
+
+  it('force:true sends a guard-blocked message anyway (manual single-send override)', async () => {
+    const r = await post(
+      `http://127.0.0.1:${serverPort}/hh/send`,
+      { username: TEST_UID, negotiation_id: 'neg-005', message: 'Здравствуйте, [Имя кандидата]!', force: true },
+      authHeader(),
+    );
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.blocked).toBeFalsy();
+    expect(mockHh.state.messages['neg-005']).toContain('Здравствуйте, [Имя кандидата]!');
+  });
+
   it('missing username → 400', async () => {
     const r = await post(
       `http://127.0.0.1:${serverPort}/hh/send`,
