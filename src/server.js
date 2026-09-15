@@ -1478,11 +1478,12 @@ async function main() {
             </tr>`;
           }).join('');
       const guardRows = guardEntries.length === 0
-        ? '<tr><td colspan="3" style="text-align:center;color:#94a3b8;padding:16px">Guard блокировок не было</td></tr>'
+        ? '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:16px">Guard блокировок не было</td></tr>'
         : guardEntries.slice(0, 20).map(g => `<tr>
             <td>${fmt(g.at)}</td>
             <td style="color:#64748b;font-family:monospace;font-size:12px">${g.neg_id || '—'}</td>
-            <td style="color:#dc2626">${g.reason || '—'}</td>
+            <td style="color:${g.blocked === false ? '#d97706' : '#dc2626'}">${g.blocked === false ? '⚠ пропущена проверка' : '⛔ заблокировано'}</td>
+            <td style="color:#64748b">${g.reason || '—'}</td>
           </tr>`).join('');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1493,8 +1494,8 @@ async function main() {
 <p class="sub">Последние запуски · ${username}</p>
 <h2>Фоновый скоринг</h2>
 <table><thead><tr><th>Время (МСК)</th><th>Проверено</th><th>Новых сообщ.</th><th>Скоринг</th><th>С активностью</th><th>API ошибки</th></tr></thead><tbody>${rows}</tbody></table>
-<h2>Bullshit Guard — последние блокировки</h2>
-<table><thead><tr><th>Время</th><th>neg_id</th><th>Причина</th></tr></thead><tbody>${guardRows}</tbody></table>
+<h2>Bullshit Guard — последние блокировки и пропуски проверки</h2>
+<table><thead><tr><th>Время</th><th>neg_id</th><th>Статус</th><th>Причина</th></tr></thead><tbody>${guardRows}</tbody></table>
 </body></html>`);
     }
 
@@ -1557,7 +1558,12 @@ async function main() {
       const guard = await bullshitGuard(message, history.messages, { username });
       if (!guard.ok) {
         console.warn(`[hh/send] guard blocked user=${username} neg=${negotiation_id} reason="${guard.reason}"`);
+        appendGuardBlock(username, negotiation_id, guard.reason, guard.checks);
         return json(res, 200, { ok: false, blocked: true, reason: guard.reason, checks: guard.checks });
+      }
+      if (guard.degraded) {
+        console.warn(`[hh/send] guard degraded (semantic check skipped) user=${username} neg=${negotiation_id} checks=${JSON.stringify(guard.checks)}`);
+        appendGuardBlock(username, negotiation_id, 'семантическая проверка пропущена (' + (guard.checks.llm_skipped || 'unknown') + ')', guard.checks, false);
       }
 
       try {
@@ -1605,7 +1611,10 @@ async function main() {
       const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
       const msgs = history.messages || [];
       const hasPriorContact = msgs.some(m => m.role === 'employer');
-      const msgType = message_type === 'rejection' ? 'rejection' : (already_sent || hasPriorContact ? 'followup' : 'initial');
+      const candidateReplied = msgs.some(m => m.role === 'applicant');
+      const msgType = message_type === 'rejection' ? 'rejection'
+        : candidateReplied ? 'reply'
+        : (already_sent || hasPriorContact ? 'followup' : 'initial');
 
       // Read HH token once — reused for resume fetch and vacancy fetch
       let hhToken = null;
@@ -1668,6 +1677,10 @@ async function main() {
 Тон: лёгкий, без давления. 2-3 предложения. Пиши на русском языке.`;
       const rejectionSystem = `Ты — рекрутер. Напиши вежливый отказ кандидату.
 Тон: уважительный, тёплый, без объяснения причин. Пожелай удачи в поиске. 2-3 предложения. Пиши на русском языке.`;
+      const replySystem = `Ты — рекрутер, уже переписываешься с кандидатом. Кандидат тебе ответил — прочитай его последнее сообщение и ответь по существу.
+НЕ здоровайся заново и НЕ представляйся — вы уже знакомы, вступление уже было. Не повторяй вопросы, которые уже задавал.
+Тон: профессиональный, по делу. 3-6 предложений. Пиши на русском языке.` +
+        (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
 
       const recruiterCtx = msgCfg ? [
         msgCfg.represent_as || (msgCfg.agency ? `Ты пишешь от лица агентства ${msgCfg.agency}.` : ''),
@@ -1676,7 +1689,10 @@ async function main() {
         ...(msgCfg.rules || []).map(r => `ПРАВИЛО: ${r}`),
       ].filter(Boolean).join('\n') : '';
 
-      const activeSystem = msgType === 'rejection' ? rejectionSystem : msgType === 'followup' ? followupSystem : baseSystem;
+      const activeSystem = msgType === 'rejection' ? rejectionSystem
+        : msgType === 'reply' ? replySystem
+        : msgType === 'followup' ? followupSystem
+        : baseSystem;
       const systemPrompt = [
         activeSystem,
         recruiterCtx ? `\n\n## Идентичность рекрутера\n${recruiterCtx}` : '',
@@ -1684,11 +1700,17 @@ async function main() {
       ].join('');
 
       const firstName = (candidate_name || 'Кандидат').split(' ')[0];
+      const convoCtx = msgs.slice(-8).map(m => {
+        const who = m.role === 'employer' ? 'Рекрутер' : 'Кандидат';
+        return `${who}: ${(m.text || '').slice(0, 500)}`;
+      }).join('\n');
       const userMsg = msgType === 'rejection'
         ? `Напиши вежливый отказ кандидату ${firstName}.`
-        : msgType === 'followup'
-          ? `Кандидат ${firstName} не ответил. Напиши follow-up.`
-          : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}`;
+        : msgType === 'reply'
+          ? `История переписки с кандидатом ${firstName}:\n\n${convoCtx}\n\nНапиши следующее сообщение рекрутера — ответ на последнее сообщение кандидата.`
+          : msgType === 'followup'
+            ? `Кандидат ${firstName} не ответил. Напиши follow-up.`
+            : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}`;
 
       try {
         const message = await new Promise((resolve, reject) => {
@@ -1776,7 +1798,12 @@ async function main() {
       const guard2 = await bullshitGuard(message, history2.messages, { username });
       if (!guard2.ok) {
         console.warn(`[hh/send-and-reject] guard blocked user=${username} neg=${negotiation_id} reason="${guard2.reason}"`);
+        appendGuardBlock(username, negotiation_id, guard2.reason, guard2.checks);
         return json(res, 200, { ok: false, blocked: true, reason: guard2.reason, checks: guard2.checks });
+      }
+      if (guard2.degraded) {
+        console.warn(`[hh/send-and-reject] guard degraded (semantic check skipped) user=${username} neg=${negotiation_id} checks=${JSON.stringify(guard2.checks)}`);
+        appendGuardBlock(username, negotiation_id, 'семантическая проверка пропущена (' + (guard2.checks.llm_skipped || 'unknown') + ')', guard2.checks, false);
       }
 
       try {
@@ -3790,13 +3817,13 @@ function splitBuffer(buf, sep) {
   return parts.filter(p => p.length > 0);
 }
 
-function appendGuardBlock(username, negId, reason, checks) {
+function appendGuardBlock(username, negId, reason, checks, blocked = true) {
   try {
     const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
     const logPath = path.join(dataDir, 'hh', String(username), 'guard-log.json');
     let entries = [];
     try { entries = JSON.parse(fs.readFileSync(logPath, 'utf8')); } catch {}
-    entries.unshift({ at: Date.now(), neg_id: negId, reason, checks });
+    entries.unshift({ at: Date.now(), neg_id: negId, reason, checks, blocked });
     if (entries.length > 100) entries.length = 100;
     fs.writeFileSync(logPath, JSON.stringify(entries), { mode: 0o600 });
   } catch { /* non-critical */ }
