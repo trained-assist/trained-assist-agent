@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt } = require('./hh-message-prompts');
 
 const FALLBACK_MODEL = 'google/gemini-2.5-flash';
 
@@ -429,12 +430,8 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
       if (val && typeof val === 'object') msgCfg = val;
     }
   } catch { /* ignore */ }
-  const recruiterCtx = msgCfg ? [
-    msgCfg.represent_as || (msgCfg.agency ? `Ты пишешь от лица агентства ${msgCfg.agency}.` : ''),
-    msgCfg.recruiter_name ? `Твоё имя: ${msgCfg.recruiter_name}.` : '',
-    msgCfg.signature ? `Подпись в конце каждого сообщения: «${msgCfg.signature}».` : '',
-    ...(msgCfg.rules || []).map(r => `ПРАВИЛО: ${r}`),
-  ].filter(Boolean).join('\n') : '';
+  const recruiterCtx = buildRecruiterIdentity(msgCfg);
+  const availabilityBlock = buildAvailabilityBlock(atsConfig.interview_config);
 
   const vacancyCtx = atsConfig.vacancy_title && atsConfig.vacancy_context
     ? `Вакансия: ${atsConfig.vacancy_title}\n\n${atsConfig.vacancy_context}`
@@ -447,13 +444,8 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
 
   if (!needDraft.length) return 0;
 
-  const baseSystem = 'Ты — рекрутер. ВСЕГДА пиши сообщение, даже если данных мало.\n' +
-    'Тон: профессиональный, уважительный, конкретный. Пиши от первого лица на русском языке.\n' +
-    'Структура: 1) Приветствие с именем 2) что зацепило в резюме 3) короткое описание роли 4) 1-2 конкретных вопроса 5) призыв к действию.\n' +
-    'Длина: 4-7 предложений. Каждый вопрос — отдельная строка.\n' +
-    (vacancyCtx ? `\n## Контекст вакансии\n${vacancyCtx}` : '');
-  const rejectionSystem = 'Ты — рекрутер. Напиши вежливый отказ кандидату.\n' +
-    'Тон: уважительный, тёплый, без объяснения причин. Пожелай удачи в поиске. 2-3 предложения. Пиши на русском языке.';
+  const baseSystem = buildMessageSystemPrompt({ vacancyContext: vacancyCtx, recruiterCtx, commStyle });
+  const rejectionSystem = buildRejectionSystemPrompt({ recruiterCtx, commStyle });
 
   let generated = 0;
 
@@ -469,16 +461,12 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
         const r = neg.resume || {};
         const firstName = r.first_name || r.last_name || 'Кандидат';
 
-        const systemPrompt = [
-          isReject ? rejectionSystem : baseSystem,
-          recruiterCtx ? `\n\n## Идентичность рекрутера\n${recruiterCtx}` : '',
-          commStyle ? `\n\n## Стиль рекрутера\n${commStyle}` : '',
-        ].join('');
+        const systemPrompt = isReject ? rejectionSystem : baseSystem;
 
         const resumeText = buildResumeText(neg);
         const userMsg = isReject
           ? `Напиши вежливый отказ кандидату ${firstName}.`
-          : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resumeText}`;
+          : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resumeText}${availabilityBlock}`;
 
         const messages = [
           { role: 'system', content: systemPrompt },

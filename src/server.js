@@ -24,6 +24,7 @@ const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { bullshitGuard } = require('./hh-bullshit-guard');
+const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt } = require('./hh-message-prompts');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
@@ -1668,29 +1669,24 @@ async function main() {
         } catch { /* ignore — generate without vacancy context */ }
       }
 
-      const MESSAGE_SYSTEM = 'Ты — рекрутер. ВСЕГДА пиши сообщение, даже если данных мало.\n' +
-        'Пишешь сообщение кандидату на HeadHunter. Это может быть первое сообщение или ответ внутри уже идущей переписки — на входе всегда полная история диалога и результат ATS-оценки кандидата (скор, вердикт).\n\n' +
-        'Если это первое сообщение (истории переписки ещё нет): 1) Приветствие с именем 2) 1-2 предложения что в резюме зацепило 3) короткое описание роли 4) конкретный вопрос для квалификации (самый важный пробел из требований вакансии) 5) призыв к действию.\n\n' +
-        'Если кандидат уже отвечал в переписке: прочитай его ответы и учти скор/вердикт. Если скор хороший/проходной и ответы кандидата по делу, или скор высокий сразу — аккуратно, ничего не обещая, предложи следующий шаг: сейчас планируем процесс собеседований, предложи созвониться. Если скор низкий или в ответах остались пробелы — задай уточняющий вопрос по самому важному пробелу.\n\n' +
-        'Если кандидат ещё не ответил на наше последнее сообщение: напиши короткий вежливый follow-up без давления, упомяни, что писал(а) ранее.\n\n' +
-        'Если это отказ: напиши вежливый отказ — уважительно, тепло, без объяснения причин, пожелай удачи в поиске.\n\n' +
-        'Форматирование: каждый вопрос — отдельная строка (через \\n). Между смысловыми блоками — пустая строка. Не пиши всё в один абзац.\n' +
-        'Длина: 4-7 предложений (follow-up и отказ — 2-3). Не используй шаблонные фразы. Пиши от первого лица на русском языке.\n' +
-        'НЕЛЬЗЯ: обещать перезвонить или позвонить — только переписка в HH. Не используй слова «перезвоню», «позвоню», «свяжусь по телефону», «созвонимся». Не обещай трудоустройство или конкретные условия — только предлагай следующий шаг процесса.' +
-        (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
+      // interview_config (set via the ATS editor) — only proposes a concrete call
+      // slot when it has real availability, otherwise asks the candidate instead
+      // of inventing a time (see hh-message-prompts.js / commit 3ff4e11 / #606).
+      let interviewConfig = null;
+      try {
+        const atsConfigFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
+        if (fs.existsSync(atsConfigFile)) {
+          let val = JSON.parse(fs.readFileSync(atsConfigFile, 'utf8'))?.value;
+          if (typeof val === 'string') val = JSON.parse(val);
+          interviewConfig = val?.interview_config || null;
+        }
+      } catch { /* ignore */ }
+      const availabilityBlock = buildAvailabilityBlock(interviewConfig);
 
-      const recruiterCtx = msgCfg ? [
-        msgCfg.represent_as || (msgCfg.agency ? `Ты пишешь от лица агентства ${msgCfg.agency}.` : ''),
-        msgCfg.recruiter_name ? `Твоё имя: ${msgCfg.recruiter_name}.` : '',
-        msgCfg.signature ? `Подпись в конце каждого сообщения: «${msgCfg.signature}».` : '',
-        ...(msgCfg.rules || []).map(r => `ПРАВИЛО: ${r}`),
-      ].filter(Boolean).join('\n') : '';
-
-      const systemPrompt = [
-        MESSAGE_SYSTEM,
-        recruiterCtx ? `\n\n## Идентичность рекрутера\n${recruiterCtx}` : '',
-        commStyle ? `\n\n## Стиль общения рекрутера\n${commStyle}` : '',
-      ].join('');
+      const recruiterCtx = buildRecruiterIdentity(msgCfg);
+      const systemPrompt = msgType === 'rejection'
+        ? buildRejectionSystemPrompt({ recruiterCtx, commStyle })
+        : buildMessageSystemPrompt({ vacancyContext, recruiterCtx, commStyle });
 
       const firstName = (candidate_name || 'Кандидат').split(' ')[0];
       const convoCtx = msgs.slice(-8).map(m => {
@@ -1704,7 +1700,7 @@ async function main() {
         : '';
       const userMsg = msgType === 'rejection'
         ? `Напиши вежливый отказ кандидату ${firstName}.`
-        : `Кандидат: ${firstName}\n\n${msgType === 'initial' ? `Резюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}\n\n` : ''}${atsLine}История переписки:\n${convoCtx || '(переписки ещё не было — это первое сообщение)'}${msgType === 'followup' ? '\n\n(кандидат не ответил на наше последнее сообщение)' : ''}\n\nНапиши следующее сообщение кандидату.`;
+        : `Кандидат: ${firstName}\n\n${msgType === 'initial' ? `Резюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}\n\n` : ''}${atsLine}История переписки:\n${convoCtx || '(переписки ещё не было — это первое сообщение)'}${msgType === 'followup' ? '\n\n(кандидат не ответил на наше последнее сообщение)' : ''}${availabilityBlock}\n\nНапиши следующее сообщение кандидату.`;
 
       try {
         const message = await new Promise((resolve, reject) => {
@@ -3817,9 +3813,9 @@ function hhInterviewConfigAllowsTime(username) {
   try {
     const configFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
     if (!fs.existsSync(configFile)) return false;
-    const config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value || {};
-    const ic = config.interview_config || {};
-    return !!(ic.invite_call_enabled && (ic.availability?.trim() || ic.booking_url?.trim()));
+    let config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value || {};
+    if (typeof config === 'string') config = JSON.parse(config);
+    return hasRealAvailability(config.interview_config);
   } catch {
     return false;
   }
