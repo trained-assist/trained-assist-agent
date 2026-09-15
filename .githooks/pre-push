@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Enforces immutable PRs: once a branch has an OPEN pull request on GitHub,
+# no further pushes to it are allowed. Open a new branch (and a new PR) for
+# further changes instead of amending one that's already submitted.
+#
+# Pushing to main/master directly is always blocked (merges happen via a
+# reviewed PR only).
+#
+# Fails OPEN (does not block) if the GitHub API can't be reached or the
+# remote isn't GitHub-hosted with an embedded token — this hook must never
+# be the reason nobody can push.
+#
+# Emergency override (explain why in the PR): ALLOW_PR_UPDATE=1 git push ...
+set -euo pipefail
+
+if [ -n "${ALLOW_PR_UPDATE:-}" ]; then
+  exit 0
+fi
+
+remote_name="$1"
+remote_url="${2:-$(git remote get-url "$remote_name" 2>/dev/null || echo "")}"
+
+PROTECTED_BRANCHES="main master"
+
+repo_slug=$(echo "$remote_url" | sed -nE 's#.*github\.com[:/]+([^/]+/[^/.]+)(\.git)?/?$#\1#p')
+token=$(echo "$remote_url" | sed -nE 's#https://[^:@/]+:([^@]+)@.*#\1#p')
+owner="${repo_slug%%/*}"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue # deleting a ref
+  branch=$(echo "$remote_ref" | sed -nE 's#refs/heads/(.*)#\1#p')
+  [ -z "$branch" ] && continue # not a branch push (e.g. a tag)
+
+  for p in $PROTECTED_BRANCHES; do
+    if [ "$branch" = "$p" ]; then
+      echo "✗ Push blocked: direct push to protected branch '$branch'. Merge via a reviewed PR instead." >&2
+      exit 1
+    fi
+  done
+
+  if [ -z "$token" ] || [ -z "$repo_slug" ]; then
+    continue # can't verify against GitHub — allow
+  fi
+
+  resp=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer $token" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$repo_slug/pulls?head=${owner}:${branch}&state=open" 2>/dev/null) || resp=""
+  http_code=$(echo "$resp" | tail -1)
+  body=$(echo "$resp" | sed '$d')
+
+  if [ "$http_code" != "200" ]; then
+    echo "⚠ pre-push: could not verify PR state for '$branch' (HTTP ${http_code:-?}) — allowing push" >&2
+    continue
+  fi
+
+  if echo "$body" | grep -q '"number"'; then
+    cat >&2 <<EOF
+✗ Push blocked: branch '$branch' already has an OPEN pull request.
+
+PRs are immutable once opened — create a new branch for further changes:
+  git checkout -b <new-branch>
+
+(emergency override, explain why: ALLOW_PR_UPDATE=1 git push ...)
+EOF
+    exit 1
+  fi
+done
+
+exit 0

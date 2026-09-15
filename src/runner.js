@@ -1,5 +1,5 @@
 const { runAttemptChain, taskStatus, setTaskStatus } = require('./intake-contract');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -152,6 +152,14 @@ const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:чернови�
 // "Подготовь черновик вакансии на HH" — fast-path when vacancy data already exists or is provided inline
 const VACANCY_PREP_DRAFT_INTENT   = /подготов.{0,20}(?:черновик|драфт|вакансию).{0,30}(?:hh|хх|хэдхантер)|создай.{0,20}(?:черновик|драфт).{0,30}(?:hh|хх|хэдхантер)|(?:черновик|драфт).{0,30}(?:в|на)\s+(?:hh|хх|хэдхантер)|положи.{0,20}(?:вакансию|на).{0,20}(?:hh|хх|хэдхантер)|вакансию.{0,20}(?:на|в)\s+(?:hh|хх|хэдхантер)|подготов.{0,10}(?:вакансию|черновик)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
+// /usage klod, /usage codex — CLI subscription rate-limit check (Claude Code / Codex CLI
+// OAuth session on THIS VM: ~/.claude/.credentials.json, ~/.codex/auth.json). Distinct from
+// USAGE_INTENT above (per-profile token-SPEND stats) — this reads the operator's own shared
+// CLI login, so it's gated to OWNER_USERNAME: a tenant profile has no reason to see the
+// operator's personal Claude/Codex subscription usage.
+const CLI_USAGE_INTENT      = /^\/?usage\s+(klod|codex|клод|кодекс)\b/i;
+const OWNER_USERNAME        = 'trained-assist-product-owner';
+const CLI_USAGE_SCRIPTS     = { klod: '/home/vova/bin/usage-klod.sh', codex: '/home/vova/bin/usage-codex.sh' };
 const CONTEXT_OFF_INTENT    = /^\/context_off$|выключи.{0,15}контекст|скрой.{0,15}контекст|отключи.{0,15}(?:статус|контекст|карточк)/i;
 const CONTEXT_ON_INTENT     = /^\/context_on$|включи.{0,15}контекст|покажи.{0,15}контекст|включи.{0,15}(?:статус|карточк)/i;
 const CALLTIPS_PREPARE_INTENT = /(?:подготов|составь|сделай|создай).{0,30}(?:план|вопросы|интервью).{0,30}(?:для|с|звонк)|подготов.{0,20}(?:к|для).{0,10}звонк|план.{0,20}(?:интервью|звонка|встречи).{0,30}(?:с|для)|call.?tips.{0,20}(?:для|с|план|prepare)/i;
@@ -165,6 +173,16 @@ const PERSONA_GUIDE_URL     = 'https://instant-publish.trainedassist.store/p/per
 // /project — list / switch / create projects. Lets the user steer which project new
 // sessions bind to (see projects.js + the project-binding block in run()).
 const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\s|$)/i;
+// /switch2klod, /switch2codex (or natural "switch to codex" / "переключись на клод") — which
+// CLI (Claude Code vs Codex) runs THIS CHAT's tasks going forward. Any profile can flip its
+// own chat — unlike CLI_USAGE_INTENT above, this isn't reading the operator's shared VM
+// subscription, it's a per-profile setting. Storage: profile.json engineByChat[chatId]
+// (see profiles.getEngine/setEngine) — falls back to the profile-wide `engine` default
+// (scripts/set-engine.mjs) when this chat has no override. A task already running keeps
+// its engine; the switch takes effect on the next task started in this chat.
+// \b doesn't fire after a Cyrillic letter in JS, so both alternatives end on
+// (?=\s|$) instead (same fix as PERSONA_INTENT above).
+const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|клод|кодекс)(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|клод|кодекс)(?=\s|$)/i;
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -390,6 +408,16 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     if (!target) return `Проект «${rest}» не найден. Список проектов: \`/project\``;
     projects.setActiveProjectId(workDir, target.id, chatId);
     return `▶️ Активный проект: «${target.name}» (${target.label}).\nСледующие новые сессии пойдут в него. Список: \`/project\``;
+  }
+
+  // /switch2klod, /switch2codex — see ENGINE_SWITCH_INTENT above.
+  const engineSwitchM = task.trim().match(ENGINE_SWITCH_INTENT);
+  if (engineSwitchM && workDir) {
+    const raw = (engineSwitchM[1] || engineSwitchM[2] || '').toLowerCase();
+    const engine = /^(codex|кодекс)$/.test(raw) ? 'codex' : 'claude';
+    profiles.setEngine(workDir, engine, chatId);
+    const label = engine === 'codex' ? 'Codex CLI' : 'Claude Code';
+    return `🔀 Для этого чата переключил движок на ${label}.\nСледующая задача в этом чате пойдёт через него (текущая, если выполняется, — доработает на старом).`;
   }
 
   // Developer intent — if GitHub not connected, ask to connect before doing anything
@@ -1080,6 +1108,28 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     }
     const { createBugReport } = require('./bug-report');
     return await createBugReport({ workDir, chatId, userId, note });
+  }
+
+  // /usage klod, /usage codex — see CLI_USAGE_INTENT above.
+  const cliUsageM = task.trim().match(CLI_USAGE_INTENT);
+  if (cliUsageM) {
+    if (userId !== OWNER_USERNAME) {
+      return 'Команда доступна только владельцу.';
+    }
+    const key = /^(codex|кодекс)$/i.test(cliUsageM[1]) ? 'codex' : 'klod';
+    const script = CLI_USAGE_SCRIPTS[key];
+    try {
+      const { stdout } = await new Promise((resolve, reject) => {
+        execFile(script, [], { timeout: 15000 }, (err, stdout, stderr) => {
+          if (err) reject(new Error(stderr?.trim() || err.message));
+          else resolve({ stdout });
+        });
+      });
+      return stdout.trim();
+    } catch (e) {
+      console.error('[cli-usage] %s script failed: %s', key, e.message);
+      return `⚠️ Не удалось получить данные (${key}): ${e.message}`;
+    }
   }
 
   const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
@@ -2322,10 +2372,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     ? path.join(user.workDir, 'sessions', `${activeSessionId}.json`)
     : '';
 
-  // Per-profile engine switch (claude|codex) — set via profile.json { "engine": "codex" }.
+  // Per-chat engine switch (claude|codex) — see ENGINE_SWITCH_INTENT / profiles.getEngine.
   // v1 codex path has no MCP tools (codex's MCP wiring is TOML-based, not wired up yet) and no
   // separate system-prompt flag — the system prompt is folded into the prompt text instead.
-  const engine = profiles.load(user.workDir).engine === 'codex' ? 'codex' : 'claude';
+  const engine = profiles.getEngine(user.workDir, chatId);
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
   const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username, sessionFilePath });
@@ -2808,6 +2858,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         gtd.maybeSchedule({
           workDir: user.workDir, sessionId: activeSessionId, chatId,
           username: user.username, task, apiKey: secrets.OPENROUTER_API_KEY,
+          projectDir: user.cwd || null,
         }).catch(e => console.warn('[gtd] schedule:', e.message));
       } catch (e) { console.warn('[gtd] hook:', e.message); }
     }
@@ -2904,7 +2955,7 @@ module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   // Exported for intent-coverage tests only
-  _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT },
+  _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
   // Exported for pin-state tests only
   _pin: { updateContextPin, readPinStore },
   // Exported for final-text-selection tests only

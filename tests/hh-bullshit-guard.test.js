@@ -174,6 +174,22 @@ describe('bullshitGuard — LLM failure passthrough', () => {
   });
 });
 
+// ─── 3b. Invented time/date — flagged but non-blocking ───────────────────────
+
+describe('bullshitGuard — invented time (non-blocking)', () => {
+  it('lets a message naming a time/date through, but flags it', async () => {
+    const r = await guard.bullshitGuard('Давайте созвонимся завтра в 15:00, вам удобно?', []);
+    expect(r.ok).toBe(true);
+    expect(r.checks.invented_time).toBe(true);
+  });
+
+  it('does not flag a message with no time/date mention', async () => {
+    const r = await guard.bullshitGuard('Спасибо, когда вам удобно пообщаться?', []);
+    expect(r.ok).toBe(true);
+    expect(r.checks.invented_time).toBe(false);
+  });
+});
+
 // ─── 4. No LLM call on empty history ─────────────────────────────────────────
 
 describe('bullshitGuard — no LLM on empty history', () => {

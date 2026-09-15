@@ -134,9 +134,11 @@ async function bullshitGuard(messageText, conversationHistory = [], options = {}
     return { ok: false, reason: 'незаполненный placeholder в тексте', checks };
   }
 
+  // Informational only, not blocking: a recruiter typing their own real availability
+  // ("завтра в 15:00") is a legitimate message, not an AI hallucination — this check
+  // can't tell the two apart, so it flags for the guard log but lets the send through.
   if (options.allowSpecificTime !== true && hasInventedTime(messageText, conversationHistory)) {
     checks.invented_time = true;
-    return { ok: false, reason: 'сообщение называет конкретное время/дату звонка, хотя реальная доступность не задана в ATS-конфиге (interview_config)', checks };
   }
 
   const apiKey = options.apiKey || getApiKey(options.username);

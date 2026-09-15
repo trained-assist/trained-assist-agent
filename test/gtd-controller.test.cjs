@@ -62,6 +62,33 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   const stillOpen = G.readGtd(userDir3, 's-1');
   ok(!called && stillOpen.status === 'open' && stillOpen.iterations === 0, 're-entrancy: skip while running');
 
+  // 7. checklist.md: readChecklist parses goal + items, checklistSummary lists unchecked
+  const projDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd-proj-'));
+  fs.writeFileSync(path.join(projDir, 'checklist.md'), [
+    'Goal: довести фичу X до прода',
+    '- [x] написать код',
+    '- [ ] написать тесты',
+    '- [ ] задеплоить',
+  ].join('\n'));
+  const cl = G.readChecklist(projDir);
+  ok(cl && cl.goal === 'довести фичу X до прода', 'readChecklist parses goal');
+  ok(cl.items.length === 3 && cl.items.filter(i => i.done).length === 1, 'readChecklist parses items/done');
+  const summary = G.checklistSummary(cl);
+  ok(/написать тесты/.test(summary) && /задеплоить/.test(summary) && !/написать код/.test(summary), 'checklistSummary lists only unchecked');
+  ok(G.readChecklist(fs.mkdtempSync(path.join(os.tmpdir(), 'gtd-empty-'))) === null, 'readChecklist null when no file');
+
+  // 8. computeMaxIterations scales with unchecked checklist items (capped, no LLM call)
+  ok(G.computeMaxIterations(cl) === 4, 'maxIterations scales with unchecked items (2+2)');
+  ok(G.computeMaxIterations(null) === G.DEFAULT_MAX_ITERATIONS, 'no checklist -> default cap');
+  const bigChecklist = { goal: null, items: Array.from({ length: 100 }, () => ({ text: 'x', done: false })) };
+  ok(G.computeMaxIterations(bigChecklist) === G.CHECKLIST_MAX_ITERATIONS, 'huge checklist clamped to hard ceiling');
+
+  // 9. buildReopenMessage injects checklist summary instead of truncated task
+  const recWithChecklist = { iterations: 1, maxIterations: 4, originalTask: 'x', projectDir: projDir };
+  const reopenMsg = G.buildReopenMessage(recWithChecklist);
+  ok(/написать тесты/.test(reopenMsg) && /задеплоить/.test(reopenMsg), 'reopen message carries unchecked checklist items');
+  ok(/Цель: довести фичу X до прода/.test(reopenMsg), 'reopen message carries goal');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

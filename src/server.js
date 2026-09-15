@@ -9,6 +9,7 @@ const { loadSecrets } = require('./secrets');
 const { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkPassword, generatePassword } = require('./web-auth');
 const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
+const { runMcpTool } = require('./mcp-action');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
@@ -1545,7 +1546,7 @@ async function main() {
       res.setHeader('Access-Control-Allow-Origin', '*');
       let body;
       try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-      const { username, negotiation_id, message } = body || {};
+      const { username, negotiation_id, message, force } = body || {};
       if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
 
       const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -1563,13 +1564,23 @@ async function main() {
       const allowSpecificTime = hhInterviewConfigAllowsTime(username);
       const guard = await bullshitGuard(message, history.messages, { username, allowSpecificTime });
       if (!guard.ok) {
-        console.warn(`[hh/send] guard blocked user=${username} neg=${negotiation_id} reason="${guard.reason}"`);
-        appendGuardBlock(username, negotiation_id, guard.reason, guard.checks);
-        return json(res, 200, { ok: false, blocked: true, reason: guard.reason, checks: guard.checks });
+        if (!force) {
+          console.warn(`[hh/send] guard blocked user=${username} neg=${negotiation_id} reason="${guard.reason}"`);
+          appendGuardBlock(username, negotiation_id, guard.reason, guard.checks);
+          return json(res, 200, { ok: false, blocked: true, reason: guard.reason, checks: guard.checks });
+        }
+        // Recruiter reviewed the block and chose to send anyway — this path is only
+        // reachable from the single-candidate send buttons, never from sendAll(),
+        // so a bulk blast can't self-override. Still logged for the guard history page.
+        console.warn(`[hh/send] guard block FORCED by user=${username} neg=${negotiation_id} reason="${guard.reason}"`);
+        appendGuardBlock(username, negotiation_id, `[отправлено вручную несмотря на блок] ${guard.reason}`, guard.checks, false);
       }
       if (guard.degraded) {
         console.warn(`[hh/send] guard degraded (semantic check skipped) user=${username} neg=${negotiation_id} checks=${JSON.stringify(guard.checks)}`);
         appendGuardBlock(username, negotiation_id, 'семантическая проверка пропущена (' + (guard.checks.llm_skipped || 'unknown') + ')', guard.checks, false);
+      }
+      if (guard.checks.invented_time) {
+        appendGuardBlock(username, negotiation_id, 'сообщение упоминает время/дату — не блокирует отправку, только для истории', guard.checks, false);
       }
 
       try {
@@ -1707,11 +1718,11 @@ async function main() {
         ? `Напиши вежливый отказ кандидату ${firstName}.`
         : `Кандидат: ${firstName}\n\n${msgType === 'initial' ? `Резюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}\n\n` : ''}${atsLine}История переписки:\n${convoCtx || '(переписки ещё не было — это первое сообщение)'}${msgType === 'followup' ? '\n\n(кандидат не ответил на наше последнее сообщение)' : ''}${availabilityBlock}\n\nНапиши следующее сообщение кандидату.`;
 
-      try {
-        const message = await new Promise((resolve, reject) => {
+      function callLlm(userContent) {
+        return new Promise((resolve, reject) => {
           const reqBody = JSON.stringify({
             model: 'openai/gpt-4o-mini',
-            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMsg }],
+            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userContent }],
             temperature: 0.7,
             max_tokens: 800,
           });
@@ -1735,12 +1746,31 @@ async function main() {
           hreq.write(reqBody);
           hreq.end();
         });
+      }
+
+      try {
+        // Guard's primary job is feeding the generator, not just gatekeeping at send
+        // time: draft, check, and if it fails on something the model can fix (placeholder,
+        // repeated question/intro, template garbage), regenerate once telling it exactly
+        // what was wrong. Only a still-failing second attempt reaches the recruiter as a
+        // visible warning — invented_time is informational-only so it never triggers this.
+        const allowSpecificTime = hhInterviewConfigAllowsTime(username);
+        let message = await callLlm(userMsg);
+        let guard = await bullshitGuard(message, msgs, { username, allowSpecificTime });
+        if (!guard.ok) {
+          console.warn(`[hh/generate-message] draft failed guard, regenerating: user=${username} neg=${negotiation_id} reason="${guard.reason}"`);
+          const retryMsg = `${userMsg}\n\n(Предыдущая попытка была отклонена автопроверкой: "${guard.reason}". Не повторяй эту ошибку — напиши новый вариант без неё.)`;
+          message = await callLlm(retryMsg);
+          guard = await bullshitGuard(message, msgs, { username, allowSpecificTime });
+        }
 
         if (!history.ats_result) history.ats_result = {};
         history.ats_result.draft_message = message;
         fs.mkdirSync(candDir, { recursive: true });
         fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
-        return json(res, 200, { ok: true, message });
+        const resp = { ok: true, message };
+        if (!guard.ok) resp.guard_warning = guard.reason;
+        return json(res, 200, resp);
       } catch (e) {
         console.error('[hh/generate-message] error:', e.message);
         return json(res, 500, { error: e.message });
@@ -1775,7 +1805,7 @@ async function main() {
     if (req.method === 'POST' && url.pathname === '/hh/send-and-reject') {
       res.setHeader('Access-Control-Allow-Origin', '*');
       const body = JSON.parse(await readBody(req));
-      const { username, negotiation_id, message } = body || {};
+      const { username, negotiation_id, message, force } = body || {};
       if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
 
       const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -1792,13 +1822,20 @@ async function main() {
 
       const guard2 = await bullshitGuard(message, history2.messages, { username });
       if (!guard2.ok) {
-        console.warn(`[hh/send-and-reject] guard blocked user=${username} neg=${negotiation_id} reason="${guard2.reason}"`);
-        appendGuardBlock(username, negotiation_id, guard2.reason, guard2.checks);
-        return json(res, 200, { ok: false, blocked: true, reason: guard2.reason, checks: guard2.checks });
+        if (!force) {
+          console.warn(`[hh/send-and-reject] guard blocked user=${username} neg=${negotiation_id} reason="${guard2.reason}"`);
+          appendGuardBlock(username, negotiation_id, guard2.reason, guard2.checks);
+          return json(res, 200, { ok: false, blocked: true, reason: guard2.reason, checks: guard2.checks });
+        }
+        console.warn(`[hh/send-and-reject] guard block FORCED by user=${username} neg=${negotiation_id} reason="${guard2.reason}"`);
+        appendGuardBlock(username, negotiation_id, `[отправлено вручную несмотря на блок] ${guard2.reason}`, guard2.checks, false);
       }
       if (guard2.degraded) {
         console.warn(`[hh/send-and-reject] guard degraded (semantic check skipped) user=${username} neg=${negotiation_id} checks=${JSON.stringify(guard2.checks)}`);
         appendGuardBlock(username, negotiation_id, 'семантическая проверка пропущена (' + (guard2.checks.llm_skipped || 'unknown') + ')', guard2.checks, false);
+      }
+      if (guard2.checks.invented_time) {
+        appendGuardBlock(username, negotiation_id, 'сообщение упоминает время/дату — не блокирует отправку, только для истории', guard2.checks, false);
       }
 
       try {
@@ -2978,6 +3015,38 @@ ${expLines || '—'}
       return;
     }
 
+    // POST /action — call a single MCP tool directly, bypassing Claude Code entirely.
+    // The "command → tool" fast path for parameterized Telegram quick-commands
+    // (/eval, /review, /send_message, …). Does not touch session-store — this is
+    // deliberately stateless, not a lightweight Claude session.
+    if (req.method === 'POST' && url.pathname === '/action') {
+      const start = Date.now();
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+
+      const { username, tool, params } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      if (!tool || typeof tool !== 'string') return json(res, 400, { error: 'tool required' });
+      if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) {
+        return json(res, 400, { error: 'params must be an object' });
+      }
+
+      const workDir = path.join(BASE_USERS_DIR, username);
+      fs.mkdirSync(workDir, { recursive: true });
+
+      try {
+        const text = await runMcpTool({ tool, params: params || {}, username, workDir });
+        let result = text;
+        try { result = JSON.parse(text); } catch { /* tool returned plain text — keep as-is */ }
+        return json(res, 200, { ok: true, result, ms: Date.now() - start });
+      } catch (e) {
+        const statusByCode = { bad_request: 400, tool_error: 400, timeout: 504 };
+        const status = statusByCode[e.code] || 502;
+        console.error('[/action]', username, tool, `${status}:`, e.message);
+        return json(res, status, { error: e.message });
+      }
+    }
+
     // CORS preflight for /apply (form is hosted on chillai.space, different origin)
     if (req.method === 'OPTIONS' && /^\/apply\//.test(url.pathname)) {
       res.writeHead(204, {
@@ -4093,7 +4162,7 @@ function showToast(msg, err) {
   setTimeout(() => { t.style.display = 'none'; }, 4000);
 }
 
-async function doSend() {
+async function doSend(force) {
   const msg = document.getElementById('draft-msg').value.trim();
   if (!msg) { showToast('Сообщение пустое', true); return; }
   const btn = document.getElementById('sendBtn');
@@ -4102,12 +4171,14 @@ async function doSend() {
     const r = await fetch(CALLBACK_BASE + '/hh/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
-      body: JSON.stringify({ username: HH_USER, negotiation_id: NEG_ID, message: msg }),
+      body: JSON.stringify({ username: HH_USER, negotiation_id: NEG_ID, message: msg, force: !!force }),
     });
     const data = await r.json().catch(() => ({}));
     if (data.blocked) {
-      showToast('🚫 Guard: ' + (data.reason || 'заблокировано'), true);
       btn.disabled = false; btn.textContent = '✓ Отправить в HH';
+      if (confirm('🚫 Guard: ' + (data.reason || 'заблокировано') + '\n\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
+        return doSend(true);
+      }
     } else if (!r.ok) {
       showToast('❌ ' + (data.error || r.statusText), true);
       btn.disabled = false; btn.textContent = '✓ Отправить в HH';
@@ -4671,6 +4742,7 @@ async function generateOne(i, negId, candidateName, alreadySent) {
     });
     if (ta) { ta.value = data.message || ''; ta.classList.remove('generating'); ta.placeholder = ''; }
     if (btn) { btn.disabled = false; btn.textContent = '✦ Переписать'; }
+    if (data.guard_warning) showToast('⚠️ Черновик после перегенерации всё ещё под вопросом: ' + data.guard_warning, true);
   } catch(e) {
     if (ta) { ta.classList.remove('generating'); ta.placeholder = ''; }
     if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать'; }
@@ -4690,6 +4762,7 @@ async function generateRejection(i, negId, candidateName) {
     });
     if (ta) { ta.value = data.message || ''; ta.classList.remove('generating'); ta.placeholder = ''; }
     if (btn) { btn.disabled = false; btn.textContent = '✦ Переписать отказ'; }
+    if (data.guard_warning) showToast('⚠️ Черновик после перегенерации всё ещё под вопросом: ' + data.guard_warning, true);
   } catch(e) {
     if (ta) { ta.classList.remove('generating'); ta.placeholder = ''; }
     if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать отказ'; }
@@ -4697,16 +4770,18 @@ async function generateRejection(i, negId, candidateName) {
   }
 }
 
-async function sendAndRejectOne(i, negId) {
+async function sendAndRejectOne(i, negId, force) {
   const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
   if (!msg) { showToast('Напишите или сгенерируйте сообщение', true); return; }
   const btn = event?.currentTarget;
   if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
   try {
-    const data = await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg });
+    const data = await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg, force: !!force });
     if (data.blocked) {
-      showToast('🚫 Guard: ' + (data.reason || 'сообщение заблокировано'), true);
       if (btn) { btn.disabled = false; btn.textContent = '✗ Отправить отказ'; }
+      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\n\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
+        return sendAndRejectOne(i, negId, true);
+      }
       return;
     }
     markDone(i); onCheck(); showToast('✅ Отказ отправлен');
@@ -4736,16 +4811,18 @@ async function autoGenerate() {
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, emptyBtns.length) }, worker));
 }
 
-async function sendOne(i, negId) {
+async function sendOne(i, negId, force) {
   const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
   if (!msg) { showToast('Сообщение пустое', true); return; }
   const btn = event?.currentTarget;
   if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
   try {
-    const data = await hhAction('/hh/send', { negotiation_id: negId, message: msg });
+    const data = await hhAction('/hh/send', { negotiation_id: negId, message: msg, force: !!force });
     if (data.blocked) {
-      showToast('🚫 Guard: ' + (data.reason || 'сообщение заблокировано'), true);
       if (btn) { btn.disabled = false; btn.textContent = '✓ Отправить'; }
+      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\n\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
+        return sendOne(i, negId, true);
+      }
       return;
     }
     markDone(i); onCheck(); showToast('✅ Отправлено!');
