@@ -5,7 +5,7 @@ const path = require('path');
 const os = require('os');
 const http = require('http');
 const https = require('https');
-const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt } = require('../../hh-message-prompts');
+const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, loadBaseOverride } = require('../../hh-message-prompts');
 
 const USER_ID = process.env.USER_ID || '';
 
@@ -1598,8 +1598,9 @@ async function generateMessage(candidateContext, atsResult, name, apiKey, messag
   const gaps = (atsResult.gaps || []).slice(0, 2).join(', ') || 'нет критических пробелов';
 
   const commStyle = loadCommunicationStyle(userId || USER_ID);
+  const baseOverride = loadBaseOverride(tokenBase(), userId || USER_ID);
   const recruiterCtx = buildRecruiterIdentity(loadRecruiterIdentityConfig());
-  const systemPrompt = buildMessageSystemPrompt({ recruiterCtx, commStyle });
+  const systemPrompt = buildMessageSystemPrompt({ recruiterCtx, commStyle, baseOverride });
   const availabilityBlock = buildAvailabilityBlock(atsConfig?.interview_config);
 
   const historyLines = history.map(m => `${m.role === 'employer' ? 'Рекрутер' : 'Кандидат'}: ${m.text}`).join('\n');

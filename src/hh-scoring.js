@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt } = require('./hh-message-prompts');
+const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride } = require('./hh-message-prompts');
 
 const FALLBACK_MODEL = 'google/gemini-2.5-flash';
 
@@ -416,6 +416,7 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const styleFile = path.join(tokensBase, String(username), 'hh-message-style');
   const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
+  const baseOverride = loadBaseOverride(tokensBase, username);
 
   // Read recruiter identity config (agency, name, signature, rules)
   let msgCfg = null;
@@ -442,7 +443,7 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
 
   if (!needDraft.length) return 0;
 
-  const baseSystem = buildMessageSystemPrompt({ vacancyContext: vacancyCtx, recruiterCtx, commStyle });
+  const baseSystem = buildMessageSystemPrompt({ vacancyContext: vacancyCtx, recruiterCtx, commStyle, baseOverride });
   const rejectionSystem = buildRejectionSystemPrompt({ recruiterCtx, commStyle });
 
   let generated = 0;
