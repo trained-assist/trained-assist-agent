@@ -42,6 +42,19 @@ function pickFinalText(claudeResult, lastAssistantMsg, fullText) {
   return (fullText || '').trim();
 }
 
+// True when pickFinalText() has nothing but the raw scratchpad to fall back on — no clean
+// result-event string, no captured coherent turn. What's shown is mid-thought narration
+// ("Смотрю X:", tool calls interleaved with text), not a concluded answer. The SIGTERM/
+// user-stop paths already frame their message as interrupted, but the normal completion
+// path (exitCode 0, no timeout/stop) has nothing else signaling this — it must mark it
+// explicitly instead of presenting a cut-off narration as if it were the final answer (#577
+// follow-up: #577 fixed narration only leaking via lastAssistantMsg, not this scratchpad gap).
+function isScratchpadFallback(claudeResult, lastAssistantMsg) {
+  const clean = typeof claudeResult === 'string' ? claudeResult.trim() : '';
+  const last = (lastAssistantMsg || '').trim();
+  return !clean && !last;
+}
+
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
@@ -2539,7 +2552,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
 
   // Prefer the clean result string from the result event; fall back to accumulated stream text
-  const result = pickFinalText(claudeResult, lastAssistantMsg, fullOutput.text) || '(нет вывода)';
+  const scratchpadFallback = isScratchpadFallback(claudeResult, lastAssistantMsg) && fullOutput.text.trim();
+  let result = pickFinalText(claudeResult, lastAssistantMsg, fullOutput.text) || '(нет вывода)';
+  // No clean answer and no captured turn on a normal (non-timeout, non-stopped) completion —
+  // this is a cut-off narration, not a conclusion. Mark it so the user doesn't read it as a
+  // finished answer (the SIGTERM/stop paths above already frame theirs as interrupted).
+  if (scratchpadFallback) {
+    result = `⚠️ Не получил чистого финального ответа — процесс оборвался посреди действия. Вот последнее, что успел:\n\n${result}`;
+  }
 
   // Detect Claude Code auth failure — set flag and send clear message instead of raw error
   if (isAuthError(result)) {
@@ -2727,7 +2747,7 @@ module.exports = {
   // Exported for pin-state tests only
   _pin: { updateContextPin, readPinStore },
   // Exported for final-text-selection tests only
-  _final: { pickFinalText },
+  _final: { pickFinalText, isScratchpadFallback },
   // Exported for lane-granularity tests only
   _laneKey,
   // Exported for per-profile cap-isolation tests only (R7/S8a)
