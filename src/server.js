@@ -8,6 +8,7 @@ const { loadSecrets } = require('./secrets');
 const { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkPassword, generatePassword } = require('./web-auth');
 const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
+const { runMcpTool } = require('./mcp-action');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
@@ -3010,6 +3011,38 @@ ${expLines || '—'}
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;
+    }
+
+    // POST /action — call a single MCP tool directly, bypassing Claude Code entirely.
+    // The "command → tool" fast path for parameterized Telegram quick-commands
+    // (/eval, /review, /send_message, …). Does not touch session-store — this is
+    // deliberately stateless, not a lightweight Claude session.
+    if (req.method === 'POST' && url.pathname === '/action') {
+      const start = Date.now();
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+
+      const { username, tool, params } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      if (!tool || typeof tool !== 'string') return json(res, 400, { error: 'tool required' });
+      if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) {
+        return json(res, 400, { error: 'params must be an object' });
+      }
+
+      const workDir = path.join(BASE_USERS_DIR, username);
+      fs.mkdirSync(workDir, { recursive: true });
+
+      try {
+        const text = await runMcpTool({ tool, params: params || {}, username, workDir });
+        let result = text;
+        try { result = JSON.parse(text); } catch { /* tool returned plain text — keep as-is */ }
+        return json(res, 200, { ok: true, result, ms: Date.now() - start });
+      } catch (e) {
+        const statusByCode = { bad_request: 400, tool_error: 400, timeout: 504 };
+        const status = statusByCode[e.code] || 502;
+        console.error('[/action]', username, tool, `${status}:`, e.message);
+        return json(res, status, { error: e.message });
+      }
     }
 
     // CORS preflight for /apply (form is hosted on chillai.space, different origin)
