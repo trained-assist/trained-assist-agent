@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
-const { runProactiveSearch, SCORING_PROMPT_TEXT } = require('../../hh-proactive-search');
+const { runProactiveSearch, buildScoringPromptText } = require('../../hh-proactive-search');
 
 function proactiveHmac(username) {
   const secret = process.env.AGENT_SECRET || '';
@@ -57,7 +57,10 @@ module.exports = {
     hh_proactive_scoring_prompt: {
       description: 'Показывает промпт и логику по которой оцениваются кандидаты при проактивном поиске. Вызывай когда рекрутер спрашивает "как вы подбирали", "покажи критерии", "почему этот кандидат" и т.п.',
       inputSchema: { type: 'object', properties: {} },
-      handler: async () => ({ text: SCORING_PROMPT_TEXT }),
+      handler: async () => {
+        const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+        return { text: buildScoringPromptText(userId) };
+      },
     },
 
     hh_proactive_view: {
