@@ -6,7 +6,7 @@
 // Fix: pickFinalText() prefers the clean result, then the LAST assistant turn, and only
 // as a last resort the whole scratchpad.
 const { _final } = require('../src/runner');
-const { pickFinalText } = _final;
+const { pickFinalText, isScratchpadFallback } = _final;
 
 let pass = 0, fail = 0;
 function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
@@ -34,6 +34,15 @@ ok(pickFinalText(null, '', scratchpad) === scratchpad.trim(), 'last resort: full
 
 // 6) everything empty → empty string (caller substitutes "(нет вывода)")
 ok(pickFinalText(null, '', '') === '', 'all empty → empty string');
+
+// 7) isScratchpadFallback — #577 follow-up gap: normal completion (exit 0, not timeout/stopped)
+// with no clean result AND no captured turn must be flagged so the caller marks the message,
+// instead of silently showing cut-off narration as if it were the concluded answer.
+ok(isScratchpadFallback(null, '') === true, 'no clean result, no last turn → scratchpad fallback');
+ok(isScratchpadFallback(null, lastTurn) === false, 'last turn present → not a fallback');
+ok(isScratchpadFallback(clean, '') === false, 'clean result present → not a fallback');
+ok(isScratchpadFallback({ error: true }, '') === true, 'non-string result treated as absent → fallback');
+ok(isScratchpadFallback('   ', '') === true, 'blank result treated as absent → fallback');
 
 console.log(`\nfinal-text-select: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
