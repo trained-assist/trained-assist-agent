@@ -30,11 +30,13 @@ const path = require('path');
 const DEFAULT_ETA_MIN = 60;   // через сколько минут после завершения проверить
 const ETA_MIN_CLAMP   = 20;   // < этого — дребезг, пинг раньше, чем что-то доедет
 const ETA_MAX_CLAMP   = 180;  // > этого — уже не «доведение», а отдельная задача
-const DEFAULT_MAX_ITERATIONS = 3;   // hard cap на упорство (попробовал ×3 → стоп)
+const DEFAULT_MAX_ITERATIONS = 3;   // hard cap на упорство (попробовал ×3 → стоп), без checklist.md
+const CHECKLIST_MAX_ITERATIONS = 25; // hard ceiling даже для длинного чек-листа (деньги/циклы)
 const INTENT_MODEL = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
 const MAX_FIRES_PER_TICK = 3;  // не будим весь профиль-парк разом
 
 const GTD_DIR = 'gtd';
+const CHECKLIST_FILE = 'checklist.md';
 
 // Дешёвый pre-gate: без хотя бы одного из этих сигналов LLM не зовём —
 // ложный пинг дороже пропуска, а большинство задач контроля не просят.
@@ -76,6 +78,40 @@ function listGtd(workDir) {
       .map(f => { try { return JSON.parse(fs.readFileSync(path.join(_dir(workDir), f), 'utf8')); } catch { return null; } })
       .filter(Boolean);
   } catch { return []; }
+}
+
+// ── checklist.md convention ──────────────────────────────────────────────
+// Формат: `Goal: <текст>` (опционально) + строки `- [ ] пункт` / `- [x] пункт`.
+// Живёт в корне ПРОЕКТА (projectDir, см. projects.js), не в user.workDir —
+// это артефакт конкретной задачи, а не профиля. Читается ЗАНОВО на каждой
+// итерации (не кэшируется в gtd-записи), чтобы видеть отмеченные пункты.
+function readChecklist(projectDir) {
+  if (!projectDir) return null;
+  let raw;
+  try { raw = fs.readFileSync(path.join(projectDir, CHECKLIST_FILE), 'utf8'); } catch { return null; }
+  const items = [];
+  let goal = null;
+  for (const line of raw.split('\n')) {
+    const item = line.match(/^\s*-\s*\[([ xX])\]\s*(.+)$/);
+    if (item) { items.push({ text: item[2].trim(), done: item[1].toLowerCase() === 'x' }); continue; }
+    const g = line.match(/^\s*#*\s*goal:\s*(.+)$/i);
+    if (g && !goal) goal = g[1].trim();
+  }
+  return { goal, items };
+}
+
+// Незакрытые пункты + цель, для инъекции в reopen-промпт вместо усечённого task.
+function checklistSummary(checklist) {
+  if (!checklist || !checklist.items.length) return null;
+  const done = checklist.items.filter(i => i.done).length;
+  const unchecked = checklist.items.filter(i => !i.done);
+  return [
+    checklist.goal ? `Цель: ${checklist.goal}` : null,
+    `Чек-лист (${done}/${checklist.items.length} закрыто), файл checklist.md в корне проекта:`,
+    unchecked.length
+      ? unchecked.map(i => `- [ ] ${i.text}`).join('\n')
+      : '(все пункты отмечены [x] — перепроверь по факту, что каждый реально доехал, прежде чем писать GTD: done)',
+  ].filter(Boolean).join('\n');
 }
 
 // ── Intent-gate (дешёвая LLM, консервативная) ───────────────────────────────
@@ -127,44 +163,63 @@ async function detectIntent(task, { apiKey, timeoutMs = 12000 } = {}) {
   }
 }
 
+// Длинный чек-лист заслуживает больше попыток, чем "попробовал ×3" дефолт;
+// всё ещё жёстко ограничено CHECKLIST_MAX_ITERATIONS (деньги/циклы).
+function computeMaxIterations(checklist) {
+  if (!checklist || !checklist.items.length) return DEFAULT_MAX_ITERATIONS;
+  const unchecked = checklist.items.filter(i => !i.done).length;
+  return Math.max(DEFAULT_MAX_ITERATIONS, Math.min(CHECKLIST_MAX_ITERATIONS, unchecked + 2));
+}
+
 // Вызывается на успешном завершении WORKRUN (гейт в runner). Если юзер просил
 // довести до конца — пишем durable-запись. Идемпотентно перезаписывает открытую
 // запись сессии (новый workrun с контролем → свежий отсчёт).
-async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKey }) {
+async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKey, projectDir }) {
   if (!workDir || !sessionId) return null;
   const intent = await detectIntent(task, { apiKey });
   if (!intent.wanted) return null;
   const now = Date.now();
+  const maxIterations = computeMaxIterations(readChecklist(projectDir));
   const rec = {
     sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
     createdAt: now,
     dueAt: now + intent.etaMinutes * 60 * 1000,
     etaMinutes: intent.etaMinutes,
     iterations: 0,
-    maxIterations: DEFAULT_MAX_ITERATIONS,
+    maxIterations,
     status: 'open',
     originalTask: String(task || '').slice(0, 300),
+    projectDir: projectDir || null,
     lastFiredAt: null,
     closedReason: null,
   };
   writeGtd(workDir, rec);
-  console.log(`[gtd] scheduled session=${sessionId} user=${username} eta=${intent.etaMinutes}m due=${new Date(rec.dueAt).toISOString()}`);
+  console.log(`[gtd] scheduled session=${sessionId} user=${username} eta=${intent.etaMinutes}m maxIterations=${maxIterations}${checklist ? ' (checklist.md)' : ''} due=${new Date(rec.dueAt).toISOString()}`);
   return rec;
 }
 
 const REOPEN_INTRO = '[GTD — авто-доведение задачи до конца]';
 
 function buildReopenMessage(rec) {
+  // Перечитываем checklist.md заново каждую итерацию — так видим пункты,
+  // отмеченные [x] предыдущей попыткой, вместо статичного усечённого task.
+  const checklist = rec.projectDir ? readChecklist(rec.projectDir) : null;
+  const summary = checklistSummary(checklist);
   return [
     REOPEN_INTRO,
     `Ты взялся довести эту задачу до конца. Попытка ${rec.iterations} из ${rec.maxIterations}.`,
     '',
     'Проверь по ФАКТУ (с диска / из сети, не по памяти): всё ли реально доехало — прод/PR/деплой/результат, а не только «лежит в коде»?',
-    '• Если всё готово — кратко подтверди что сделано и в самом конце ответа напиши строкой: GTD: done',
-    '• Если нет — сделай ещё одну попытку (можно другим путём, чем прошлая). ПЕРЕД работой создай GitHub issue на то, что собираешься сделать',
-    '  (или подними уже открытый issue с прошлого шага и двигай его), потом выполни. В конце напиши строкой: GTD: continue',
+    summary
+      ? '• Если всё готово — отметь оставшиеся пункты `- [x]` в checklist.md, кратко подтверди и в самом конце ответа напиши строкой: GTD: done'
+      : '• Если всё готово — кратко подтверди что сделано и в самом конце ответа напиши строкой: GTD: done',
+    summary
+      ? '• Если нет — сделай ещё одну попытку (можно другим путём, чем прошлая). ПЕРЕД работой создай GitHub issue на то, что собираешься сделать'
+        + '\n  (или подними уже открытый issue с прошлого шага и двигай его), потом выполни, отмечая закрытые пункты в checklist.md. В конце напиши строкой: GTD: continue'
+      : '• Если нет — сделай ещё одну попытку (можно другим путём, чем прошлая). ПЕРЕД работой создай GitHub issue на то, что собираешься сделать'
+        + '\n  (или подними уже открытый issue с прошлого шага и двигай его), потом выполни. В конце напиши строкой: GTD: continue',
     '',
-    `Исходная задача: ${rec.originalTask || '(см. историю сессии)'}`,
+    summary || `Исходная задача: ${rec.originalTask || '(см. историю сессии)'}`,
   ].join('\n');
 }
 
@@ -253,5 +308,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 module.exports = {
   detectIntent, maybeSchedule, runDue, buildReopenMessage,
   readGtd, writeGtd, clearGtd, listGtd,
+  readChecklist, checklistSummary, computeMaxIterations,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
+  CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS,
 };
