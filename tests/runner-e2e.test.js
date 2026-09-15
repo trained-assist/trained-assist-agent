@@ -461,16 +461,23 @@ describe('Telegram delivery', () => {
 
 describe('Expand button — forceClaude escalation', () => {
 
-  it('quick answer has no inline keyboard button', { timeout: 10000 }, async () => {
+  it('quick answer carries a qa_more escalate button (requirements-log [062])', { timeout: 10000 }, async () => {
     await chat('подключи github');
     const sent = tgSent();
     expect(sent.length).toBe(1);
     const body = sent[0].body;
-    // #530 §B + INTAKE-REFACTOR-SPEC §9.2 (owner reversal): the launch path moved to
-    // the gateway accumulator («▶️ Запустить проработку» → callback intake_run); the
-    // former «❓ Уточнить задачу» button (clarify|<sid>) was removed as a bad idea —
-    // quick answers now ship with no buttons at all. See answer-router.oneshotActionMarkup().
-    expect(body.reply_markup).toBeUndefined();
+    // #530 §B + INTAKE-REFACTOR-SPEC §9.2 (owner reversal) killed the generic one-shot
+    // action markup (answer-router.oneshotActionMarkup stays null — clarify| is gone for
+    // good). But a template quick answer never runs detectPlanInAnswer, so it could never
+    // earn a «▶️ Действуй дальше по плану» button either — leaving it a dead end whenever
+    // it missed the point (requirements-log [062], 2026-09-15). Fix: a dedicated
+    // qa_more|{sessionId} button (tg-bot callbacks.js) reruns the same session
+    // forceClaude+deep, and runner.js's existing forceClaude-deep wrap (SCENARIO 7 below)
+    // carries the quick reply along as context.
+    const sessionId = readCurrentSession().id;
+    expect(body.reply_markup).toEqual({
+      inline_keyboard: [[{ text: '🔎 Разобраться подробнее', callback_data: `qa_more|${sessionId}` }]],
+    });
   });
 
   it('forceClaude=true skips quick answer and calls Claude', { timeout: 20000 }, async () => {

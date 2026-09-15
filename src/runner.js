@@ -2137,8 +2137,21 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       }
       setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
-    // Под быстрым one-shot ответом — явные действия: проработка / уточнение.
-    const expandMarkup = !isUtility ? actionButtons(activeSessionId) : null;
+    // Escalate-button (requirements-log [062], 2026-09-15): §9.2 killed the generic
+    // one-shot action markup (oneshotActionMarkup — see answer-router.js), but a quick
+    // answer is a template match, not an LLM plan — detectPlanInAnswer never runs on it,
+    // so it can never earn a «▶️ Действуй дальше по плану» button. Without a button here,
+    // a quick answer that missed the point is a dead end: it IS saved to session history
+    // (below), but nothing lets the user hand that exact exchange to Claude — they'd have
+    // to retype the question into the accumulator and hope it resolves to the same session.
+    // qa_more|{sessionId} (tg-bot callbacks.js) reruns this session with forceClaude+deep;
+    // runner.js's own forceClaude-deep wrap (below, "Пользователь запустил проработку того
+    // же запроса") already attaches the quick reply as prior context — no new plumbing
+    // needed there. Utility replies (ping/help/sessions/...) stay button-less: they're not
+    // logged to session history at all, so there's nothing yet to hand off to Claude.
+    const expandMarkup = !isUtility && activeSessionId
+      ? { inline_keyboard: [[{ text: '🔎 Разобраться подробнее', callback_data: `qa_more|${activeSessionId}` }]] }
+      : null;
     const quickExtra = expandMarkup ? { reply_markup: expandMarkup } : {};
     if (initialMsgId) {
       await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra));
