@@ -7,14 +7,6 @@ const { readHhToken } = require('./hh-utils');
 
 const HH_API_BASE = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
 const HH_CONTACT = process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru';
-const SEARCH_QUERIES = [
-  'private banking',
-  'приватный банкинг',
-  'wealth management',
-  'финансовый советник VIP',
-  'family office',
-  'управление капиталом состоятельных клиентов',
-];
 
 async function hhResumeSearch(query, token) {
   const params = new URLSearchParams({ text: query, area: '1', page: '0', per_page: '50', order_by: 'relevance' });
@@ -30,60 +22,50 @@ async function hhResumeSearch(query, token) {
   return res.json();
 }
 
+// Significant words (4+ chars) from a criterion name, used for cheap substring matching
+// against a candidate's title/positions/companies before the AI does the real evaluation.
+function extractKeywords(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 4);
+}
+
+// Generic pre-filter: driven entirely by this vacancy's ATS config (min experience +
+// required/preferred criteria with weights), no hardcoded domain keywords. This is only
+// a cheap sort to pick the top-30 for AI enrichment below — the AI step does the real,
+// accurate scoring against the same criteria.
 function scoreCandidate(r, atsConfig) {
+  const minExpMonths = Math.round((atsConfig.filters?.min_experience_years ?? 2) * 12);
   const totalMonths = r.total_experience?.months ?? 0;
-  if (totalMonths < 72) return null;
+  if (totalMonths < minExpMonths) return null;
 
   const expList = r.experience || [];
   let allText = (r.title || '').toLowerCase();
   for (const e of expList) {
-    allText += ' ' + (e.position || '').toLowerCase() + ' ' + (e.company || '').toLowerCase();
+    allText += ' ' + (e.position || '').toLowerCase() + ' ' + (e.company || '').toLowerCase() + ' ' + (e.description || '').toLowerCase();
   }
   const certText = (r.certificate || []).map(c => (c.title || '').toLowerCase()).join(' ');
+  allText += ' ' + certText;
 
-  let score = 0;
-  const signals = [];
+  const baseScore = 1.5;
+  let score = baseScore;
+  const signals = [`опыт ${Math.floor(totalMonths / 12)}л +1.5`];
 
-  score += 1.5;
-  signals.push(`опыт ${Math.floor(totalMonths / 12)}л +1.5`);
-
-  if (['private banking', 'приватный', 'hnwi', 'uhnwi', 'состоятельн', 'wealth'].some(kw => allText.includes(kw))) {
-    score += 3;
-    signals.push('private banking сегмент +3');
+  const criteria = [...(atsConfig.required || []), ...(atsConfig.preferred || [])];
+  for (const c of criteria) {
+    const weight = c.weight || 0;
+    const words = extractKeywords(c.name);
+    if (words.length && words.some(w => allText.includes(w))) {
+      score += weight;
+      signals.push(`${c.name} +${weight}`);
+    }
   }
 
-  if (['привлечение', 'привлек', 'acquisition', 'личная сеть', 'развитие базы', 'привлекать'].some(kw => allText.includes(kw))) {
-    score += 3;
-    signals.push('привлечение клиентов +3');
-  }
-
-  if (['hnwi', 'uhnwi', 'состоятельн', 'private', 'vip', 'premium', 'млрд'].some(kw => allText.includes(kw))) {
-    score += 2;
-    signals.push('HNI сегмент +2');
-  }
-
-  if (allText.includes('family office') || allText.includes('семейный офис')) {
-    score += 1.0;
-    signals.push('family office +1.0');
-  }
-
-  if (allText.includes('фсфр') || allText.includes('квалиф') || certText.includes('фсфр') || certText.includes('аттестат')) {
-    score += 1.0;
-    signals.push('ФСФР/квалинвестор +1.0');
-  }
-
-  if (['альфа-банк', 'сбер', 'газпромбанк', 'бкс', 'ультима', 'goldman', 'citibank', 'атон', 'финам', 'vtb', 'втб'].some(kw => allText.includes(kw))) {
-    score += 0.5;
-    signals.push('премиум компания +0.5');
-  }
-
-  if (['директор', 'руководитель', 'head of', 'вице-президент', 'управляющий директор'].some(kw => allText.includes(kw))) {
-    score += 0.5;
-    signals.push('старшая позиция +0.5');
-  }
-
-  const passThreshold = atsConfig.pass_threshold ?? 7;
-  const reviewThreshold = atsConfig.review_threshold ?? 5;
+  const totalPossible = baseScore + criteria.reduce((s, c) => s + (c.weight || 0), 0);
+  const passThreshold = totalPossible * 0.55;
+  const reviewThreshold = totalPossible * 0.32;
   const tag = score >= passThreshold ? 'PASS' : score >= reviewThreshold ? 'REVIEW' : 'WEAK';
 
   return { score, signals, tag };
@@ -177,34 +159,85 @@ async function enrichCandidates(candidates, atsConfig, orKey) {
   return enriched;
 }
 
-// Exported scoring prompt text — shown to recruiter on request
-const SCORING_PROMPT_TEXT = `Как мы подбираем кандидатов (проактивный поиск):
+// Generate HH resume-search queries for this specific vacancy (title + context + criteria)
+// instead of a fixed list — makes cold-search work for any vacancy, not just one domain.
+async function generateSearchQueries(atsConfig, orKey) {
+  const criteriaStr = [...(atsConfig.required || []), ...(atsConfig.preferred || [])]
+    .map(c => c.name).join(', ') || '—';
 
-🔍 Поисковые запросы в базе HH:
-• "private banking"
-• "приватный банкинг"
-• "wealth management"
-• "финансовый советник VIP"
-• "family office"
-• "управление капиталом состоятельных клиентов"
+  const prompt = `Вакансия: "${atsConfig.vacancy_title || 'без названия'}"
+Контекст: ${atsConfig.vacancy_context || '—'}
+Ключевые критерии: ${criteriaStr}
 
-⛔ Knockout (автоматически исключаем):
-• Общий опыт работы менее 6 лет
+Составь 5-7 поисковых запросов для поиска резюме кандидатов в базе резюме HH.ru по этой вакансии.
+Запросы короткие (2-4 слова), по названиям должностей и ключевым навыкам (не по формулировкам вакансии).
+Пиши на русском; добавь 1-2 запроса на английском только если для этой сферы такие термины реально приняты в резюме.
 
-📊 Эвристический скоринг (0–12 баллов):
-• +1.5 — опыт 6+ лет (базовый)
-• +3.0 — private banking / HNWI / UHNWI сегмент в должностях
-• +3.0 — привлечение клиентов / личная сеть / acquisition
-• +2.0 — работа с крупными/состоятельными клиентами (VIP/premium/млрд)
-• +1.0 — family office / семейный офис
-• +1.0 — ФСФР аттестат / квалифицированный инвестор
-• +0.5 — топовые компании (Альфа, Сбер, ВТБ, АТОН, Goldman, Citi…)
-• +0.5 — руководящие позиции (директор, руководитель, head of)
+Верни ТОЛЬКО JSON-массив строк, без markdown:
+["запрос 1", "запрос 2", ...]`;
 
-✅ PASS ≥ 7 баллов | 🟡 REVIEW ≥ 5 | ⚫ WEAK < 5
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'google/gemini-2.5-flash',
+      max_tokens: 300,
+      temperature: 0.3,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+
+  if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content || '[]';
+  const match = text.match(/\[[\s\S]*\]/);
+  if (!match) throw new Error('no JSON array in AI response');
+  const queries = JSON.parse(match[0]).filter(q => typeof q === 'string' && q.trim()).slice(0, 8);
+  if (!queries.length) throw new Error('empty query list from AI');
+  return queries;
+}
+
+// Scoring explanation shown to the recruiter on request — built from the latest actual
+// run's ats_config + generated queries, not a static domain-specific description.
+function buildScoringPromptText(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  const dir = path.join(dataDir, 'hh', String(username), 'proactive');
+  let latest = null;
+  try {
+    const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json')).sort();
+    if (files.length) latest = JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8'));
+  } catch {}
+
+  if (!latest) {
+    return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
+  }
+
+  const cfg = latest.ats_config || {};
+  const queriesStr = (latest.search_queries || []).map(q => `• "${q}"`).join('\n') || '—';
+  const knockoutStr = (cfg.knockout || []).map(k => `• ${k}`).join('\n') || '(не задано)';
+  const minExp = cfg.filters?.min_experience_years ?? 2;
+  const reqStr = (cfg.required || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
+  const prefStr = (cfg.preferred || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
+
+  return `Как мы подбираем кандидатов для «${latest.vacancy_title || 'вакансии'}» (проактивный поиск):
+
+🔍 Поисковые запросы в базе резюме HH (сгенерированы под эту вакансию):
+${queriesStr}
+
+⛔ Отсекаем на этапе поиска: опыт работы менее ${minExp} лет
+⛔ Стоп-факторы, которые дальше проверяет AI:
+${knockoutStr}
+
+📊 Предварительный скоринг (для отбора топ-30 перед AI):
+• +1.5 — базовый порог по опыту
+${reqStr}
+${prefStr}
+PASS/REVIEW считаются относительно суммы весов этой вакансии — точную оценку даёт следующий шаг.
 
 🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
-После скоринга топ-30 прогоняются через AI — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента.`;
+Топ-30 по предварительному скорингу прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента.`;
+}
 
 async function runProactiveSearch(username, workDir) {
   const token = readHhToken(username);
@@ -220,14 +253,35 @@ async function runProactiveSearch(username, workDir) {
   }
   if (!atsConfig) throw new Error('ATS конфиг пуст. Настрой критерии оценки кандидатов.');
 
-  // Read OpenRouter key for AI enrichment
+  // Read OpenRouter key for AI enrichment + query generation
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
   const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
 
+  // Search queries are generated per-vacancy and cached in the ATS config until the
+  // vacancy title changes, so we don't re-call the LLM on every run.
+  let queries = Array.isArray(atsConfig.proactive_search_queries) && atsConfig.proactive_search_queries_for === atsConfig.vacancy_title
+    ? atsConfig.proactive_search_queries
+    : null;
+  if (!queries) {
+    if (!orKey) throw new Error('OpenRouter ключ не найден — нужен, чтобы сгенерировать поисковые запросы под эту вакансию.');
+    queries = await generateSearchQueries(atsConfig, orKey);
+    try {
+      const raw = JSON.parse(fs.readFileSync(atsCtxFile, 'utf8'));
+      raw.value = raw.value || {};
+      raw.value.proactive_search_queries = queries;
+      raw.value.proactive_search_queries_for = atsConfig.vacancy_title;
+      fs.writeFileSync(atsCtxFile, JSON.stringify(raw, null, 2), 'utf8');
+      atsConfig.proactive_search_queries = queries;
+      atsConfig.proactive_search_queries_for = atsConfig.vacancy_title;
+    } catch (e) {
+      console.error('[proactive-search] failed to cache generated queries:', e.message);
+    }
+  }
+
   const allCandidates = new Map();
 
-  for (const query of SEARCH_QUERIES) {
+  for (const query of queries) {
     try {
       const data = await hhResumeSearch(query, token);
       for (const r of (data.items || [])) {
@@ -296,6 +350,7 @@ async function runProactiveSearch(username, workDir) {
   const output = {
     vacancy_id: atsConfig.vacancy_id || '',
     vacancy_title: atsConfig.vacancy_title || 'Вакансия',
+    search_queries: queries,
     searched_at: now.toISOString(),
     total_collected: allCandidates.size,
     total_after_knockout: scored.length,
@@ -358,4 +413,4 @@ async function scoreUnscoredProactiveCandidates(username) {
   return enriched.filter(c => c.plus_tags).length;
 }
 
-module.exports = { runProactiveSearch, SCORING_PROMPT_TEXT, scoreUnscoredProactiveCandidates };
+module.exports = { runProactiveSearch, buildScoringPromptText, scoreUnscoredProactiveCandidates };
