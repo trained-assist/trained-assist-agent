@@ -38,4 +38,17 @@ function saveAttachments(workDir, taskId, task, files) {
   } catch (error) { fs.rmSync(dir, { recursive: true, force: true }); throw error; }
   return [...notes, task || ''].filter(Boolean).join('\n\n');
 }
-module.exports = { taskStatus, setTaskStatus, saveAttachments };
+// Synchronous admission has no await gap: concurrent HTTP requests with the
+// same trace cannot both save files and enqueue a task in this process.
+function admitIntakeTask(workDir, username, traceId, task, files) {
+  if (traceId !== undefined && (typeof traceId !== 'string' || !/^[a-zA-Z0-9_-]{1,60}$/.test(traceId)))
+    throw new Error('invalid traceId');
+  const taskId = traceId ? `${username}-intake-${traceId}` : `${username}-${require('crypto').randomUUID()}`;
+  const existing = taskStatus(taskId);
+  if (existing.state !== 'unknown') return { taskId, traceId: existing.traceId, duplicate: true };
+  const effectiveTask = saveAttachments(workDir, taskId, task, files);
+  const correlation = traceId || taskId;
+  setTaskStatus(taskId, { state: 'accepted', traceId: correlation });
+  return { taskId, traceId: correlation, effectiveTask, duplicate: false };
+}
+module.exports = { taskStatus, setTaskStatus, saveAttachments, admitIntakeTask };

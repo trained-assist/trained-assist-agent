@@ -43,3 +43,28 @@ describe('intake attachment and status contract', () => {
     }
   });
 });
+
+describe('stable intake admission', () => {
+  it('returns one persisted receipt for duplicate requests, including after module reload', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-admission-'));
+    const previous = process.env.AGENT_DATA_DIR;
+    process.env.AGENT_DATA_DIR = root;
+    const require = createRequire(import.meta.url);
+    try {
+      const files = [{ fileName: 'a.txt', fileBase64: Buffer.from('original').toString('base64') }];
+      const first = require('../src/intake-contract.js').admitIntakeTask(root, 'u', 'trace-1', 'task', files);
+      expect(first).toMatchObject({ taskId: 'u-intake-trace-1', duplicate: false });
+      delete require.cache[require.resolve('../src/intake-contract.js')];
+      const again = require('../src/intake-contract.js').admitIntakeTask(root, 'u', 'trace-1', 'task', files);
+      expect(again).toMatchObject({ taskId: first.taskId, duplicate: true });
+      expect(fs.readFileSync(path.join(root, 'uploads', first.taskId, '0-a.txt'), 'utf8')).toBe('original');
+      setTaskStatus(first.taskId, { state: 'settled', traceId: 'trace-1' });
+      expect(require('../src/intake-contract.js').admitIntakeTask(root, 'u', 'trace-1', 'task', files).duplicate).toBe(true);
+      expect(() => require('../src/intake-contract.js').admitIntakeTask(root, 'u', '../bad', 'task', files)).toThrow('invalid traceId');
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_DATA_DIR;
+      else process.env.AGENT_DATA_DIR = previous;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

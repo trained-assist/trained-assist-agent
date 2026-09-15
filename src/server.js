@@ -1,5 +1,5 @@
 const http = require('http');
-const { taskStatus, setTaskStatus, saveAttachments } = require('./intake-contract');
+const { taskStatus, setTaskStatus, admitIntakeTask } = require('./intake-contract');
 const https = require('https');
 const fs = require('fs');
 const os = require('os');
@@ -2954,16 +2954,16 @@ ${expLines || '—'}
       const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
-      const taskId = `${username}-${require('crypto').randomUUID()}`;
-      const correlation = typeof traceId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(traceId) ? traceId : taskId;
-      let effectiveTask;
+      let admission;
       try {
-        effectiveTask = saveAttachments(workDir, taskId, task, files || (fileBase64 ? [{ fileBase64, fileName, fileMimeType }] : []));
-      } catch {
-        return json(res, 400, { error: 'invalid or unsaved attachments' });
+        admission = admitIntakeTask(workDir, username, traceId, task,
+          files || (fileBase64 ? [{ fileBase64, fileName, fileMimeType }] : []));
+      } catch (error) {
+        return json(res, 400, { error: error.message });
       }
-      setTaskStatus(taskId, { state: 'accepted', traceId: correlation });
+      const { taskId, traceId: correlation, effectiveTask } = admission;
       json(res, 202, { taskId, traceId: correlation });
+      if (admission.duplicate) return;
 
       // Fire-and-forget
       runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).then(() => setTaskStatus(taskId, { state: 'settled', traceId: correlation }), err => {
