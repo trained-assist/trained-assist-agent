@@ -2,7 +2,8 @@
   "vitest": [
     "tests/runner-e2e.test.js",
     "tests/quick-answers.test.js",
-    "tests/intake-contract.test.js"
+    "tests/intake-contract.test.js",
+    "tests/intake-http-restart.test.js"
   ],
   "node": [
     "test/answer-router.test.cjs",

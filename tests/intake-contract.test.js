@@ -68,3 +68,54 @@ describe('stable intake admission', () => {
     }
   });
 });
+
+describe('durable intake lifecycle', () => {
+  it('recovers accepted work after process exit and hides the execution from status', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-restart-'));
+    const previous = process.env.AGENT_DATA_DIR;
+    process.env.AGENT_DATA_DIR = root;
+    const require = createRequire(import.meta.url);
+    const contract = require('../src/intake-contract.js');
+    try {
+      const modulePath = require.resolve('../src/intake-contract.js');
+      execFileSync(process.execPath, ['-e', `require(${JSON.stringify(modulePath)}).admitIntakeTask(process.env.AGENT_DATA_DIR, 'u', 'restart', 'finish work', [], {user: {id: 1, username: 'u'}, mode: 'deep', projectId: 'p', continuationCount: 2})`], { env: { ...process.env, AGENT_DATA_DIR: root } });
+      const [record] = contract.recoverableIntakeTasks();
+      expect(record.taskId).toBe('u-intake-restart');
+      expect(record.execution).toMatchObject({ task: 'finish work', mode: 'deep', projectId: 'p', continuationCount: 2 });
+      expect(contract.taskStatus(record.taskId).execution).toBeUndefined();
+      await contract.executeIntakeTask(record.taskId, async opts => {
+        expect(opts.taskId).toBe(record.taskId);
+        expect(opts.secrets).toEqual({ private: 'runtime-only' });
+        expect(contract.taskStatus(opts.taskId).state).toBe('running');
+      }, { private: 'runtime-only' });
+      expect(contract.taskStatus(record.taskId).state).toBe('settled');
+      expect(contract.recoverableIntakeTasks()).toEqual([]);
+      expect(fs.readFileSync(path.join(root, 'intake-status', `${record.taskId}.json`), 'utf8')).not.toContain('runtime-only');
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_DATA_DIR; else process.env.AGENT_DATA_DIR = previous;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the same task pending through continuations and propagates failure', async () => {
+    const { runAttemptChain } = createRequire(import.meta.url)('../src/intake-contract.js');
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let completed = false;
+    const seen = [];
+    const run = runAttemptChain({ taskId: 'original', mode: 'deep', projectId: 'p' }, async opts => {
+      seen.push(opts);
+      if (seen.length === 1) return { nextAttempt: { taskId: 'must-not-change', continuationCount: 1 } };
+      await gate;
+      throw new Error('second attempt failed');
+    });
+    const checked = expect(run).rejects.toThrow('second attempt failed');
+    run.then(() => { completed = true; }, () => { completed = true; });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(completed).toBe(false);
+    expect(seen[1]).toMatchObject({ taskId: 'original', mode: 'deep', projectId: 'p', continuationCount: 1 });
+    release();
+    await checked;
+  });
+});

@@ -1,5 +1,5 @@
 const http = require('http');
-const { taskStatus, setTaskStatus, admitIntakeTask } = require('./intake-contract');
+const { taskStatus, setTaskStatus, admitIntakeTask, recoverableIntakeTasks, executeIntakeTask } = require('./intake-contract');
 const https = require('https');
 const fs = require('fs');
 const os = require('os');
@@ -486,7 +486,12 @@ function scheduleGtdController(secrets) {
 }
 
 async function resumePendingTasks(secrets) {
-  const pending = getPendingTasks();
+  const durable = recoverableIntakeTasks();
+  for (const record of durable) {
+    executeIntakeTask(record.taskId, runTask, secrets)
+      .catch(err => console.error(`[resume] ${record.taskId}:`, err.message));
+  }
+  const pending = getPendingTasks().filter(p => taskStatus(p.taskId).state === 'unknown');
   const cutoff = Date.now() - 15 * 60 * 1000;
   const toResume = pending.filter(t => t.startedAt && t.startedAt > cutoff && t.username && t.userId && t.task);
   // Clean up stale files that are too old to resume — prevents slow startup after many crashes.
@@ -499,13 +504,9 @@ async function resumePendingTasks(secrets) {
   console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
-  // Import clearPendingTask to remove original files before re-running
-  const { clearPendingTask: _clearPending } = require('./runner');
-
   for (const p of toResume) {
     console.log(`[resume] task=${p.taskId} user=${p.username} task="${String(p.task).slice(0, 60)}"`);
-    // Delete original file immediately — the new runTask will journal under its own taskId
-    _clearPending(p.taskId);
+    // Keep the original journal until the resumed execution finishes.
     if (p.initialMsgId && secrets.BOT_TOKEN) {
       fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
         method: 'POST',
@@ -516,11 +517,13 @@ async function resumePendingTasks(secrets) {
     }
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
     const user = { id: p.userId, name: p.username, username: p.username, workDir };
-    const newTaskId = `${p.username}-resume-${Date.now()}`;
+    const newTaskId = p.taskId;
     runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
       sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
       forceClaude: !!p.forceClaude, initialMsgId: p.initialMsgId || null,
-      pinnedMsgId: p.pinnedMsgId || null, secrets,
+      pinnedMsgId: p.pinnedMsgId || null, secrets, mode: p.mode || null,
+      forceNew: !!p.forceNew, projectId: p.projectId || null, newProjectName: p.newProjectName || null,
+      continuationCount: p.continuationCount || 0, retryCount: p.retryCount || 0,
     }).catch(err => console.error(`[resume] ${newTaskId} error:`, err.message));
     await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
   }
@@ -2818,7 +2821,7 @@ ${expLines || '—'}
     if (req.method === 'GET' && url.pathname === '/tasks/status') {
       const id = url.searchParams.get('taskId');
       if (!id || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) return json(res, 400, { error: 'invalid taskId' });
-      return json(res, 200, taskStatus(id));
+      return json(res, 200, { ...taskStatus(id), retrySafe: true });
     }
     if (req.method === 'GET' && url.pathname === '/tasks/running') {
       const username = url.searchParams.get('username');
@@ -2957,17 +2960,19 @@ ${expLines || '—'}
       let admission;
       try {
         admission = admitIntakeTask(workDir, username, traceId, task,
-          files || (fileBase64 ? [{ fileBase64, fileName, fileMimeType }] : []));
+          files || (fileBase64 ? [{ fileBase64, fileName, fileMimeType }] : []),
+          { user, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null,
+            forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null,
+            pinnedMsgId: pinnedMsgId || null, mode: mode || null, projectId: projectId || null,
+            newProjectName: newProjectName || null });
       } catch (error) {
-        return json(res, 400, { error: error.message });
+        return json(res, /^(invalid|batch too large)/.test(error.message) ? 400 : 503, { error: 'intake admission failed' });
       }
-      const { taskId, traceId: correlation, effectiveTask } = admission;
+      const { taskId, traceId: correlation } = admission;
       json(res, 202, { taskId, traceId: correlation });
       if (admission.duplicate) return;
 
-      // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).then(() => setTaskStatus(taskId, { state: 'settled', traceId: correlation }), err => {
-        setTaskStatus(taskId, { state: 'failed', traceId: correlation });
+      executeIntakeTask(taskId, runTask, secrets).catch(err => {
         console.error(`[${taskId}] runTask error:`, err.message);
       });
       return;
