@@ -2849,6 +2849,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         gtd.maybeSchedule({
           workDir: user.workDir, sessionId: activeSessionId, chatId,
           username: user.username, task, apiKey: secrets.OPENROUTER_API_KEY,
+          projectDir: user.cwd || null,
         }).catch(e => console.warn('[gtd] schedule:', e.message));
       } catch (e) { console.warn('[gtd] hook:', e.message); }
     }
