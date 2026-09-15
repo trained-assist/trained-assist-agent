@@ -4261,7 +4261,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            ${msgMeta}
            <div class="msg-label-row">
              <label class="msg-label">${msgLabel}</label>
-             <button class="btn btn-gen" id="gen-${i}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
+             <button class="btn btn-gen" id="gen-${i}" data-idx="${i}" data-negid="${esc(c.negotiation_id)}" data-name="${esc(c.name)}" data-sent="${c.already_sent ? '1' : '0'}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
            </div>
            <textarea class="msg-area" id="msg-${i}" rows="5">${hasDraft ? esc(c.draft_message) : ''}</textarea>
            <div class="btns">
@@ -4551,6 +4551,33 @@ function markDone(i) {
   const cb = document.getElementById('cb-'+i);
   if (cb) { cb.checked = false; cb.disabled = true; }
   document.getElementById('sentCount').textContent = done.size;
+}
+
+async function regenerateAll() {
+  const btn = document.getElementById('regenAllBtn');
+  const targets = Array.from(document.querySelectorAll('.btn-gen[data-negid]'))
+    .filter(b => !b.disabled && !done.has(parseInt(b.dataset.idx)));
+  if (!targets.length) { showToast('Нечего перегенерировать'); return; }
+  const total = targets.length;
+  let finished = 0;
+  btn.disabled = true;
+  btn.textContent = '⏳ 0/' + total + '…';
+  const CONCURRENCY = 3;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < targets.length) {
+      const b = targets[cursor++];
+      try {
+        await generateOne(parseInt(b.dataset.idx), b.dataset.negid, b.dataset.name, b.dataset.sent === '1');
+      } catch (e) { /* generateOne already surfaces its own error state */ }
+      finished++;
+      btn.textContent = '⏳ ' + finished + '/' + total + '…';
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+  btn.disabled = false;
+  btn.textContent = '🔄 Перегенерировать все черновики';
+  showToast('✅ Перегенерировано: ' + finished + '/' + total);
 }
 
 async function generateOne(i, negId, candidateName, alreadySent) {
