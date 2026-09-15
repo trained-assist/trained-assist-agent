@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 // Single source of truth for the candidate-message system prompt.
 //
 // This used to be copy-pasted independently in src/server.js (/hh/generate-message,
@@ -7,6 +10,25 @@
 // job after hh_batch_evaluate), and src/mcp-skills/tools/90-hh.js (chat-triggered
 // hh_regenerate_messages / hh_draft_review_page). Editing one copy silently did not
 // affect the others. Edit the prompt HERE — all three call sites render from it.
+//
+// The base instructions below are also editable per-recruiter without a code deploy,
+// via the /hh/style page: a non-empty `agent-tokens/<user>/hh-message-base-prompt`
+// file overrides MESSAGE_SYSTEM_BASE entirely. Call loadBaseOverride() at each call
+// site (same pattern already used for the hh-message-style file) and pass the result
+// as `baseOverride`.
+
+const BASE_PROMPT_FILENAME = 'hh-message-base-prompt';
+
+function loadBaseOverride(tokensBase, username) {
+  try {
+    const file = path.join(tokensBase, String(username), BASE_PROMPT_FILENAME);
+    if (fs.existsSync(file)) {
+      const text = fs.readFileSync(file, 'utf8').trim();
+      if (text) return text;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
 
 const MESSAGE_SYSTEM_BASE = 'Ты — рекрутер. ВСЕГДА пиши сообщение, даже если данных мало.\n' +
   'Пишешь сообщение кандидату на HeadHunter. Это может быть первое сообщение или ответ внутри уже идущей переписки — на входе всегда полная история диалога и результат ATS-оценки кандидата (скор, вердикт).\n\n' +
@@ -54,8 +76,8 @@ function buildRecruiterIdentity(msgCfg) {
   ].filter(Boolean).join('\n');
 }
 
-function buildMessageSystemPrompt({ vacancyContext = '', recruiterCtx = '', commStyle = '' } = {}) {
-  let prompt = MESSAGE_SYSTEM_BASE + (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
+function buildMessageSystemPrompt({ vacancyContext = '', recruiterCtx = '', commStyle = '', baseOverride = '' } = {}) {
+  let prompt = (baseOverride || MESSAGE_SYSTEM_BASE) + (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
   if (recruiterCtx) prompt += `\n\n## Идентичность рекрутера\n${recruiterCtx}`;
   if (commStyle) prompt += `\n\n## Стиль общения рекрутера\n${commStyle}`;
   return prompt;
@@ -74,4 +96,7 @@ module.exports = {
   buildRecruiterIdentity,
   buildMessageSystemPrompt,
   buildRejectionSystemPrompt,
+  loadBaseOverride,
+  BASE_PROMPT_FILENAME,
+  DEFAULT_MESSAGE_BASE: MESSAGE_SYSTEM_BASE,
 };

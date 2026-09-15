@@ -24,7 +24,7 @@ const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { bullshitGuard } = require('./hh-bullshit-guard');
-const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt } = require('./hh-message-prompts');
+const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride, BASE_PROMPT_FILENAME, DEFAULT_MESSAGE_BASE } = require('./hh-message-prompts');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
@@ -1326,7 +1326,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/candidate' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/candidate' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/update-base-prompt' || url.pathname === '/hh/sync-negotiations')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1594,6 +1594,7 @@ async function main() {
 
       const styleFile = path.join(hhTokensBase, String(username), 'hh-message-style');
       const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
+      const baseOverride = loadBaseOverride(hhTokensBase, username);
 
       // Read recruiter identity config (agency, name, signature, rules)
       let msgCfg = null;
@@ -1686,7 +1687,7 @@ async function main() {
       const recruiterCtx = buildRecruiterIdentity(msgCfg);
       const systemPrompt = msgType === 'rejection'
         ? buildRejectionSystemPrompt({ recruiterCtx, commStyle })
-        : buildMessageSystemPrompt({ vacancyContext, recruiterCtx, commStyle });
+        : buildMessageSystemPrompt({ vacancyContext, recruiterCtx, commStyle, baseOverride });
 
       const firstName = (candidate_name || 'Кандидат').split(' ')[0];
       const convoCtx = msgs.slice(-8).map(m => {
@@ -1836,6 +1837,9 @@ async function main() {
       const hmacToken3 = agentSecret ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16) : '';
       const defaultStyle = '- Тон: профессиональный, дружелюбный, без официоза. Обращение на «вы».\n- Приветствие: «Добрый день, [Имя]!» или «Здравствуйте, [Имя]!»\n- Структура: приветствие → что понравилось в резюме → описание роли → 1-2 конкретных вопроса → призыв ответить\n- Всегда задаю конкретные вопросы по опыту из требований вакансии, не общие\n- Не использую штампы: «рассмотрели вашу кандидатуру», «вакансия открылась», «мы ищем»\n- Длина: 4-6 предложений\n- Подпись: имя рекрутера';
       const rulesValue = (existingStyle || defaultStyle).replace(/`/g, '\\`');
+      const existingBase = loadBaseOverride(hhTokensBase3, username) || '';
+      const hasBaseOverride = !!existingBase;
+      const baseValue = (existingBase || DEFAULT_MESSAGE_BASE).replace(/`/g, '\\`');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html><head><meta charset="utf-8">
 <title>Стиль общения — ${username}</title>
@@ -1882,6 +1886,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <button class="btn-secondary" id="btnExtract" onclick="extractStyle()">Извлечь стиль из примеров</button>
 <div class="status" id="statusExtract"></div>
 
+<hr class="sep">
+
+<h2>Базовый сценарий сообщений (продвинутое)</h2>
+<p class="sub" style="margin-bottom:10px">Это сама инструкция ИИ — что писать в первом сообщении, follow-up, ответе, отказе, как обращаться со временем звонка. Правила стиля выше добавляются поверх неё. Меняй только если понимаешь, на что влияет.</p>
+<textarea id="basePrompt" rows="14">${baseValue}</textarea>
+<div class="hint">${hasBaseOverride ? '⚙️ Сейчас используется твоя версия (переопределяет умолчание).' : 'Сейчас используется версия по умолчанию — правки ниже создадут переопределение.'}</div>
+<button class="btn-primary" id="btnSaveBase" onclick="saveBasePrompt()">Сохранить сценарий</button>
+<button class="btn-secondary" id="btnResetBase" onclick="resetBasePrompt()">Сбросить к умолчанию</button>
+<div class="status" id="statusBase"></div>
+
 <script>
 async function saveRules() {
   const text = document.getElementById('rules').value.trim();
@@ -1920,6 +1934,39 @@ async function extractStyle() {
     }
   } catch(e) { show('statusExtract', 'err', 'Сетевая ошибка: ' + e.message); }
   document.getElementById('btnExtract').disabled = false;
+}
+async function saveBasePrompt() {
+  const text = document.getElementById('basePrompt').value.trim();
+  if (!text || text.length < 50) { show('statusBase', 'err', 'Сценарий подозрительно короткий — проверь текст.'); return; }
+  document.getElementById('btnSaveBase').disabled = true;
+  show('statusBase', 'loading', 'Сохраняю...');
+  try {
+    const r = await fetch('${callbackBase3}/hh/update-base-prompt', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', text}),
+    });
+    const d = await r.json();
+    if (d.ok) show('statusBase', 'ok', '✅ Сценарий сохранён! Применится при следующей генерации сообщений.');
+    else show('statusBase', 'err', 'Ошибка: ' + (d.error || 'неизвестная'));
+  } catch(e) { show('statusBase', 'err', 'Сетевая ошибка: ' + e.message); }
+  document.getElementById('btnSaveBase').disabled = false;
+}
+async function resetBasePrompt() {
+  if (!confirm('Вернуть сценарий по умолчанию? Твои правки к нему будут удалены.')) return;
+  document.getElementById('btnResetBase').disabled = true;
+  show('statusBase', 'loading', 'Сбрасываю...');
+  try {
+    const r = await fetch('${callbackBase3}/hh/update-base-prompt', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', reset: true}),
+    });
+    const d = await r.json();
+    if (d.ok) { document.getElementById('basePrompt').value = d.text; show('statusBase', 'ok', '✅ Сброшено к умолчанию.'); }
+    else show('statusBase', 'err', 'Ошибка: ' + (d.error || 'неизвестная'));
+  } catch(e) { show('statusBase', 'err', 'Сетевая ошибка: ' + e.message); }
+  document.getElementById('btnResetBase').disabled = false;
 }
 function show(id, type, msg) {
   const s = document.getElementById(id);
@@ -1998,6 +2045,36 @@ function show(id, type, msg) {
         console.error('[hh/update-style] error:', e.message);
         return json(res, 500, { error: 'generation failed: ' + e.message });
       }
+    }
+
+    // POST /hh/update-base-prompt — save or reset the per-recruiter base message-generation prompt
+    if (req.method === 'POST' && url.pathname === '/hh/update-base-prompt') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body5 = JSON.parse(await readBody(req));
+      const { username, token: givenToken5, text, reset = false } = body5 || {};
+      if (!username) return json(res, 400, { error: 'missing fields' });
+      const agentSecret5 = process.env.AGENT_SECRET || '';
+      if (agentSecret5) {
+        const { createHmac } = require('crypto');
+        const expected5 = createHmac('sha256', agentSecret5).update(String(username)).digest('hex').slice(0, 16);
+        if (givenToken5 !== expected5) return json(res, 403, { error: 'invalid token' });
+      }
+      const hhTokensBase5 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const baseFile5 = path.join(hhTokensBase5, String(username), BASE_PROMPT_FILENAME);
+
+      if (reset) {
+        try { fs.unlinkSync(baseFile5); } catch { /* already absent */ }
+        console.log('[hh/update-base-prompt] reset to default for', username);
+        return json(res, 200, { ok: true, text: DEFAULT_MESSAGE_BASE });
+      }
+
+      if (!text || typeof text !== 'string' || text.trim().length < 50) {
+        return json(res, 400, { error: 'text too short' });
+      }
+      fs.mkdirSync(path.join(hhTokensBase5, String(username)), { recursive: true });
+      fs.writeFileSync(baseFile5, text.trim());
+      console.log('[hh/update-base-prompt] saved override for', username, 'len=', text.length);
+      return json(res, 200, { ok: true });
     }
 
     // POST /hh/sync-negotiations — force-refresh negotiations cache (called from review page)
