@@ -350,6 +350,37 @@ pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radi
     </div>
   </div>
 
+  <!-- Interview / call config -->
+  <div class="config-card">
+    <div class="section-title" style="margin-bottom:8px">Приглашение на звонок</div>
+    <div class="filters-row">
+      <div class="filter-field">
+        <label>Уровень позиции</label>
+        <input type="text" id="fIcLevel" placeholder="Junior / Middle / Senior">
+      </div>
+      <div class="filter-field">
+        <label>Ссылка для записи (Calendly и т.п.)</label>
+        <input type="text" id="fIcBookingUrl" placeholder="https://calendly.com/...">
+      </div>
+      <div class="filter-field">
+        <label>Разрешить авто-приглашение с конкретным временем</label>
+        <div class="toggle-wrap">
+          <label class="toggle"><input type="checkbox" id="fIcEnabled"><span class="toggle-slider"></span></label>
+          <span id="fIcEnabledLabel" style="font-size:13px;color:var(--text)">Нет</span>
+        </div>
+      </div>
+    </div>
+    <div class="field">
+      <label>Требования к звонку (что взять с собой, формат)</label>
+      <input type="text" id="fIcRequirements" placeholder="Например: подключение к Zoom, тестовое задание уже готово">
+    </div>
+    <div class="field">
+      <label>Реальная доступность рекрутера</label>
+      <textarea id="fIcAvailability" rows="2" placeholder="Например: Пн–Пт 10:00–18:00 МСК, слоты по 30 минут"></textarea>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">Без ссылки на запись или указанной доступности бот НЕ будет предлагать кандидату конкретное время — вместо этого спросит, когда ему удобно.</div>
+  </div>
+
   <!-- Validation output -->
   <div class="validation-box" id="validationBox"></div>
 
@@ -414,6 +445,13 @@ function loadFromConfig(config, stagesArr) {
   document.getElementById('fMaxSalary').value = f.salary_max_rub || '';
   document.getElementById('fRemote').checked = f.remote_ok !== false;
   updateRemoteLabel();
+  const ic = config.interview_config || {};
+  document.getElementById('fIcLevel').value = ic.level || '';
+  document.getElementById('fIcBookingUrl').value = ic.booking_url || '';
+  document.getElementById('fIcRequirements').value = ic.requirements || '';
+  document.getElementById('fIcAvailability').value = ic.availability || '';
+  document.getElementById('fIcEnabled').checked = !!ic.invite_call_enabled;
+  updateIcEnabledLabel();
   stages = (stagesArr && stagesArr.length) ? [...stagesArr] : ['Скрининг', 'Интервью', 'Оффер'];
   knockout = config.knockout && config.knockout.length ? [...config.knockout] : [''];
   required = config.required && config.required.length ? config.required.map(x => ({ ...x })) : [{ name: '', weight: 2.0 }];
@@ -569,13 +607,18 @@ function renderPreferred() {
 
 // ── Field events ──────────────────────────────────────────────────────────────
 
-['fTitle','fContext','fPass','fReview','fMinExp','fMaxSalary'].forEach(id => {
+['fTitle','fContext','fPass','fReview','fMinExp','fMaxSalary','fIcLevel','fIcBookingUrl','fIcRequirements','fIcAvailability'].forEach(id => {
   document.getElementById(id).addEventListener('input', updateJsonPreview);
 });
 document.getElementById('fRemote').addEventListener('change', () => { updateRemoteLabel(); updateJsonPreview(); });
+document.getElementById('fIcEnabled').addEventListener('change', () => { updateIcEnabledLabel(); updateJsonPreview(); });
 
 function updateRemoteLabel() {
   document.getElementById('fRemoteLabel').textContent = document.getElementById('fRemote').checked ? 'Да' : 'Нет';
+}
+
+function updateIcEnabledLabel() {
+  document.getElementById('fIcEnabledLabel').textContent = document.getElementById('fIcEnabled').checked ? 'Да' : 'Нет';
 }
 
 // ── Build config object ───────────────────────────────────────────────────────
@@ -598,6 +641,13 @@ function buildConfig() {
     },
     pass_threshold: isNaN(pass) ? 6.5 : pass,
     review_threshold: isNaN(review) ? 4.0 : review,
+    interview_config: {
+      level: document.getElementById('fIcLevel').value.trim(),
+      requirements: document.getElementById('fIcRequirements').value.trim(),
+      availability: document.getElementById('fIcAvailability').value.trim(),
+      booking_url: document.getElementById('fIcBookingUrl').value.trim(),
+      invite_call_enabled: document.getElementById('fIcEnabled').checked,
+    },
   };
 }
 
@@ -627,6 +677,9 @@ function validate() {
   if (config.review_threshold < 0 || config.review_threshold >= config.pass_threshold) errors.push('Review threshold: от 0 до pass threshold.');
   if (stages.length < 2) errors.push('Нужно минимум 2 этапа подбора.');
   if (stages.some(s => !s.trim())) errors.push('Есть пустые этапы — заполни или удали.');
+  if (config.interview_config.invite_call_enabled && !config.interview_config.availability && !config.interview_config.booking_url) {
+    errors.push('Чтобы разрешить авто-приглашение на звонок с конкретным временем — укажи доступность рекрутера или ссылку на запись.');
+  }
 
   const box = document.getElementById('validationBox');
   box.style.display = 'block';
