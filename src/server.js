@@ -1567,6 +1567,9 @@ async function main() {
         console.warn(`[hh/send] guard degraded (semantic check skipped) user=${username} neg=${negotiation_id} checks=${JSON.stringify(guard.checks)}`);
         appendGuardBlock(username, negotiation_id, 'семантическая проверка пропущена (' + (guard.checks.llm_skipped || 'unknown') + ')', guard.checks, false);
       }
+      if (guard.checks.invented_time) {
+        appendGuardBlock(username, negotiation_id, 'сообщение упоминает время/дату — не блокирует отправку, только для истории', guard.checks, false);
+      }
 
       try {
         await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
@@ -1795,6 +1798,9 @@ async function main() {
       if (guard2.degraded) {
         console.warn(`[hh/send-and-reject] guard degraded (semantic check skipped) user=${username} neg=${negotiation_id} checks=${JSON.stringify(guard2.checks)}`);
         appendGuardBlock(username, negotiation_id, 'семантическая проверка пропущена (' + (guard2.checks.llm_skipped || 'unknown') + ')', guard2.checks, false);
+      }
+      if (guard2.checks.invented_time) {
+        appendGuardBlock(username, negotiation_id, 'сообщение упоминает время/дату — не блокирует отправку, только для истории', guard2.checks, false);
       }
 
       try {
