@@ -935,6 +935,47 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
   }
 }
 
+// getQuickAnswer's ~40 INTENT regexes are broad fuzzy-language patterns (e.g. "мои
+// вакансии", "покажи ссылку", "включи X") — they misfire on unrelated messages that
+// happen to share wording, silently eating a real task instead of reaching Claude.
+// Before committing to a matched quick-answer, ask a cheap LLM whether the message
+// actually requests it. Skipped for slash commands (unambiguous, no fuzzy match
+// possible). Fails OPEN on missing key / timeout / error — a broken OpenRouter call
+// must not make quick answers less reliable than before this gate existed.
+async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
+  const orKey = openrouterKey || process.env.OPENROUTER_API_KEY;
+  if (!orKey || !answerPreview) return true;
+  try {
+    const body = JSON.stringify({
+      model: 'deepseek/deepseek-v4-flash-0731',
+      messages: [
+        {
+          role: 'system',
+          content: 'You verify chatbot auto-replies before they are sent. Answer with a single word: YES or NO.',
+        },
+        {
+          role: 'user',
+          content: `A user sent this message to a chatbot:\n"${task}"\n\nThe bot is about to auto-reply with something like this:\n"${String(answerPreview).slice(0, 300)}"\n\nDoes the user's message actually request this kind of reply? If unsure, answer YES.\n\nYES or NO:`,
+        },
+      ],
+      max_tokens: 5,
+      temperature: 0,
+    });
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(2500),
+    });
+    const data = await res.json();
+    const answer = data.choices?.[0]?.message?.content?.trim().toUpperCase() || '';
+    return !answer.startsWith('NO');
+  } catch (e) {
+    console.warn('[verifyQuickAnswerIntent] error (fail-open):', e.message);
+    return true;
+  }
+}
+
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null) {
   // /bug_or_feature — second step: if a report is awaiting the user's comment, the NEXT
@@ -1039,16 +1080,22 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 
   const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
   if (sync !== null) {
-    if (sync && typeof sync === 'object' && sync.__connectLink) {
-      try {
-        const link = await generateConnectLink(userId, sync.service);
-        return `Данные для входа — по ссылке:\n${link}\n\n${sync.hint}${TRUST_FOOTER}`;
-      } catch (e) {
-        console.error('[quick-answer] generateConnectLink failed:', e.message);
-        return sync.hint;
+    const isSlashCommand = /^\//.test(task.trim());
+    const preview = (sync && typeof sync === 'object') ? sync.hint : sync;
+    const confirmed = isSlashCommand || await verifyQuickAnswerIntent(task, preview, openrouterKey);
+    if (confirmed) {
+      if (sync && typeof sync === 'object' && sync.__connectLink) {
+        try {
+          const link = await generateConnectLink(userId, sync.service);
+          return `Данные для входа — по ссылке:\n${link}\n\n${sync.hint}${TRUST_FOOTER}`;
+        } catch (e) {
+          console.error('[quick-answer] generateConnectLink failed:', e.message);
+          return sync.hint;
+        }
       }
+      return sync;
     }
-    return sync;
+    console.log('[quick-answer] intent-check rejected match len=%d, falling through to Claude, task=%j', preview?.length || 0, task.slice(0, 120));
   }
 
   // Vacancy generation — triggered when collecting mode is done ("всё" set status → "generating")
