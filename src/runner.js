@@ -23,6 +23,7 @@ const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancySt
 const { loadUserSiteIntents } = require('./user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
 const persona = require('./persona');
+const profiles = require('./profiles');
 const answerRouter = require('./answer-router');
 const { formatForTelegram, makeLlmFixer } = require('./tg-format');
 
@@ -2304,6 +2305,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     ? path.join(user.workDir, 'sessions', `${activeSessionId}.json`)
     : '';
 
+  // Per-profile engine switch (claude|codex) — set via profile.json { "engine": "codex" }.
+  // v1 codex path has no MCP tools (codex's MCP wiring is TOML-based, not wired up yet) and no
+  // separate system-prompt flag — the system prompt is folded into the prompt text instead.
+  const engine = profiles.load(user.workDir).engine === 'codex' ? 'codex' : 'claude';
+
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
   const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username, sessionFilePath });
 
@@ -2353,14 +2359,26 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
   } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
-  const proc = spawn(process.env.CLAUDE_BIN || 'claude', [
-    '--dangerously-skip-permissions',
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--mcp-config', mcpConfig,
-    ...(systemPromptFile && fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
-    '--print', prompt,
-  ], {
+  const systemPromptText = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
+  const [engineBin, engineArgs] = engine === 'codex'
+    ? [process.env.CODEX_BIN || 'codex', [
+        'exec',
+        '--json',
+        '--skip-git-repo-check',
+        '--dangerously-bypass-approvals-and-sandbox',
+        '-C', user.cwd || user.workDir,
+        systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
+      ]]
+    : [process.env.CLAUDE_BIN || 'claude', [
+        '--dangerously-skip-permissions',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--mcp-config', mcpConfig,
+        ...(systemPromptFile && fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
+        '--print', prompt,
+      ]];
+
+  const proc = spawn(engineBin, engineArgs, {
     cwd: user.cwd || user.workDir,
     env: {
       ...cleanEnv,
@@ -2379,6 +2397,10 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       AGENT_TASK_ID: taskId,
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
     },
+    // codex exec blocks reading stdin for EOF when it's an unclosed pipe (Node's spawn
+    // default) — verified by hang repro. claude doesn't read stdin in --print mode, so
+    // only codex needs it explicitly closed.
+    ...(engine === 'codex' ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
   });
 
   let streamTimer = null;
@@ -2452,6 +2474,29 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       try {
         const event = JSON.parse(line);
         firstJsonEventSeen = true;
+        if (engine === 'codex') {
+          if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
+            fullOutput.text += event.item.text;
+            lastAssistantMsg = event.item.text;
+            claudeResult = event.item.text;
+            if (outputCallback) try { outputCallback(event.item.text); } catch {}
+            scheduleStream();
+          } else if (event.type === 'item.started' && event.item?.type === 'command_execution') {
+            lastActivity = formatToolActivity('Bash', { command: event.item.command });
+            if (!outputStarted && msgId) {
+              const secs = Math.round((Date.now() - thinkingStart) / 1000);
+              tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${lastActivity} (${secs}с)`).catch(() => {});
+            }
+          } else if (event.type === 'turn.completed') {
+            claudeUsage = event.usage || null;
+            if (claudeUsage) {
+              console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cached_input_tokens || 0} cache_write=${claudeUsage.cache_write_input_tokens || 0}`);
+            }
+          } else if (event.type === 'turn.failed' || event.type === 'error') {
+            console.warn(`[${taskId}] codex ${event.type}:`, JSON.stringify(event).slice(0, 500));
+          }
+          continue;
+        }
         if (event.type === 'result') {
           claudeResult = typeof event.result === 'string' ? event.result : null;
           claudeUsage = event.usage || null;
@@ -2506,8 +2551,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         console.log(`[${taskId}] timeout warning — sending SIGTERM, 2 min left`);
         try { proc.kill('SIGTERM'); } catch {}
         const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
+        const engineLabel = engine === 'codex' ? 'Кодекс' : 'Клод';
         tgSend(BOT_TOKEN, chatId,
-          `⚠️ Клод работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
+          `⚠️ ${engineLabel} работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
           `Получил сигнал завершить текущий шаг и вывести итоги.`
         ).catch(() => {});
       }, WARN_TIMEOUT_MS);
