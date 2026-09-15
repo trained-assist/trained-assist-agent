@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Blocks commits directly on protected branches (main/master).
+# Every session must work on a dedicated branch before it can commit.
+# Emergency override (explain why in the commit body): ALLOW_PROTECTED_COMMIT=1 git commit ...
+set -euo pipefail
+
+PROTECTED_BRANCHES="main master"
+
+if [ -n "${ALLOW_PROTECTED_COMMIT:-}" ]; then
+  exit 0
+fi
+
+branch=$(git symbolic-ref --short -q HEAD || echo "HEAD")
+
+for p in $PROTECTED_BRANCHES; do
+  if [ "$branch" = "$p" ]; then
+    cat >&2 <<EOF
+✗ Commit blocked: you are on protected branch '$branch'.
+
+Create a dedicated branch first:
+  git checkout -b feat/<short-topic>
+
+(emergency override, explain why: ALLOW_PROTECTED_COMMIT=1 git commit ...)
+EOF
+    exit 1
+  fi
+done
+
+exit 0
