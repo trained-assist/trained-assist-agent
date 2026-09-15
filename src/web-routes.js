@@ -27,6 +27,8 @@ function listSessionsFor(username, limit = 20) {
   return listSessions(workDir, cap).map((s, i) => ({
     id: s.id,
     topic: s.topic,
+    summary: s.summary || null,
+    projectId: s.projectId || null,
     lastAt: s.lastAt,
     createdAt: s.createdAt,
     messageCount: s.messageCount,
@@ -47,6 +49,8 @@ function getSessionFor(username, sessionId) {
   return {
     id: session.id,
     topic: session.topic,
+    summary: session.summary || meta.summary || null,
+    projectId: session.projectId || meta.projectId || null,
     createdAt: session.createdAt,
     lastAt: session.lastAt,
     messageCount: session.messageCount,
