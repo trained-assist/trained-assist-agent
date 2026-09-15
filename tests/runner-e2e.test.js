@@ -62,12 +62,8 @@ function setupFakeClaude(reply = 'OK') {
   writeFileSync(claudeReplyFile, reply);
 }
 
-function buildFakeClaudeBinary() {
-  fakeBinDir = mkdtempSync(join(tmpdir(), 'fake-claude-bin-'));
-  claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
-  writeFileSync(claudeReplyFile, 'default reply');
-
-  // Shell script that outputs stream-json matching Claude's format
+// Writes the normal (always-succeeds) fake claude script to the current fakeBinDir/claude path.
+function writeNormalClaudeScript() {
   const script = `#!/bin/bash
 REPLY=$(cat "${claudeReplyFile}" 2>/dev/null || echo "OK")
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$REPLY"'"}]}}'
@@ -76,6 +72,44 @@ echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output
   const scriptPath = join(fakeBinDir, 'claude');
   writeFileSync(scriptPath, script);
   chmodSync(scriptPath, 0o755);
+}
+
+// Crashes (non-zero exit, near-empty output) on the first `crashCount` invocations,
+// then behaves like a normal successful run. Invocation count tracked on disk so it
+// survives the fact that a retry spawns a brand-new process. Callers MUST call
+// restoreNormalClaude() afterwards — this overwrites the shared claude binary in place.
+function setupCrashingClaude(crashCount = 1, exitCode = 1) {
+  claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
+  writeFileSync(claudeReplyFile, 'OK after retry');
+  const counterFile = join(fakeBinDir, 'crash-counter.txt');
+  writeFileSync(counterFile, '0');
+  const scriptPath = join(fakeBinDir, 'claude');
+  const script = `#!/bin/bash
+COUNT=$(cat "${counterFile}" 2>/dev/null || echo 0)
+COUNT=$((COUNT+1))
+echo $COUNT > "${counterFile}"
+if [ "$COUNT" -le ${crashCount} ]; then
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}'
+  exit ${exitCode}
+fi
+REPLY=$(cat "${claudeReplyFile}" 2>/dev/null || echo "OK")
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$REPLY"'"}]}}'
+echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output_tokens":50}}'
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+}
+
+function restoreNormalClaude() {
+  writeNormalClaudeScript();
+  setupFakeClaude('OK');
+}
+
+function buildFakeClaudeBinary() {
+  fakeBinDir = mkdtempSync(join(tmpdir(), 'fake-claude-bin-'));
+  claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
+  writeFileSync(claudeReplyFile, 'default reply');
+  writeNormalClaudeScript();
 }
 
 // ── Module loading ────────────────────────────────────────────────────────────
@@ -592,6 +626,46 @@ describe('Dialogue: Google Drive file research (like выставки)', () => {
 
     const sessionId = readCurrentSession().id;
     expect(sessionId, 'session should stay the same throughout').toBe(readCurrentSession().id);
+  });
+
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO: quick-crash self-healing — a crash within QUICK_CRASH_MS of launch
+// gets one silent auto-retry before bothering the user; a crash that keeps
+// happening surfaces as a real error instead of looping forever.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Quick-crash auto-retry', () => {
+
+  it('crash on first launch auto-retries once and delivers the eventual success', { timeout: 20000 }, async () => {
+    setupCrashingClaude(1); // crashes on invocation #1, succeeds from #2 on
+    try {
+      await chat('сделай штуку', { claudeReply: 'Готово, сделал штуку' });
+    } finally {
+      restoreNormalClaude();
+    }
+
+    const texts = tgTexts();
+    expect(texts.some(t => /⚡ Быстрый сбой/.test(t)), 'should show the silent-retry status line').toBe(true);
+    expect(texts[texts.length - 1]).toMatch(/Готово, сделал штуку/);
+    // Only one retry happened — the crash+retry pair, not a loop.
+    expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
+  });
+
+  it('crash that keeps happening surfaces as a real error, capped at one retry', { timeout: 20000 }, async () => {
+    setupCrashingClaude(5); // would crash 5 times in a row if allowed to keep retrying
+    try {
+      await chat('сделай штуку');
+    } finally {
+      restoreNormalClaude();
+    }
+
+    const texts = tgTexts();
+    expect(texts.some(t => /⚡ Быстрый сбой/.test(t)), 'exactly one retry attempt should show').toBe(true);
+    expect(texts[texts.length - 1]).toMatch(/реальный сбой/);
+    // Original launch + exactly 1 retry = 2 invocations, no infinite loop.
+    expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
   });
 
 });

@@ -58,6 +58,8 @@ function isScratchpadFallback(claudeResult, lastAssistantMsg) {
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
+const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth 1 retry
+const MAX_QUICK_RETRIES = 1; // cap so a repeatable crash doesn't loop forever
 
 // ── Pending-task journal — survives process restart ──────────────────────────
 const PENDING_DIR = path.join(
@@ -1937,7 +1939,7 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -2611,9 +2613,34 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     return stoppedMsg;
   }
 
-  // If claude crashed with non-zero exit and produced almost no output — show crash error
+  // If claude crashed with non-zero exit and produced almost no output — show crash error.
+  // A crash within QUICK_CRASH_MS of launch looks like a transient environment blip (process
+  // spawn race, brief resource contention) rather than the task's own logic — worth one silent
+  // retry before bothering the user. Capped at MAX_QUICK_RETRIES so a genuinely broken task
+  // doesn't loop; a crash after the process has been running longer is treated as real and
+  // surfaced immediately (a slow failure is much more likely to be about the task itself).
   if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
-    const crashMsg = `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
+    const crashDurationMs = Date.now() - thinkingStart;
+    if (crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
+      const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
+      else await tgSend(BOT_TOKEN, chatId, retryMsg);
+      return runTask({
+        taskId: `${user.username}-${Date.now()}`,
+        user,
+        task,
+        context,
+        sessionId: activeSessionId,
+        forceClaude,
+        initialMsgId: msgId,
+        pinnedMsgId,
+        secrets,
+        retryCount: retryCount + 1,
+      });
+    }
+    const crashMsg = retryCount > 0
+      ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`
+      : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
     else await tgSend(BOT_TOKEN, chatId, crashMsg);
     return crashMsg;
