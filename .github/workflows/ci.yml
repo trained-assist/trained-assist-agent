@@ -28,6 +28,13 @@ jobs:
             echo "❌ Direct connect-pending usage found outside user-tokens.js — use generateConnectLink() or generateLegacyConnectLink() instead"
             exit 1
           fi
+      - name: Recruiter/HH tools must call OpenRouter, not spawn Claude Code
+        run: |
+          FILES=$(find src/mcp-skills/tools -maxdepth 1 -type f \( -iname "*hh*.js" -o -iname "*recruiter*.js" \))
+          if [ -n "$FILES" ] && echo "$FILES" | xargs grep -lE "require\((['\"]).*runner\1\)|spawn\(['\"]claude['\"]" ; then
+            echo "❌ recruiter-quick-action MCP tools must call OpenRouter (DeepSeek/Gemini) via their own llmCall()-style helper, never open a Claude Code session — see README.md 'Recruiter/quick-action MCP tools must use cheap LLMs, never Claude Code'"
+            exit 1
+          fi
 
   merge:
     needs: [ci]

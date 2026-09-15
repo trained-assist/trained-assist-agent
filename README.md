@@ -427,6 +427,14 @@ When adding a new entry to `SERVICE_FORM_SCHEMA` in `src/user-tokens.js`:
 ### Adding a new endpoint
 Add route handling in `src/server.js` in the request handler chain (method + pathname check pattern).
 
+### Recruiter/quick-action MCP tools must use cheap LLMs, never Claude Code
+
+**Rule: any MCP tool under `src/mcp-skills/tools/*hh*.js` or `*recruiter*.js` must call OpenRouter (DeepSeek/Gemini) directly via its own `llmCall()`-style helper — it must never spawn a Claude Code session.**
+
+Why: these tools back one-tap Telegram quick-commands (`/eval`, `/review`, `/send_message`, …). Spawning Claude Code for them defeats the point of a "quick" action — it's slow and burns Claude tokens for work a cheap model already handles (see `src/mcp-skills/tools/90-hh.js` — 100% OpenRouter, `deepseek/deepseek-chat` / `deepseek/deepseek-v4-flash-0731`, no Claude Code call anywhere in the HH domain).
+
+Enforced in CI (`ci.yml` → "Recruiter/HH tools must call OpenRouter, not spawn Claude Code") — a new file under those globs that imports `runner.js` or spawns the `claude` binary fails the build.
+
 ### src/ module map
 
 | Module / path | Description |
