@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -151,6 +151,14 @@ const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:чернови�
 // "Подготовь черновик вакансии на HH" — fast-path when vacancy data already exists or is provided inline
 const VACANCY_PREP_DRAFT_INTENT   = /подготов.{0,20}(?:черновик|драфт|вакансию).{0,30}(?:hh|хх|хэдхантер)|создай.{0,20}(?:черновик|драфт).{0,30}(?:hh|хх|хэдхантер)|(?:черновик|драфт).{0,30}(?:в|на)\s+(?:hh|хх|хэдхантер)|положи.{0,20}(?:вакансию|на).{0,20}(?:hh|хх|хэдхантер)|вакансию.{0,20}(?:на|в)\s+(?:hh|хх|хэдхантер)|подготов.{0,10}(?:вакансию|черновик)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
+// /usage klod, /usage codex — CLI subscription rate-limit check (Claude Code / Codex CLI
+// OAuth session on THIS VM: ~/.claude/.credentials.json, ~/.codex/auth.json). Distinct from
+// USAGE_INTENT above (per-profile token-SPEND stats) — this reads the operator's own shared
+// CLI login, so it's gated to OWNER_USERNAME: a tenant profile has no reason to see the
+// operator's personal Claude/Codex subscription usage.
+const CLI_USAGE_INTENT      = /^\/?usage\s+(klod|codex|клод|кодекс)\b/i;
+const OWNER_USERNAME        = 'trained-assist-product-owner';
+const CLI_USAGE_SCRIPTS     = { klod: '/home/vova/bin/usage-klod.sh', codex: '/home/vova/bin/usage-codex.sh' };
 const CONTEXT_OFF_INTENT    = /^\/context_off$|выключи.{0,15}контекст|скрой.{0,15}контекст|отключи.{0,15}(?:статус|контекст|карточк)/i;
 const CONTEXT_ON_INTENT     = /^\/context_on$|включи.{0,15}контекст|покажи.{0,15}контекст|включи.{0,15}(?:статус|карточк)/i;
 const CALLTIPS_PREPARE_INTENT = /(?:подготов|составь|сделай|создай).{0,30}(?:план|вопросы|интервью).{0,30}(?:для|с|звонк)|подготов.{0,20}(?:к|для).{0,10}звонк|план.{0,20}(?:интервью|звонка|встречи).{0,30}(?:с|для)|call.?tips.{0,20}(?:для|с|план|prepare)/i;
@@ -1079,6 +1087,28 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     }
     const { createBugReport } = require('./bug-report');
     return await createBugReport({ workDir, chatId, userId, note });
+  }
+
+  // /usage klod, /usage codex — see CLI_USAGE_INTENT above.
+  const cliUsageM = task.trim().match(CLI_USAGE_INTENT);
+  if (cliUsageM) {
+    if (userId !== OWNER_USERNAME) {
+      return 'Команда доступна только владельцу.';
+    }
+    const key = /^(codex|кодекс)$/i.test(cliUsageM[1]) ? 'codex' : 'klod';
+    const script = CLI_USAGE_SCRIPTS[key];
+    try {
+      const { stdout } = await new Promise((resolve, reject) => {
+        execFile(script, [], { timeout: 15000 }, (err, stdout, stderr) => {
+          if (err) reject(new Error(stderr?.trim() || err.message));
+          else resolve({ stdout });
+        });
+      });
+      return stdout.trim();
+    } catch (e) {
+      console.error('[cli-usage] %s script failed: %s', key, e.message);
+      return `⚠️ Не удалось получить данные (${key}): ${e.message}`;
+    }
   }
 
   const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
