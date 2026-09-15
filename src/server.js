@@ -1555,7 +1555,8 @@ async function main() {
       const history = fs.existsSync(histFile) ? JSON.parse(fs.readFileSync(histFile, 'utf8')) : { messages: [] };
       history.messages = history.messages || [];
 
-      const guard = await bullshitGuard(message, history.messages, { username });
+      const allowSpecificTime = hhInterviewConfigAllowsTime(username);
+      const guard = await bullshitGuard(message, history.messages, { username, allowSpecificTime });
       if (!guard.ok) {
         console.warn(`[hh/send] guard blocked user=${username} neg=${negotiation_id} reason="${guard.reason}"`);
         appendGuardBlock(username, negotiation_id, guard.reason, guard.checks);
@@ -1667,19 +1668,15 @@ async function main() {
         } catch { /* ignore — generate without vacancy context */ }
       }
 
-      const baseSystem = 'Ты — рекрутер. ВСЕГДА пиши сообщение, даже если данных мало.\n' +
-        'Тон: профессиональный, уважительный, конкретный. Пиши от первого лица на русском языке.\n' +
-        'Структура: 1) Приветствие с именем 2) что зацепило в резюме 3) короткое описание роли 4) 1-2 конкретных вопроса по требованиям вакансии 5) призыв к действию.\n' +
+      const MESSAGE_SYSTEM = 'Ты — рекрутер. ВСЕГДА пиши сообщение, даже если данных мало.\n' +
+        'Пишешь сообщение кандидату на HeadHunter. Это может быть первое сообщение или ответ внутри уже идущей переписки — на входе всегда полная история диалога и результат ATS-оценки кандидата (скор, вердикт).\n\n' +
+        'Если это первое сообщение (истории переписки ещё нет): 1) Приветствие с именем 2) 1-2 предложения что в резюме зацепило 3) короткое описание роли 4) конкретный вопрос для квалификации (самый важный пробел из требований вакансии) 5) призыв к действию.\n\n' +
+        'Если кандидат уже отвечал в переписке: прочитай его ответы и учти скор/вердикт. Если скор хороший/проходной и ответы кандидата по делу, или скор высокий сразу — аккуратно, ничего не обещая, предложи следующий шаг: сейчас планируем процесс собеседований, предложи созвониться. Если скор низкий или в ответах остались пробелы — задай уточняющий вопрос по самому важному пробелу.\n\n' +
+        'Если кандидат ещё не ответил на наше последнее сообщение: напиши короткий вежливый follow-up без давления, упомяни, что писал(а) ранее.\n\n' +
+        'Если это отказ: напиши вежливый отказ — уважительно, тепло, без объяснения причин, пожелай удачи в поиске.\n\n' +
         'Форматирование: каждый вопрос — отдельная строка (через \\n). Между смысловыми блоками — пустая строка. Не пиши всё в один абзац.\n' +
-        'Длина: 4-7 предложений. Обязательно задай конкретные вопросы из требований вакансии — не общие, а именно те что важны для этой роли.' +
-        (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
-      const followupSystem = `Ты — рекрутер. Напиши короткий follow-up кандидату, который не ответил на первое сообщение.
-Тон: лёгкий, без давления. 2-3 предложения. Пиши на русском языке.`;
-      const rejectionSystem = `Ты — рекрутер. Напиши вежливый отказ кандидату.
-Тон: уважительный, тёплый, без объяснения причин. Пожелай удачи в поиске. 2-3 предложения. Пиши на русском языке.`;
-      const replySystem = `Ты — рекрутер, уже переписываешься с кандидатом. Кандидат тебе ответил — прочитай его последнее сообщение и ответь по существу.
-НЕ здоровайся заново и НЕ представляйся — вы уже знакомы, вступление уже было. Не повторяй вопросы, которые уже задавал.
-Тон: профессиональный, по делу. 3-6 предложений. Пиши на русском языке.` +
+        'Длина: 4-7 предложений (follow-up и отказ — 2-3). Не используй шаблонные фразы. Пиши от первого лица на русском языке.\n' +
+        'НЕЛЬЗЯ: обещать перезвонить или позвонить — только переписка в HH. Не используй слова «перезвоню», «позвоню», «свяжусь по телефону», «созвонимся». Не обещай трудоустройство или конкретные условия — только предлагай следующий шаг процесса.' +
         (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
 
       const recruiterCtx = msgCfg ? [
@@ -1689,12 +1686,8 @@ async function main() {
         ...(msgCfg.rules || []).map(r => `ПРАВИЛО: ${r}`),
       ].filter(Boolean).join('\n') : '';
 
-      const activeSystem = msgType === 'rejection' ? rejectionSystem
-        : msgType === 'reply' ? replySystem
-        : msgType === 'followup' ? followupSystem
-        : baseSystem;
       const systemPrompt = [
-        activeSystem,
+        MESSAGE_SYSTEM,
         recruiterCtx ? `\n\n## Идентичность рекрутера\n${recruiterCtx}` : '',
         commStyle ? `\n\n## Стиль общения рекрутера\n${commStyle}` : '',
       ].join('');
@@ -1704,13 +1697,14 @@ async function main() {
         const who = m.role === 'employer' ? 'Рекрутер' : 'Кандидат';
         return `${who}: ${(m.text || '').slice(0, 500)}`;
       }).join('\n');
+      const ats = history.ats_result || {};
+      const gaps = (ats.gaps || []).slice(0, 2).join(', ') || 'нет критических пробелов';
+      const atsLine = ats.score != null
+        ? `ATS-оценка: ${ats.score}/10, вердикт: ${ats.verdict || 'n/a'}. Совпадения: ${(ats.matched || []).slice(0, 3).join(', ') || 'нет'}. Уточнить: ${gaps}.\n\n`
+        : '';
       const userMsg = msgType === 'rejection'
         ? `Напиши вежливый отказ кандидату ${firstName}.`
-        : msgType === 'reply'
-          ? `История переписки с кандидатом ${firstName}:\n\n${convoCtx}\n\nНапиши следующее сообщение рекрутера — ответ на последнее сообщение кандидата.`
-          : msgType === 'followup'
-            ? `Кандидат ${firstName} не ответил. Напиши follow-up.`
-            : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}`;
+        : `Кандидат: ${firstName}\n\n${msgType === 'initial' ? `Резюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}\n\n` : ''}${atsLine}История переписки:\n${convoCtx || '(переписки ещё не было — это первое сообщение)'}${msgType === 'followup' ? '\n\n(кандидат не ответил на наше последнее сообщение)' : ''}\n\nНапиши следующее сообщение кандидату.`;
 
       try {
         const message = await new Promise((resolve, reject) => {
@@ -3817,6 +3811,20 @@ function splitBuffer(buf, sep) {
   return parts.filter(p => p.length > 0);
 }
 
+// True only when the vacancy's ats_config.interview_config has real, recruiter-provided
+// availability — gates whether the outgoing-message guard allows naming a specific time.
+function hhInterviewConfigAllowsTime(username) {
+  try {
+    const configFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
+    if (!fs.existsSync(configFile)) return false;
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value || {};
+    const ic = config.interview_config || {};
+    return !!(ic.invite_call_enabled && (ic.availability?.trim() || ic.booking_url?.trim()));
+  } catch {
+    return false;
+  }
+}
+
 function appendGuardBlock(username, negId, reason, checks, blocked = true) {
   try {
     const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
@@ -4442,6 +4450,7 @@ h1{font-size:18px}
 </div>
 <div class="footer">
   <div class="counter">Отправить: <strong id="selCount">0</strong> · Отказать: <strong id="rejCount">0</strong> · Готово: <strong id="sentCount">0</strong></div>
+  <button class="btn-reject-all" id="regenAllBtn" onclick="regenerateAll()">🔄 Перегенерировать все черновики</button>
   <button class="btn-reject-all" id="rejectAllBtn" onclick="rejectAll()" disabled>Отказать (0)</button>
   <button class="btn-send-all" id="sendAllBtn" onclick="sendAll()" disabled>Отправить (0)</button>
 </div>

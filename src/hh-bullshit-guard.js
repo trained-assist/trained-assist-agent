@@ -22,6 +22,34 @@ function hasPlaceholder(text) {
   return PLACEHOLDER_RE.some(p => p.test(text));
 }
 
+// Plain \b doesn't detect word boundaries around Cyrillic letters (JS \w is ASCII-only),
+// so Cyrillic alternatives use explicit lookaround instead of \b.
+const CYR_BOUND_BEFORE = '(?<![а-яёА-ЯЁ])';
+const CYR_BOUND_AFTER = '(?![а-яёА-ЯЁ])';
+const cyrWord = (w) => `${CYR_BOUND_BEFORE}${w}${CYR_BOUND_AFTER}`;
+const TIME_EXPR_RE = new RegExp([
+  '\\d{1,2}[:.]\\d{2}\\b',
+  `${CYR_BOUND_BEFORE}в\\s*\\d{1,2}\\s*(?:час|ч\\.)`,
+  cyrWord('утром'), cyrWord('днём'), cyrWord('днем'), cyrWord('вечером'),
+  cyrWord('сегодня'), cyrWord('завтра'), cyrWord('послезавтра'),
+  cyrWord('понедельник'), cyrWord('вторник'), cyrWord('сред[ау]'), cyrWord('четверг'),
+  cyrWord('пятниц[ау]'), cyrWord('суббот[ау]'), cyrWord('воскресень[ея]'),
+].join('|'), 'gi');
+
+// Detects a recruiter message naming a specific call time/date that wasn't echoed
+// from the candidate's own messages — i.e. the model invented it rather than
+// reflecting real availability configured for the vacancy.
+function hasInventedTime(messageText, conversationHistory) {
+  const found = messageText.match(TIME_EXPR_RE);
+  if (!found) return false;
+  const candidateText = conversationHistory
+    .filter(m => m.role !== 'employer')
+    .map(m => m.text || '')
+    .join(' ')
+    .toLowerCase();
+  return !found.every(t => candidateText.includes(t.toLowerCase()));
+}
+
 // ─── LLM ──────────────────────────────────────────────────────────────────────
 
 function llmCall(apiKey, messages) {
@@ -94,7 +122,7 @@ template_garbage = текст явно является незаполненны
  * @returns {Promise<{ ok: boolean, reason?: string, checks: object }>}
  */
 async function bullshitGuard(messageText, conversationHistory = [], options = {}) {
-  const checks = { empty: false, placeholder: false, repeated_question: false, repeated_intro: false, template_garbage: false };
+  const checks = { empty: false, placeholder: false, invented_time: false, repeated_question: false, repeated_intro: false, template_garbage: false };
 
   if (!messageText || messageText.trim().length === 0) {
     checks.empty = true;
@@ -104,6 +132,11 @@ async function bullshitGuard(messageText, conversationHistory = [], options = {}
   if (hasPlaceholder(messageText)) {
     checks.placeholder = true;
     return { ok: false, reason: 'незаполненный placeholder в тексте', checks };
+  }
+
+  if (options.allowSpecificTime !== true && hasInventedTime(messageText, conversationHistory)) {
+    checks.invented_time = true;
+    return { ok: false, reason: 'сообщение называет конкретное время/дату звонка, хотя реальная доступность не задана в ATS-конфиге (interview_config)', checks };
   }
 
   const apiKey = options.apiKey || getApiKey(options.username);
@@ -135,4 +168,4 @@ async function bullshitGuard(messageText, conversationHistory = [], options = {}
   return { ok: true, checks, degraded: conversationHistory.length > 0 && !llmChecked };
 }
 
-module.exports = { bullshitGuard, hasPlaceholder, getApiKey, llmCall };
+module.exports = { bullshitGuard, hasPlaceholder, hasInventedTime, getApiKey, llmCall };
