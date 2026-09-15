@@ -1438,6 +1438,7 @@ function killTaskByUsername(username) {
     if (!taskId.startsWith(prefix)) continue;
     try {
       if (state.proc) {
+        state.userStopped = true;
         state.proc.kill('SIGTERM');
         killed++;
         console.log(`[runner] killTaskByUsername: killed ${taskId}`);
