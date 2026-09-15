@@ -25,6 +25,7 @@ const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { bullshitGuard } = require('./hh-bullshit-guard');
+const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride, BASE_PROMPT_FILENAME, DEFAULT_MESSAGE_BASE } = require('./hh-message-prompts');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
@@ -1326,7 +1327,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/candidate' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/sync-negotiations')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/candidate' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/update-base-prompt' || url.pathname === '/hh/sync-negotiations')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1594,6 +1595,7 @@ async function main() {
 
       const styleFile = path.join(hhTokensBase, String(username), 'hh-message-style');
       const commStyle = fs.existsSync(styleFile) ? fs.readFileSync(styleFile, 'utf8').trim() : null;
+      const baseOverride = loadBaseOverride(hhTokensBase, username);
 
       // Read recruiter identity config (agency, name, signature, rules)
       let msgCfg = null;
@@ -1669,29 +1671,24 @@ async function main() {
         } catch { /* ignore — generate without vacancy context */ }
       }
 
-      const MESSAGE_SYSTEM = 'Ты — рекрутер. ВСЕГДА пиши сообщение, даже если данных мало.\n' +
-        'Пишешь сообщение кандидату на HeadHunter. Это может быть первое сообщение или ответ внутри уже идущей переписки — на входе всегда полная история диалога и результат ATS-оценки кандидата (скор, вердикт).\n\n' +
-        'Если это первое сообщение (истории переписки ещё нет): 1) Приветствие с именем 2) 1-2 предложения что в резюме зацепило 3) короткое описание роли 4) конкретный вопрос для квалификации (самый важный пробел из требований вакансии) 5) призыв к действию.\n\n' +
-        'Если кандидат уже отвечал в переписке: прочитай его ответы и учти скор/вердикт. Если скор хороший/проходной и ответы кандидата по делу, или скор высокий сразу — аккуратно, ничего не обещая, предложи следующий шаг: сейчас планируем процесс собеседований, предложи созвониться. Если скор низкий или в ответах остались пробелы — задай уточняющий вопрос по самому важному пробелу.\n\n' +
-        'Если кандидат ещё не ответил на наше последнее сообщение: напиши короткий вежливый follow-up без давления, упомяни, что писал(а) ранее.\n\n' +
-        'Если это отказ: напиши вежливый отказ — уважительно, тепло, без объяснения причин, пожелай удачи в поиске.\n\n' +
-        'Форматирование: каждый вопрос — отдельная строка (через \\n). Между смысловыми блоками — пустая строка. Не пиши всё в один абзац.\n' +
-        'Длина: 4-7 предложений (follow-up и отказ — 2-3). Не используй шаблонные фразы. Пиши от первого лица на русском языке.\n' +
-        'НЕЛЬЗЯ: обещать перезвонить или позвонить — только переписка в HH. Не используй слова «перезвоню», «позвоню», «свяжусь по телефону», «созвонимся». Не обещай трудоустройство или конкретные условия — только предлагай следующий шаг процесса.' +
-        (vacancyContext ? '\n\n## Контекст вакансии\n' + vacancyContext : '');
+      // interview_config (set via the ATS editor) — only proposes a concrete call
+      // slot when it has real availability, otherwise asks the candidate instead
+      // of inventing a time (see hh-message-prompts.js / commit 3ff4e11 / #606).
+      let interviewConfig = null;
+      try {
+        const atsConfigFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
+        if (fs.existsSync(atsConfigFile)) {
+          let val = JSON.parse(fs.readFileSync(atsConfigFile, 'utf8'))?.value;
+          if (typeof val === 'string') val = JSON.parse(val);
+          interviewConfig = val?.interview_config || null;
+        }
+      } catch { /* ignore */ }
+      const availabilityBlock = buildAvailabilityBlock(interviewConfig);
 
-      const recruiterCtx = msgCfg ? [
-        msgCfg.represent_as || (msgCfg.agency ? `Ты пишешь от лица агентства ${msgCfg.agency}.` : ''),
-        msgCfg.recruiter_name ? `Твоё имя: ${msgCfg.recruiter_name}.` : '',
-        msgCfg.signature ? `Подпись в конце каждого сообщения: «${msgCfg.signature}».` : '',
-        ...(msgCfg.rules || []).map(r => `ПРАВИЛО: ${r}`),
-      ].filter(Boolean).join('\n') : '';
-
-      const systemPrompt = [
-        MESSAGE_SYSTEM,
-        recruiterCtx ? `\n\n## Идентичность рекрутера\n${recruiterCtx}` : '',
-        commStyle ? `\n\n## Стиль общения рекрутера\n${commStyle}` : '',
-      ].join('');
+      const recruiterCtx = buildRecruiterIdentity(msgCfg);
+      const systemPrompt = msgType === 'rejection'
+        ? buildRejectionSystemPrompt({ recruiterCtx, commStyle })
+        : buildMessageSystemPrompt({ vacancyContext, recruiterCtx, commStyle, baseOverride });
 
       const firstName = (candidate_name || 'Кандидат').split(' ')[0];
       const convoCtx = msgs.slice(-8).map(m => {
@@ -1705,7 +1702,7 @@ async function main() {
         : '';
       const userMsg = msgType === 'rejection'
         ? `Напиши вежливый отказ кандидату ${firstName}.`
-        : `Кандидат: ${firstName}\n\n${msgType === 'initial' ? `Резюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}\n\n` : ''}${atsLine}История переписки:\n${convoCtx || '(переписки ещё не было — это первое сообщение)'}${msgType === 'followup' ? '\n\n(кандидат не ответил на наше последнее сообщение)' : ''}\n\nНапиши следующее сообщение кандидату.`;
+        : `Кандидат: ${firstName}\n\n${msgType === 'initial' ? `Резюме:\n${fullResumeText || '(резюме недоступно — напиши общее приглашение)'}\n\n` : ''}${atsLine}История переписки:\n${convoCtx || '(переписки ещё не было — это первое сообщение)'}${msgType === 'followup' ? '\n\n(кандидат не ответил на наше последнее сообщение)' : ''}${availabilityBlock}\n\nНапиши следующее сообщение кандидату.`;
 
       try {
         const message = await new Promise((resolve, reject) => {
@@ -1841,6 +1838,9 @@ async function main() {
       const hmacToken3 = agentSecret ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16) : '';
       const defaultStyle = '- Тон: профессиональный, дружелюбный, без официоза. Обращение на «вы».\n- Приветствие: «Добрый день, [Имя]!» или «Здравствуйте, [Имя]!»\n- Структура: приветствие → что понравилось в резюме → описание роли → 1-2 конкретных вопроса → призыв ответить\n- Всегда задаю конкретные вопросы по опыту из требований вакансии, не общие\n- Не использую штампы: «рассмотрели вашу кандидатуру», «вакансия открылась», «мы ищем»\n- Длина: 4-6 предложений\n- Подпись: имя рекрутера';
       const rulesValue = (existingStyle || defaultStyle).replace(/`/g, '\\`');
+      const existingBase = loadBaseOverride(hhTokensBase3, username) || '';
+      const hasBaseOverride = !!existingBase;
+      const baseValue = (existingBase || DEFAULT_MESSAGE_BASE).replace(/`/g, '\\`');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html><head><meta charset="utf-8">
 <title>Стиль общения — ${username}</title>
@@ -1887,6 +1887,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <button class="btn-secondary" id="btnExtract" onclick="extractStyle()">Извлечь стиль из примеров</button>
 <div class="status" id="statusExtract"></div>
 
+<hr class="sep">
+
+<h2>Базовый сценарий сообщений (продвинутое)</h2>
+<p class="sub" style="margin-bottom:10px">Это сама инструкция ИИ — что писать в первом сообщении, follow-up, ответе, отказе, как обращаться со временем звонка. Правила стиля выше добавляются поверх неё. Меняй только если понимаешь, на что влияет.</p>
+<textarea id="basePrompt" rows="14">${baseValue}</textarea>
+<div class="hint">${hasBaseOverride ? '⚙️ Сейчас используется твоя версия (переопределяет умолчание).' : 'Сейчас используется версия по умолчанию — правки ниже создадут переопределение.'}</div>
+<button class="btn-primary" id="btnSaveBase" onclick="saveBasePrompt()">Сохранить сценарий</button>
+<button class="btn-secondary" id="btnResetBase" onclick="resetBasePrompt()">Сбросить к умолчанию</button>
+<div class="status" id="statusBase"></div>
+
 <script>
 async function saveRules() {
   const text = document.getElementById('rules').value.trim();
@@ -1925,6 +1935,39 @@ async function extractStyle() {
     }
   } catch(e) { show('statusExtract', 'err', 'Сетевая ошибка: ' + e.message); }
   document.getElementById('btnExtract').disabled = false;
+}
+async function saveBasePrompt() {
+  const text = document.getElementById('basePrompt').value.trim();
+  if (!text || text.length < 50) { show('statusBase', 'err', 'Сценарий подозрительно короткий — проверь текст.'); return; }
+  document.getElementById('btnSaveBase').disabled = true;
+  show('statusBase', 'loading', 'Сохраняю...');
+  try {
+    const r = await fetch('${callbackBase3}/hh/update-base-prompt', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', text}),
+    });
+    const d = await r.json();
+    if (d.ok) show('statusBase', 'ok', '✅ Сценарий сохранён! Применится при следующей генерации сообщений.');
+    else show('statusBase', 'err', 'Ошибка: ' + (d.error || 'неизвестная'));
+  } catch(e) { show('statusBase', 'err', 'Сетевая ошибка: ' + e.message); }
+  document.getElementById('btnSaveBase').disabled = false;
+}
+async function resetBasePrompt() {
+  if (!confirm('Вернуть сценарий по умолчанию? Твои правки к нему будут удалены.')) return;
+  document.getElementById('btnResetBase').disabled = true;
+  show('statusBase', 'loading', 'Сбрасываю...');
+  try {
+    const r = await fetch('${callbackBase3}/hh/update-base-prompt', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: '${username}', token: '${hmacToken3}', reset: true}),
+    });
+    const d = await r.json();
+    if (d.ok) { document.getElementById('basePrompt').value = d.text; show('statusBase', 'ok', '✅ Сброшено к умолчанию.'); }
+    else show('statusBase', 'err', 'Ошибка: ' + (d.error || 'неизвестная'));
+  } catch(e) { show('statusBase', 'err', 'Сетевая ошибка: ' + e.message); }
+  document.getElementById('btnResetBase').disabled = false;
 }
 function show(id, type, msg) {
   const s = document.getElementById(id);
@@ -2003,6 +2046,36 @@ function show(id, type, msg) {
         console.error('[hh/update-style] error:', e.message);
         return json(res, 500, { error: 'generation failed: ' + e.message });
       }
+    }
+
+    // POST /hh/update-base-prompt — save or reset the per-recruiter base message-generation prompt
+    if (req.method === 'POST' && url.pathname === '/hh/update-base-prompt') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const body5 = JSON.parse(await readBody(req));
+      const { username, token: givenToken5, text, reset = false } = body5 || {};
+      if (!username) return json(res, 400, { error: 'missing fields' });
+      const agentSecret5 = process.env.AGENT_SECRET || '';
+      if (agentSecret5) {
+        const { createHmac } = require('crypto');
+        const expected5 = createHmac('sha256', agentSecret5).update(String(username)).digest('hex').slice(0, 16);
+        if (givenToken5 !== expected5) return json(res, 403, { error: 'invalid token' });
+      }
+      const hhTokensBase5 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+      const baseFile5 = path.join(hhTokensBase5, String(username), BASE_PROMPT_FILENAME);
+
+      if (reset) {
+        try { fs.unlinkSync(baseFile5); } catch { /* already absent */ }
+        console.log('[hh/update-base-prompt] reset to default for', username);
+        return json(res, 200, { ok: true, text: DEFAULT_MESSAGE_BASE });
+      }
+
+      if (!text || typeof text !== 'string' || text.trim().length < 50) {
+        return json(res, 400, { error: 'text too short' });
+      }
+      fs.mkdirSync(path.join(hhTokensBase5, String(username)), { recursive: true });
+      fs.writeFileSync(baseFile5, text.trim());
+      console.log('[hh/update-base-prompt] saved override for', username, 'len=', text.length);
+      return json(res, 200, { ok: true });
     }
 
     // POST /hh/sync-negotiations — force-refresh negotiations cache (called from review page)
@@ -3814,9 +3887,9 @@ function hhInterviewConfigAllowsTime(username) {
   try {
     const configFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
     if (!fs.existsSync(configFile)) return false;
-    const config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value || {};
-    const ic = config.interview_config || {};
-    return !!(ic.invite_call_enabled && (ic.availability?.trim() || ic.booking_url?.trim()));
+    let config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value || {};
+    if (typeof config === 'string') config = JSON.parse(config);
+    return hasRealAvailability(config.interview_config);
   } catch {
     return false;
   }
@@ -4258,7 +4331,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            ${msgMeta}
            <div class="msg-label-row">
              <label class="msg-label">${msgLabel}</label>
-             <button class="btn btn-gen" id="gen-${i}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
+             <button class="btn btn-gen" id="gen-${i}" data-idx="${i}" data-negid="${esc(c.negotiation_id)}" data-name="${esc(c.name)}" data-sent="${c.already_sent ? '1' : '0'}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
            </div>
            <textarea class="msg-area" id="msg-${i}" rows="5">${hasDraft ? esc(c.draft_message) : ''}</textarea>
            <div class="btns">
@@ -4548,6 +4621,33 @@ function markDone(i) {
   const cb = document.getElementById('cb-'+i);
   if (cb) { cb.checked = false; cb.disabled = true; }
   document.getElementById('sentCount').textContent = done.size;
+}
+
+async function regenerateAll() {
+  const btn = document.getElementById('regenAllBtn');
+  const targets = Array.from(document.querySelectorAll('.btn-gen[data-negid]'))
+    .filter(b => !b.disabled && !done.has(parseInt(b.dataset.idx)));
+  if (!targets.length) { showToast('Нечего перегенерировать'); return; }
+  const total = targets.length;
+  let finished = 0;
+  btn.disabled = true;
+  btn.textContent = '⏳ 0/' + total + '…';
+  const CONCURRENCY = 3;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < targets.length) {
+      const b = targets[cursor++];
+      try {
+        await generateOne(parseInt(b.dataset.idx), b.dataset.negid, b.dataset.name, b.dataset.sent === '1');
+      } catch (e) { /* generateOne already surfaces its own error state */ }
+      finished++;
+      btn.textContent = '⏳ ' + finished + '/' + total + '…';
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+  btn.disabled = false;
+  btn.textContent = '🔄 Перегенерировать все черновики';
+  showToast('✅ Перегенерировано: ' + finished + '/' + total);
 }
 
 async function generateOne(i, negId, candidateName, alreadySent) {

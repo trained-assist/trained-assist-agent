@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const http = require('http');
 const https = require('https');
+const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, loadBaseOverride } = require('../../hh-message-prompts');
 
 const USER_ID = process.env.USER_ID || '';
 
@@ -59,6 +60,17 @@ function loadCommunicationStyle(userId) {
     if (style) return style;
   }
   return null;
+}
+
+// message_config.json (agency/name/signature/rules) — set via the recruiter-identity
+// page, lives under process.cwd()/contexts/hh like the rest of the context store.
+function loadRecruiterIdentityConfig() {
+  const raw = readContext('hh', 'message_config');
+  let val = raw?.value;
+  if (typeof val === 'string') {
+    try { val = JSON.parse(val); } catch { return null; }
+  }
+  return (val && typeof val === 'object') ? val : null;
 }
 
 const DEFAULT_REJECTION_TEMPLATE = 'Здравствуйте, {firstName}! Спасибо за отклик. К сожалению, ваш профиль не соответствует нашим текущим требованиям. Желаем успехов в поиске!';
@@ -190,20 +202,6 @@ const ATS_EXTRACT_SYSTEM = `Ты — senior технический рекрут�
 - review_threshold: на 2-2.5 ниже pass_threshold.
 
 Выведи ТОЛЬКО валидный JSON без markdown и без комментариев.`;
-
-const MESSAGE_SYSTEM = `Ты — рекрутер в технической компании.
-Пишешь сообщение кандидату на HeadHunter. Это может быть первое сообщение или ответ внутри уже идущей переписки — на входе всегда полная история диалога и результат ATS-оценки кандидата (скор, вердикт).
-
-Если это первое сообщение (истории переписки ещё нет): 1) Приветствие с именем 2) 1-2 предложения что в резюме зацепило 3) Короткое описание роли 4) Конкретный вопрос для квалификации (самый важный пробел) 5) Призыв к действию.
-
-Если кандидат уже отвечал в переписке: прочитай его ответы и учти скор/вердикт. Если скор хороший/проходной и ответы кандидата по делу, или скор высокий сразу — аккуратно, ничего не обещая, предложи следующий шаг: сейчас планируем процесс собеседований, предложи созвониться. Если скор низкий или в ответах остались пробелы — задай уточняющий вопрос по самому важному пробелу.
-
-Если кандидат ещё не ответил на наше последнее сообщение: напиши короткий вежливый follow-up без давления, упомяни, что писал(а) ранее.
-
-Про время звонка — ВАЖНО: если ниже в контексте дан блок "Доступность для звонка" с реальными данными — используй только их (предложи слот из указанной доступности или дай ссылку на запись). Если такого блока нет — НЕ придумывай время и дату (никаких «утро», «завтра днём», «в среду в 15:00»); вместо этого спроси у кандидата, когда ему удобно созвониться.
-
-Длина: 4-6 предложений (follow-up — 2-3). Не используй шаблонные фразы. Пиши от первого лица.
-НЕЛЬЗЯ: обещать перезвонить или позвонить — только переписка в HH. Не используй слова «перезвоню», «позвоню», «свяжусь по телефону», «созвонимся». Не обещай трудоустройство или конкретные условия — только предлагай следующий шаг процесса.`;
 
 const PROFILE_SYSTEM = `Ты — рекрутер, составляющий профиль кандидата для показа заказчику.
 Формат: markdown. Структура: имя + текущая позиция, краткое резюме (2-3 предложения), ключевые компетенции (список), опыт работы (топ-3 места), ключевые проекты/достижения, образование, ожидания.
@@ -1600,21 +1598,10 @@ async function generateMessage(candidateContext, atsResult, name, apiKey, messag
   const gaps = (atsResult.gaps || []).slice(0, 2).join(', ') || 'нет критических пробелов';
 
   const commStyle = loadCommunicationStyle(userId || USER_ID);
-  const systemPrompt = commStyle
-    ? `${MESSAGE_SYSTEM}\n\n## Стиль общения рекрутера\n${commStyle}`
-    : MESSAGE_SYSTEM;
-
-  const ic = atsConfig?.interview_config || null;
-  const hasRealAvailability = !!(ic?.invite_call_enabled && (ic.availability?.trim() || ic.booking_url?.trim()));
-  let availabilityBlock = '';
-  if (hasRealAvailability) {
-    const notes = [];
-    if (ic.level) notes.push(`Уровень позиции: ${ic.level}.`);
-    if (ic.requirements) notes.push(`Требования к звонку: ${ic.requirements}.`);
-    if (ic.availability) notes.push(`Доступность рекрутера: ${ic.availability}.`);
-    if (ic.booking_url) notes.push(`Ссылка для самостоятельной записи: ${ic.booking_url}.`);
-    availabilityBlock = `\n\nДоступность для звонка:\n${notes.join('\n')}`;
-  }
+  const baseOverride = loadBaseOverride(tokenBase(), userId || USER_ID);
+  const recruiterCtx = buildRecruiterIdentity(loadRecruiterIdentityConfig());
+  const systemPrompt = buildMessageSystemPrompt({ recruiterCtx, commStyle, baseOverride });
+  const availabilityBlock = buildAvailabilityBlock(atsConfig?.interview_config);
 
   const historyLines = history.map(m => `${m.role === 'employer' ? 'Рекрутер' : 'Кандидат'}: ${m.text}`).join('\n');
   const userMsg = `Кандидат: ${firstName}\n\nКонтекст:\n${candidateContext}\n\nATS-оценка: ${atsResult.score ?? 'n/a'}/10, вердикт: ${atsResult.verdict || 'n/a'}. Совпадения: ${(atsResult.matched || []).slice(0, 3).join(', ') || 'нет'}. Уточнить: ${gaps}.\n\nИстория переписки:\n${historyLines || '(переписки ещё не было — это первое сообщение)'}${availabilityBlock}\n\nНапиши следующее сообщение кандидату.`;
