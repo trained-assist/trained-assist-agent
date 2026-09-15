@@ -34,6 +34,25 @@ function getToken() {
   throw new Error('GitHub токен не подключён. Вызови connect({ service: "github" }) чтобы получить ссылку для ввода токена.');
 }
 
+// Same hooks this agent's own repos use (.githooks/ at repo root) — copied into
+// every workspace dev_workspace_setup touches so branch-per-session is enforced
+// there too, not just in the agent's own checkouts.
+const HOOKS_TEMPLATE_DIR = path.join(__dirname, '..', '..', '..', '.githooks');
+
+function installGitHooks(wsPath) {
+  const hooksDir = path.join(wsPath, '.git', 'hooks');
+  if (!fs.existsSync(hooksDir)) return false;
+  let installed = false;
+  for (const name of ['pre-commit', 'pre-push']) {
+    const src = path.join(HOOKS_TEMPLATE_DIR, name);
+    if (!fs.existsSync(src)) continue;
+    fs.copyFileSync(src, path.join(hooksDir, name));
+    fs.chmodSync(path.join(hooksDir, name), 0o755);
+    installed = true;
+  }
+  return installed;
+}
+
 function run(cmd, args, opts = {}) {
   const result = spawnSync(cmd, args, {
     encoding: 'utf8',
@@ -124,6 +143,7 @@ module.exports = {
             } else {
               run('git', ['pull', '--ff-only'], { cwd: wsPath });
             }
+            installGitHooks(wsPath);
             return { workspace: wsPath, status: 'updated', repo, branch: branch || 'default' };
           } catch (e) {
             // If pull fails (dirty), still return workspace so Claude can inspect
@@ -141,6 +161,9 @@ module.exports = {
         // Configure git identity (needed for commits)
         run('git', ['config', 'user.email', 'agent@recruiter-assistant.ru'], { cwd: wsPath });
         run('git', ['config', 'user.name', 'AI Agent'], { cwd: wsPath });
+
+        // Block commits/pushes to main/master before Claude ever gets a shell here
+        installGitHooks(wsPath);
 
         if (branch) {
           run('git', ['checkout', '-b', branch, `origin/${branch}`], { cwd: wsPath });
@@ -181,7 +204,7 @@ module.exports = {
           deps_log: depsLog,
           next_steps: [
             `cd ${wsPath}  # work in this directory`,
-            'git checkout -b feat/your-feature-name  # create feature branch',
+            'git checkout -b feat/your-feature-name  # create feature branch — direct commits/pushes to main are hook-blocked',
             '# ... edit files, run tests ...',
             'git add -p && git commit -m "feat: ..."',
             'git push -u origin feat/your-feature-name',
