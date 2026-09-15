@@ -1,4 +1,5 @@
 const http = require('http');
+const { taskStatus, setTaskStatus, saveAttachments } = require('./intake-contract');
 const https = require('https');
 const fs = require('fs');
 const os = require('os');
@@ -2741,6 +2742,11 @@ ${expLines || '—'}
     // enqueue, which returns 202 immediately). Reading live state here — rather
     // than trusting a fire-and-forget completion callback — means a dropped
     // packet can't trap the buffer; the next poll self-heals.
+    if (req.method === 'GET' && url.pathname === '/tasks/status') {
+      const id = url.searchParams.get('taskId');
+      if (!id || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) return json(res, 400, { error: 'invalid taskId' });
+      return json(res, 200, taskStatus(id));
+    }
     if (req.method === 'GET' && url.pathname === '/tasks/running') {
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
@@ -2833,10 +2839,10 @@ ${expLines || '—'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, files, traceId, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
-      if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
+      if (!task && !forceClaude && !fileBase64 && !files?.length) return json(res, 400, { error: 'missing fields' });
       if (!/^-?\d{1,20}$/.test(String(userId))) {
         console.log('[/run] 400 invalid userId:', userId);
         return json(res, 400, { error: 'invalid userId' });
@@ -2875,31 +2881,22 @@ ${expLines || '—'}
       const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
-      // Save attached file (base64) to workDir and prepend path info to the task.
-      let effectiveTask = task || '';
-      if (fileBase64 && fileName) {
-        const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-        const uploadsDir = path.join(workDir, 'uploads');
-        fs.mkdirSync(uploadsDir, { recursive: true });
-        const filePath = path.join(uploadsDir, safeName);
-        try {
-          fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'), { mode: 0o600 });
-          const typeNote = fileMimeType ? ` (${fileMimeType})` : '';
-          const fileNote = `[Файл сохранён: ${filePath}${typeNote}]`;
-          effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
-        } catch (e) {
-          console.error('[/run] file save error:', e.message);
-        }
+      const taskId = `${username}-${require('crypto').randomUUID()}`;
+      const correlation = typeof traceId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(traceId) ? traceId : taskId;
+      let effectiveTask;
+      try {
+        effectiveTask = saveAttachments(workDir, taskId, task, files || (fileBase64 ? [{ fileBase64, fileName, fileMimeType }] : []));
+      } catch {
+        return json(res, 400, { error: 'invalid or unsaved attachments' });
       }
-
-      // Accept request immediately, run task in background
-      const taskId = `${username}-${Date.now()}`;
-      json(res, 202, { taskId });
+      setTaskStatus(taskId, { state: 'accepted', traceId: correlation });
+      json(res, 202, { taskId, traceId: correlation });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
-        console.error(`[${taskId}] runTask error:`, err.message)
-      );
+      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).then(() => setTaskStatus(taskId, { state: 'settled', traceId: correlation }), err => {
+        setTaskStatus(taskId, { state: 'failed', traceId: correlation });
+        console.error(`[${taskId}] runTask error:`, err.message);
+      });
       return;
     }
 

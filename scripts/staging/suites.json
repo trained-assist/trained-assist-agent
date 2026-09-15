@@ -1,0 +1,16 @@
+{
+  "vitest": [
+    "tests/runner-e2e.test.js",
+    "tests/quick-answers.test.js",
+    "tests/intake-contract.test.js"
+  ],
+  "node": [
+    "test/answer-router.test.cjs",
+    "test/gtd-controller.test.cjs",
+    "test/session-context-batch.test.cjs",
+    "test/final-text-select.test.cjs",
+    "test/session-store-recency.test.cjs",
+    "test/lane-granularity.test.cjs",
+    "test/cap-per-profile.test.cjs"
+  ]
+}
