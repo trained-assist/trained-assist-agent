@@ -89,6 +89,23 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   ok(/написать тесты/.test(reopenMsg) && /задеплоить/.test(reopenMsg), 'reopen message carries unchecked checklist items');
   ok(/Цель: довести фичу X до прода/.test(reopenMsg), 'reopen message carries goal');
 
+  // 10. maybeSchedule end-to-end with a real checklist.md + wanted:true intent
+  // (regression for #631: `checklist` was undefined in the scheduling log line,
+  // throwing a ReferenceError on every successful schedule call).
+  const realFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify({ wanted: true, etaMinutes: 30 }) } }] }),
+  });
+  let scheduleErr = null;
+  const scheduled = await G.maybeSchedule({
+    workDir: wd, sessionId: 's-checklist', task: 'доведи фичу X до конца',
+    apiKey: 'k', projectDir: projDir,
+  }).catch(e => { scheduleErr = e; return null; });
+  global.fetch = realFetch;
+  ok(scheduleErr === null, 'maybeSchedule with checklist.md does not throw');
+  ok(scheduled && scheduled.maxIterations === 4, 'maybeSchedule scales maxIterations from checklist');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
