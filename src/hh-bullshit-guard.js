@@ -107,22 +107,32 @@ async function bullshitGuard(messageText, conversationHistory = [], options = {}
   }
 
   const apiKey = options.apiKey || getApiKey(options.username);
-  if (apiKey && conversationHistory.length > 0) {
-    try {
-      const r = await llmCheck(messageText, conversationHistory, apiKey);
-      checks.repeated_question = !!r.repeated_question;
-      checks.repeated_intro = !!r.repeated_intro;
-      checks.template_garbage = !!r.template_garbage;
+  let llmChecked = false;
+  if (conversationHistory.length > 0) {
+    if (!apiKey) {
+      checks.llm_skipped = 'no_api_key';
+    } else {
+      try {
+        const r = await llmCheck(messageText, conversationHistory, apiKey);
+        llmChecked = true;
+        checks.repeated_question = !!r.repeated_question;
+        checks.repeated_intro = !!r.repeated_intro;
+        checks.template_garbage = !!r.template_garbage;
 
-      if (checks.repeated_question || checks.repeated_intro || checks.template_garbage) {
-        return { ok: false, reason: r.reason || 'обнаружена проблема в сообщении', checks };
+        if (checks.repeated_question || checks.repeated_intro || checks.template_garbage) {
+          return { ok: false, reason: r.reason || 'обнаружена проблема в сообщении', checks };
+        }
+      } catch (e) {
+        console.warn('[bullshit-guard] llm check skipped:', e.message);
+        checks.llm_skipped = `error: ${e.message}`;
       }
-    } catch (e) {
-      console.warn('[bullshit-guard] llm check skipped:', e.message);
     }
   }
 
-  return { ok: true, checks };
+  // degraded = semantic (LLM) check never ran even though there was history to check against —
+  // the message passed only on the free regex checks. Callers should log this so a run of
+  // API failures doesn't silently defeat the guard.
+  return { ok: true, checks, degraded: conversationHistory.length > 0 && !llmChecked };
 }
 
 module.exports = { bullshitGuard, hasPlaceholder, getApiKey, llmCall };
