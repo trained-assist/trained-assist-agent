@@ -179,7 +179,8 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
   const intent = await detectIntent(task, { apiKey });
   if (!intent.wanted) return null;
   const now = Date.now();
-  const maxIterations = computeMaxIterations(readChecklist(projectDir));
+  const checklist = readChecklist(projectDir);
+  const maxIterations = computeMaxIterations(checklist);
   const rec = {
     sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
     createdAt: now,
