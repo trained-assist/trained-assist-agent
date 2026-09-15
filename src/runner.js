@@ -1,3 +1,4 @@
+const { runAttemptChain, taskStatus, setTaskStatus } = require('./intake-contract');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -1587,7 +1588,7 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  const prev = chatLanes.get(queueKey) ?? Promise.resolve();
+  const prev = (chatLanes.get(queueKey) ?? Promise.resolve()).catch(() => {});
 
   // If there's already a queued task, show "В очереди (Xs)" while waiting.
   let queueWaitTimer = null;
@@ -1620,7 +1621,7 @@ function runTask(opts) {
       await _waitForRam();
       await _acquireSlot();
       try {
-        return await _runTask(opts);
+        return await runAttemptChain(opts, _runTask);
       } finally {
         _releaseSlot();
       }
@@ -1630,13 +1631,15 @@ function runTask(opts) {
   }).catch(err => {
     if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
+    throw err;
   });
   chatLanes.set(queueKey, current);
-  current.finally(() => {
+  const cleanup = () => {
     clearPendingTask(opts.taskId);
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
-  });
+  };
+  current.then(cleanup, cleanup);
   return current;
 }
 
@@ -2006,9 +2009,16 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   savePendingTask(taskId, {
     taskId, userId: user.id, username: user.username, workDir: user.workDir,
     task, context, sessionId, contextFromSession, forceClaude, forceNew,
-    initialMsgId, pinnedMsgId,
+    initialMsgId, pinnedMsgId, mode, projectId, newProjectName, continuationCount, retryCount,
     startedAt: Date.now(),
   });
+
+  if (taskStatus(taskId).state !== 'unknown') {
+    setTaskStatus(taskId, { state: 'running', execution: {
+      taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew,
+      initialMsgId, pinnedMsgId, continuationCount, retryCount, internalGtd, mode, projectId, newProjectName,
+    } });
+  }
 
   fs.mkdirSync(user.workDir, { recursive: true });
   initLog(user.workDir);
@@ -2220,6 +2230,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
     activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
+  }
+
+  if (taskStatus(taskId).state !== 'unknown') {
+    const { readTaskRecord } = require('./intake-contract');
+    setTaskStatus(taskId, { execution: { ...readTaskRecord(taskId).execution,
+      sessionId: activeSessionId, forceNew: false } });
   }
 
   // Answer router (manual launch): глубина выбирается ЯВНОЙ кнопкой, не угадывается.
@@ -2662,18 +2678,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         else await tgSend(BOT_TOKEN, chatId, tgMsg);
 
         const continuationTask = `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
-        runTask({
-          taskId: `${user.username}-${Date.now()}`,
-          user,
-          task: continuationTask,
-          context: '',
-          sessionId: activeSessionId,
-          forceClaude: true,
-          initialMsgId: msgId,
-          pinnedMsgId,
-          secrets,
-          continuationCount: nextCount,
-        });
+        return { nextAttempt: {
+          user, task: continuationTask, context: '', sessionId: activeSessionId,
+          forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
+          continuationCount: nextCount, mode, projectId, newProjectName,
+        } };
       } else {
         const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
@@ -2722,8 +2731,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
-      return runTask({
-        taskId: `${user.username}-${Date.now()}`,
+      return { nextAttempt: {
+        taskId,
         user,
         task,
         context,
@@ -2732,8 +2741,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         initialMsgId: msgId,
         pinnedMsgId,
         secrets,
-        retryCount: retryCount + 1,
-      });
+        retryCount: retryCount + 1, mode, projectId, newProjectName, continuationCount,
+      } };
     }
     const crashMsg = retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`

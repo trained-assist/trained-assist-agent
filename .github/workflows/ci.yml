@@ -5,8 +5,43 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR to retry after an automatic fix (empty = check main)'
+        type: string
+        required: false
+      expected_head:
+        description: 'Exact PR head commit after the automatic fix'
+        type: string
+        required: false
 
 jobs:
+  staging-gate:
+    name: staging-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci --include=dev
+      - name: Replay mandatory user scenarios
+        run: npm run test:staging
+      - name: Save scenario results and tested revision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-${{ github.run_id }}-${{ github.run_attempt }}
+          path: staging-results/
+          if-no-files-found: error
+
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -37,30 +72,55 @@ jobs:
           fi
 
   merge:
-    needs: [ci]
-    if: |
-      github.event_name == 'pull_request' &&
-      needs.ci.result == 'success'
+    needs: [ci, staging-gate]
+    if: >-
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && inputs.pr_number != '')
     runs-on: ubuntu-latest
     concurrency:
-      group: merge-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      group: merge-${{ github.event.pull_request.number || inputs.pr_number }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      sha: ${{ steps.merge.outputs.sha }}
     steps:
-      - name: Squash-merge the PR
-        run: gh pr merge --squash "${{ github.event.pull_request.html_url }}"
+      - name: Merge only the tested PR revision
+        id: merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr_number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.expected_head }}
+          TESTED_SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          [[ "$PR" =~ ^[0-9]+$ && "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$EVENT" = workflow_dispatch ]; then
+            [ "$TESTED_SHA" = "$EXPECTED_HEAD" ]
+          fi
+          gh pr view "$PR" -R "$REPO" --json headRefOid,baseRefName,isDraft,state,headRepositoryOwner \
+            > pr.json
+          jq -e --arg sha "$EXPECTED_HEAD" \
+            '.headRefOid == $sha and .baseRefName == "main" and .isDraft == false and .state == "OPEN"' pr.json
+          gh pr merge "$PR" -R "$REPO" --squash --match-head-commit "$EXPECTED_HEAD"
+          SHA=$(gh pr view "$PR" -R "$REPO" --json mergeCommit --jq '.mergeCommit.oid')
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+          EXPECTED_TREE=$(gh api "repos/$REPO/git/commits/$TESTED_SHA" --jq .tree.sha)
+          ACTUAL_TREE=$(gh api "repos/$REPO/git/commits/$SHA" --jq .tree.sha)
+          [ "$ACTUAL_TREE" = "$EXPECTED_TREE" ]
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
   # Runs after PR auto-merge OR on direct push to main (e.g. GitHub UI squash-merge).
   # always() lets the job run even when `merge` was skipped (merge only runs on PRs).
   deploy-gcp:
-    needs: [ci, merge]
+    needs: [ci, staging-gate, merge]
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      needs.staging-gate.result == 'success' &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
@@ -76,7 +136,8 @@ jobs:
           script: |
             cd /home/vova/trained-assist-agent
             git fetch origin main
-            git reset --hard origin/main
+            git fetch origin ${{ needs.merge.outputs.sha || github.sha }}
+            git reset --hard ${{ needs.merge.outputs.sha || github.sha }}
             printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
@@ -95,10 +156,11 @@ jobs:
             bash scripts/deploy.sh
 
   deploy-ru:
-    needs: [ci, merge]
+    needs: [ci, staging-gate, merge]
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      needs.staging-gate.result == 'success' &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
@@ -115,7 +177,8 @@ jobs:
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
             git fetch origin main
-            git reset --hard origin/main
+            git fetch origin ${{ needs.merge.outputs.sha || github.sha }}
+            git reset --hard ${{ needs.merge.outputs.sha || github.sha }}
             printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.TELEGRAM_BOT_TOKEN }}' \
               '${{ secrets.ANTHROPIC_API_KEY }}' \

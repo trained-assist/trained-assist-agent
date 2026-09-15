@@ -1,4 +1,5 @@
 const http = require('http');
+const { taskStatus, setTaskStatus, admitIntakeTask, recoverableIntakeTasks, executeIntakeTask } = require('./intake-contract');
 const https = require('https');
 const fs = require('fs');
 const os = require('os');
@@ -486,7 +487,12 @@ function scheduleGtdController(secrets) {
 }
 
 async function resumePendingTasks(secrets) {
-  const pending = getPendingTasks();
+  const durable = recoverableIntakeTasks();
+  for (const record of durable) {
+    executeIntakeTask(record.taskId, runTask, secrets)
+      .catch(err => console.error(`[resume] ${record.taskId}:`, err.message));
+  }
+  const pending = getPendingTasks().filter(p => taskStatus(p.taskId).state === 'unknown');
   const cutoff = Date.now() - 15 * 60 * 1000;
   const toResume = pending.filter(t => t.startedAt && t.startedAt > cutoff && t.username && t.userId && t.task);
   // Clean up stale files that are too old to resume — prevents slow startup after many crashes.
@@ -499,13 +505,9 @@ async function resumePendingTasks(secrets) {
   console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
-  // Import clearPendingTask to remove original files before re-running
-  const { clearPendingTask: _clearPending } = require('./runner');
-
   for (const p of toResume) {
     console.log(`[resume] task=${p.taskId} user=${p.username} task="${String(p.task).slice(0, 60)}"`);
-    // Delete original file immediately — the new runTask will journal under its own taskId
-    _clearPending(p.taskId);
+    // Keep the original journal until the resumed execution finishes.
     if (p.initialMsgId && secrets.BOT_TOKEN) {
       fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
         method: 'POST',
@@ -516,11 +518,13 @@ async function resumePendingTasks(secrets) {
     }
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
     const user = { id: p.userId, name: p.username, username: p.username, workDir };
-    const newTaskId = `${p.username}-resume-${Date.now()}`;
+    const newTaskId = p.taskId;
     runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
       sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
       forceClaude: !!p.forceClaude, initialMsgId: p.initialMsgId || null,
-      pinnedMsgId: p.pinnedMsgId || null, secrets,
+      pinnedMsgId: p.pinnedMsgId || null, secrets, mode: p.mode || null,
+      forceNew: !!p.forceNew, projectId: p.projectId || null, newProjectName: p.newProjectName || null,
+      continuationCount: p.continuationCount || 0, retryCount: p.retryCount || 0,
     }).catch(err => console.error(`[resume] ${newTaskId} error:`, err.message));
     await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
   }
@@ -2851,6 +2855,11 @@ ${expLines || '—'}
     // enqueue, which returns 202 immediately). Reading live state here — rather
     // than trusting a fire-and-forget completion callback — means a dropped
     // packet can't trap the buffer; the next poll self-heals.
+    if (req.method === 'GET' && url.pathname === '/tasks/status') {
+      const id = url.searchParams.get('taskId');
+      if (!id || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) return json(res, 400, { error: 'invalid taskId' });
+      return json(res, 200, { ...taskStatus(id), retrySafe: true });
+    }
     if (req.method === 'GET' && url.pathname === '/tasks/running') {
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
@@ -2943,10 +2952,10 @@ ${expLines || '—'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, files, traceId, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
-      if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
+      if (!task && !forceClaude && !fileBase64 && !files?.length) return json(res, 400, { error: 'missing fields' });
       if (!/^-?\d{1,20}$/.test(String(userId))) {
         console.log('[/run] 400 invalid userId:', userId);
         return json(res, 400, { error: 'invalid userId' });
@@ -2985,31 +2994,24 @@ ${expLines || '—'}
       const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
-      // Save attached file (base64) to workDir and prepend path info to the task.
-      let effectiveTask = task || '';
-      if (fileBase64 && fileName) {
-        const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-        const uploadsDir = path.join(workDir, 'uploads');
-        fs.mkdirSync(uploadsDir, { recursive: true });
-        const filePath = path.join(uploadsDir, safeName);
-        try {
-          fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'), { mode: 0o600 });
-          const typeNote = fileMimeType ? ` (${fileMimeType})` : '';
-          const fileNote = `[Файл сохранён: ${filePath}${typeNote}]`;
-          effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
-        } catch (e) {
-          console.error('[/run] file save error:', e.message);
-        }
+      let admission;
+      try {
+        admission = admitIntakeTask(workDir, username, traceId, task,
+          files || (fileBase64 ? [{ fileBase64, fileName, fileMimeType }] : []),
+          { user, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null,
+            forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null,
+            pinnedMsgId: pinnedMsgId || null, mode: mode || null, projectId: projectId || null,
+            newProjectName: newProjectName || null });
+      } catch (error) {
+        return json(res, /^(invalid|batch too large)/.test(error.message) ? 400 : 503, { error: 'intake admission failed' });
       }
+      const { taskId, traceId: correlation } = admission;
+      json(res, 202, { taskId, traceId: correlation });
+      if (admission.duplicate) return;
 
-      // Accept request immediately, run task in background
-      const taskId = `${username}-${Date.now()}`;
-      json(res, 202, { taskId });
-
-      // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
-        console.error(`[${taskId}] runTask error:`, err.message)
-      );
+      executeIntakeTask(taskId, runTask, secrets).catch(err => {
+        console.error(`[${taskId}] runTask error:`, err.message);
+      });
       return;
     }
 
