@@ -109,9 +109,28 @@ const CLARIFY_BLOCK = [
   '  «▶️ Запустить проработку».',
 ].join('\n');
 
+// ── Заплатка для internalGtd-ходов внутри deep-сессии ─────────────────────────
+// GTD-контроллер дожимает задачу автономными ре-запусками (buildReopenMessage,
+// см. gtd-controller.js) поверх той же deep-сессии — значит deepSticky=true и
+// Claude всё ещё получает базовый agent-system-prompt.txt, где написано, что
+// кнопка «▶️ Действуй дальше по плану» появляется под планом. Но runner.js
+// (_runTask, §C) жёстко подавляет ЛЮБЫЕ кнопки на internalGtd-ходах — код их
+// не детектит и не прикрепляет, вообще не хочет читать текст. Без этой заметки
+// Claude пишет «нажми ▶️ Действуй дальше…», хотя кнопки физически не будет —
+// баг «текст про кнопку есть, кнопки нет», обнаруженный пользователем 2026-09-15.
+const GTD_NO_BUTTON_NOTE = [
+  '',
+  'Это автономный шаг GTD-контроллера (авто-доведение), не обычный ход диалога.',
+  'На ЭТОМ шаге ни одна inline-кнопка НЕ прикрепляется программно — даже если ответ',
+  'читается как план дальнейших действий. НЕ пиши «нажми ▶️ Действуй дальше по плану»',
+  'и не упоминай эту кнопку — её не будет. Если нужно ещё одно действие — сделай его',
+  'сам следующей итерацией (см. правила ниже), а не проси пользователя нажать что-то.',
+].join('\n');
+
 function buildDeepBlock() { return DEEP_BLOCK; }
 function buildClarifyBlock() { return CLARIFY_BLOCK; }
 function buildOneshotBlock() { return ONESHOT_BLOCK; }
+function buildGtdNoButtonNote() { return GTD_NO_BUTTON_NOTE; }
 
 // Кнопки под быстрым one-shot ответом. Реверс владельца (INTAKE-REFACTOR-SPEC §9.2,
 // 2026-09-14): «❓ Уточнить задачу» — плохая идея, убрана. Единый путь запуска
@@ -123,5 +142,5 @@ function oneshotActionMarkup(_sid, _opts = {}) {
 
 module.exports = {
   MODES, normalizeMode, readMode, writeMode, buildDeepBlock, buildClarifyBlock, buildOneshotBlock,
-  oneshotActionMarkup,
+  buildGtdNoButtonNote, oneshotActionMarkup,
 };

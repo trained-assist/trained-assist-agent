@@ -1794,7 +1794,11 @@ function ensureSkillDir(workDir, domainPath, description) {
 // консервативно: сомнение / короткий ответ / нет ключа → false (кнопку не показываем).
 async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   const t = String(text || '').trim();
-  if (t.length < 200) return false; // слишком коротко для плана дальнейших шагов
+  // Порог был 200 — резал короткие, но настоящие планы («Дальше предлагаю: 1)…2)…»
+  // укладывается в ~120 символов) и текст молчал про план, хотя реально его описывал
+  // (баг от 2026-09-15). Выровняли с detectMenuInAnswer (100) — там та же дешёвая
+  // LLM и тот же риск ложных срабатываний на коротком тексте, отдельного порога не нужно.
+  if (t.length < 100) return false;
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return false;
   const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
@@ -2270,7 +2274,11 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   try {
     const deepSticky = answerRouter.readMode(user.workDir, activeSessionId)?.mode === 'deep';
     // internalGtd ходы — уже «дожим до конца», им oneshot-гард про research не нужен.
+    // Но если это internalGtd ВНУТРИ deep-сессии, кнопка «Действуй дальше» всё равно
+    // программно подавлена (см. §C ниже) — предупреждаем Claude отдельной заметкой,
+    // иначе он пишет про кнопку, которой не будет (баг от 2026-09-15).
     const block = explicitMode === 'clarify' ? answerRouter.buildClarifyBlock()
+                : deepSticky && internalGtd   ? answerRouter.buildDeepBlock() + '\n' + answerRouter.buildGtdNoButtonNote()
                 : deepSticky                  ? answerRouter.buildDeepBlock()
                 : internalGtd                 ? null
                 : answerRouter.buildOneshotBlock();
@@ -2599,22 +2607,32 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // (см. tg-bot callbacks.js), так что кнопка не обязана ждать явного deep-режима.
   // Плана нет → кнопки нет (actionButtons/oneshotActionMarkup и так null, §9.2).
   let finalMarkup = null;
+  let buttonReason = internalGtd ? 'internalGtd-suppressed' : 'no-session';
   if (!internalGtd) {
     if (activeSessionId) {
       const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
       if (hasPlan) {
         finalMarkup = { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] };
+        buttonReason = 'plan';
       } else {
         const menuLabels = await detectMenuInAnswer(final, secrets.OPENROUTER_API_KEY);
         finalMarkup = menuLabels
           ? { inline_keyboard: menuLabels.map((label, idx) => [{ text: `${idx + 1}. ${label}`.slice(0, 60), callback_data: `menu|${activeSessionId}|${idx}` }]) }
           : actionButtons(activeSessionId, { deep: finalDeep });
+        buttonReason = menuLabels ? 'menu' : 'none';
       }
     } else {
       finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
+      buttonReason = 'no-session';
     }
   }
   const finalExtra = { reply_markup: finalMarkup || { inline_keyboard: [] } };
+
+  // Retro-checkable audit trail (2026-09-15): раньше "была ли кнопка на самом деле
+  // в сообщении X" нельзя было проверить постфактум — reply_markup нигде не логировался.
+  // Одна строка на каждый исходящий ответ: session/причина/что реально прикреплено.
+  const buttonLabels = (finalMarkup?.inline_keyboard || []).flat().map(b => b.text);
+  console.log(`[buttons] session=${activeSessionId || '-'} internalGtd=${internalGtd} reason=${buttonReason} textLen=${final.length} attached=${JSON.stringify(buttonLabels)}`);
 
   // Send result (clear stop button; attach action buttons unless suppressed)
   if (msgId) {
