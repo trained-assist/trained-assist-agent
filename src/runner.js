@@ -71,7 +71,29 @@ const PENDING_DIR = path.join(
 );
 
 function savePendingTask(taskId, params) {
-  atomicJson(path.join(PENDING_DIR, `${taskId}.json`), params);
+  const file = path.join(PENDING_DIR, `${taskId}.json`);
+  let previous = null;
+  try { previous = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) { if (e.code !== 'ENOENT') throw e; }
+  atomicJson(file, { ...params, threadId: params.threadId ?? previous?.threadId ?? null,
+    // Retries and transition to running must never refresh the original intent.
+    initiatedAt: previous ? (Object.hasOwn(previous, 'initiatedAt') ? previous.initiatedAt : previous.startedAt ?? null) : (Object.hasOwn(params, 'initiatedAt') ? params.initiatedAt : params.startedAt ?? null) });
+}
+
+function recordTaskActivity(opts, at = Date.now()) {
+  const { activity } = require('./restart-activity');
+  const sessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id);
+  if (!opts.user.id && !sessionId) return;
+  const target = activity.record({ username: opts.user.username, chatId: opts.user.id,
+    sessionId, threadId: opts.threadId }, at);
+  maintenance.addRecipient(target);
+}
+
+function bindTaskActivity(taskId, user, sessionId) {
+  const file = path.join(PENDING_DIR, `${taskId}.json`);
+  const pending = JSON.parse(fs.readFileSync(file, 'utf8'));
+  atomicJson(file, { ...pending, sessionId });
+  if (Number.isFinite(pending.initiatedAt)) recordTaskActivity({ user, sessionId, threadId: pending.threadId }, pending.initiatedAt);
 }
 
 function clearPendingTask(taskId) {
@@ -1594,11 +1616,13 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
+  if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   const prev = chatLanes.get(queueKey) ?? Promise.resolve();
 
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
   savePendingTask(opts.taskId, {
-    phase: 'queued', taskId: opts.taskId, userId: opts.user.id, username: opts.user.username,
+    phase: 'queued', taskId: opts.taskId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
     workDir: opts.user.workDir, task: opts.task, context: opts.context,
     sessionId: opts.sessionId, contextFromSession: opts.contextFromSession,
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode,
@@ -1606,7 +1630,7 @@ function runTask(opts) {
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId,
     profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
     continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
-    startedAt: opts.acceptedAt || Date.now(),
+    startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
   if (maintenance.paused()) status.waiting('⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.');
@@ -1646,8 +1670,13 @@ function runTask(opts) {
   });
   chatLanes.set(queueKey, current);
   current.finally(() => {
-    clearPendingTask(opts.taskId);
-    releaseAdmission?.();
+    try {
+      const pendingFile = path.join(PENDING_DIR, `${opts.taskId}.json`);
+      const pending = fs.existsSync(pendingFile) ? JSON.parse(fs.readFileSync(pendingFile, 'utf8')) : null;
+      recordTaskActivity({ ...opts, sessionId: pending?.sessionId || opts.sessionId });
+    } catch (error) {
+      console.error('[restart-activity] completion:', error.message);
+    } finally { clearPendingTask(opts.taskId); releaseAdmission?.(); }
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
   });
@@ -2006,7 +2035,7 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task, context, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -2022,7 +2051,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
     profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
     task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
-    initialMsgId, pinnedMsgId,
+    initialMsgId, pinnedMsgId, initiatedAt, threadId,
     startedAt: Date.now(),
   });
 
@@ -2205,6 +2234,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
+      bindTaskActivity(taskId, user, activeSessionId);
       setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
     // Escalate-button (requirements-log [062], 2026-09-15): §9.2 killed the generic
@@ -2237,6 +2267,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   } else {
     activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
   }
+
+  bindTaskActivity(taskId, user, activeSessionId);
 
   // Answer router (manual launch): глубина выбирается ЯВНОЙ кнопкой, не угадывается.
   // «⏻ Запустить проработку» → mode='deep' пишется в durable-сайдкар (sticky: держится
@@ -2715,7 +2747,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         runTask({
           taskId: `${user.username}-${Date.now()}`,
           user,
-          task: continuationTask,
+          task: continuationTask, initiatedAt, threadId,
           context: '',
           sessionId: activeSessionId,
           forceClaude: true,
@@ -2773,6 +2805,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
       const queuedRetry = runTask({
+        initiatedAt, threadId,
         taskId: `${user.username}-${Date.now()}`,
         user,
         task,

@@ -49,3 +49,13 @@ test('file references survive acceptance and missing references are never acknow
  const missing=await f.send({requestId:'missing',fileRefs:[{id:'b'.repeat(64),name:'missing.pdf'}]});
  assert.equal(missing.status,503);assert.equal(f.runs.length,1);
 });
+
+test('topic routing is retained and malformed topics are rejected before accepting work', async t => {
+ const f=fixture(t);
+ assert.equal((await f.send({threadId:42})).status,202);
+ assert.equal(f.runs[0].threadId,42);
+ for (const threadId of [0,-1,1.5,'42']) {
+   assert.equal((await f.send({requestId:'bad-'+String(threadId),threadId})).status,400);
+ }
+ assert.equal(f.runs.length,1);
+});

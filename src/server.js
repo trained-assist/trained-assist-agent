@@ -536,7 +536,7 @@ async function resumePendingTasks(secrets) {
     const user = { id: p.userId, name: p.username, username: p.username, workDir, profileId: p.profileId, telegramUserId: p.telegramUserId };
     const newTaskId = p.taskId;
     atomicJson(path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${p.taskId}.json`), { taskId: p.taskId, acceptedAt: p.startedAt });
-    runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
+    runTask({ taskId: newTaskId, user, threadId: p.threadId, initiatedAt: Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : p.startedAt ?? null, task: p.task, context: p.context || null,
       sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
       forceClaude: !!p.forceClaude, forceNew: !!p.forceNew, mode: p.mode || null,
       projectId: p.projectId || null, newProjectName: p.newProjectName || null,
@@ -3227,7 +3227,8 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId } = payload;
+      if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return json(res, 400, { error: 'invalid threadId' });
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64 && !(fileRefs && fileRefs.length)) return json(res, 400, { error: 'missing fields' });
@@ -3326,7 +3327,7 @@ ${recent || '(пока нет)'}
       }
 
       // runTask journals synchronously, before any await or acknowledgement.
-      const completion = runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
+      const completion = runTask({ taskId, user, threadId, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
       completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
       if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
       json(res, 202, { taskId, requestId, durable: true, queued: maintenance.paused() });

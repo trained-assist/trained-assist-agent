@@ -12,7 +12,7 @@ function atomicJson(file, value) {
   const dir = fs.openSync(path.dirname(file), 'r');
   try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
 }
-function createMaintenance(file, { recovering = false } = {}) {
+function createMaintenance(file, { recovering = false, snapshotRecipients = null } = {}) {
   const bootId = randomUUID();
   let state = null;
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -25,15 +25,31 @@ function createMaintenance(file, { recovering = false } = {}) {
   const save = next => { atomicJson(file, next); state = next; };
   const transition = next => {
     const notifications = [...(state?.notifications || [])];
-    if (next.phase !== state?.phase && next.initiator && typeof next.initiator === 'object') {
-      notifications.push({ id: `${next.id}:${next.phase}`, operationId: next.id,
-        phase: next.phase, target: next.initiator, createdAt: Date.now(), delivered: {} });
+    if (next.phase !== state?.phase) {
+      if (next.recipients) {
+        notifications.push(...audienceEvents(next, next.recipients));
+      } else if (next.initiator && typeof next.initiator === 'object') {
+        // Existing operations retain their IDs/receipts across upgrade.
+        notifications.push({ id: `${next.id}:${next.phase}`, operationId: next.id,
+          phase: next.phase, target: next.initiator, createdAt: Date.now(), delivered: {} });
+      }
     }
     save({ ...next, notifications });
   };
   const paused = () => recovering || (!!state && ['draining', 'restarting', 'failed'].includes(state.phase));
   return {
     paused,
+    addRecipient(target) {
+      if (!paused() || !state?.recipients) return false;
+      const { normalizeTarget, targetKey } = require('./restart-activity');
+      target = normalizeTarget(target);
+      if (state.recipients.some(t => targetKey(t) === targetKey(target))) return false;
+      const recipients = [...state.recipients, target];
+      const existing = new Set(state.notifications.map(n => n.id));
+      const events = audienceEvents(state, [target]).filter(n => !existing.has(n.id));
+      save({ ...state, recipients, notifications: [...state.notifications, ...events] });
+      return true;
+    },
     pendingNotifications() { return (state?.notifications || []).filter(n => !n.sentAt); },
     acknowledgeNotification(id, channel) {
       const notifications = (state?.notifications || []).map(n => {
@@ -57,7 +73,15 @@ function createMaintenance(file, { recovering = false } = {}) {
     },
     request(initiator, kind = 'restart') {
       if (recovering) throw Error('Startup recovery is not complete');
-      if (!paused()) transition({ id: randomUUID(), phase: 'draining', kind, initiator, requestedAt: Date.now(), ownerBootId: bootId });
+      if (!paused()) {
+        const requestedAt = Date.now();
+        // Synchronous snapshot + journal replacement: no admission can interleave.
+        // An unreadable source fails the request before closing admission.
+        const recipients = snapshotRecipients ? snapshotRecipients(requestedAt) : null;
+        if (recipients && initiator && typeof initiator === 'object') recipients.push(initiator);
+        transition({ id: randomUUID(), phase: 'draining', kind, initiator, requestedAt, ownerBootId: bootId,
+          ...(recipients ? { audienceVersion: 2, recipients } : {}) });
+      }
       return this.status();
     },
     cancel() {
@@ -81,5 +105,24 @@ function createMaintenance(file, { recovering = false } = {}) {
     },
   };
 }
-const maintenance = createMaintenance(path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'maintenance.json'));
+function audienceEvents(state, recipients) {
+  const { normalizeTarget, targetKey } = require('./restart-activity');
+  const channels = new Map();
+  for (const recipient of recipients) {
+    const target = normalizeTarget(recipient);
+    // A chat/topic gets one Telegram notice, while each original web transcript
+    // gets its own receipt. Multiple sessions must not duplicate chat delivery.
+    if (target.chatId != null) {
+      const channel = { ...target, sessionId: null };
+      channels.set(targetKey(channel), channel);
+    }
+    if (target.sessionId) {
+      const channel = { ...target, chatId: null, threadId: null };
+      channels.set(targetKey(channel), channel);
+    }
+  }
+  return [...channels].map(([key, target]) => ({ id: `${state.id}:${state.phase}:${key}`,
+    operationId: state.id, phase: state.phase, target, createdAt: Date.now(), delivered: {} }));
+}
+const maintenance = createMaintenance(path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'maintenance.json'), { snapshotRecipients: at => require('./restart-activity').activity.snapshot(at) });
 module.exports = { maintenance, createMaintenance, atomicJson };
