@@ -528,6 +528,9 @@ async function resumePendingTasks(secrets) {
 
 async function main() {
   const secrets = await loadSecrets();
+  const intakeQuick = require('./intake-quick').createIntakeQuick({
+    baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
+  });
 
   const GDRIVE_CLIENT_ID     = secrets.GOOGLE_OAUTH_CLIENT_ID;
   const GDRIVE_CLIENT_SECRET = secrets.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -539,6 +542,7 @@ async function main() {
   // Parse callback path from the registered redirect URI so the route handler matches regardless of domain
   const HH_CALLBACK_PATH = (() => { try { return new URL(HH_REDIRECT_URI).pathname; } catch { return '/hh-callback'; } })();
 
+  require('./intake-media-retention').startIntakeMediaRetention(BASE_USERS_DIR);
   const server = http.createServer(async (req, res) => {
     try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -2748,6 +2752,15 @@ ${expLines || '—'}
       return json(res, 200, { capabilities, skills, upsell_text });
     }
 
+    // Gateway preflight: full async quick engine, without /run or a spawned session.
+    if (req.method === 'POST' && url.pathname === '/intake-quick') {
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: 'invalid json' }); }
+      const result = await intakeQuick(payload);
+      return json(res, result.status || 200, result);
+    }
+
     // POST /quick — quick deterministic answer without Claude Code (<200ms)
     if (req.method === 'POST' && url.pathname === '/quick') {
       const body = await readBody(req);
@@ -3001,13 +3014,13 @@ ${expLines || '—'}
       let effectiveTask = task || '';
       if (fileBase64 && fileName) {
         const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-        const uploadsDir = path.join(workDir, 'uploads');
+        const uploadsDir = path.join(workDir, 'media', 'intake');
         fs.mkdirSync(uploadsDir, { recursive: true });
-        const filePath = path.join(uploadsDir, safeName);
+        const filePath = path.join(uploadsDir, `${require('crypto').randomUUID()}-${safeName}`);
         try {
           fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'), { mode: 0o600 });
           const typeNote = fileMimeType ? ` (${fileMimeType})` : '';
-          const fileNote = `[Файл сохранён: ${filePath}${typeNote}]`;
+          const fileNote = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
           effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
         } catch (e) {
           console.error('[/run] file save error:', e.message);
