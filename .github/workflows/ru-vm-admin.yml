@@ -1,0 +1,28 @@
+name: RU VM Admin Command
+
+# The RU VM (secrets.VM_RU_HOST) hosts more than trained-assist-agent — it also
+# serves other products on the same box (e.g. zerocreds.ru) whose own deploy
+# users don't have full sudo. This is a manually-triggered escape hatch to run
+# one-off admin commands (service restarts, sudoers fixes, diagnostics) using
+# the credentials this repo already has for that VM, instead of re-deriving
+# SSH access from scratch every time something on the shared box needs a poke.
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Shell command to run on the RU VM'
+        required: true
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run command on RU VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_RU_HOST }}
+          username: ${{ secrets.VM_RU_USER }}
+          password: ${{ secrets.VM_RU_PASSWORD }}
+          script: ${{ inputs.command }}
