@@ -1520,7 +1520,7 @@ function runTask(opts) {
     const username = opts.user.username;
     const stopped = controlSession({ username, chatId: opts.user.id, sessionId: opts.sessionId, action: 'stop' }).killed > 0;
     const msg = stopped ? '⛔ Задача остановлена.' : 'Нет активной задачи для остановки.';
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const botToken = (opts.secrets?.BOT_TOKEN || opts.secrets?.TELEGRAM_BOT_TOKEN);
     const chatId = opts.user.id;
     if (botToken) {
       const markup = { reply_markup: { inline_keyboard: [] } };
@@ -1534,7 +1534,7 @@ function runTask(opts) {
   // Admin restart command — only for the operator chat. Sends confirmation then exits (systemd restarts).
   const ADMIN_CHAT_IDS = new Set([-5308931318]);
   if (/^\/restart$/i.test((opts.task || '').trim()) && ADMIN_CHAT_IDS.has(Number(opts.user.id))) {
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const botToken = (opts.secrets?.BOT_TOKEN || opts.secrets?.TELEGRAM_BOT_TOKEN);
     const chatId = opts.user.id;
     const msg = '🔄 Сервер перезапускается... (systemd поднимет через несколько секунд)';
     const sendAndExit = () => setTimeout(() => process.exit(0), 600);
@@ -1554,15 +1554,14 @@ function runTask(opts) {
   if (WAKEUP_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const hadActive = activeTimers.size > 0;
-    const stopped = controlSession({ username, chatId: opts.user.id, sessionId: opts.sessionId, action: 'stop' }).killed > 0;
-    // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
-    chatLanes.delete(queueKey);
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const stopped = controlSession({ username, chatId: opts.user.id, sessionId: opts.sessionId, action: 'skip' }).killed > 0;
+    // Keep the lane until the old process exits; deleting it permits overlapping engines.
+    const botToken = (opts.secrets?.BOT_TOKEN || opts.secrets?.TELEGRAM_BOT_TOKEN);
     const chatId = opts.user.id;
     const msg = stopped
-      ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
+      ? '🔄 Зависшая работа пропущена. Очередь продолжит работу.'
       : hadActive
-        ? '🔄 Очередь очищена. Активных задач не было.'
+        ? '🔄 В этом диалоге активных задач не было.'
         : '✅ Всё чисто, активных задач нет.';
     if (botToken) {
       const im = opts.initialMsgId;
