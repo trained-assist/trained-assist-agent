@@ -7,7 +7,7 @@ This is a partial implementation, not a production release. Keep the PR draft un
 - Durable activity journal for accepted requests and completed runner tasks. Running tasks count even with an unknown/old timestamp. Legacy session history bridges the first upgrade; restart notices do not refresh activity.
 - Inclusive 15-minute recipient snapshot at operation creation; immutable original routes and channel-level deduplication (one Telegram notice per profile/chat/topic, separate receipts for original transcripts).
 - Durable start/phase/result events for the snapshot, late arrivals, per-recipient failure isolation and retry receipts across processes. Existing maintenance operations retain their IDs, initiator, queue and receipts.
-- Original `initiatedAt` survives running-state rewrites, retry/continuation propagation and recovery; unknown age remains unknown. Topic metadata accepted by `/run` and retained by the task journal.
+- Agent-side `initiatedAt` survives running-state rewrites, retry/continuation propagation and recovery; unknown age remains unknown. Gateway receipt time still needs transmission, so age is not yet enforced end-to-end. Topic metadata accepted by `/run` and retained by the task journal.
 - New boundary, isolation, migration, two-process receipt and timestamp tests required by CI and deterministic staging. Existing admission tests retain their assertions; their isolated harness now supplies the new activity dependency.
 
 ## Not yet implemented — do not merge/deploy as the finished v2

@@ -132,3 +132,8 @@ test('pending journal preserves original age and topic across queue, start and r
   p=JSON.parse(fs.readFileSync(path.join(sandbox.PENDING_DIR,'unknown.json')));
   assert.equal(p.initiatedAt,null);
 });
+test('queued unknown original age does not borrow a recent running-state timestamp', t => {
+  const f=fixture(t);
+  atomicJson(path.join(f.dataRoot,'pending-tasks','unknown.json'),{username:'unknown',userId:11,phase:'queued',initiatedAt:null,startedAt:f.at});
+  assert.deepEqual(f.activity.snapshot(),[]);
+});

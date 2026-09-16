@@ -59,7 +59,7 @@ function createActivityStore({ dataRoot = SYSTEM_ROOT, usersRoot = USERS_ROOT, n
     const pendingDir = path.join(dataRoot, 'pending-tasks');
     for (const file of jsonFiles(pendingDir)) {
       const p = readJson(path.join(pendingDir, file));
-      if (p.phase === 'running' || recent(p.initiatedAt ?? p.startedAt)) {
+      if (p.phase === 'running' || recent(Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : p.startedAt)) {
         if (p.username && (p.userId || p.sessionId)) add({ username: p.username, chatId: p.userId, sessionId: p.sessionId, threadId: p.threadId });
       }
     }
