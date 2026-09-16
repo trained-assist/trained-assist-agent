@@ -19,7 +19,9 @@ read the same bucket through the gateway; there is no disk-to-disk copy for R2.
 Intake retains reservations through crashes before enqueue and periodically
 reconciles them. Pending files block launch of that batch without blocking receipt
 of more text. Download/STT errors get three attempts (permanent errors stop sooner).
-Delivery retries indefinitely with capped backoff. Failed files are moved to a
+Retry-After up to five minutes is honored by an alarm; longer limits park the
+file for explicit retry rather than repeatedly hitting the provider. Delivery
+retries indefinitely with capped backoff. Failed files are moved to a
 separate durable record and the user is told they will not enter the next task;
 new text can proceed on explicit launch. Resending a failed attachment creates a
 new job; there is currently no user-facing retry of the parked original job.
