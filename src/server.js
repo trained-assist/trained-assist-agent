@@ -3310,7 +3310,13 @@ ${recent || '(пока нет)'}
             const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
             fs.mkdirSync(uploadsDir, { recursive: true });
             const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
-            fs.copyFileSync(src, filePath);
+            if (ref.storage === 'r2') {
+              await require('./r2-media').materializeR2({ ref, username, destination: filePath,
+                gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
+            } else {
+              if (ref.storage) throw new Error('Unknown media storage');
+              fs.copyFileSync(src, filePath);
+            }
             const fd = fs.openSync(filePath, 'r');
             try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
             const dirFd = fs.openSync(uploadsDir, 'r');
