@@ -11,7 +11,11 @@ const Database = require('better-sqlite3');
 function acquireExecutionOwner(dataRoot) {
   fs.mkdirSync(dataRoot, { recursive: true });
   const file = path.join(dataRoot, 'execution-owner.sqlite');
-  fs.closeSync(fs.openSync(file, 'a', 0o600));
+  // Closing an unrelated descriptor for an existing file can release this
+  // process's POSIX locks. Only precreate a new inode; SQLite owns all subsequent
+  // opens/closes and coordinates its connections within the same process.
+  try { fs.closeSync(fs.openSync(file, 'wx', 0o600)); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
   let db;
   try {
     db = new Database(file, { timeout: 0 });
