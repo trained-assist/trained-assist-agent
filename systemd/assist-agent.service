@@ -29,6 +29,7 @@ StartLimitBurst=10
 TimeoutStopSec=120
 EnvironmentFile=-/home/vova/secrets.env
 Environment=NODE_ENV=production
+Environment=MEDIA_GATEWAY_URL=https://trained-assist-tg-bot.skillset-apply.workers.dev
 Environment=PORT=8080
 Environment=AGENT_DATA_DIR=/home/vova/agent-data
 Environment=AGENT_PUBLIC_URL=https://136-65-7-197.sslip.io/agent

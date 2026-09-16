@@ -2859,6 +2859,19 @@ ${recent || '(пока нет)'}
       }
     }
 
+    // Authenticated release probe: exercises the same verified reader as /run,
+    // without starting a user task or sending anything to Telegram.
+    if (url.pathname === '/intake-media-check' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      try {
+        const result = await require('./r2-media').verifyR2({ ref: body.ref, username: body.username,
+          gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
+        return json(res, 200, result);
+      } catch {
+        return json(res, 503, { error: 'R2 reader verification failed' });
+      }
+    }
+
     // PUT/GET /intake-files?username=X&id=Y&name=Z — durable per-file store for
     // gateway intake (photos/voice/docs). Replaces base64-in-KV so a retry never
     // re-sends bytes and isn't capped by KV's 25MB value limit. See intake-files.js
@@ -3313,7 +3326,13 @@ ${recent || '(пока нет)'}
             const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
             fs.mkdirSync(uploadsDir, { recursive: true });
             const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
-            fs.copyFileSync(src, filePath);
+            if (ref.storage === 'r2') {
+              await require('./r2-media').materializeR2({ ref, username, destination: filePath,
+                gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
+            } else {
+              if (ref.storage) throw new Error('Unknown media storage');
+              fs.copyFileSync(src, filePath);
+            }
             const fd = fs.openSync(filePath, 'r');
             try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
             const dirFd = fs.openSync(uploadsDir, 'r');
