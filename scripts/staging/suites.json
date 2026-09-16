@@ -2,7 +2,8 @@
   "vitest": [
     "tests/runner-e2e.test.js",
     "tests/quick-answers.test.js",
-    "tests/unit/intake-files-endpoint.test.js"
+    "tests/unit/intake-files-endpoint.test.js",
+    "tests/planned-restart-http.test.js"
   ],
   "node": [
     "test/maintenance.test.cjs",
