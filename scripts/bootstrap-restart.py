@@ -37,9 +37,24 @@ def idle(pid, cgroup, pending):
             return False
     return Path(f'/proc/{pid}/stat').exists()
 
+def notify(request, state, phase, env=None):
+    if not state.get('initiator'): return
+    try:
+        if env is None:
+            pid = run('systemctl', 'show', SERVICE, '-p', 'MainPID', '--value')
+            env = dict(v.split('=', 1) for v in Path(f'/proc/{pid}/environ').read_bytes().decode().split('\0') if '=' in v)
+        directory = REPO if state['phase'] == 'complete' else Path(state['release'])
+        subprocess.run(['node', str(directory / 'scripts/restart-bootstrap-notify.js'), str(request), phase],
+                       env=env, check=True, timeout=25)
+    except Exception as error:
+        print('Bootstrap notification pending:', type(error).__name__, flush=True)
+
 def tick(request=REQUEST):
     if not request.exists(): return
     state = json.loads(request.read_text())
+    if state['phase'] in ('complete', 'failed'):
+        notify(request, state, 'ready' if state['phase'] == 'complete' else 'failed')
+        return
     if state['phase'] not in ('waiting',): return
     release = Path(state['release']); target = state['commit']
     if run('git', '-C', str(release), 'rev-parse', 'HEAD') != target:
@@ -76,6 +91,7 @@ def tick(request=REQUEST):
         else: raise RuntimeError('Could not verify suspended process')
         if not idle(pid, cg, pending): return
         state.update(phase='installing', previous=previous, startedAt=time.time()); atomic(request, state)
+        notify(request, state, 'restarting', env)
         # systemd sends SIGCONT after SIGTERM, permitting the suspended, idle
         # server to close sockets cleanly (systemd.kill(5)).
         subprocess.run(['systemctl', 'stop', SERVICE], check=True, timeout=150)
@@ -91,6 +107,7 @@ def tick(request=REQUEST):
         subprocess.run(['python3', str(REPO / 'scripts/restart-coordinator.py'), '--ready'], check=True, timeout=80)
         run('systemctl', 'enable', '--now', 'assist-agent-restart.timer')
         state.update(phase='complete', completedAt=time.time()); atomic(request, state)
+        notify(request, state, 'ready', env)
     except Exception as error:
         state.update(phase='failed', error=str(error), failedAt=time.time()); atomic(request, state)
         if stopped:
@@ -102,6 +119,7 @@ def tick(request=REQUEST):
                 backup.rename(REPO / 'node_modules')
             maintenance_file.unlink(missing_ok=True)
             run('systemctl', 'start', SERVICE)
+        notify(request, state, 'failed', env)
         raise
     finally:
         if frozen:

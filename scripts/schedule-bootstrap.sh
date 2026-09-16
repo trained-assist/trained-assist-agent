@@ -3,6 +3,7 @@
 set -euo pipefail
 TARGET=${1:?tested release SHA required}
 [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || exit 2
+INITIATOR_FILE=${2:-}
 REPO=/home/vova/trained-assist-agent
 RELEASE=/home/vova/agent-releases/$TARGET
 REQUEST=/home/vova/agent-data/restart-bootstrap.json
@@ -45,11 +46,15 @@ Unit=assist-agent-bootstrap.service
 [Install]
 WantedBy=timers.target
 UNIT
-python3 - "$REQUEST" "$RELEASE" "$TARGET" <<'PY'
+if [ -n "$INITIATOR_FILE" ]; then
+  sudo -u vova node "$RELEASE/scripts/restart-bootstrap-notify.js" --validate "$INITIATOR_FILE" >/dev/null
+fi
+python3 - "$REQUEST" "$RELEASE" "$TARGET" "$INITIATOR_FILE" <<'PY'
 import json,os,sys,time
-p,release,commit=sys.argv[1:]
+p,release,commit,initiator_file=sys.argv[1:]
+initiator=json.load(open(initiator_file)) if initiator_file else None
 with open(p+'.tmp','w') as f:
- json.dump(dict(phase='waiting',release=release,commit=commit,requestedAt=time.time()),f);f.flush();os.fsync(f.fileno())
+ json.dump(dict(phase='waiting',release=release,commit=commit,requestedAt=time.time(),initiator=initiator),f);f.flush();os.fsync(f.fileno())
 os.replace(p+'.tmp',p)
 PY
 systemctl daemon-reload

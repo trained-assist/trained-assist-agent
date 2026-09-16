@@ -68,7 +68,7 @@ function createRestartNotifier(gate, { token, fetchImpl = fetch, append = append
           if (channel === 'session') append(target, event, text);
           else {
             if (!token) throw Error('Telegram token unavailable');
-            const response = await fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, {
+            const response = await fetchImpl(`${process.env.TELEGRAM_API_URL || 'https://api.telegram.org'}/bot${token}/sendMessage`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ chat_id: target.chatId, text,
                 ...(target.threadId ? { message_thread_id: target.threadId } : {}) }),

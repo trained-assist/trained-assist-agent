@@ -103,3 +103,17 @@ test('real web runner command creates a session and returns visible text without
  const state=maintenance.status();assert.equal(state.initiator.chatId,0);assert.ok(state.initiator.sessionId);
  assert.ok(sessions.getSession(f.dir,state.initiator.sessionId));maintenance.cancel();
 });
+test('external bootstrap notifier persists outcomes outside the service and retries without duplication',async t=>{
+ const http=require('node:http');const {spawn}=require('node:child_process');const f=fixture(t);const calls=[];
+ const tg=http.createServer(async(req,res)=>{let body='';for await(const c of req)body+=c;calls.push(JSON.parse(body));res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');});
+ await new Promise(r=>tg.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>tg.close(r)));
+ const request=path.join(f.dir,'bootstrap.json');fs.writeFileSync(request,JSON.stringify({initiator:f.target}));
+ async function notify(phase){
+  const child=spawn(process.execPath,[path.resolve('scripts/restart-bootstrap-notify.js'),request,phase],{
+   env:{...process.env,SECRETS_SOURCE:'env',TELEGRAM_BOT_TOKEN:'fixture',AGENT_SECRET:'fixture',TELEGRAM_API_URL:`http://127.0.0.1:${tg.address().port}`},stdio:'pipe'});
+  let error='';child.stderr.on('data',b=>error+=b);const code=await new Promise(r=>child.on('exit',r));assert.equal(code,0,error);
+ }
+ await notify('restarting');await notify('ready');await notify('ready');
+ assert.equal(calls.length,3);assert.match(calls.at(-1).text,/перезапущен/);
+ assert.equal(sessions.getSession(f.dir,f.sid).messages.length,4);
+});

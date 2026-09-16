@@ -132,3 +132,13 @@ matching the new environment-specific deploy contract; both rollback scenarios
 remain executable. No test has been skipped or removed from this release.
 Gateway live fake-user webhook probes are replaced with deterministic handler
 scenarios and a Worker build; live health remains a deployment check.
+
+First legacy installation uses the same addressing: pass a validated initiator
+JSON file as the second argument to `schedule-bootstrap.sh TESTED_SHA FILE`.
+The bootstrap coordinator sends the start message after the final idle check and
+before stopping the old service, then reports readiness or rollback failure.
+Its separate notification journal survives rollback; terminal timer ticks retry
+undelivered outcomes. The external sender loads the normal secret provider
+(including GCP Secret Manager); it never persists tokens in the operation file.
+Existing requests without an initiator remain silent for compatibility and must
+not be described as notification-enabled.

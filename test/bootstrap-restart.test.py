@@ -19,7 +19,7 @@ class IdleTest(unittest.TestCase):
             with patch.object(mod,'run',side_effect=AssertionError('must not touch service')): mod.tick(request)
 
 class InstallTest(unittest.TestCase):
-    def exercise(self, failure=False, race=False):
+    def exercise(self, failure=False, race=False, notifications=False):
         import os, time, json
         from contextlib import ExitStack
         with tempfile.TemporaryDirectory() as root:
@@ -27,7 +27,7 @@ class InstallTest(unittest.TestCase):
             for directory in (repo/'node_modules', release/'node_modules', data/'pending-tasks'):
                 directory.mkdir(parents=True)
             (repo/'node_modules'/'old').write_text('old'); (release/'node_modules'/'new').write_text('new')
-            request=data/'bootstrap.json'; mod.atomic(request,dict(phase='waiting',release=str(release),commit='target',quietSince=time.time()-30,pid=os.getpid()))
+            request=data/'bootstrap.json'; mod.atomic(request,dict(phase='waiting',release=str(release),commit='target',quietSince=time.time()-30,pid=os.getpid(),initiator={'username':'fixture','chatId':123} if notifications else None))
             calls=[]
             def command(*args):
                 calls.append(args)
@@ -57,6 +57,13 @@ class InstallTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError,'readiness failed'): mod.tick(request)
                 else: mod.tick(request)
             state=json.loads(request.read_text())
+            if notifications:
+                notices=[c[-1] for c in calls if c[0]=='node']
+                self.assertEqual(notices, [] if race else ['restarting', 'failed' if failure else 'ready'])
+                if not race:
+                    begin=next(i for i,c in enumerate(calls) if c[0]=='node')
+                    stop=next(i for i,c in enumerate(calls) if c[:2]==('systemctl','stop'))
+                    self.assertLess(begin,stop)
             if race:
                 self.assertEqual(state['phase'],'waiting');self.assertTrue((repo/'node_modules'/'old').exists())
                 self.assertFalse(any(c[:2]==('systemctl','stop') for c in calls))
@@ -70,6 +77,9 @@ class InstallTest(unittest.TestCase):
                 self.assertIn(('systemctl','enable','--now','assist-agent-restart.timer'),calls)
     def test_successful_install_checks_readiness_before_enabling_timer(self): self.exercise()
     def test_failed_readiness_rolls_back_code_and_dependencies(self): self.exercise(failure=True)
+    def test_bootstrap_notifies_start_and_success(self): self.exercise(notifications=True)
+    def test_bootstrap_notifies_failure_after_rollback(self): self.exercise(failure=True,notifications=True)
+    def test_racing_task_sends_no_false_restart_notice(self): self.exercise(race=True,notifications=True)
     def test_racing_task_unfreezes_old_server_without_stopping(self): self.exercise(race=True)
 
 if __name__=='__main__': unittest.main()

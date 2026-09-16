@@ -12,7 +12,6 @@ if (state.id === process.argv[2] && state.phase === 'restarting') {
     atomicJson(path.join(SYSTEM_ROOT, 'restart-failure.json'), { id: state.id });
   } else {
     maintenance.fail('External restart/readiness failed');
-    createRestartNotifier(maintenance, { token: process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN })
-      .flush().catch(error => { console.error(error.message); process.exitCode = 1; });
+    require('../src/secrets').loadSecrets().then(secrets => createRestartNotifier(maintenance, { token: secrets.BOT_TOKEN }).flush()).catch(error => { console.error(error.message); process.exitCode = 1; });
   }
 }
