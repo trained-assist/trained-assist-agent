@@ -1,4 +1,5 @@
 'use strict';
+const { hydrateResume, buildResumeText, resumeHash, RESUME_VERSION } = require('../../hh-resume');
 
 const fs = require('fs');
 const path = require('path');
@@ -335,50 +336,12 @@ function computeScore(llmResult, config) {
 
 // ── Candidate context builder ───────────────────────────────────────────────
 
-function formatCandidateContext(negotiation) {
+async function formatCandidateContext(negotiation) {
+  await hydrateResume(negotiation, readHhToken(USER_ID));
+  if (negotiation._resume_status !== 'full') throw new Error('Полное резюме HH недоступно; оценка по краткой версии не выполняется.');
   const resume = negotiation.resume || {};
-  const firstName = resume.first_name || '';
-  const lastName = resume.last_name || '';
-  const name = [lastName, firstName].filter(Boolean).join(' ') || 'Кандидат';
-
-  const lines = [`# Кандидат: ${name}`];
-  if (resume.title) lines.push(`**Позиция в резюме:** ${resume.title}`);
-
-  if (resume.total_experience?.months) {
-    const y = Math.floor(resume.total_experience.months / 12);
-    const m = resume.total_experience.months % 12;
-    lines.push(`**Опыт:** ${y} лет${m ? ' ' + m + ' мес' : ''}`);
-  }
-  if (resume.area?.name) lines.push(`**Локация:** ${resume.area.name}`);
-  if (resume.salary) {
-    lines.push(`**Зарплата:** ${resume.salary.amount?.toLocaleString('ru-RU')} ${resume.salary.currency}`);
-  }
-
-  if (resume.experience?.length) {
-    lines.push('\n**Опыт работы:**');
-    for (const job of resume.experience.slice(0, 5)) {
-      const start = job.start?.slice(0, 7) || '';
-      const end = job.end?.slice(0, 7) || 'н.в.';
-      lines.push(`- ${job.company || ''} (${start}–${end}): ${job.position || ''}`);
-      if (job.description) lines.push(`  ${job.description.slice(0, 300)}`);
-    }
-  }
-
-  if (resume.skill_set?.length) {
-    lines.push(`\n**Навыки:** ${resume.skill_set.slice(0, 25).join(', ')}`);
-  }
-
-  if (resume.education?.primary?.length) {
-    const edu = resume.education.primary[0];
-    lines.push(`\n**Образование:** ${edu.name || ''}, ${edu.organization || ''} (${edu.year || ''})`);
-  }
-
-  // Cover letter from negotiation
-  if (negotiation.message) {
-    lines.push(`\n**Сопроводительное письмо:**\n${negotiation.message.slice(0, 600)}`);
-  }
-
-  return { name, text: lines.join('\n') };
+  const name = [resume.last_name, resume.first_name].filter(Boolean).join(' ') || 'Кандидат';
+  return { name, text: buildResumeText(negotiation) };
 }
 
 // ── Module exports ──────────────────────────────────────────────────────────
@@ -761,7 +724,7 @@ module.exports = {
 
         try {
           const neg = await hhGet(`/negotiations/${negotiation_id}`, token);
-          const { name, text: candidateContext } = formatCandidateContext(neg);
+          const { name, text: candidateContext } = await formatCandidateContext(neg);
 
           const result = await evaluateCandidate(candidateContext, ats_config, apiKey);
 
@@ -809,7 +772,7 @@ module.exports = {
 
         try {
           const neg = await hhGet(`/negotiations/${negotiation_id}`, token);
-          const { name } = formatCandidateContext(neg);
+          const { name } = await formatCandidateContext(neg);
 
           if (message_type === 'rejection') {
             const template = loadRejectionTemplate(USER_ID);
@@ -828,7 +791,7 @@ module.exports = {
           const apiKey = readOrKey(USER_ID);
           if (!apiKey) return { error: 'OpenRouter API key не найден.' };
 
-          const { text: candidateContext } = formatCandidateContext(neg);
+          const { text: candidateContext } = await formatCandidateContext(neg);
           const contextWithVacancy = vacancy_context
             ? `## О вакансии\n${vacancy_context}\n\n${candidateContext}`
             : candidateContext;
@@ -1012,11 +975,17 @@ module.exports = {
               continue;
             }
 
-            const { name, text: candidateContext } = formatCandidateContext(neg);
+            let context;
+            try { context = await formatCandidateContext(neg); }
+            catch {
+              skipped.push({ id: neg.id, reason: 'Полное резюме HH недоступно; оценка отложена' });
+              continue;
+            }
+            const { name, text: candidateContext } = context;
             const history = readCandidateHistory(USER_ID, neg.id);
             let atsResult;
 
-            if (history.ats_result?.score != null) {
+            if (history.ats_result?.score != null && history.ats_result.resume_version === RESUME_VERSION && history.ats_result.resume_hash === resumeHash(neg)) {
               // Already scored by background process — reuse cached result
               atsResult = history.ats_result;
             } else {
@@ -1027,6 +996,8 @@ module.exports = {
                 atsResult = { score: null, verdict: null, reasoning: `Ошибка оценки: ${e.message}`, matched: [], gaps: [] };
               }
               if (atsResult.score != null) {
+                atsResult.resume_version = RESUME_VERSION;
+                atsResult.resume_hash = resumeHash(neg);
                 history.ats_result = atsResult;
                 saveCandidateHistory(USER_ID, neg.id, history);
               }
@@ -1165,7 +1136,7 @@ module.exports = {
               continue;
             }
 
-            const { name, text: candidateContext } = formatCandidateContext(neg);
+            const { name, text: candidateContext } = await formatCandidateContext(neg);
             const alreadySent = (history.messages || []).some(m => m.role === 'employer');
             const msgType = atsResult.verdict === 'ПРОПУСТИТЬ' ? 'invite_call'
               : alreadySent ? 'followup'
@@ -1448,7 +1419,7 @@ module.exports = {
 
         try {
           const neg = await hhGet(`/negotiations/${negotiation_id}`, token);
-          const { name, text: candidateContext } = formatCandidateContext(neg);
+          const { name, text: candidateContext } = await formatCandidateContext(neg);
 
           const userMsg = [
             vacancy_context ? `Роль: ${vacancy_context}\n` : '',

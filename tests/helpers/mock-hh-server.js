@@ -211,6 +211,12 @@ function createMockHhServer(options = {}) {
       return vac ? send(200, vac) : send(404, { error: 'Not found' });
     }
 
+    const resumeMatch = p.match(/^\/resumes\/([^/]+)$/);
+    if (req.method === 'GET' && resumeMatch) {
+      const resume = options.resumes?.[resumeMatch[1]] || negotiations.find(n => n.resume?.id === resumeMatch[1])?.resume;
+      return resume ? send(200, resume) : send(404, { error: 'not found' });
+    }
+
     // GET /negotiations/{state}  (list by state)
     const negList = p.match(/^\/negotiations\/([^/]+)$/);
     if (req.method === 'GET' && negList && LIST_STATES.has(negList[1])) {

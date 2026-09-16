@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'os';
 import { spawn } from 'child_process';
 import * as http from 'http';
+import { createHmac } from 'node:crypto';
 import { createMockHhServer } from '../helpers/mock-hh-server.js';
 
 const TEST_UID  = 'hh-srv-ep-test-001';
@@ -141,7 +142,7 @@ beforeAll(async () => {
   }), { mode: 0o600 });
 
   // Start mock HH server
-  mockHh = createMockHhServer();
+  mockHh = createMockHhServer({ resumes: { 'res-001': { id: 'res-001', first_name: 'Алексей', skills: 'FULL-ONLY-ABOUT', experience: [{ company: 'EARLY-COMPANY', description: 'FULL-ONLY-EXPERIENCE-END' }] } } });
   await mockHh.start();
 
   // Start real server.js
@@ -168,6 +169,16 @@ afterAll(async () => {
 
 beforeEach(() => {
   mockHh.reset();
+});
+
+it('candidate page fetches full resume beyond negotiation summary', async () => {
+  const token = createHmac('sha256', SECRET).update(TEST_UID).digest('hex').slice(0, 16);
+  const response = await fetch(`http://127.0.0.1:${serverPort}/hh/candidate?username=${TEST_UID}&neg_id=neg-001&token=${token}`);
+  expect(response.status).toBe(200);
+  const html = await response.text();
+  expect(html).toContain('FULL-ONLY-ABOUT');
+  expect(html).toContain('FULL-ONLY-EXPERIENCE-END');
+  expect(html).toContain('Полное резюме загружено');
 });
 
 // ── CORS preflight ─────────────────────────────────────────────────────────────

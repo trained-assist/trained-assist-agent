@@ -204,7 +204,7 @@ describe('Flow 4 — hh_batch_evaluate message_draft persistence', () => {
     updated_at: '2026-09-08T10:00:00.000Z',
   };
 
-  const FAKE_ATS_RESULT = {
+  const FAKE_ATS_RESULT = { resume_version: 1,
     score: 80,
     verdict: 'ПРОПУСТИТЬ',
     reasoning: 'Good candidate',
@@ -214,6 +214,10 @@ describe('Flow 4 — hh_batch_evaluate message_draft persistence', () => {
 
   function writeCandidateHistory(negId, data) {
     mkdirSync(CAND_DIR, { recursive: true });
+    if (data.ats_result?.resume_version === 1) {
+      const neg = require('./helpers/mock-hh-server.js').DEFAULT_NEGOTIATIONS.find(n => n.id === negId);
+      if (neg) data.ats_result = { ...data.ats_result, resume_hash: require('../src/hh-resume').resumeHash(neg) };
+    }
     writeFileSync(join(CAND_DIR, `${negId}.json`), JSON.stringify(data), { mode: 0o600 });
   }
 
@@ -303,11 +307,15 @@ describe('Flow 5 — hh_regenerate_messages', () => {
     updated_at: '2026-09-08T10:00:00.000Z',
   };
 
-  const SCORED_PASS = { score: 80, verdict: 'ПРОПУСТИТЬ', reasoning: 'Good candidate', matched: ['Node.js'], gaps: [] };
-  const SCORED_REJECT = { score: 10, verdict: 'ОТКЛОНИТЬ', reasoning: 'No match', matched: [], gaps: ['Node.js'] };
+  const SCORED_PASS = { resume_version: 1, score: 80, verdict: 'ПРОПУСТИТЬ', reasoning: 'Good candidate', matched: ['Node.js'], gaps: [] };
+  const SCORED_REJECT = { resume_version: 1, score: 10, verdict: 'ОТКЛОНИТЬ', reasoning: 'No match', matched: [], gaps: ['Node.js'] };
 
   function writeCandidateHistory(negId, data) {
     mkdirSync(CAND_DIR, { recursive: true });
+    if (data.ats_result?.resume_version === 1) {
+      const neg = require('./helpers/mock-hh-server.js').DEFAULT_NEGOTIATIONS.find(n => n.id === negId);
+      if (neg) data.ats_result = { ...data.ats_result, resume_hash: require('../src/hh-resume').resumeHash(neg) };
+    }
     writeFileSync(join(CAND_DIR, `${negId}.json`), JSON.stringify(data), { mode: 0o600 });
   }
 

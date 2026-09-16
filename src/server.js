@@ -1,3 +1,4 @@
+const { hydrateResume, hydrateResumes, buildResumeText, resumeNotice } = require('./hh-resume');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -287,7 +288,7 @@ async function fetchAllHhNegotiations(vacancyId, accessToken) {
     } while (page < totalPages);
     return items.map(item => ({ ...item, _state: state }));
   }));
-  return results.flat();
+  return hydrateResumes(results.flat(), { access_token: accessToken });
 }
 
 function hhCacheFile(dataDir, username) {
@@ -300,7 +301,7 @@ async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessTo
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     const ageMs = Date.now() - (cached.synced_at || 0);
-    if (ageMs < CACHE_TTL_MS && String(cached.vacancy_id) === String(vacancyId)) {
+    if (cached.resume_version === 1 && ageMs < CACHE_TTL_MS && String(cached.vacancy_id) === String(vacancyId)) {
       return { negotiations: cached.negotiations, synced_at: cached.synced_at };
     }
   } catch {}
@@ -308,7 +309,7 @@ async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessTo
   const synced_at = Date.now();
   try {
     fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-    fs.writeFileSync(cacheFile, JSON.stringify({ synced_at, vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
+    fs.writeFileSync(cacheFile, JSON.stringify({ resume_version: 1, synced_at, vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
   } catch (e) { console.error('[hh-cache] write error:', e.message); }
   return { negotiations, synced_at };
 }
@@ -1431,6 +1432,7 @@ async function main() {
       let neg = null;
       try {
         neg = await hhApiRequest('GET', `/negotiations/${neg_id}`, tokenData.access_token);
+        await hydrateResume(neg, tokenData);
       } catch (e) {
         console.error(`[hh/candidate] fetch neg ${neg_id}:`, e.message);
       }
@@ -1653,30 +1655,13 @@ async function main() {
         if (fs.existsSync(hhTokenFile)) hhToken = JSON.parse(fs.readFileSync(hhTokenFile, 'utf8'));
       } catch { /* ignore */ }
 
-      // If resume_text from page is too short, fetch full resume from HH API
       let fullResumeText = (resume_text || '').trim();
-      if (fullResumeText.length < 80 && msgType === 'initial' && hhToken) {
+      if (hhToken) {
         try {
           const neg = await hhApiRequest('GET', `/negotiations/${negotiation_id}`, hhToken.access_token);
-          const r = neg.resume || {};
-          const lines = [];
-          if (r.title) lines.push(`Позиция: ${r.title}`);
-          if (r.total_experience?.months) {
-            const y = Math.floor(r.total_experience.months / 12);
-            lines.push(`Опыт: ${y} лет`);
-          }
-          if (r.area?.name) lines.push(`Локация: ${r.area.name}`);
-          if (r.experience?.length) {
-            lines.push('Опыт работы:');
-            for (const job of r.experience.slice(0, 4)) {
-              lines.push(`- ${job.company || ''}: ${job.position || ''}`);
-              if (job.description) lines.push(`  ${job.description.slice(0, 250)}`);
-            }
-          }
-          if (r.skill_set?.length) lines.push(`Навыки: ${r.skill_set.slice(0, 20).join(', ')}`);
-          if (neg.message) lines.push(`Сопроводительное: ${neg.message.slice(0, 400)}`);
-          if (lines.length > 0) fullResumeText = lines.join('\n');
-        } catch { /* use whatever we have */ }
+          await hydrateResume(neg, hhToken);
+          if (neg._resume_status === 'full') fullResumeText = buildResumeText(neg);
+        } catch { /* use page text if HH is temporarily unavailable */ }
       }
 
       // Fetch vacancy description from HH API for targeted message generation
@@ -2146,7 +2131,7 @@ function show(id, type, msg) {
         const cacheFile = hhCacheFile(syncDataDir, syncUser);
         fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
         const synced_at = Date.now();
-        fs.writeFileSync(cacheFile, JSON.stringify({ synced_at, vacancy_id: String(syncVacancyId), negotiations }), { mode: 0o600 });
+        fs.writeFileSync(cacheFile, JSON.stringify({ resume_version: 1, synced_at, vacancy_id: String(syncVacancyId), negotiations }), { mode: 0o600 });
         console.log(`[hh/sync] user=${syncUser} vacancy=${syncVacancyId} count=${negotiations.length}`);
         return json(res, 200, { ok: true, count: negotiations.length, synced_at });
       } catch (e) {
@@ -4028,15 +4013,6 @@ function generateCandidateProfileHtml(neg, history, username, callbackBase, revi
 
   const metaItems = [jobTitle, expStr, location, salary].filter(Boolean);
 
-  // Resume section
-  const expHtml = (r.experience || []).map(j => {
-    const start = (j.start || '').slice(0, 7);
-    const end = (j.end || '').slice(0, 7) || 'н.в.';
-    return `<div class="job"><div class="job-header"><strong>${esc(j.position || '')}</strong> · ${esc(j.company || '')} <span class="job-dates">${start}–${end}</span></div>${j.description ? `<p class="job-desc">${esc(j.description)}</p>` : ''}</div>`;
-  }).join('');
-  const skillsHtml = (r.skill_set || []).slice(0, 30).map(s => `<span class="skill-tag">${esc(s)}</span>`).join('');
-  const eduList = (r.education?.primary || []).slice(0, 2).map(e => `<li>${esc(e.name || '')} (${esc(e.year || '')})</li>`).join('');
-
   // ATS section
   const matchedHtml = (ats?.matched || []).map(m => `<span class="tag tag-ok">${esc(m)}</span>`).join('');
   const gapsHtml = (ats?.gaps || []).map(g => `<span class="tag tag-gap">${esc(g)}</span>`).join('');
@@ -4155,12 +4131,9 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f1f5f9;color:#1e
   </div>
 
   <!-- Experience -->
-  ${expHtml || skillsHtml ? `<div class="card">
-    <h2>Опыт и навыки</h2>
-    ${expHtml}
-    ${skillsHtml ? `<div class="skills">${skillsHtml}</div>` : ''}
-    ${eduList ? `<ul class="edu-list">${eduList}</ul>` : ''}
-  </div>` : ''}
+  <div class="card"><h2>Резюме</h2><p>${esc(resumeNotice(neg, ats))}</p>
+    <pre style="white-space:pre-wrap;font-family:inherit">${esc(buildResumeText(neg || {}))}</pre>
+  </div>
 
   <!-- Cover letter -->
   ${coverLetter ? `<div class="card">
@@ -4240,34 +4213,6 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     atsConfigVersion = atsCfg?.value?.updated_at || null;
   } catch {}
 
-  function buildResumeText(neg) {
-    const r = neg.resume || {};
-    const lines = [];
-    if (r.title) lines.push(`Позиция: ${r.title}`);
-    if (r.total_experience?.months) {
-      const y = Math.floor(r.total_experience.months / 12);
-      const m = r.total_experience.months % 12;
-      lines.push(`Опыт: ${y} лет${m ? ' ' + m + ' мес' : ''}`);
-    }
-    if (r.area?.name) lines.push(`Локация: ${r.area.name}`);
-    if (r.salary) lines.push(`Зарплата: ${r.salary.amount?.toLocaleString('ru-RU')} ${r.salary.currency}`);
-    if (r.experience?.length) {
-      lines.push('\nОпыт работы:');
-      for (const job of r.experience) {
-        const start = job.start?.slice(0, 7) || '';
-        const end = job.end?.slice(0, 7) || 'н.в.';
-        lines.push(`- ${job.company || ''} (${start}–${end}): ${job.position || ''}`);
-        if (job.description) lines.push(`  ${job.description}`);
-      }
-    }
-    if (r.skill_set?.length) lines.push(`\nНавыки: ${r.skill_set.slice(0, 25).join(', ')}`);
-    if (r.education?.primary?.length) {
-      const edu = r.education.primary[0];
-      lines.push(`\nОбразование: ${edu.name || ''}, ${edu.organization || ''} (${edu.year || ''})`);
-    }
-    if (neg.message) lines.push(`\nСопроводительное письмо:\n${neg.message.slice(0, 600)}`);
-    return lines.join('\n');
-  }
 
   const candidates = negotiations.map(neg => {
     const r = neg.resume || {};
@@ -4290,6 +4235,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       })(),
       days_since_activity: daysAgo,
       resume_text: buildResumeText(neg),
+      resume_notice: resumeNotice(neg, ats),
       history_messages: history.messages || [],
       already_sent: (history.messages || []).some(m => m.role === 'employer'),
       needs_reply: (() => {
@@ -4377,7 +4323,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            </div></details>`;
 
     const resumeSection = c.resume_text
-      ? `<details class="resume-details"><summary class="resume-summary">📄 Резюме (текст)</summary>
+      ? `<p class="resume-status">${esc(c.resume_notice)}</p><details class="resume-details"><summary class="resume-summary">📄 Резюме (текст)</summary>
            <pre class="resume-text">${esc(c.resume_text)}</pre>
          </details>`
       : '';

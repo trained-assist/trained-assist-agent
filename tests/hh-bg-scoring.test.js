@@ -29,7 +29,9 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const scoring = require('../src/hh-scoring.js');
-const { createMockHhServer, DEFAULT_NEGOTIATIONS } = require('./helpers/mock-hh-server.js');
+const { createMockHhServer } = require('./helpers/mock-hh-server.js');
+const DEFAULT_NEGOTIATIONS = require('./helpers/mock-hh-server.js').DEFAULT_NEGOTIATIONS.map(n => ({ ...n, _resume_status: 'full' }));
+const { resumeHash } = require('../src/hh-resume');
 
 // ── Isolated test directories ─────────────────────────────────────────────────
 
@@ -209,7 +211,7 @@ describe('scoreUnscoredCandidates — skip and guard conditions', () => {
   it('already-scored candidates are skipped (idempotency)', async () => {
     // Pre-write ats_result for all candidates
     for (const neg of DEFAULT_NEGOTIATIONS) {
-      scoring.saveCandidateHistory(TEST_USER, neg.id, { messages: [], ats_result: FAKE_SCORE });
+      scoring.saveCandidateHistory(TEST_USER, neg.id, { messages: [], ats_result: { ...FAKE_SCORE, resume_version: 1, resume_hash: resumeHash(neg) } });
     }
 
     process.env.OPENROUTER_API_KEY = 'test-or-key';
@@ -258,6 +260,26 @@ describe('scoreUnscoredCandidates — actual scoring (monkey-patched LLM)', () =
 
   afterEach(() => {
     scoring.evaluateCandidate = originalEvaluate;
+  });
+
+  it('blocks partial resumes and rescoring migrates old scores exactly once', async () => {
+    process.env.OPENROUTER_API_KEY = 'test-or-key';
+    try {
+      const neg = structuredClone(DEFAULT_NEGOTIATIONS[0]);
+      neg._resume_status = 'unavailable';
+      expect(await scoring.scoreUnscoredCandidates([neg], TEST_USER, WORK_DIR)).toBe(0);
+      expect(scoring.readCandidateHistory(TEST_USER, neg.id).ats_result).toBeNull();
+      scoring.saveCandidateHistory(TEST_USER, neg.id, { messages: [], ats_result: FAKE_SCORE });
+      neg._resume_status = 'full';
+      neg.resume.skills = 'FULL-ABOUT-TAIL';
+      scoring.evaluateCandidate = async text => {
+        expect(text).toContain('FULL-ABOUT-TAIL');
+        return { ...FAKE_SCORE };
+      };
+      expect(await scoring.scoreUnscoredCandidates([neg], TEST_USER, WORK_DIR)).toBe(1);
+      expect(scoring.readCandidateHistory(TEST_USER, neg.id).ats_result.resume_version).toBe(1);
+      expect(await scoring.scoreUnscoredCandidates([neg], TEST_USER, WORK_DIR)).toBe(0);
+    } finally { delete process.env.OPENROUTER_API_KEY; }
   });
 
   it('scores 3 unscored candidates and writes ats_result to disk', async () => {
