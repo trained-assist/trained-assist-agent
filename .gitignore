@@ -2,3 +2,6 @@ node_modules/
 *.log
 .env
 __pycache__/
+
+staging-results/
+__pycache__/
