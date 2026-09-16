@@ -20,10 +20,12 @@ def client():
             return json.load(res)
     return api
 
-def release_ready(api, operation):
+def release_ready(api, operation, expected_commit=None):
     current = api()
     if current.get('id') != operation['id']:
         raise RuntimeError('Maintenance operation changed; gate not released')
+    if expected_commit and (not current.get('runtimeCommit') or current['runtimeCommit'] == 'unknown' or not expected_commit.startswith(current['runtimeCommit'])):
+        raise RuntimeError('Unexpected running revision; queue remains paused')
     if current.get('phase') == 'ready':
         return True
     if (current.get('phase') == 'restarting' and current.get('recovered')
@@ -57,11 +59,18 @@ def coordinate(api, restart, wait=time.sleep):
     raise RuntimeError('Restart readiness failed; admission remains closed, queue retained')
 
 def main():
-    api = client()
     if '--ready' in sys.argv:
-        if not release_ready(api, api()):
-            raise RuntimeError('New process recovery incomplete; queue remains paused')
-        return
+        expected = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
+        for _ in range(30):
+            try:
+                api = client()
+                if release_ready(api, api(), expected):
+                    return
+            except (OSError, ValueError, RuntimeError):
+                pass
+            time.sleep(2)
+        raise RuntimeError('New process recovery incomplete; queue remains paused')
+    api = client()
     coordinate(api, lambda: subprocess.run(['systemctl', 'restart', 'assist-agent'], check=True, timeout=150))
 
 if __name__ == '__main__':

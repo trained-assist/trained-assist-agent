@@ -2799,7 +2799,7 @@ ${recent || '(пока нет)'}
     }
 
     if (url.pathname === '/maintenance') {
-      if (req.method === 'GET') return json(res, 200, maintenance.status());
+      if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: GIT_COMMIT });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
         if (body.action === 'claim') return json(res, 200, { claimed: maintenance.claim(body.id) });

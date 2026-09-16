@@ -67,3 +67,6 @@ test('failed recovery never silently releases queued work', t => {
   const {gate} = fixture(t); gate.request('operator'); gate.fail('broken pending JSON');
   assert.throws(() => gate.cancel()); assert.equal(gate.acquire(), null); gate.ready(); assert.equal(gate.paused(), true);
 });
+test('valid JSON with invalid maintenance schema must not open admission', t => {
+ const {file}=fixture(t);fs.writeFileSync(file,'{}');assert.throws(()=>createMaintenance(file),/Invalid maintenance journal/);
+});

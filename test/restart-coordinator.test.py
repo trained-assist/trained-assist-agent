@@ -30,6 +30,10 @@ class CoordinatorTest(unittest.TestCase):
         self.assertEqual(a,[]);self.assertEqual(s['phase'],'restarting')
     def test_deploy_is_never_restarted_by_timer(self):
         s,a,api,restart=self.fixture(kind='deploy');mod.coordinate(api,restart,lambda _:None);self.assertEqual(a,[])
+    def test_wrong_running_revision_does_not_release_gate(self):
+        s,a,api,_=self.fixture(phase='restarting',bootId='new',runtimeCommit='bad1234')
+        with self.assertRaises(RuntimeError): mod.release_ready(api,s,'good1234abcdef')
+        self.assertEqual(a,[])
     def test_failed_systemctl_does_not_open_gate(self):
         s,a,api,_=self.fixture()
         def restart(): raise OSError('systemctl failed')

@@ -16,6 +16,11 @@ function createMaintenance(file, { recovering = false } = {}) {
   const bootId = randomUUID();
   let state = null;
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (state !== null && (typeof state !== 'object' || typeof state.id !== 'string' ||
+      !['restart', 'deploy'].includes(state.kind) ||
+      !['draining', 'restarting', 'failed', 'cancelled', 'ready'].includes(state.phase))) {
+    throw Error('Invalid maintenance journal; operator repair required');
+  }
   const active = new Map();
   const save = next => { atomicJson(file, next); state = next; };
   const paused = () => recovering || (!!state && ['draining', 'restarting', 'failed'].includes(state.phase));
@@ -23,7 +28,7 @@ function createMaintenance(file, { recovering = false } = {}) {
     paused,
     beginRecovery() { recovering = true; },
     recovered() { recovering = false; },
-    status() { return { ...state, bootId, recovered: !recovering, paused: paused(), active: active.size,
+    status() { return { ...state, durableIngress: 1, bootId, recovered: !recovering, paused: paused(), active: active.size,
       oldestStartedAt: active.size ? Math.min(...active.values()) : null }; },
     acquire(id = randomUUID(), allowDuringDrain = false) {
       if (recovering || (paused() && !(allowDuringDrain && state?.phase === 'draining'))) return null;
@@ -46,7 +51,7 @@ function createMaintenance(file, { recovering = false } = {}) {
       save({ ...state, phase: 'restarting', ownerBootId: bootId });
       return true;
     },
-    fail(error) { save({ ...state, phase: 'failed', error, failedAt: Date.now() }); },
+    fail(error) { save({ id: randomUUID(), kind: 'restart', ownerBootId: bootId, ...state, phase: 'failed', error, failedAt: Date.now() }); },
     ready() {
       // Startup recovery only, after queued tasks have been registered. A same-process
       // health check must never reopen a gate claimed by the coordinator.

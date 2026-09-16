@@ -80,6 +80,7 @@ jobs:
             set -euo pipefail
             exec 9>/tmp/assist-agent-deploy.lock
             flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
+            export ASSIST_DEPLOY_LOCKED=1
             cd /home/vova/trained-assist-agent
             git fetch origin main
             python3 scripts/drain-for-deploy.py
@@ -124,6 +125,7 @@ jobs:
             set -euo pipefail
             exec 9>/tmp/assist-agent-deploy.lock
             flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
+            export ASSIST_DEPLOY_LOCKED=1
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
             git fetch origin main

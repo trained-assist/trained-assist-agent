@@ -4,23 +4,38 @@ set -Eeuo pipefail
 
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
+if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
+  exec 9>/tmp/assist-agent-deploy.lock
+  flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
+  export ASSIST_DEPLOY_LOCKED=1
+fi
 
 # Save current commit so we can roll back if smoke tests fail
 PREV_COMMIT=${PREV_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")}
-NEW_COMMIT=$(git -C "$REPO_DIR" rev-parse origin/main 2>/dev/null || echo "")
+# First installation needs a quiescent bootstrap; legacy code cannot maintain a
+# closed gate through rollback. Refuse before stopping or changing dependencies.
+git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/maintenance.js" || {
+  echo "Legacy runtime: install the drain-aware baseline in a quiet bootstrap window first"
+  exit 1
+}
 
+DEPS_STAGE=""
+OLD_DEPS=""
+DEPS_SWAPPED=0
 rollback() {
-  if [ -z "$PREV_COMMIT" ] || [ "$PREV_COMMIT" = "$NEW_COMMIT" ]; then
-    echo "  ⚠️  No previous commit to roll back to — skipping rollback"
-    return
+  if [ -z "$PREV_COMMIT" ]; then
+    echo "No previous commit recorded; queue remains paused"
+    return 1
   fi
-  echo "==> 🔄 Rolling back to $PREV_COMMIT..."
-  git -C "$REPO_DIR" reset --hard "$PREV_COMMIT"
-  cd "$REPO_DIR"
-  rm -rf node_modules
-  npm ci --omit=dev
-  sudo systemctl restart "$SERVICE"
-  python3 "$REPO_DIR/scripts/restart-coordinator.py" --ready
+  echo "==> Rolling back to $PREV_COMMIT with the saved dependencies..."
+  git -C "$REPO_DIR" reset --hard "$PREV_COMMIT" || return 1
+  if [ "$DEPS_SWAPPED" = "1" ]; then
+    sudo systemctl stop "$SERVICE" || return 1
+    rm -rf "$REPO_DIR/node_modules" || return 1
+    mv "$OLD_DEPS" "$REPO_DIR/node_modules" || return 1
+  fi
+  sudo systemctl restart "$SERVICE" || return 1
+  python3 "$REPO_DIR/scripts/restart-coordinator.py" --ready || return 1
   echo "==> Rolled back to previous version. Deploy failed."
 }
 
@@ -37,13 +52,24 @@ on_deploy_error() {
 # The CI caller also drains before git reset; direct invocations still must drain.
 python3 "$REPO_DIR/scripts/drain-for-deploy.py"
 trap on_deploy_error ERR
-echo "==> Stopping service before dependency install..."
-sudo systemctl stop "$SERVICE"
+# Prepare dependencies while the old process is still healthy and gated. Network
+# or npm failures must not leave a stopped service with its dependencies deleted.
+echo "==> Preparing dependencies in an isolated directory..."
+DEPS_STAGE=$(mktemp -d "$REPO_DIR/../.agent-deps.XXXXXX")
+cp "$REPO_DIR/package.json" "$REPO_DIR/package-lock.json" "$DEPS_STAGE/"
+npm ci --prefix "$DEPS_STAGE" --omit=dev
 
-echo "==> Installing dependencies..."
+echo "==> Stopping drained service and swapping dependencies..."
+sudo systemctl stop "$SERVICE"
+OLD_DEPS="$DEPS_STAGE/previous-node_modules"
+if [ -d "$REPO_DIR/node_modules" ]; then
+  mv "$REPO_DIR/node_modules" "$OLD_DEPS"
+else
+  mkdir "$OLD_DEPS"
+fi
+DEPS_SWAPPED=1
+mv "$DEPS_STAGE/node_modules" "$REPO_DIR/node_modules"
 cd "$REPO_DIR"
-rm -rf node_modules
-npm ci --omit=dev
 
 # Install Playwright Chromium if not already present (idempotent)
 if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; then
@@ -164,4 +190,5 @@ fi
 echo "==> Verifying new process and recovered queue..."
 python3 "$REPO_DIR/scripts/restart-coordinator.py" --ready
 trap - ERR
+rm -rf "$DEPS_STAGE"
 echo "==> Deploy complete ✅"
