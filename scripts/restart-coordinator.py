@@ -77,7 +77,7 @@ def coordinate(api, restart, wait=time.sleep):
 
 def main():
     if '--ready' in sys.argv:
-        expected = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
+        expected = subprocess.check_output(['git', '-c', 'safe.directory=' + str(Path(__file__).resolve().parents[1]), 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
         for _ in range(30):
             try:
                 api = client()

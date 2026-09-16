@@ -105,3 +105,30 @@ process reconstruction, network failure, event ordering, and recipient isolation
 and `::test_failed_systemctl_does_not_open_gate` now expect durable `failed`
 instead of silently remaining `restarting`: the changed requirement is an explicit
 failure outcome for the initiating user. Both still assert admission stays closed.
+
+
+## Updated rollout (2026-09-16)
+
+`bootstrap-restart.py` is a one-time external installer, with a durable request
+and a prebuilt immutable release. It waits for an empty legacy pending journal
+and a service cgroup containing only the main process for at least 20 seconds.
+It suspends the main process and checks both again before stopping the service.
+Unknown state blocks installation. A task racing the freeze resumes the old
+process instead of installing. systemd sends SIGCONT after SIGTERM as documented
+in systemd.kill(5), allowing shutdown of the suspended idle server.
+
+The installer preserves previous dependencies and commit for rollback, creates a
+closed maintenance state, starts the new process, checks revision/recovery, then
+enables the ordinary external coordinator. A failed installation is recorded and
+is not blindly retried. A crash during installation requires operator recovery;
+it must not be interpreted as success. Bootstrap backups are retained for review.
+
+Mandatory staging now includes `tests/planned-restart-http.test.js`, using two
+real isolated server boots, a local fake Telegram endpoint, and a fixture engine.
+It checks queued ACK, claim, closed gate on startup, matching request deduplication,
+explicit readiness, one execution and empty pending journal after delivery.
+`test/deploy-safety.test.cjs` now provides DEPLOY_ENV and a stub nginx deployment,
+matching the new environment-specific deploy contract; both rollback scenarios
+remain executable. No test has been skipped or removed from this release.
+Gateway live fake-user webhook probes are replaced with deterministic handler
+scenarios and a Worker build; live health remains a deployment check.
