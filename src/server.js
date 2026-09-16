@@ -4437,6 +4437,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
              <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
              <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
              <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
+             <button class="btn btn-send-reject" onclick="rejectWithMessage(${i},'${esc(c.negotiation_id)}')">🚫 Отказать</button>
            </div>
          </div>`;
 
@@ -4452,7 +4453,6 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     </div>
     ${scoreHtml}
   </div>
-  <button class="btn btn-skip" onclick="rejectOne(${i},'${esc(c.negotiation_id)}')">🚫 Отказать без сообщения</button>
   ${c.reasoning ? `<p class="reasoning">${esc(c.reasoning)}</p>` : ''}
   ${matched || gaps ? `<div class="tags">${matched}${gaps}</div>` : ''}
   ${histSection}
@@ -4799,14 +4799,16 @@ async function generateRejection(i, negId, candidateName) {
 }
 
 async function sendAndRejectOne(i, negId, force) {
+  if (done.has(i)) return;
   const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
   if (!msg) { showToast('Напишите или сгенерируйте сообщение', true); return; }
-  const btn = event?.currentTarget;
+  const btn = document.querySelector('#card-' + i + ' .btn-send-reject');
+  const buttonText = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
   try {
     const data = await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg, force: !!force });
     if (data.blocked) {
-      if (btn) { btn.disabled = false; btn.textContent = '✗ Отправить отказ'; }
+      if (btn) { btn.disabled = false; btn.textContent = buttonText; }
       if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\\n\\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
         return sendAndRejectOne(i, negId, true);
       }
@@ -4815,7 +4817,7 @@ async function sendAndRejectOne(i, negId, force) {
     markDone(i); onCheck(); showToast('✅ Отказ отправлен');
   } catch(e) {
     showToast('❌ ' + e.message, true);
-    if (btn) { btn.disabled = false; btn.textContent = '✗ Отправить отказ'; }
+    if (btn) { btn.disabled = false; btn.textContent = buttonText; }
   }
 }
 
@@ -4887,14 +4889,19 @@ async function sendAll() {
   if (ok > 0) showToast('✅ Отправлено ' + ok + ' сообщений');
 }
 
-async function rejectOne(i, negId) {
-  if (done.has(i) || !confirm('Отказать кандидату на HH без сообщения?')) return;
-  try {
-    const res = await hhAction('/hh/reject', { negotiation_ids: [negId] });
-    const result = (res.results || []).find(r => r.negotiation_id === negId);
-    if (!result?.ok) throw new Error(result?.error || 'Отказ не подтверждён');
-    markDone(i); onCheck(); showToast('✅ Кандидату отказано');
-  } catch(e) { showToast('❌ ' + e.message, true); }
+const STANDARD_REJECTION_TEXT =
+  'Добрый день! Благодарим за отклик и уделённое время. ' +
+  'На данный момент мы решили продолжить с другими кандидатами, ' +
+  'чей опыт ближе к требованиям вакансии. Желаем успехов в поиске ' +
+  'и будем рады видеть вас среди откликнувшихся на другие наши вакансии!';
+
+async function rejectWithMessage(i, negId) {
+  if (done.has(i)) return;
+  const ta = document.getElementById('msg-' + i);
+  if (!ta) return;
+  if (!ta.value.trim()) ta.value = STANDARD_REJECTION_TEXT;
+  if (!confirm('Отправить отказ кандидату со следующим сообщением?\\n\\n' + ta.value.trim())) return;
+  return sendAndRejectOne(i, negId);
 }
 
 async function rejectAll() {
