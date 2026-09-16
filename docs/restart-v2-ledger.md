@@ -1,3 +1,35 @@
+# Current integration status (continuation #675)
+
+The release worktree now makes SQLite the runner/recovery authority under closed
+admission, stores terminal results before transport delivery, supports deadline
+interruption and retains late HTTP arrivals after a forced claim. This supersedes
+the preparatory implementation status in the historical sections below. Not yet
+released: production remains on c3b347c. Do not merge this draft until all release
+acceptance items are verified.
+
+Validation: 592 Vitest tests, CJS and Python suites pass locally. Three isolated
+real-server restart cycles cover fresh resume, stale confirmation, and forced
+40-minute interruption; the forced cycle also verifies durable acceptance between
+claim and HTTP shutdown. Gateway: 280 tests. Separate web: authenticated worker and
+Playwright suites pass. Current-head remote CI/staging still required.
+
+Changed requirement and test replacement: in test/admission-status.test.cjs,
+`restart restores queued work older than 15 minutes in acceptance order with deep/project binding`
+asserted unconditional legacy recovery. The owner now requires >=5-minute work to
+wait for confirmation. Replaced by test/restart-execution.test.cjs and
+`stale HTTP queue survives boot, requires owner confirmation and preserves media`
+in tests/planned-restart-http.test.js. No suite-wide skip or continue-on-error.
+
+Remaining release risks: arbitrary model/MCP external actions do not yet use the
+action ledger interface; a real gateway-to-restarted-agent integration cycle needs
+verification, and simultaneous buffered references to the same media need durable
+per-buffer ownership. These must not be described as exactly-once side effects or
+fully verified retention. Production bootstrap remains subject to the active-work
+guard. Rollback to the legacy unconditional resumer is prohibited once the v2
+execution-authority marker exists; keep admission closed for operator recovery.
+
+---
+
 # Restart v2: durable intent ledger (issue #664)
 
 This is a preparatory implementation, **not a v2 production rollout**. The existing

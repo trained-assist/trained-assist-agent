@@ -16,7 +16,8 @@ function purgeIntakeMedia(baseDir, now = Date.now()) {
     }
   };
   try {
-    for (const file of fs.readdirSync(pendingDir).filter(f => f.endsWith('.json'))) {
+    const legacy = fs.existsSync(path.join(path.dirname(pendingDir), 'execution-authority.json')) ? [] : fs.readdirSync(pendingDir);
+    for (const file of legacy.filter(f => f.endsWith('.json'))) {
       const raw = fs.readFileSync(require('path').join(pendingDir, file), 'utf8');
       const entry = JSON.parse(raw); retain(entry.username, entry);
     }
@@ -53,7 +54,11 @@ function purgeIntakeMedia(baseDir, now = Date.now()) {
         if (!entry.isDirectory()) continue;
         const target = path.join(storeDir, entry.name);
         let mtimeMs;
-        try { mtimeMs = fs.lstatSync(path.join(target, 'meta.json')).mtimeMs; } catch { mtimeMs = fs.lstatSync(target).mtimeMs; }
+        try {
+          const meta=JSON.parse(fs.readFileSync(path.join(target,'meta.json'),'utf8'));
+          if(meta.buffered===true)continue;
+          mtimeMs = fs.lstatSync(path.join(target, 'meta.json')).mtimeMs;
+        } catch (error) { if (error.code !== 'ENOENT') continue; mtimeMs = fs.lstatSync(target).mtimeMs; }
         if (!retainedRefs.has(JSON.stringify([profile.name, entry.name])) && !pendingText.includes(target) && now - mtimeMs >= TTL_MS) { fs.rmSync(target, { recursive: true, force: true }); deleted++; }
       }
     } catch (error) { if (error.code !== 'ENOENT') console.warn('[intake-media cleanup]', error.code); }

@@ -17,6 +17,8 @@
     "test/restart-audience.test.cjs",
     "test/restart-intents.test.cjs",
     "test/restart-confirmations.test.cjs",
-    "test/restart-confirmation-http.test.cjs"
+    "test/restart-confirmation-http.test.cjs",
+    "test/restart-execution.test.cjs",
+    "test/restart-results.test.cjs"
   ]
 }

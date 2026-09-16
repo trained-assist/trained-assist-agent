@@ -7,7 +7,7 @@ const { randomUUID, timingSafeEqual } = require('crypto');
 const Database = require('better-sqlite3');
 const FRESH_MS = 5 * 60 * 1000;
 const TERMINAL = new Set(['completed', 'cancelled']);
-const STATES = new Set(['queued', 'claimed', 'running', 'interrupted_by_restart', 'waiting_confirmation', ...TERMINAL]);
+const STATES = new Set(['queued', 'claimed', 'running', 'interrupted_by_restart', 'waiting_confirmation', 'delivering', ...TERMINAL]);
 function ownerKey(owner) {
   if (!owner || typeof owner.username !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(owner.username)) throw Error('Invalid owner');
   // All fields are required, including explicit nulls for absent bindings.
@@ -47,7 +47,7 @@ function createIntentStore(file, { now = Date.now } = {}) {
   };
   const write = intent => {
     if (!STATES.has(intent.state)) throw Error('Invalid intent state');
-    db.prepare('INSERT INTO intents VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
+    db.prepare('INSERT INTO intents VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, data=excluded.data')
       .run(intent.id, ownerKey(intent.owner), JSON.stringify(intent));
     return intent;
   };
@@ -101,6 +101,48 @@ function createIntentStore(file, { now = Date.now } = {}) {
     .some(row => JSON.parse(row.data).state === 'started');
   const store = {
     close() { db.close(); },
+    find(id) { return read(id); },
+    all() { return db.prepare('SELECT data FROM intents').all().map(row => JSON.parse(row.data)); },
+    bindContext: atomic((id, token, context) => {
+      const intent = claimed(id, token, 'running');
+      const owner = { ...intent.owner, sessionId: context.sessionId, projectId: context.projectId ?? intent.owner.projectId };
+      ownerKey(owner);
+      return write({ ...intent, owner, payload: { ...intent.payload, sessionId: owner.sessionId,
+        activitySessionId: owner.sessionId, projectId: owner.projectId }, updatedAt: now() });
+    }),
+    stageResult: atomic((id, token, result) => {
+      const intent = claimed(id, token);
+      if (!['running', 'delivering'].includes(intent.state)) throw Error('Result cannot be staged');
+      if (intent.result) return intent;
+      if (!result || typeof result.text !== 'string' || !result.text.trim()) throw Error('Empty terminal result');
+      return write({ ...intent, state: 'delivering', result, resultReceipts: {}, updatedAt: now() });
+    }),
+    presentResult: atomic((id, token, extra) => {
+      const intent = claimed(id, token, 'delivering');
+      return write({ ...intent, result: { ...intent.result, extra } });
+    }),
+    acknowledgeResult: atomic((id, channel) => {
+      const intent = read(id);
+      if (!intent || intent.state !== 'delivering') return;
+      return write({ ...intent, resultReceipts: { ...intent.resultReceipts, [channel]: now() } });
+    }),
+    finishResult: atomic(id => {
+      const intent = read(id);
+      if (!intent || intent.state !== 'delivering') return;
+      if (!intent.resultReceipts?.session || !intent.resultReceipts?.telegram) throw Error('Result not delivered');
+      return write({ ...intent, state: 'completed', completedAt: now(), updatedAt: now() });
+    }),
+    interrupt: atomic((id, token) => {
+      const intent = claimed(id, token);
+      if (!['claimed', 'running'].includes(intent.state)) return intent;
+      return write({ ...intent, state: 'interrupted_by_restart', claimToken: null,
+        claimedBy: null, interruptedAt: now(), updatedAt: now() });
+    }),
+    hold: atomic((id, owner) => {
+      const intent = owned(id, owner);
+      if (!['queued', 'interrupted_by_restart'].includes(intent.state)) return intent;
+      return waiting(intent);
+    }),
     enqueue: atomic(({ id, owner, payload, initiatedAt = null, state = 'queued' }) => {
       if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(id)) throw Error('Invalid intent id');
       ownerKey(owner);

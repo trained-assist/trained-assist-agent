@@ -19,6 +19,9 @@ class CoordinatorTest(unittest.TestCase):
         return state, actions, api, restart
     def test_active_work_never_stopped(self):
         s,a,api,restart=self.fixture(active=1); mod.coordinate(api,restart,lambda _:None); self.assertEqual(a,[])
+    def test_v2_deadline_claims_active_work_but_only_when_server_says_due(self):
+        s,a,api,restart=self.fixture(active=1,deadlineReached=True); mod.coordinate(api,restart,lambda _:None)
+        self.assertEqual(a,['claim','restart','ready'])
     def test_restart_after_claim_then_explicit_readiness(self):
         s,a,api,restart=self.fixture(); mod.coordinate(api,restart,lambda _:None)
         self.assertEqual(a,['claim','restart','ready']);self.assertEqual(s['phase'],'ready')

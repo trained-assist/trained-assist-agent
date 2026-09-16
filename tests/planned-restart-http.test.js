@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import Database from 'better-sqlite3';
 
-it('real HTTP drain survives process restart and releases the accepted queue exactly once', { timeout: 45000 }, async () => {
+async function restartCycle(kind) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'planned-restart-http-'));
   const calls = [];
   const telegram = http.createServer((req, res) => {
@@ -19,10 +20,13 @@ it('real HTTP drain survives process restart and releases the accepted queue exa
   const reserve = http.createServer(); await new Promise(r => reserve.listen(0, '127.0.0.1', r));
   const port = reserve.address().port; await new Promise(r => reserve.close(r));
   const launches = path.join(root, 'launches'); const engine = path.join(root, 'engine.cjs');
-  fs.writeFileSync(engine, `#!/usr/bin/env node\nrequire('fs').appendFileSync(${JSON.stringify(launches)}, 'run\\n');\nconsole.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Queue recovered'}]}}));\nconsole.log(JSON.stringify({type:'result',result:'Queue recovered'}));\n`, { mode: 0o700 });
+  fs.writeFileSync(engine, `#!/usr/bin/env node\nconst fs=require('fs');const file=${JSON.stringify(launches)};fs.appendFileSync(file, 'run\\n');\nif (${kind == 'forced'} && fs.readFileSync(file,'utf8')==='run\\n') { setInterval(()=>{},1000); } else {\nconsole.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Queue recovered'}]}}));\nconsole.log(JSON.stringify({type:'result',result:'Queue recovered'}));\n}\n`, { mode: 0o700 });
   const env = { PATH: process.env.PATH, HOME: root, NODE_ENV: 'test', PORT: String(port), SECRETS_SOURCE: 'env',
     AGENT_SECRET: 'fixture-secret', TELEGRAM_BOT_TOKEN: 'fixture-token', TELEGRAM_API_URL: `http://127.0.0.1:${telegram.address().port}`,
     AGENT_DATA_DIR: path.join(root, 'data'), USERS_DIR: path.join(root, 'users'), AGENT_TOKENS_ROOT: path.join(root, 'tokens'), CLAUDE_BIN: engine };
+  const clockFile=path.join(root,'clock');fs.writeFileSync(clockFile,'0');
+  const preload=path.join(root,'clock.cjs');
+  fs.writeFileSync(preload,`const fs=require('fs'),real=Date.now;Date.now=()=>real()+Number(fs.readFileSync(${JSON.stringify(clockFile)},'utf8'));`);
   let child; let log = '';
   const headers = { Authorization: 'Bearer fixture-secret', 'Content-Type': 'application/json' };
   async function api(route, body) {
@@ -35,7 +39,7 @@ it('real HTTP drain survives process restart and releases the accepted queue exa
     throw Error(log.slice(-4000));
   }
   async function start() {
-    child = spawn(process.execPath, ['src/server.js'], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(process.execPath, ['--require', preload, 'src/server.js'], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', b => log += b); child.stderr.on('data', b => log += b);
     await until(async () => { try { return (await api('/maintenance')).recovered; } catch { return false; } });
   }
@@ -45,20 +49,70 @@ it('real HTTP drain survives process restart and releases the accepted queue exa
   }
   try {
     await start();
+    const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true, mode: 'deep', requestId: 'stable',
+      fileBase64: Buffer.from('preserved attachment').toString('base64'), fileName:'resume.txt',
+      ...(kind === 'stale' ? { initiatedAt: Date.now()-300000 } : {}) };
+    if(kind==='forced') {
+      await api('/run',payload);
+      await until(()=>fs.existsSync(launches));
+    }
     const operation = await api('/maintenance', { action: 'request' });
-    const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true, mode: 'deep', requestId: 'stable' };
-    const ack = await api('/run', payload); expect(ack.durable).toBe(true); expect(ack.queued).toBe(true);
-    expect(fs.existsSync(launches)).toBe(false);
+    if(kind!=='forced') {
+      const ack = await api('/run', payload); expect(ack.durable).toBe(true); expect(ack.queued).toBe(true);
+      expect(fs.existsSync(launches)).toBe(false);
+    } else {
+      expect((await api('/maintenance',{action:'claim',id:operation.id})).claimed).toBe(false);
+      fs.writeFileSync(clockFile, '2400000');
+      expect((await api('/maintenance')).deadlineReached).toBe(true);
+    }
     expect((await api('/maintenance', { action: 'claim', id: operation.id })).claimed).toBe(true);
+    if (kind === 'forced') {
+      // The coordinator has claimed shutdown, but HTTP is still accepting input.
+      // A durable ACK in this window must correspond to an actual ledger row.
+      const late = await api('/run', { ...payload, requestId: 'late', task: 'Late request', initiatedAt: Date.now() });
+      expect(late.durable).toBe(true);
+      const lateDb = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+      const lateRow = lateDb.prepare('SELECT data FROM intents WHERE id=?').get(late.taskId);
+      lateDb.close();
+      expect(lateRow).toBeDefined();
+      expect(JSON.parse(lateRow.data).payload.task).toContain('Late request');
+    }
     await stop(); await start();
     const state = await api('/maintenance'); expect(state.paused).toBe(true); expect(state.bootId).not.toBe(operation.bootId);
-    expect(fs.existsSync(launches)).toBe(false);
+    expect(fs.existsSync(launches)).toBe(kind==='forced');
     expect((await api('/run', payload)).duplicate).toBe(true);
     expect((await api('/maintenance', { action: 'ready', id: operation.id })).phase).toBe('ready');
+    if(kind!=='fresh') {
+      const listed=await api('/web/restart-intents-bearer',{username:'fixture',action:'list'});
+      expect(listed.intents).toHaveLength(kind === 'forced' ? 2 : 1);
+      const selectionDb = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+      const original = JSON.parse(selectionDb.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
+      selectionDb.close();
+      const handle=listed.intents.find(i => i.handle === original.confirmationToken).handle;
+      const decision={handle,action:'confirm',username:'fixture',telegramUserId:123,chatId:123};
+      const forbidden=await fetch(`http://127.0.0.1:${port}/restart/decision`,{method:'POST',headers,body:JSON.stringify({...decision,telegramUserId:456})});
+      expect(forbidden.status).toBe(404);
+      const before=fs.existsSync(launches)?fs.readFileSync(launches,'utf8'):'';
+      expect(before).toBe(kind==='forced'?'run\n':'');
+      expect((await api('/restart/decision',decision)).accepted).toBe(true);
+      expect((await api('/restart/decision',decision)).replay).toBe(true);
+    }
     await until(() => calls.some(c => c.text?.includes('Queue recovered')));
     await until(async () => (await api('/maintenance')).active === 0);
-    expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
+    expect(fs.readFileSync(launches, 'utf8')).toBe(kind==='forced'?'run\nrun\n':'run\n');
     expect((await api('/run', payload)).duplicate).toBe(true);
-    expect(fs.readdirSync(path.join(root, 'data', 'pending-tasks'))).toEqual([]);
+    const db = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+    const intents = db.prepare('SELECT data FROM intents').all().map(row => JSON.parse(row.data));
+    db.close();
+    expect(intents).toHaveLength(kind === 'forced' ? 2 : 1);
+    intents.sort((a, b) => Number(b.id.endsWith('-stable')) - Number(a.id.endsWith('-stable')));
+    expect(intents[0].state).toBe('completed');
+    expect(intents[0].payload.task).toContain('resume.txt');
+    expect(intents[0].payload.mode).toBe('deep');
+    expect(intents[0].payload.engine).toBe('claude');
   } finally { await stop('SIGKILL'); await new Promise(r => telegram.close(r)); fs.rmSync(root, { recursive: true, force: true }); }
-});
+}
+
+it('fresh HTTP queue survives process restart and executes once', {timeout:45000}, () => restartCycle('fresh'));
+it('stale HTTP queue survives boot, requires owner confirmation and preserves media', {timeout:45000}, () => restartCycle('stale'));
+it('40-minute deadline interrupts a real child and requires confirmation after readiness', {timeout:45000}, () => restartCycle('forced'));

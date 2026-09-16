@@ -86,3 +86,15 @@ test('corrupt intent database stops all media cleanup',()=>{
     assert.equal(purgeIntakeMedia(profiles),0);assert.equal(fs.existsSync(file),true);
   } finally {if(before===undefined)delete process.env.AGENT_DATA_DIR;else process.env.AGENT_DATA_DIR=before;fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('gateway buffer pin retains files beyond TTL until explicit release, corrupt metadata is retained',()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'buffer-pin-'));const before=process.env.AGENT_DATA_DIR;process.env.AGENT_DATA_DIR=path.join(root,'state');
+ try{
+  const profiles=path.join(root,'profiles'),dir=path.join(profiles,'alice','media','intake-store','a'.repeat(64));fs.mkdirSync(dir,{recursive:true});
+  const meta=path.join(dir,'meta.json');fs.writeFileSync(path.join(dir,'data'),'bytes');fs.writeFileSync(meta,JSON.stringify({buffered:true}));
+  const old=new Date(Date.now()-TTL_MS-1000);fs.utimesSync(meta,old,old);
+  assert.equal(purgeIntakeMedia(profiles),0);assert.equal(fs.readFileSync(path.join(dir,'data'),'utf8'),'bytes');
+  fs.writeFileSync(meta,'{broken');fs.utimesSync(meta,old,old);assert.equal(purgeIntakeMedia(profiles),0);
+  fs.writeFileSync(meta,JSON.stringify({buffered:false}));fs.utimesSync(meta,old,old);assert.equal(purgeIntakeMedia(profiles),1);
+ }finally{if(before===undefined)delete process.env.AGENT_DATA_DIR;else process.env.AGENT_DATA_DIR=before;fs.rmSync(root,{recursive:true,force:true});}
+});

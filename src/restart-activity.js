@@ -57,9 +57,15 @@ function createActivityStore({ dataRoot = SYSTEM_ROOT, usersRoot = USERS_ROOT, n
     // Active tasks qualify even if their start time is old or unknown. Queued
     // work qualifies through its recorded user activity, not through polling.
     const pendingDir = path.join(dataRoot, 'pending-tasks');
-    for (const file of jsonFiles(pendingDir)) {
-      const p = readJson(path.join(pendingDir, file));
-      if (p.phase === 'running' || recent(Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : p.startedAt)) {
+    const execution = require('./restart-execution').currentExecution();
+    if (execution) {
+      for (const intent of execution.store.all()) {
+        if (intent.state === 'completed' && recent(intent.completedAt)) add({username:intent.owner.username,chatId:intent.owner.chatId,threadId:intent.owner.threadId,sessionId:intent.owner.sessionId});
+      }
+    }
+    const pending = execution ? execution.pending() : jsonFiles(pendingDir).map(file => readJson(path.join(pendingDir, file)));
+    for (const p of pending) {
+      if (['running', 'delivering'].includes(p.phase) || recent(Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : p.startedAt)) {
         if (p.username && (p.userId || p.sessionId)) add({ username: p.username, chatId: p.userId, sessionId: p.sessionId, threadId: p.threadId });
       }
     }

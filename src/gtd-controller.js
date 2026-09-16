@@ -351,7 +351,7 @@ const DONE_RE = /GTD:\s*done/i;
 
 // Серверный tick. Аргументы инжектятся из server.js, чтобы модуль не тянул
 // зависимости и был тестируем: { secrets, baseUsersDir, isTaskRunning, runTask, getSession }.
-async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSession, now = Date.now() }) {
+async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSession, canRunSession = () => true, now = Date.now() }) {
   let users = [];
   try { users = fs.readdirSync(baseUsersDir).filter(u => /^[a-zA-Z0-9_-]+$/.test(u)); } catch { return; }
 
@@ -367,6 +367,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       // Ждём следующего tick; dueAt уже в прошлом, поэтому запись не потеряется.
       if (isTaskRunning(username)) { console.log(`[gtd] skip ${rec.sessionId}: task running`); continue; }
 
+      if (!canRunSession(username, rec.sessionId)) continue;
       const session = getSession(workDir, rec.sessionId);
       if (!session) { clearGtd(workDir, rec.sessionId); continue; }
 

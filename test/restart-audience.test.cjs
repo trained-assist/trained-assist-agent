@@ -120,7 +120,7 @@ test('pending journal preserves original age and topic across queue, start and r
   const f=fixture(t);const vm=require('node:vm');
   const source=fs.readFileSync(require.resolve('../src/runner'),'utf8');
   const start=source.indexOf('function savePendingTask('),end=source.indexOf('\nfunction recordTaskActivity(',start);
-  const sandbox={fs,path,atomicJson,PENDING_DIR:path.join(f.dataRoot,'pending-tasks')};
+  const sandbox={currentExecution:()=>null,fs,path,atomicJson,PENDING_DIR:path.join(f.dataRoot,'pending-tasks')};
   vm.createContext(sandbox);vm.runInContext(source.slice(start,end),sandbox);
   sandbox.savePendingTask('known',{phase:'queued',startedAt:100,initiatedAt:90,threadId:42});
   sandbox.savePendingTask('known',{phase:'running',startedAt:200});
