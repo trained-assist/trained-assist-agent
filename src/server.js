@@ -23,6 +23,7 @@ const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('./connec
 const { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml } = require('./connect-forms/hh');
 const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
+const { genericMultiFormHtml } = require('./connect-forms/generic-multi');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { bullshitGuard } = require('./hh-bullshit-guard');
@@ -1265,7 +1266,75 @@ async function main() {
         github: { name: 'GitHub', placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx', hint: 'github.com/settings/tokens → Generate new token (classic) → scopes: <b>repo</b>, <b>read:org</b>' },
       };
       const meta = SERVICE_META[service];
-      if (!meta) { res.writeHead(404).end('Unknown service'); return; }
+
+      // ── generic fallback — any service created via credentials_form_create ──
+      // (or any other caller passing an inline schema) that isn't one of the
+      // specially-handled services above. Without this, ZeroCreds being down
+      // for even a moment turns every such link into a dead 404 "Unknown service".
+      if (!meta) {
+        const t = url.searchParams.get('t') || (req.method === 'POST' ? null : '');
+        const readPending = (token) => {
+          if (!token || !/^[a-f0-9]{32}$/.test(token)) return null;
+          try {
+            const p = JSON.parse(fs.readFileSync(path.join(CONNECT_PENDING_DIR, `${token}.json`), 'utf8'));
+            if (p.expires < Date.now() || p.service !== service || !p.schema) return null;
+            return p;
+          } catch { return null; }
+        };
+
+        if (req.method === 'GET') {
+          const pending = readPending(t);
+          if (!pending) { res.writeHead(404).end('Unknown service'); return; }
+          let saved = null;
+          try {
+            const credsFile = path.join(os.homedir(), 'agent-tokens', pending.uid, service);
+            if (fs.existsSync(credsFile)) saved = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+          } catch { /* non-critical */ }
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+            .end(genericMultiFormHtml(service, pending.schema, t, saved));
+          return;
+        }
+
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          let payload;
+          try { payload = JSON.parse(body); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
+          const tokenVal = payload.t;
+          const pendingFile = path.join(CONNECT_PENDING_DIR, `${tokenVal}.json`);
+          const pending = readPending(tokenVal);
+          if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
+          if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
+          const fieldsIn = payload.fields && typeof payload.fields === 'object' ? payload.fields : null;
+          if (!fieldsIn) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
+          for (const f of (pending.schema.fields || [])) {
+            if (f.required && !fieldsIn[f.name]) { res.writeHead(400).end(JSON.stringify({ error: `missing field: ${f.name}` })); return; }
+          }
+          try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; }
+
+          const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
+          fs.mkdirSync(tokensDir, { recursive: true });
+          fs.writeFileSync(path.join(tokensDir, service), JSON.stringify(fieldsIn), { mode: 0o600 });
+          console.log(`[connect] saved ${service} creds (generic form) for uid=${pending.uid}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
+
+          const genChatId = readChatId(pending.uid);
+          if (genChatId) {
+            const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+              method: 'POST',
+              signal: AbortSignal.timeout(8000),
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: genChatId,
+                text: `✅ ${pending.schema.title || service} сохранено! Данные изолированы от чата.\n\nУправление: /secrets_list`,
+              }),
+            }).catch(e => console.error('[connect] tg notify failed:', e.message));
+          }
+          return;
+        }
+
+        res.writeHead(405).end(); return;
+      }
 
       if (req.method === 'GET') {
         const t = url.searchParams.get('t') || '';
