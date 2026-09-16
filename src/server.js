@@ -1,3 +1,6 @@
+// Acquire before modules can recover tasks or write maintenance state.
+const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
+process.once('exit', () => executionOwner.close());
 const { maintenance, atomicJson } = require('./maintenance');
 const { restartTarget, createRestartNotifier } = require('./restart-notifications');
 const { sendRejection } = require('./hh-rejection');
