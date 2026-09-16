@@ -18,7 +18,7 @@ The test runs the real gateway webhook handler and intake buffer, agent HTTP ser
 - J12: save ATS criteria, execute the real scoring tool via `/action`, assert that all three LLM requests contain earlier experience omitted from the response summaries; a repeat call must reuse scores.
 - J07: full earlier experience is visible on the real review page.
 - J08: browser invitation delivers the intended text and moves the candidate to `consider`.
-- J09: browser rejection replaces an unrelated draft with the standard named rejection; an injected HH stage failure leaves a visible partial result and retry does not duplicate the message.
+- J09: browser rejection replaces an unrelated draft with the standard named rejection; an injected HH stage failure leaves a visible partial result and retry across a page reload does not duplicate the message. The completed state remains visible after another reload.
 - G02: the real cold-search tool returns candidates and an accessible browser page; search sends no messages.
 - J10: missing/wrong authorization on all three message mutation endpoints causes 403 and no provider calls or state changes.
 - J11: no unexpected provider routes, agent CLI launches or external requests.
@@ -36,3 +36,5 @@ The Node preload blocks arbitrary child processes and sockets outside test-owned
 1. `/hh/send`, `/hh/reject` and `/hh/send-and-reject` previously accepted a caller based only on the existence of a user's stored HH token. They now require the bearer already sent by the review UI when an agent secret is configured.
 2. `/action` validated tool names against the shared process's credential-filtered registry. It now validates static metadata and leaves per-user availability/execution to the fresh MCP child.
 3. Tool `console.log` output polluted MCP stdout and broke parsing of a successful cold search. The MCP entrypoint sends diagnostics to stderr and reserves stdout for JSON-RPC.
+
+4. Rejection results were persisted but disappeared on page reload. Review cards now recover completed, partial and uncertain states from the saved operation; completed/uncertain operations cannot be resent from the UI.

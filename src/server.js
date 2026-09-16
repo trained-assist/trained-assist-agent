@@ -4334,6 +4334,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       resume_text: buildResumeText(neg),
       resume_notice: resumeNotice(neg, ats),
       history_messages: history.messages || [],
+      rejection_state: history.rejection_operation?.status || '',
       already_sent: (history.messages || []).some(m => m.role === 'employer'),
       needs_reply: (() => {
         // Use HH API as source of truth — local history can be out of sync
@@ -4485,7 +4486,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
          </div>`;
 
     const salaryNote = c.salary ? `<span class="meta"> · зп ${esc(c.salary)}</span>` : '';
-    return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" data-first-name="${esc(c.first_name)}" style="background:${bg};border-left:4px solid ${col}">
+    return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" data-first-name="${esc(c.first_name)}" data-rejection-state="${esc(c.rejection_state)}" style="background:${bg};border-left:4px solid ${col}">
   <div class="card-header">
     <div class="card-header-left">
       ${checkboxHtml}
@@ -4985,6 +4986,20 @@ async function rejectAll() {
   }
 }
 
+// Recover durable rejection outcomes even while the negotiation cache is stale.
+document.querySelectorAll('.card[data-rejection-state]').forEach(card => {
+  const state = card.dataset.rejectionState;
+  if (state === 'done') {
+    markDone(Number(card.id.slice(5)));
+    rejectionStatus(card.dataset.neg, '✅ Сообщение отправлено. Кандидат переведён в отказ на HH.', true);
+  } else if (state === 'message_sent') {
+    rejectionStatus(card.dataset.neg, '⚠️ Сообщение отправлено, но перевод в отказ на HH не подтверждён. Повтор кнопки повторит только перевод в отказ.', false);
+  } else if (['sending', 'unknown', 'discarding'].includes(state)) {
+    rejectionStatus(card.dataset.neg, '⚠️ Результат предыдущего запроса не подтверждён. Проверьте переписку и статус на HH перед повтором.', true);
+  } else if (state === 'failed') {
+    rejectionStatus(card.dataset.neg, '⚠️ Сообщение не отправлено. Можно повторить отказ.', false);
+  }
+});
 onCheck();
 </script>
 </body>

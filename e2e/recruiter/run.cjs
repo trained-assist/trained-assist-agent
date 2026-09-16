@@ -206,6 +206,9 @@ async function main() {
     assert.doesNotMatch(provider.state.messages['2'][0].text, /давайте дальше работать/);
     assert.match(await card.locator('.rejection-status').textContent(), /сообщение|Сообщение/);
     assert.equal(provider.state.negotiations.find(n => n.id === '2').state.id, 'response');
+    await page.reload();
+    await page.getByRole('button', { name: /Все \(/ }).click();
+    assert.match(await card.locator('.rejection-status').textContent(), /Сообщение отправлено, но перевод/);
     delete provider.state.faults['PUT /hh/negotiations/discard_vacancy_closed/2'];
     await card.locator('.btn-send-reject').click();
     await page.waitForFunction(() => document.querySelector('#tab-all .card[data-neg="2"]').classList.contains('done'));
@@ -213,6 +216,9 @@ async function main() {
     assert.equal(provider.state.negotiations.find(n => n.id === '2').state.id, 'discard');
     assert.match(await card.locator('.rejection-status').textContent(), /Кандидат переведён в отказ/);
     await page.reload();
+    await page.getByRole('button', { name: /Все \(/ }).click();
+    assert.match(await card.locator('.rejection-status').textContent(), /Кандидат переведён в отказ/);
+    assert.equal(await card.locator('.btn-send-reject').isDisabled(), true);
     fs.mkdirSync(reportDir, { recursive: true });
     await page.screenshot({ path: reportDir + '/review.png', fullPage: true });
     assert.match(await page.locator('body').textContent(), /отказ|Отказ/);
