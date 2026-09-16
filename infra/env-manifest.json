@@ -70,6 +70,7 @@
   "systemd_env_vars": {
     "_doc": "Static env vars baked into systemd unit files (not secrets). Update systemd/*.service files directly.",
     "gcp": [
+      { "name": "MEDIA_GATEWAY_URL", "value": "https://trained-assist-tg-bot.skillset-apply.workers.dev", "description": "Trusted R2 media reader endpoint; references never supply a URL" },
       { "name": "NODE_ENV",        "value": "production" },
       { "name": "PORT",            "value": "8080" },
       { "name": "AGENT_DATA_DIR",  "value": "/home/vova/agent-data" },
@@ -81,6 +82,7 @@
       { "name": "ANTHROPIC_MODEL",          "value": "claude-sonnet-5", "description": "Claude model used by Claude Code agent" }
     ],
     "ru": [
+      { "name": "MEDIA_GATEWAY_URL", "value": "https://trained-assist-tg-bot.skillset-apply.workers.dev", "description": "Trusted R2 media reader endpoint; references never supply a URL" },
       { "name": "NODE_ENV",           "value": "production" },
       { "name": "PORT",               "value": "8080" },
       { "name": "AGENT_DATA_DIR",     "value": "/home/vova/agent-data" },

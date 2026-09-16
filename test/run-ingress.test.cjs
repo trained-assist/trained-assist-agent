@@ -49,3 +49,26 @@ test('file references survive acceptance and missing references are never acknow
  const missing=await f.send({requestId:'missing',fileRefs:[{id:'b'.repeat(64),name:'missing.pdf'}]});
  assert.equal(missing.status,503);assert.equal(f.runs.length,1);
 });
+
+test('R2 refs are fetched and verified before run acceptance, without a legacy store copy', async t => {
+ const f=fixture(t);const crypto=require('node:crypto');const bytes=Buffer.from('r2-original');
+ const ref={storage:'r2',version:1,id:'c'.repeat(64),name:'voice.ogg',mime:'audio/ogg',size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+ const materialize=require('../src/r2-media').materializeR2;
+ let reads=0;
+ f.sandbox.process.env.MEDIA_GATEWAY_URL='https://gateway.example';f.sandbox.secrets.AGENT_SECRET='secret';
+ f.sandbox.require=name=>name==='./r2-media'?{materializeR2:opts=>materialize({...opts,fetchImpl:async url=>{
+  reads++;assert.equal(url.searchParams.get('username'),'alice');return new Response(bytes);
+ }})}:require(name);
+ const response=await f.send({fileRefs:[ref]});assert.equal(response.status,202);assert.equal(reads,1);
+ const file=path.join(f.root,'users','alice','media','intake',ref.id+'-voice.ogg');assert.deepEqual(fs.readFileSync(file),bytes);
+ assert.ok(f.runs[0].task.includes(file));
+ const retry=await f.send({fileRefs:[ref]});assert.equal(retry.data.duplicate,true);assert.equal(reads,1);assert.equal(f.runs.length,1);
+});
+test('a failed R2 integrity check prevents acknowledgement or text-only launch', async t => {
+ const f=fixture(t);f.sandbox.process.env.MEDIA_GATEWAY_URL='https://gateway.example';f.sandbox.secrets.AGENT_SECRET='secret';
+ const materialize=require('../src/r2-media').materializeR2;
+ f.sandbox.require=name=>name==='./r2-media'?{materializeR2:opts=>materialize({...opts,fetchImpl:async()=>new Response('bad')})}:require(name);
+ const ref={storage:'r2',version:1,id:'d'.repeat(64),name:'doc.pdf',size:3,sha256:'0'.repeat(64)};
+ const response=await f.send({fileRefs:[ref]});assert.equal(response.status,503);assert.equal(f.runs.length,0);
+ assert.equal(fs.existsSync(path.join(f.root,'accepted-requests','request-1.json')),false);
+});
