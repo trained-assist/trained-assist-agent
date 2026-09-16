@@ -108,12 +108,12 @@ test('external bootstrap notifier persists outcomes outside the service and retr
  const tg=http.createServer(async(req,res)=>{let body='';for await(const c of req)body+=c;calls.push(JSON.parse(body));res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');});
  await new Promise(r=>tg.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>tg.close(r)));
  const request=path.join(f.dir,'bootstrap.json');fs.writeFileSync(request,JSON.stringify({initiator:f.target}));
- async function notify(phase){
+ async function notify(phase, delivered=false){
   const child=spawn(process.execPath,[path.resolve('scripts/restart-bootstrap-notify.js'),request,phase],{
-   env:{...process.env,SECRETS_SOURCE:'env',TELEGRAM_BOT_TOKEN:'fixture',AGENT_SECRET:'fixture',TELEGRAM_API_URL:`http://127.0.0.1:${tg.address().port}`},stdio:'pipe'});
+   env:{...process.env,SECRETS_SOURCE:'env',TELEGRAM_BOT_TOKEN:delivered?'':'fixture',AGENT_SECRET:delivered?'':'fixture',TELEGRAM_API_URL:`http://127.0.0.1:${tg.address().port}`},stdio:'pipe'});
   let error='';child.stderr.on('data',b=>error+=b);const code=await new Promise(r=>child.on('exit',r));assert.equal(code,0,error);
  }
- await notify('restarting');await notify('ready');await notify('ready');
+ await notify('restarting');await notify('ready');await notify('ready',true);
  assert.equal(calls.length,3);assert.match(calls.at(-1).text,/перезапущен/);
  assert.equal(sessions.getSession(f.dir,f.sid).messages.length,4);
 });

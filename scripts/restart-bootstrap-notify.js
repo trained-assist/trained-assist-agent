@@ -15,6 +15,7 @@ async function main() {
   if (phase === 'restarting' && gate.status().phase === 'draining') gate.claim(gate.status().id);
   if (phase === 'ready') gate.ready();
   if (phase === 'failed' && !['ready', 'failed'].includes(gate.status().phase)) gate.fail('Bootstrap failed; rollback attempted');
+  if (!gate.pendingNotifications().length) return; // No secret-provider traffic after delivery.
   const secrets = await require('../src/secrets').loadSecrets();
   await createRestartNotifier(gate, { token: secrets.BOT_TOKEN }).flush();
 }
