@@ -313,7 +313,7 @@ describe('scoreUnscoredCandidates — actual scoring (monkey-patched LLM)', () =
     const { existsSync, readFileSync } = require('fs');
     const { join } = require('path');
     const { homedir } = require('os');
-    const logFile = join(homedir(), 'agent-data', 'hh', TEST_USER, 'last-scoring.json');
+    const logFile = join(DATA_DIR, 'hh', TEST_USER, 'last-scoring.json');
 
     await scoring.scoreUnscoredCandidates(DEFAULT_NEGOTIATIONS, TEST_USER, WORK_DIR, { maxConcurrent: 2 });
 
