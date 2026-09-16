@@ -66,8 +66,9 @@ const NARROW_BOTS = {
 };
 
 const VM_NAME = process.env.VM_NAME || 'unknown';
+let RUNTIME_REVISION = 'unknown';
 let GIT_COMMIT = 'unknown';
-try { GIT_COMMIT = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
+try { RUNTIME_REVISION = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim(); GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
 
 const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 // Matches assistant replies that signal task completion — session should not be reused
@@ -2829,7 +2830,7 @@ ${recent || '(пока нет)'}
     }
 
     if (url.pathname === '/maintenance') {
-      if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: GIT_COMMIT });
+      if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: RUNTIME_REVISION });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
         if (body.action === 'claim') {
@@ -2843,9 +2844,13 @@ ${recent || '(пока нет)'}
           await flushRestartNotices();
           return json(res, 200, maintenance.status());
         }
+        if (body.action === 'rollback') {
+          try { return json(res, 200, maintenance.rollback(body.id)); }
+          catch (e) { return json(res, 409, { error: e.message }); }
+        }
         if (body.action === 'ready') {
           if (body.id !== maintenance.status().id) return json(res, 409, { error: 'operation changed' });
-          const state = maintenance.ready();
+          const state = maintenance.ready(RUNTIME_REVISION);
           await flushRestartNotices();
           return json(res, 200, state);
         }
@@ -2856,7 +2861,9 @@ ${recent || '(пока нет)'}
         if (body.action !== 'request') return json(res, 400, { error: 'invalid action' });
         const initiator = typeof body.initiator === 'object' && body.initiator !== null
           ? restartTarget(body.initiator) : body.initiator || 'operator';
-        const state = maintenance.request(initiator, body.kind === 'deploy' ? 'deploy' : 'restart');
+        let state;
+        try { state = maintenance.request(initiator, body.kind === 'deploy' ? 'deploy' : 'restart', body.targetCommit, body.previousCommit); }
+        catch (e) { return json(res, 409, { error: e.message }); }
         // Request acknowledgement is returned immediately; delivery uses the durable outbox.
         void flushRestartNotices();
         return json(res, 200, state);
@@ -4130,14 +4137,10 @@ ${recent || '(пока нет)'}
   scheduleGtdController(secrets);
   resumePendingTasks(secrets).then(() => {
     maintenance.recovered();
-    // Auto-clear a stale restarting gate left by a previous boot (e.g. machine reboot
-    // mid-deploy, or coordinator crash before --ready). Safe because ownerBootId belongs
-    // to an old process; the same-boot guard in ready() prevents clearing our own claim.
-    const st = maintenance.status();
-    if (st.phase === 'restarting' && st.ownerBootId !== st.bootId) {
-      maintenance.ready();
-      console.log('[startup] auto-cleared stale restarting gate from boot', st.ownerBootId.slice(0, 8));
-    }
+    // The journal and the revision captured at process startup must agree.
+    // A new boot alone is insufficient proof that deployment completed.
+    const state = maintenance.ready(RUNTIME_REVISION);
+    if (state.phase === 'restarting') console.error('[startup] maintenance retained: target revision not verified');
   }).catch(err => { maintenance.fail(err.message); console.error('[resume] startup error:', err.message); });
 
   // Deploys restart this service frequently (every few minutes during an
