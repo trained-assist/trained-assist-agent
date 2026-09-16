@@ -552,7 +552,11 @@ async function main() {
   maintenance.beginRecovery();
   const secrets = await loadSecrets();
   const restartNotifier = createRestartNotifier(maintenance, { token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN });
-  const flushRestartNotices = () => restartNotifier.flush().catch(e => console.error('[restart-notification]', e.message));
+  const flushRestartNotices = () => Promise.race([
+    restartNotifier.flush().catch(e => console.error('[restart-notification]', e.message)),
+    // Notification outages must not turn a claimed restart into a coordinator HTTP timeout.
+    new Promise(resolve => { const timer = setTimeout(resolve, 6000); timer.unref(); }),
+  ]);
   setInterval(flushRestartNotices, 15000).unref();
   await flushRestartNotices();
   const intakeQuick = require('./intake-quick').createIntakeQuick({

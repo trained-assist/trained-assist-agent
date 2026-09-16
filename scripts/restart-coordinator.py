@@ -62,6 +62,8 @@ def _coordinate(api, restart, wait=time.sleep):
 
 def coordinate(api, restart, wait=time.sleep):
     operation = api()
+    global attempted_operation_id
+    attempted_operation_id = operation.get('id')
     try:
         return _coordinate(api, restart, wait)
     except Exception:
@@ -79,7 +81,10 @@ def main():
         for _ in range(30):
             try:
                 api = client()
-                if release_ready(api, api(), expected):
+                state = api()
+                global attempted_operation_id
+                attempted_operation_id = state.get('id')
+                if release_ready(api, state, expected):
                     return
             except (OSError, ValueError, RuntimeError):
                 pass
@@ -96,7 +101,8 @@ if __name__ == '__main__':
             import os
             child_env = os.environ.copy()
             child_env.update(globals().get('agent_environment', {}))
-            subprocess.run(['node', str(Path(__file__).resolve().parent / 'restart-failure.js')],
+            subprocess.run(['node', str(Path(__file__).resolve().parent / 'restart-failure.js'),
+                            globals().get('attempted_operation_id') or 'unknown'],
                            env=child_env, timeout=30, check=True)
         except Exception as notify_error:
             print('restart failure notice retained or unavailable:', type(notify_error).__name__, file=sys.stderr)
