@@ -109,7 +109,13 @@ def tick(request=REQUEST):
             except ProcessLookupError: pass
 
 def main():
-    with open('/tmp/assist-agent-deploy.lock', 'a') as lock:
+    lock_path = '/tmp/assist-agent-deploy.lock'
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDONLY, 0o644)
+        os.close(fd)
+    except FileExistsError:
+        pass
+    with open(lock_path, 'r') as lock:
         try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError: return
         tick(Path(sys.argv[1]) if len(sys.argv) > 1 else REQUEST)
