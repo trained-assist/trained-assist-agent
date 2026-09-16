@@ -585,7 +585,11 @@ async function main() {
     // count towards draining; requests arriving after the gate closes retry later.
     const maintenanceExempt = ['/maintenance', '/run', '/health'].includes(url.pathname) || url.pathname.startsWith('/web/');
     if (!maintenanceExempt) {
-      const release = maintenance.acquire();
+      // Attachments are durable ingress too. Accept them during drain, but hold
+      // a lease so the coordinator cannot restart halfway through a transfer.
+      // Once restart/recovery begins, acquire still fails closed.
+      const mediaIngress = url.pathname === '/intake-files' && ['PUT', 'GET'].includes(req.method);
+      const release = maintenance.acquire(undefined, mediaIngress);
       if (!release) return json(res, 503, { error: 'planned restart; retry after readiness' });
       releaseRequest = release;
     }
