@@ -36,13 +36,29 @@ def release_ready(api, operation, expected_commit=None):
         return current.get('id') == operation['id'] and current.get('phase') == 'ready'
     return False
 
+_DEPLOY_STUCK_GRACE_MS = 3 * 60 * 1000  # 3 min — let an active CI deploy finish before intervening
+
 def _coordinate(api, restart, wait=time.sleep):
     state = api()
-    # A deploy-kind gate stuck in restarting after a machine reboot (coordinator died before
-    # --ready): the new server boot has already recovered; just release the gate.
-    if (state.get('kind') == 'deploy' and state.get('phase') == 'restarting'
-            and state.get('recovered') and state.get('bootId') != state.get('ownerBootId')):
-        release_ready(api, state)
+    # Deploy-kind gate stuck in restarting — CI coordinator died or deploy failed before
+    # systemctl restart. Only intervene after the grace period so a live CI deploy finishes first.
+    if state.get('kind') == 'deploy' and state.get('phase') == 'restarting':
+        age_ms = int(time.time() * 1000) - (state.get('requestedAt') or 0)
+        if age_ms >= _DEPLOY_STUCK_GRACE_MS:
+            if state.get('bootId') != state.get('ownerBootId') and state.get('recovered'):
+                # Machine reboot: new service already started. Release the gate.
+                release_ready(api, state)
+            elif state.get('bootId') == state.get('ownerBootId'):
+                # Deploy claimed but never restarted the service. Restart + release.
+                restart()
+                for _ in range(30):
+                    try:
+                        if release_ready(api, state):
+                            print('Stuck deploy gate released after coordinator restart')
+                            break
+                    except (OSError, ValueError):
+                        pass
+                    wait(2)
         return
     if state.get('kind') != 'restart' or state.get('phase') not in ('draining', 'restarting'):
         return
