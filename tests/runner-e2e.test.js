@@ -25,6 +25,7 @@ const require = createRequire(import.meta.url);
 
 let tgServer;
 let tgPort;
+let tgRespond = null;
 let tgLog = []; // captured { method, body } per request
 
 async function startTgServer() {
@@ -35,6 +36,7 @@ async function startTgServer() {
       req.on('end', () => {
         const parsed = body ? JSON.parse(body) : {};
         tgLog.push({ url: req.url, body: parsed });
+        if (tgRespond?.(req, res, parsed)) return;
         // Always reply with a valid Telegram-like response
         const msgId = Math.floor(Math.random() * 9000 + 1000);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -155,6 +157,7 @@ let workDir;
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), 'runner-e2e-'));
   tgLog = [];
+  tgRespond = null;
   setupFakeClaude('OK');
 });
 
@@ -667,5 +670,94 @@ describe('Quick-crash auto-retry', () => {
     // Original launch + exactly 1 retry = 2 invocations, no infinite loop.
     expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
   });
+
+});
+
+// Regression: separate text/tool events + deployment SIGTERM used to publish narration as final.
+describe('terminal answer delivery', () => {
+  function streamScript(events, ending = 'exit 0', trailingNewline = true) {
+    const payload = events.map(e => JSON.stringify(e)).join('\n') + (trailingNewline ? '\n' : '');
+    writeFileSync(join(fakeBinDir, 'claude'), `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(payload)}, () => { ${ending === 'signal' ? "process.kill(process.pid, 'SIGTERM')" : `process.exit(${ending === 'exit 143' ? 143 : 0})`}; });\n`);
+    chmodSync(join(fakeBinDir, 'claude'), 0o755);
+  }
+  const narration = 'Секунду, подниму факты о том, что реально было сделано и задеплоено — отвечу по диску, а не по памяти.';
+  const text = { type: 'assistant', message: { stop_reason: 'tool_use', content: [{ type: 'text', text: narration }] } };
+  const tool = { type: 'assistant', message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'true' } }] } };
+  for (const ending of ['exit 143', 'signal', 'exit 0']) {
+    it(`does not report split tool narration as completed after ${ending}`, async () => {
+      try {
+        streamScript([text, tool], ending);
+        await chat('Проверь проект и исправь найденные дефекты');
+        const final = tgTexts().at(-1);
+        expect(final).toContain('Работа прервана');
+        expect(final).not.toContain(narration);
+        expect(readSession(readCurrentSession().id).messages.at(-1).content).toContain('Работа прервана');
+      } finally { writeNormalClaudeScript(); }
+    });
+  }
+  it('reads the final result even without a trailing newline', async () => {
+    try {
+      streamScript([text, tool, { type: 'result', subtype: 'success', result: 'Готово: исправление проверено.' }], 'exit 0', false);
+      await chat('Проверь проект и исправь найденные дефекты');
+      expect(tgTexts().at(-1)).toContain('Готово: исправление проверено.');
+      expect(tgTexts().at(-1)).not.toContain(narration);
+    } finally { writeNormalClaudeScript(); }
+  });
+  it('does not treat an error result as successful completion', async () => {
+    try {
+      streamScript([text, { type: 'result', subtype: 'error_max_turns', is_error: true, result: narration }]);
+      await chat('Проверь проект и исправь найденные дефекты');
+      expect(tgTexts().at(-1)).toContain('Работа прервана');
+      expect(tgTexts().at(-1)).not.toContain(narration);
+    } finally { writeNormalClaudeScript(); }
+  });
+  it('sends a new final message when Telegram rejects editing the old one', async () => {
+    tgRespond = (req, res) => {
+      if (!req.url.includes('editMessageText')) return false;
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error_code: 400, description: 'message to edit not found' }));
+      return true;
+    };
+    await chat('Проверь проект и исправь найденные дефекты', { claudeReply: 'Финальный отчёт доставлен' });
+    expect(tgSent().at(-1).url).toContain('sendMessage');
+    expect(tgTexts().at(-1)).toContain('Финальный отчёт доставлен');
+  });
+  it('waits for a delayed progress edit before sending the final answer', async () => {
+    let progressFinished = false;
+    tgRespond = (req, res, body) => {
+      if (!req.url.includes('editMessageText')) return false;
+      if (body.text.includes('Финальный отчёт')) {
+        expect(progressFinished).toBe(true);
+        return false;
+      }
+      setTimeout(() => {
+        progressFinished = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, result: { message_id: 123 } }));
+      }, 80);
+      return true;
+    };
+    try {
+      streamScript([tool, { type: 'result', subtype: 'success', result: 'Финальный отчёт' }]);
+      await chat('Проверь проект и исправь найденные дефекты');
+      expect(progressFinished).toBe(true);
+      expect(tgTexts().at(-1)).toContain('Финальный отчёт');
+    } finally { writeNormalClaudeScript(); }
+  });
+
+  for (const completed of [true, false]) {
+    it(`requires Codex turn completion (completed=${completed})`, async () => {
+      const profiles = require('../src/profiles');
+      profiles.setEngine(workDir, 'codex', 111222333);
+      process.env.CODEX_BIN = join(fakeBinDir, 'claude');
+      try {
+        const events = [{ type: 'item.completed', item: { type: 'agent_message', text: 'Ответ Codex' } }];
+        if (completed) events.push({ type: 'turn.completed' });
+        streamScript(events);
+        await chat('Проверь проект и исправь найденные дефекты');
+        expect(tgTexts().at(-1)).toContain(completed ? 'Ответ Codex' : 'Работа прервана');
+      } finally { delete process.env.CODEX_BIN; writeNormalClaudeScript(); }
+    });
+  }
 
 });
