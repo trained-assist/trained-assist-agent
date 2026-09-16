@@ -19,6 +19,7 @@ StartLimitBurst=10
 TimeoutStopSec=120
 
 Environment=NODE_ENV=production
+Environment=MEDIA_GATEWAY_URL=https://trained-assist-tg-bot.skillset-apply.workers.dev
 Environment=PORT=8080
 Environment=AGENT_DATA_DIR=/home/vova/agent-data
 Environment=VM_NAME=ru-vm

@@ -46,7 +46,21 @@ it('real HTTP drain survives process restart and releases the accepted queue exa
   try {
     await start();
     const operation = await api('/maintenance', { action: 'request' });
-    const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true, mode: 'deep', requestId: 'stable' };
+    // Regression: screenshots used to fail with 503 here, while text /run
+    // returned 202. Exercise the real HTTP gate and disk store during drain.
+    const photo = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x42, 0xff, 0xd9]);
+    const fileRoute = `/intake-files?username=fixture&id=${'a'.repeat(64)}&name=photo.jpg`;
+    const denied = await fetch(`http://127.0.0.1:${port}${fileRoute}`, { method: 'PUT', body: photo });
+    expect(denied.status).toBe(401);
+    const upload = await fetch(`http://127.0.0.1:${port}${fileRoute}`, {
+      method: 'PUT', headers: { ...headers, 'Content-Type': 'image/jpeg' }, body: photo });
+    expect(upload.status).toBe(200);
+    const ref = await upload.json(); expect(ref.size).toBe(photo.length);
+    const downloaded = await fetch(`http://127.0.0.1:${port}${fileRoute}`, { headers });
+    expect(downloaded.status).toBe(200);
+    expect(Buffer.from(await downloaded.arrayBuffer())).toEqual(photo);
+    const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true,
+      mode: 'deep', requestId: 'stable', fileRefs: [ref] };
     const ack = await api('/run', payload); expect(ack.durable).toBe(true); expect(ack.queued).toBe(true);
     expect(fs.existsSync(launches)).toBe(false);
     expect((await api('/maintenance', { action: 'claim', id: operation.id })).claimed).toBe(true);

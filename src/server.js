@@ -1,3 +1,6 @@
+// Acquire before modules can recover tasks or write maintenance state.
+const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
+process.once('exit', () => executionOwner.close());
 const { maintenance, atomicJson } = require('./maintenance');
 const { restartTarget, createRestartNotifier } = require('./restart-notifications');
 const { sendRejection } = require('./hh-rejection');
@@ -582,7 +585,11 @@ async function main() {
     // count towards draining; requests arriving after the gate closes retry later.
     const maintenanceExempt = ['/maintenance', '/run', '/health'].includes(url.pathname) || url.pathname.startsWith('/web/');
     if (!maintenanceExempt) {
-      const release = maintenance.acquire();
+      // Attachments are durable ingress too. Accept them during drain, but hold
+      // a lease so the coordinator cannot restart halfway through a transfer.
+      // Once restart/recovery begins, acquire still fails closed.
+      const mediaIngress = url.pathname === '/intake-files' && ['PUT', 'GET'].includes(req.method);
+      const release = maintenance.acquire(undefined, mediaIngress);
       if (!release) return json(res, 503, { error: 'planned restart; retry after readiness' });
       releaseRequest = release;
     }
@@ -2856,6 +2863,19 @@ ${recent || '(пока нет)'}
       }
     }
 
+    // Authenticated release probe: exercises the same verified reader as /run,
+    // without starting a user task or sending anything to Telegram.
+    if (url.pathname === '/intake-media-check' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      try {
+        const result = await require('./r2-media').verifyR2({ ref: body.ref, username: body.username,
+          gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
+        return json(res, 200, result);
+      } catch {
+        return json(res, 503, { error: 'R2 reader verification failed' });
+      }
+    }
+
     // PUT/GET /intake-files?username=X&id=Y&name=Z — durable per-file store for
     // gateway intake (photos/voice/docs). Replaces base64-in-KV so a retry never
     // re-sends bytes and isn't capped by KV's 25MB value limit. See intake-files.js
@@ -3310,7 +3330,13 @@ ${recent || '(пока нет)'}
             const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
             fs.mkdirSync(uploadsDir, { recursive: true });
             const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
-            fs.copyFileSync(src, filePath);
+            if (ref.storage === 'r2') {
+              await require('./r2-media').materializeR2({ ref, username, destination: filePath,
+                gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
+            } else {
+              if (ref.storage) throw new Error('Unknown media storage');
+              fs.copyFileSync(src, filePath);
+            }
             const fd = fs.openSync(filePath, 'r');
             try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
             const dirFd = fs.openSync(uploadsDir, 'r');
