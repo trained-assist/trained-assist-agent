@@ -52,10 +52,20 @@ test('file references survive acceptance and missing references are never acknow
 
 test('topic routing is retained and malformed topics are rejected before accepting work', async t => {
  const f=fixture(t);
- assert.equal((await f.send({threadId:42})).status,202);
+ assert.equal((await f.send({threadId:42,initiatedAt:1234})).status,202);
  assert.equal(f.runs[0].threadId,42);
+ assert.equal(f.runs[0].initiatedAt,1234);
  for (const threadId of [0,-1,1.5,'42']) {
    assert.equal((await f.send({requestId:'bad-'+String(threadId),threadId})).status,400);
  }
  assert.equal(f.runs.length,1);
+});
+
+test('invalid future/original timestamps cannot enter the durable queue; unknown remains explicit', async t => {
+ const f=fixture(t);
+ for (const initiatedAt of [-1, '1234', Date.now()+60000]) {
+   assert.equal((await f.send({initiatedAt})).status,400);
+ }
+ assert.equal((await f.send({initiatedAt:null})).status,202);
+ assert.equal(f.runs[0].initiatedAt,null);
 });
