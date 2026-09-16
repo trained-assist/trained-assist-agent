@@ -26,7 +26,7 @@ test('exclusive ownership rejects aliases and a failed contender cannot release 
 test('SIGKILL releases ownership across processes without removing or expiring the lock file', { timeout: 10000 }, async t => {
   const root = fixture(t), script = path.join(root, 'owner.cjs');
   fs.writeFileSync(script, `const lock = require(${JSON.stringify(modulePath)}).acquireExecutionOwner(process.argv[2]);
-    process.on('message', () => {}); process.send('owned');`);
+    process.on('message', () => lock.close()); process.send('owned');`);
   const child = fork(script, [root], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
   assert.equal((await once(child, 'message'))[0], 'owned');
