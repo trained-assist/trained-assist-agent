@@ -2846,18 +2846,31 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     sessions.appendReply(user.workDir, activeSessionId, result);
     setCurrentSessionId(user.workDir, activeSessionId, chatId);
 
-    // GTD controller: schedule a durable check-back ТОЛЬКО когда это был
-    // осознанный launch — «⏻ Запустить проработку» (workrun ⇒ explicitMode==='deep').
-    // На обычном reply/clarify не детектируем (гейт запуска, #501/#502/#505).
+    // GTD controller: schedule a durable check-back.
     // Skip на внутренних GTD re-runs (no self-loop).
-    if (!internalGtd && explicitMode === 'deep') {
+    if (!internalGtd) {
       try {
         const gtd = require('./gtd-controller');
-        gtd.maybeSchedule({
+        const checklistArgs = {
           workDir: user.workDir, sessionId: activeSessionId, chatId,
-          username: user.username, task, apiKey: secrets.OPENROUTER_API_KEY,
-          projectDir: user.cwd || null,
-        }).catch(e => console.warn('[gtd] schedule:', e.message));
+          username: user.username, projectDir: user.cwd || null,
+        };
+        if (explicitMode === 'deep') {
+          // Осознанный launch — «⏻ Запустить проработку» (workrun). Свободный текст
+          // задачи ("доведи до конца") гоняем через LLM-гейт (#501/#502/#505); если
+          // фраза не совпала, но в проекте уже лежит незакрытый checklist.md —
+          // тот сам по себе достаточное основание трекать (checklist ⇒ intent).
+          gtd.maybeSchedule({
+            ...checklistArgs, task, apiKey: secrets.OPENROUTER_API_KEY,
+          }).then(rec => rec || gtd.scheduleFromChecklist(checklistArgs))
+            .catch(e => console.warn('[gtd] schedule:', e.message));
+        } else {
+          // Обычный reply/clarify: НЕ зовём LLM-гейт на каждый ход (дорого/шумно,
+          // #501/#502) — но checklist.md уже сам по себе авторский сигнал, и его
+          // достаточно, чтобы трекать (дефолт для PR: «создал PR → checklist.md
+          // с 3 пунктами → GTD подхватывает» без явной фразы «доведи до конца»).
+          gtd.scheduleFromChecklist(checklistArgs).catch(e => console.warn('[gtd] schedule:', e.message));
+        }
       } catch (e) { console.warn('[gtd] hook:', e.message); }
     }
   }

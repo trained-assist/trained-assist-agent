@@ -386,6 +386,27 @@ gh pr create --fill                # opens PR; CI runs; auto-merges on green
 
 Branch protection requires the `ci` job to pass. PRs auto-merge (squash) when CI is green — no manual approval needed.
 
+### After opening a PR — always write a checklist.md (default, unless told otherwise)
+
+**Rule: right after `gh pr create`, write/append `checklist.md` in the project root with 3 items, unless the user explicitly said not to track it:**
+
+```markdown
+Goal: <one line — what this PR does>
+
+- [ ] CI green on <PR URL>
+- [ ] Merged to main
+- [ ] Deployed to prod — verified live
+```
+
+Why: the GTD controller (`src/gtd-controller.js`) reads `checklist.md` and auto-schedules a durable
+check-back — no need to explicitly ask to "see it through". The first two items are checked off for
+free via a GitHub API poll (no LLM, no Claude spawn — see `checklistCheapPrecheck`); a real
+Claude/Codex session only wakes up once there's actual work left (CI failed, or "deployed live" needs
+a genuine check) — never just to poll a status that's plain data. This is why you don't need to ask
+the user for a reminder or worry the VM restarting will lose track — it's durable on disk and survives
+restarts. Include the actual PR URL in the checklist text (`github.com/<owner>/<repo>/pull/<n>`) — the
+precheck greps it out of the file to know which PR to poll.
+
 
 ```bash
 npm install

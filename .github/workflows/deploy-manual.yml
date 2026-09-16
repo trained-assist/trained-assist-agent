@@ -48,7 +48,7 @@ jobs:
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
-            bash scripts/deploy.sh
+            DEPLOY_ENV=gcp bash scripts/deploy.sh
 
   deploy-ru:
     if: inputs.target == 'ru' || inputs.target == 'both'
@@ -86,7 +86,7 @@ jobs:
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
-            AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
+            DEPLOY_ENV=ru AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
 
   notify-merge-queue:
     needs: [deploy-gcp, deploy-ru]
