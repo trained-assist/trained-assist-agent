@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+const { createHmac } = require('crypto');
 
 const USER_ID = process.env.USER_ID || '';
 
@@ -21,6 +22,13 @@ function tokenBase() {
 function readHhToken() {
   const { readHhToken: read } = require('../../hh-utils');
   return read(USER_ID);
+}
+
+// Scoped token for the Call Tips desktop app — bound to this profile only,
+// never the master AGENT_SECRET. Mirrors calltipsHmac() in src/server.js.
+function calltipsHmac(profile) {
+  const secret = process.env.AGENT_SECRET || '';
+  return createHmac('sha256', secret).update(`calltips:${profile}`).digest('hex').slice(0, 24);
 }
 
 function hhRequest(method, apiPath, accessToken, body) {
@@ -208,6 +216,21 @@ module.exports = {
   isReady: () => true,
 
   tools: {
+    calltips_get_login: {
+      description: 'Get the Call Tips desktop app login for this user: profile name + a scoped token (NOT the master agent secret). Use when user asks "как залогинить call tips", "дай токен для call tips", "подключи приложение для звонков", or after they report the app logged in as someone else / wrong profile.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const agentUrl = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+        const token = calltipsHmac(USER_ID);
+        return {
+          agentUrl,
+          profile: USER_ID,
+          token,
+          message: `Открой Call Tips → Настройки и введи:\nURL агента: ${agentUrl}\nПрофиль: ${USER_ID}\nТокен: ${token}\n\nЭто токен только для звонков этого профиля — не мастер-пароль агента, им нельзя зайти в чужой профиль. Если приложение уже залогинено под чужим именем — нажми «Выйти» в Call Tips и войди этими данными.`,
+        };
+      },
+    },
+
     calltips_prepare: {
       description: 'Prepare a Call Tips interview plan for a candidate. Fetches their HH resume, generates structured question plan, and saves it so the Call Tips app can load it with "📥 Из агента". Use when user says "подготовь план для звонка с [имя]" or "подготовь интервью с [имя]".',
       inputSchema: {
