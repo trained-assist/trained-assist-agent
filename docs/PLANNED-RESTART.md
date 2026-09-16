@@ -142,3 +142,9 @@ undelivered outcomes. The external sender loads the normal secret provider
 (including GCP Secret Manager); it never persists tokens in the operation file.
 Existing requests without an initiator remain silent for compatibility and must
 not be described as notification-enabled.
+
+A newer, fully tested release can replace a bootstrap that is still `waiting`:
+`schedule-bootstrap.sh TESTED_SHA INITIATOR_FILE --replace-waiting`. The shared
+deploy lock protects preparation and replacement; installing/failed operations
+are rejected. Existing initiator and original requestedAt are preserved. This is
+an explicit release operation, never an automatic choice of an untested SHA.
