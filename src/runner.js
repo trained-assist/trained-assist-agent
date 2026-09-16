@@ -1,4 +1,5 @@
 const { maintenance, atomicJson } = require('./maintenance');
+const { restartTarget } = require('./restart-notifications');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -1553,13 +1554,22 @@ function runTask(opts) {
   // Control commands bypass lanes and admission. Available to every authenticated profile.
   const restart = /^\/restart(?:@\w+)?(?:\s+(status|cancel))?$/i.exec((opts.task || '').trim());
   if (restart) {
+    let restartSessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id);
+    if (!restart[1] && !restartSessionId && opts.user.id === 0) {
+      restartSessionId = sessions.createSession(opts.user.workDir, { task: opts.task, chatId: 0 });
+    }
     const state = restart[1] === 'cancel' ? maintenance.cancel()
-      : restart[1] === 'status' ? maintenance.status() : maintenance.request(opts.user.username);
-    const msg = state.paused
+      : restart[1] === 'status' ? maintenance.status() : maintenance.request(restartTarget({ username: opts.user.username, chatId: opts.user.id, sessionId: restartSessionId }));
+    const msg = state.phase === 'failed'
+      ? '⚠️ Восстановление не завершено; очередь сохранена. Требуется проверка сервера.'
+      : state.phase === 'restarting'
+      ? '🔄 Сервер перезапускается. Об итогах сообщу в исходную сессию.'
+      : state.paused
       ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохранены и ждут.`
       : '✅ Плановый рестарт не ожидается.';
-    const token = opts.secrets?.BOT_TOKEN;
-    return token ? tgSend(token, opts.user.id, msg).then(() => msg) : Promise.resolve(msg);
+    opts.outputCallback?.(msg);
+    const token = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
+    return token && opts.user.id !== 0 ? tgSend(token, opts.user.id, msg).then(() => msg) : Promise.resolve(msg);
   }
 
   // Wakeup command — kill stuck task + clear the queue so new messages can flow through.
