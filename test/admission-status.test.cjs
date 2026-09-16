@@ -80,7 +80,8 @@ test('restart restores queued work older than 15 minutes in acceptance order wit
   const task = (id, age) => ({ taskId: id, username: 'test', userId: 42, task: id, phase: 'queued', startedAt: now - age, mode: 'deep', projectId: 'p1', forceNew: true });
   const sandbox = {
     getPendingTasks: () => [task('later', 1000), task('earlier', 30 * 60000)],
-    require: () => ({ clearPendingTask() {} }),
+    require: name => name === './recovery-resume' ? require('../src/recovery-resume') : ({ clearPendingTask() {} }),
+    fetch: async () => ({ ok: true, json: async () => ({ ok: true }) }), AbortSignal,
     console, Date, process: { env: {} }, BASE_USERS_DIR: '/test', path: require('node:path'),
     setTimeout: fn => fn(), runTask: async options => { resumed.push(options); },
   };

@@ -78,7 +78,7 @@ echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output
 // then behaves like a normal successful run. Invocation count tracked on disk so it
 // survives the fact that a retry spawns a brand-new process. Callers MUST call
 // restoreNormalClaude() afterwards — this overwrites the shared claude binary in place.
-function setupCrashingClaude(crashCount = 1, exitCode = 1) {
+function setupCrashingClaude(crashCount = 1, exitCode = 1, delaySeconds = 0) {
   claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
   writeFileSync(claudeReplyFile, 'OK after retry');
   const counterFile = join(fakeBinDir, 'crash-counter.txt');
@@ -90,7 +90,8 @@ COUNT=$((COUNT+1))
 echo $COUNT > "${counterFile}"
 if [ "$COUNT" -le ${crashCount} ]; then
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}'
-  exit ${exitCode}
+  sleep ${delaySeconds}
+  ${exitCode === 'SIGTERM' ? 'kill -TERM $$' : `exit ${exitCode}`}
 fi
 REPLY=$(cat "${claudeReplyFile}" 2>/dev/null || echo "OK")
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$REPLY"'"}]}}'
@@ -132,6 +133,7 @@ beforeAll(async () => {
   origTgUrl = process.env.TELEGRAM_API_URL;
   process.env.TELEGRAM_API_URL = `http://127.0.0.1:${tgPort}`;
   process.env.CLAUDE_BIN = join(fakeBinDir, 'claude'); // explicit path, no PATH manipulation
+  process.env.AGENT_DATA_DIR = join(testTokensRoot, "agent-data");
   process.env.AGENT_TOKENS_ROOT = testTokensRoot;     // isolate from real ~/agent-tokens/
 
   const mod = require('../src/runner.js');
@@ -647,13 +649,13 @@ describe('Quick-crash auto-retry', () => {
     }
 
     const texts = tgTexts();
-    expect(texts.some(t => /⚡ Быстрый сбой/.test(t)), 'should show the silent-retry status line').toBe(true);
+    expect(texts.some(t => /Попытка восстановления 1\/2/g.test(t)), 'should show the silent-retry status line').toBe(true);
     expect(texts[texts.length - 1]).toMatch(/Готово, сделал штуку/);
     // Only one retry happened — the crash+retry pair, not a loop.
     expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
   });
 
-  it('crash that keeps happening surfaces as a real error, capped at one retry', { timeout: 20000 }, async () => {
+  it('crash that keeps happening surfaces as a real error, capped at two retries', { timeout: 20000 }, async () => {
     setupCrashingClaude(5); // would crash 5 times in a row if allowed to keep retrying
     try {
       await chat('сделай штуку');
@@ -662,10 +664,50 @@ describe('Quick-crash auto-retry', () => {
     }
 
     const texts = tgTexts();
-    expect(texts.some(t => /⚡ Быстрый сбой/.test(t)), 'exactly one retry attempt should show').toBe(true);
-    expect(texts[texts.length - 1]).toMatch(/реальный сбой/);
-    // Original launch + exactly 1 retry = 2 invocations, no infinite loop.
-    expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
+    expect(texts.some(t => /Попытка восстановления 1\/2/g.test(t)), 'first retry attempt should show').toBe(true);
+    expect(texts[texts.length - 1]).toMatch(/Выполнено попыток: 2\/2/);
+    // Original launch + exactly 2 retries = 3 invocations, no infinite loop.
+    expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('3');
   });
 
+});
+
+describe('Session recovery regression', () => {
+  it('normalizes a real SIGTERM signal to 143 and recovers without hanging', async () => {
+    setupCrashingClaude(1, 'SIGTERM');
+    try { await chat('продолжи работу'); } finally { restoreNormalClaude(); }
+    expect(tgTexts().some(t => /код 143.*1\/2/.test(t))).toBe(true);
+    expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
+  });
+  it('recovers a long-running code 143 in the SAME session without lane deadlock', { timeout: 30000 }, async () => {
+    await chat('начни задачу');
+    const sid = readCurrentSession().id;
+    setupCrashingClaude(1, 143, 16);
+    try { await chat('продолжи задачу', { sessionId: sid, claudeReply: 'Восстановлено' }); }
+    finally { restoreNormalClaude(); }
+    expect(readCurrentSession().id).toBe(sid);
+    expect(tgTexts().some(t => /код 143.*1\/2/.test(t))).toBe(true);
+    expect(tgTexts().at(-1)).toContain('Восстановлено');
+    expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
+  });
+});
+
+describe('Shutdown recovery journal', () => {
+  it('retains deferred work with the same session and retry budget across shutdown', async () => {
+    const runner = require('../src/runner.js');
+    await chat('начни задачу');
+    const sid = readCurrentSession().id;
+    setupCrashingClaude(1, 143);
+    runner.beginShutdown();
+    try {
+      await chat('продолжи задачу', { sessionId: sid });
+      const saved = runner.getPendingTasks().filter(p => p.username === testUsername);
+      expect(saved).toHaveLength(1);
+      expect(saved[0]).toMatchObject({ sessionId: sid, retryCount: 1, phase: 'queued', forceNew: false });
+      expect(saved[0].secrets).toBeUndefined();
+      expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('1');
+      expect(tgTexts().some(t => t.includes('после перезапуска сервера; задача сохранена'))).toBe(true);
+      runner.clearPendingTask(saved[0].taskId);
+    } finally { restoreNormalClaude(); }
+  });
 });

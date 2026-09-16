@@ -1,0 +1,38 @@
+name: Recovery staging
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [fix/visible-session-recovery]
+permissions:
+  contents: read
+jobs:
+  recovery-staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --include=dev
+      - name: Replay isolated process crashes and restart recovery
+        env:
+          AGENT_DATA_DIR: ${{ runner.temp }}/recovery-data
+          AGENT_TOKENS_ROOT: ${{ runner.temp }}/recovery-tokens
+        run: |
+          mkdir -p recovery-results
+          git rev-parse HEAD > recovery-results/tested-sha.txt
+          npx vitest run tests/runner-e2e.test.js tests/recovery-resume.test.js --reporter=default --reporter=json --outputFile=recovery-results/tests.json
+          node -e 'const r=require("./recovery-results/tests.json"); if(!r.success || r.numPassedTests < 1 || r.numPendingTests || r.numTodoTests) process.exit(1)'
+          node --test test/admission-status.test.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-staging-${{ github.run_id }}
+          path: recovery-results/
+          if-no-files-found: error

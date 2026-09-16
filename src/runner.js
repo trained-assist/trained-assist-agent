@@ -59,8 +59,11 @@ function isScratchpadFallback(claudeResult, lastAssistantMsg) {
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
-const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth 1 retry
-const MAX_QUICK_RETRIES = 1; // cap so a repeatable crash doesn't loop forever
+const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth bounded retries
+const MAX_QUICK_RETRIES = 2; // cap so a repeatable crash doesn't loop forever
+
+let shuttingDown = false;
+function beginShutdown() { shuttingDown = true; }
 
 // ── Pending-task journal — survives process restart ──────────────────────────
 const PENDING_DIR = path.join(
@@ -71,7 +74,10 @@ const PENDING_DIR = path.join(
 function savePendingTask(taskId, params) {
   try {
     fs.mkdirSync(PENDING_DIR, { recursive: true });
-    fs.writeFileSync(path.join(PENDING_DIR, `${taskId}.json`), JSON.stringify(params), { mode: 0o600 });
+    const dest = path.join(PENDING_DIR, `${taskId}.json`);
+    const temp = `${dest}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(params), { mode: 0o600, flush: true });
+    fs.renameSync(temp, dest);
   } catch (e) { console.warn('[runner] savePendingTask:', e.message); }
 }
 
@@ -1602,6 +1608,7 @@ function runTask(opts) {
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode,
     projectId: opts.projectId, newProjectName: opts.newProjectName,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId,
+    retryCount: opts.retryCount || 0, continuationCount: opts.continuationCount || 0,
     startedAt: Date.now(),
   });
   const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
@@ -1615,6 +1622,7 @@ function runTask(opts) {
   // build a bare user object. In-memory Map key only — never a path/env key.
   const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
 
+  let preservePending = false;
   const current = prev.catch(() => {}).then(async () => {
     status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
     // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
@@ -1627,7 +1635,9 @@ function runTask(opts) {
       await _acquireSlot();
       try {
         await status.finish('🧠 Начинаю работу…');
-        return await _runTask(opts);
+        const result = await _runTask(opts);
+        preservePending = result?.recoveryDeferred === true;
+        return preservePending ? result.message : result;
       } finally {
         _releaseSlot();
       }
@@ -1640,7 +1650,7 @@ function runTask(opts) {
   });
   chatLanes.set(queueKey, current);
   current.finally(() => {
-    clearPendingTask(opts.taskId);
+    if (!preservePending) clearPendingTask(opts.taskId);
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
   });
@@ -2013,7 +2023,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   savePendingTask(taskId, {
     taskId, userId: user.id, username: user.username, workDir: user.workDir,
     task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
-    initialMsgId, pinnedMsgId,
+    initialMsgId, pinnedMsgId, retryCount, continuationCount,
     startedAt: Date.now(),
   });
 
@@ -2228,6 +2238,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   } else {
     activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
   }
+
+  // Persist the resolved session before spawning: a restart must resume it.
+  savePendingTask(taskId, {
+    taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    task, context, sessionId: activeSessionId, contextFromSession, forceClaude,
+    forceNew: false, mode, projectId: boundProjectId, newProjectName: null,
+    initialMsgId, pinnedMsgId, retryCount, continuationCount, startedAt: Date.now(),
+  });
 
   // Answer router (manual launch): глубина выбирается ЯВНОЙ кнопкой, не угадывается.
   // «⏻ Запустить проработку» → mode='deep' пишется в durable-сайдкар (sticky: держится
@@ -2625,7 +2643,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       };
       sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
 
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
+        if (code == null) code = signal === 'SIGTERM' ? 143 : signal === 'SIGKILL' ? 137 : 1;
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
         if (code !== 0) {
@@ -2640,6 +2659,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         }
       });
       proc.on('error', (err) => {
+        exitCode = 1;
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
         reject(err);
@@ -2717,34 +2737,39 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     return stoppedMsg;
   }
 
-  // If claude crashed with non-zero exit and produced almost no output — show crash error.
-  // A crash within QUICK_CRASH_MS of launch looks like a transient environment blip (process
-  // spawn race, brief resource contention) rather than the task's own logic — worth one silent
-  // retry before bothering the user. Capped at MAX_QUICK_RETRIES so a genuinely broken task
-  // doesn't loop; a crash after the process has been running longer is treated as real and
-  // surfaced immediately (a slow failure is much more likely to be about the task itself).
-  if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
+  // Retry in the CURRENT lane: awaiting runTask here would enqueue behind itself
+  // and deadlock. An unexpected SIGTERM is recoverable even after a long run.
+  if (exitCode !== 0 && !timedOut && !claudeResult &&
+      (exitCode === 143 || fullOutput.text.trim().length < 50)) {
     const crashDurationMs = Date.now() - thinkingStart;
-    if (crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
-      const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
-      else await tgSend(BOT_TOKEN, chatId, retryMsg);
-      return runTask({
-        taskId: `${user.username}-${Date.now()}`,
-        user,
-        task,
-        context,
-        sessionId: activeSessionId,
-        forceClaude,
-        initialMsgId: msgId,
-        pinnedMsgId,
-        secrets,
-        retryCount: retryCount + 1,
-      });
+    const canRetry = (exitCode === 143 || crashDurationMs < QUICK_CRASH_MS) && retryCount < MAX_QUICK_RETRIES;
+    if (canRetry) {
+      const next = retryCount + 1;
+      const retryMsg = `🔄 Сбой процесса (код ${exitCode}). Попытка восстановления ${next}/${MAX_QUICK_RETRIES}${shuttingDown ? ' после перезапуска сервера; задача сохранена.' : ' — запускаю.'}`;
+      console.warn(`[recovery] task=${taskId} session=${activeSessionId} code=${exitCode} attempt=${next} deferred=${shuttingDown}`);
+      if (activeSessionId && fullOutput.text.trim()) {
+        sessions.appendReply(user.workDir, activeSessionId, `[прервано с кодом ${exitCode}]\n${fullOutput.text.trim()}`);
+      }
+      if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
+      const retryOpts = {
+        taskId, user, task, context, sessionId: activeSessionId, contextFromSession,
+        forceClaude, forceNew: false, initialMsgId: msgId, pinnedMsgId, secrets,
+        continuationCount, retryCount: next, outputCallback, internalGtd, mode,
+        projectId, newProjectName: null,
+      };
+      // Commit the resume intent before any network notification or shutdown.
+      savePendingTask(taskId, { ...retryOpts, secrets: undefined, user: undefined,
+        userId: user.id, username: user.username, workDir: user.workDir,
+        phase: 'queued', startedAt: Date.now() });
+      await tgSend(BOT_TOKEN, chatId, retryMsg).catch(e => console.warn('[recovery] notify failed:', e.message));
+      if (shuttingDown) return { recoveryDeferred: true, message: retryMsg };
+      return _runTask(retryOpts);
     }
     const crashMsg = retryCount > 0
-      ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`
-      : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
+      ? `⚠️ Восстановить сессию не удалось: процесс завершился с кодом ${exitCode}. Выполнено попыток: ${retryCount}/${MAX_QUICK_RETRIES}. Автоповторы остановлены.`
+      : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Автовосстановление для этого сбоя не выполнялось.`;
+    console.warn(`[recovery] task=${taskId} failed code=${exitCode} attempts=${retryCount}`);
+    if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, crashMsg);
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
     else await tgSend(BOT_TOKEN, chatId, crashMsg);
     return crashMsg;
@@ -2963,7 +2988,7 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
 }
 
 module.exports = {
-  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
+  beginShutdown, runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },

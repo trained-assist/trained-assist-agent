@@ -503,48 +503,24 @@ function scheduleGtdController(secrets) {
 }
 
 async function resumePendingTasks(secrets) {
-  const pending = getPendingTasks();
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  const queueCutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const toResume = pending.filter(t => t.startedAt && t.startedAt > (t.phase === 'queued' ? queueCutoff : cutoff) && t.username && t.userId && t.task)
-    .sort((a, b) => a.startedAt - b.startedAt);
-  // Clean up stale files that are too old to resume — prevents slow startup after many crashes.
-  const { clearPendingTask: _clearStale } = require('./runner');
-  for (const t of pending) {
-    if (!toResume.includes(t) && t.taskId) _clearStale(t.taskId);
-  }
-  if (toResume.length === 0) return;
-
-  console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-
-  // Import clearPendingTask to remove original files before re-running
-  const { clearPendingTask: _clearPending } = require('./runner');
-
-  for (const p of toResume) {
-    console.log(`[resume] task=${p.taskId} user=${p.username} task="${String(p.task).slice(0, 60)}"`);
-    // Delete original file immediately — the new runTask will journal under its own taskId
-    _clearPending(p.taskId);
-    if (p.initialMsgId && secrets.BOT_TOKEN) {
-      fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
-        method: 'POST',
-        signal: AbortSignal.timeout(8000),
+  await require('./recovery-resume').resumePending({
+    pending: getPendingTasks(), runTask, clearPendingTask: require('./runner').clearPendingTask,
+    baseUsersDir: BASE_USERS_DIR, secrets,
+    record: (p, text) => {
+      if (p.sessionId) require('./session-store').appendReply(p.workDir || path.join(BASE_USERS_DIR, p.username), p.sessionId, text);
+    },
+    notify: async (p, text) => {
+      const token = secrets.BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN;
+      const response = await fetch(`${TG_BASE}/bot${token}/sendMessage`, {
+        method: 'POST', signal: AbortSignal.timeout(8000),
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: p.userId, message_id: p.initialMsgId, text: '🔄 Перезапускаю после сбоя…' }),
-      }).catch(() => {});
-    }
-    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
-    const user = { id: p.userId, name: p.username, username: p.username, workDir };
-    const newTaskId = `${p.username}-resume-${Date.now()}`;
-    runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
-      sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
-      forceClaude: !!p.forceClaude, forceNew: !!p.forceNew, mode: p.mode || null,
-      projectId: p.projectId || null, newProjectName: p.newProjectName || null,
-      initialMsgId: p.initialMsgId || null,
-      pinnedMsgId: p.pinnedMsgId || null, secrets,
-    }).catch(err => console.error(`[resume] ${newTaskId} error:`, err.message));
-    await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
-  }
+        body: JSON.stringify({ chat_id: p.userId, text }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.description || `HTTP ${response.status}`);
+    },
+  });
 }
 
 async function main() {
@@ -4056,6 +4032,7 @@ ${recent || '(пока нет)'}
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    require('./runner').beginShutdown();
     server.close(); // stop accepting new HTTP connections; existing tasks keep running
     const active = getActiveTaskCount();
     if (active > 0) {
