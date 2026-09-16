@@ -25,6 +25,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 // ── Разумные дефолты (небольшие, но осмысленные) ────────────────────────────
 const DEFAULT_ETA_MIN = 60;   // через сколько минут после завершения проверить
@@ -37,6 +38,7 @@ const MAX_FIRES_PER_TICK = 3;  // не будим весь профиль-пар
 
 const GTD_DIR = 'gtd';
 const CHECKLIST_FILE = 'checklist.md';
+const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'agent-tokens');
 
 // Дешёвый pre-gate: без хотя бы одного из этих сигналов LLM не зовём —
 // ложный пинг дороже пропуска, а большинство задач контроля не просят.
@@ -199,6 +201,127 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
   return rec;
 }
 
+// Чек-лист в корне проекта — уже осознанный авторский сигнал («кто-то написал
+// `- [ ] ...`»), в отличие от detectIntent (угадывание намерения по свободному
+// тексту). Поэтому не требует ни LLM-гейта, ни ограничения на deep-режим — сам
+// факт незакрытого checklist.md достаточен, чтобы довести дело до конца.
+// Используется как дефолт для PR-задач: «создал PR → checklist.md с 3 пунктами
+// (CI/merge/деплой) → трекается автоматически», без явной фразы «доведи до конца».
+async function scheduleFromChecklist({ workDir, sessionId, chatId, username, projectDir }) {
+  if (!workDir || !sessionId || !projectDir) return null;
+  const checklist = readChecklist(projectDir);
+  if (!checklist || !checklist.items.length || !checklist.items.some(i => !i.done)) return null;
+  const existing = readGtd(workDir, sessionId);
+  if (existing && existing.status === 'open') return existing; // уже трекается — не сбрасываем прогресс/backoff
+  const now = Date.now();
+  const maxIterations = computeMaxIterations(checklist);
+  const rec = {
+    sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
+    createdAt: now,
+    dueAt: now + ETA_MIN_CLAMP * 60 * 1000, // чек-лист = обычно быстрые объективные проверки (CI/деплой)
+    etaMinutes: ETA_MIN_CLAMP,
+    iterations: 0,
+    maxIterations,
+    status: 'open',
+    originalTask: checklist.goal || '(см. checklist.md)',
+    projectDir,
+    lastFiredAt: null,
+    closedReason: null,
+  };
+  writeGtd(workDir, rec);
+  console.log(`[gtd] scheduled(checklist) session=${sessionId} user=${username} eta=${ETA_MIN_CLAMP}m maxIterations=${maxIterations} due=${new Date(rec.dueAt).toISOString()}`);
+  return rec;
+}
+
+// ── Дешёвая пре-проверка (без LLM, без спавна Claude) ───────────────────────
+// Объективные факты — «CI зелёный», «замержено в main» — берём напрямую из
+// GitHub API. «Задеплоено и проверено вживую» намеренно НЕ автоматизируем: единого
+// health-эндпоинта across репозиториев нет, это остаётся на агента (реальная
+// проверка, не рутинный polling — там эскалация до дорогого Claude оправдана).
+const CI_ITEM_RE = /\bci\b|зелен|green\s*(check|ci)?/i;
+const MERGED_ITEM_RE = /merg|смерж|замерж|влит/i;
+const PR_REF_RE = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/;
+
+function _ghToken(username) {
+  try {
+    const p = path.join(TOKENS_ROOT, String(username), 'github');
+    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+  } catch { /* no token on disk */ }
+  return null;
+}
+
+async function _ghFetch(url, token) {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.v3+json', 'User-Agent': 'trained-assist-agent-gtd' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function checklistCheapPrecheck(checklist, { username } = {}) {
+  const raw = [checklist.goal, ...checklist.items.map(i => i.text)].filter(Boolean).join('\n');
+  const m = raw.match(PR_REF_RE);
+  if (!m) return { changed: false, items: checklist.items };
+  const token = username ? _ghToken(username) : null;
+  if (!token) return { changed: false, items: checklist.items };
+  const [, owner, repo, numStr] = m;
+
+  let pr;
+  try { pr = await _ghFetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${numStr}`, token); }
+  catch (e) { console.warn('[gtd] precheck PR fetch:', e.message); return { changed: false, items: checklist.items }; }
+  if (!pr) return { changed: false, items: checklist.items };
+
+  let ciGreen = null;
+  if (pr.head?.sha) {
+    try {
+      const checks = await _ghFetch(`https://api.github.com/repos/${owner}/${repo}/commits/${pr.head.sha}/check-runs`, token);
+      const runs = checks?.check_runs || [];
+      if (runs.length) ciGreen = runs.every(r => r.status === 'completed' && r.conclusion === 'success');
+    } catch (e) { console.warn('[gtd] precheck checks fetch:', e.message); }
+  }
+
+  let changed = false;
+  const items = checklist.items.map(item => {
+    if (item.done) return item;
+    if (CI_ITEM_RE.test(item.text) && ciGreen === true) { changed = true; return { ...item, done: true }; }
+    if (MERGED_ITEM_RE.test(item.text) && pr.merged === true) { changed = true; return { ...item, done: true }; }
+    return item;
+  });
+  return { changed, items };
+}
+
+// Флипает только чекбоксы (по порядку встречи в файле), не трогая остальной текст —
+// безопасно для произвольного содержимого checklist.md (заголовки, Goal:, заметки).
+function writeChecklistDone(projectDir, items) {
+  const fp = path.join(projectDir, CHECKLIST_FILE);
+  let raw;
+  try { raw = fs.readFileSync(fp, 'utf8'); } catch { return false; }
+  let idx = 0;
+  const lines = raw.split('\n').map(line => {
+    const m = line.match(/^(\s*-\s*\[)([ xX])(\]\s*)(.+)$/);
+    if (!m) return line;
+    const upd = items[idx]; idx++;
+    if (!upd) return line;
+    return `${m[1]}${upd.done ? 'x' : ' '}${m[3]}${m[4]}`;
+  });
+  try { _atomicWrite(fp, lines.join('\n')); return true; }
+  catch (e) { console.error('[gtd] writeChecklistDone:', e.message); return false; }
+}
+
+async function _tgNotify(botToken, chatId, text) {
+  if (!botToken || !chatId) return;
+  const base = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+  try {
+    await fetch(`${base}/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (e) { console.warn('[gtd] tgNotify:', e.message); }
+}
+
 const REOPEN_INTRO = '[GTD — авто-доведение задачи до конца]';
 
 function buildReopenMessage(rec) {
@@ -246,6 +369,29 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 
       const session = getSession(workDir, rec.sessionId);
       if (!session) { clearGtd(workDir, rec.sessionId); continue; }
+
+      // Дешёвая пре-проверка ПЕРЕД тем как будить дорогого Claude/Codex: объективные
+      // факты (CI зелёный / замержено) берём напрямую из GitHub API. Если чек-лист
+      // закрылся целиком уже на этом шаге — не расходуем ни итерацию, ни Claude-сессию.
+      if (rec.projectDir) {
+        const checklist = readChecklist(rec.projectDir);
+        if (checklist && checklist.items.length) {
+          let pre = { changed: false, items: checklist.items };
+          try { pre = await checklistCheapPrecheck(checklist, { username }); }
+          catch (e) { console.warn(`[gtd] precheck ${rec.sessionId}:`, e.message); }
+          if (pre.changed) writeChecklistDone(rec.projectDir, pre.items);
+          if (pre.items.every(i => i.done)) {
+            rec.status = 'closed'; rec.closedReason = 'done-precheck';
+            writeGtd(workDir, rec);
+            console.log(`[gtd] closed ${rec.sessionId}: done-precheck (no Claude spent)`);
+            const notifyChatId = rec.chatId || session.liveChatId || session.ownerChatId;
+            _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, notifyChatId,
+              `✅ Чек-лист закрыт автопроверкой (CI/merge через GitHub API, без затрат на Claude):\n${pre.items.map(i => `✓ ${i.text}`).join('\n')}`
+            ).catch(() => {});
+            continue;
+          }
+        }
+      }
 
       // Инкремент + persist ДО запуска — durable, переживает краш итерации.
       rec.iterations += 1;
@@ -307,9 +453,10 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 }
 
 module.exports = {
-  detectIntent, maybeSchedule, runDue, buildReopenMessage,
+  detectIntent, maybeSchedule, scheduleFromChecklist, runDue, buildReopenMessage,
   readGtd, writeGtd, clearGtd, listGtd,
   readChecklist, checklistSummary, computeMaxIterations,
+  checklistCheapPrecheck, writeChecklistDone,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
   CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS,
 };

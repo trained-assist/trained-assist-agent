@@ -2,6 +2,12 @@
 # Deploy script — run on the VM after git pull
 set -Eeuo pipefail
 
+case "${DEPLOY_ENV:-}" in
+  gcp) UNIT_VARIANT="" ;;
+  ru) UNIT_VARIANT="-ru" ;;
+  *) echo "DEPLOY_ENV must be gcp or ru" >&2; exit 1 ;;
+esac
+
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
@@ -49,6 +55,9 @@ on_deploy_error() {
   exit "$code"
 }
 
+echo "==> Validating and applying nginx config ($DEPLOY_ENV)..."
+bash "$REPO_DIR/scripts/deploy-nginx.sh"
+
 # The CI caller also drains before git reset; direct invocations still must drain.
 python3 "$REPO_DIR/scripts/drain-for-deploy.py"
 trap on_deploy_error ERR
@@ -78,15 +87,6 @@ if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; t
 fi
 
 echo "==> Installing systemd unit file..."
-# Use the RU-specific unit file on non-GCP VMs (Hostland has no GCP metadata)
-if curl -sf -m 2 http://metadata.google.internal/computeMetadata/v1/instance/id \
-     -H "Metadata-Flavor: Google" >/dev/null 2>&1; then
-  UNIT_VARIANT=""
-  echo "  Detected: GCP VM"
-else
-  UNIT_VARIANT="-ru"
-  echo "  Detected: non-GCP VM (using assist-agent-ru.service)"
-fi
 UNIT_SRC="$REPO_DIR/systemd/${SERVICE}${UNIT_VARIANT}.service"
 UNIT_DST="/etc/systemd/system/${SERVICE}.service"
 NOTIFY_SRC="$REPO_DIR/systemd/assist-agent-notify-failure.service"
@@ -159,23 +159,6 @@ done
 sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
 echo "==> Service journal (last 20 lines)..."
 sudo journalctl -u "$SERVICE" --no-pager -n 20 || true
-
-echo "==> Applying nginx config (GCP only)..."
-NGINX_CONF_SRC="$REPO_DIR/infra/nginx/relay.conf"
-NGINX_CONF_DST="/etc/nginx/sites-enabled/relay"
-if [ -f "$NGINX_CONF_SRC" ] && command -v nginx >/dev/null 2>&1; then
-  if ! diff -q "$NGINX_CONF_SRC" "$NGINX_CONF_DST" >/dev/null 2>&1; then
-    sudo cp "$NGINX_CONF_SRC" "$NGINX_CONF_DST"
-    if sudo nginx -t 2>/dev/null; then
-      sudo systemctl reload nginx
-      echo "  nginx reloaded"
-    else
-      echo "  ⚠️  nginx config test failed — not reloading"
-    fi
-  else
-    echo "  nginx config unchanged"
-  fi
-fi
 
 echo "==> Installing disk-hygiene crons..."
 if [ -x "$REPO_DIR/ops/cron/install.sh" ]; then

@@ -33,3 +33,21 @@ test('queued media survives TTL and a corrupt journal stops cleanup', () => {
     fs.unlinkSync(path.join(journal,'task.json'));assert.equal(purgeIntakeMedia(profiles),1);
   } finally { if(before===undefined)delete process.env.AGENT_DATA_DIR;else process.env.AGENT_DATA_DIR=before;fs.rmSync(root,{recursive:true,force:true}); }
 });
+
+test('48h purge also drops expired intake-store refs (PUT /intake-files) but keeps fresh ones', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'media-ttl-store-'));
+  try {
+    const storeDir = path.join(root, 'alice', 'media', 'intake-store');
+    const oldRef = path.join(storeDir, 'aaaa'); const freshRef = path.join(storeDir, 'bbbb');
+    for (const dir of [oldRef, freshRef]) fs.mkdirSync(dir, { recursive: true });
+    for (const dir of [oldRef, freshRef]) {
+      fs.writeFileSync(path.join(dir, 'data'), 'bytes');
+      fs.writeFileSync(path.join(dir, 'meta.json'), '{"name":"f","mime":"application/octet-stream","size":5}');
+    }
+    const aged = new Date(Date.now() - TTL_MS - 1000);
+    fs.utimesSync(path.join(oldRef, 'meta.json'), aged, aged);
+    assert.equal(purgeIntakeMedia(root), 1);
+    assert.equal(fs.existsSync(oldRef), false);
+    assert.equal(fs.existsSync(freshRef), true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

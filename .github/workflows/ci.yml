@@ -63,6 +63,7 @@ jobs:
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
@@ -101,13 +102,14 @@ jobs:
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
-            bash scripts/deploy.sh
+            DEPLOY_ENV=gcp bash scripts/deploy.sh
 
   deploy-ru:
     needs: [ci, merge]
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
@@ -152,7 +154,7 @@ jobs:
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
-            AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
+            DEPLOY_ENV=ru AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
 
   notify-merge-queue:
     needs: [deploy-gcp, deploy-ru]

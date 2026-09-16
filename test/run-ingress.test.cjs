@@ -39,3 +39,13 @@ test('attachment disk failure cannot turn into accepted text-only work',async t=
  const f=fixture(t);f.sandbox.fs={...fs,writeFileSync(){throw Error('ENOSPC');}};
  const res=await f.send({fileBase64:'YQ==',fileName:'file.pdf'});assert.equal(res.status,503);assert.equal(f.runs.length,0);
 });
+
+test('file references survive acceptance and missing references are never acknowledged', async t => {
+ const f=fixture(t);const id='a'.repeat(64);const dir=path.join(f.root,'users','alice','media','intake-store',id);
+ fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'data'),'attachment');
+ const response=await f.send({fileRefs:[{id,name:'resume.pdf'}]});assert.equal(response.status,202);
+ const file=path.join(f.root,'users','alice','media','intake',id+'-resume.pdf');
+ assert.equal(fs.readFileSync(file,'utf8'),'attachment');assert.ok(f.runs[0].task.includes(file));
+ const missing=await f.send({requestId:'missing',fileRefs:[{id:'b'.repeat(64),name:'missing.pdf'}]});
+ assert.equal(missing.status,503);assert.equal(f.runs.length,1);
+});
