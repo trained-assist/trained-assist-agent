@@ -1268,6 +1268,11 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   }
 
   if (userId && workDir && hhConnected) {
+    const hhIntents = [HH_STATUS_INTENT, HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT,
+      HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT,
+      HH_WHERE_PROMPT_INTENT, HH_SHOW_ATS_CONFIG_INTENT, HH_STYLE_INTENT];
+    if (hhIntents.some(intent => intent.test(task)) && !task.trim().startsWith('/') &&
+        !await verifyQuickAnswerIntent(task, 'Быстрый ответ HeadHunter: вакансии, статистика, ссылки на ревью кандидатов или настройки рекрутинга', openrouterKey)) return null;
     if (HH_STATUS_INTENT.test(task)) return hhStatus(userId);
     if (HH_MY_VACANCIES_INTENT.test(task)) {
       const r = await hhMyVacancies(userId, workDir).catch(() => null);

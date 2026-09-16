@@ -1,14 +1,14 @@
 {
   "name": "trained-assist-agent",
   "version": "0.1.0",
-  "description": "Trained Assist Agent — Claude Code session runner",
+  "description": "Trained Assist Agent \u2014 Claude Code session runner",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "check": "node --check src/server.js src/runner.js src/session-store.js src/secrets.js src/browser.js",
     "test": "vitest run && npm run test:cjs",
-    "test:cjs": "node test/answer-router.test.cjs && node test/gtd-controller.test.cjs && node test/session-context-batch.test.cjs && node test/final-text-select.test.cjs && node test/session-store-recency.test.cjs && node test/lane-granularity.test.cjs && node test/cap-per-profile.test.cjs",
+    "test:cjs": "node test/answer-router.test.cjs && node test/gtd-controller.test.cjs && node test/session-context-batch.test.cjs && node test/final-text-select.test.cjs && node test/session-store-recency.test.cjs && node test/lane-granularity.test.cjs && node test/cap-per-profile.test.cjs && node --test test/intake-quick.test.cjs test/intake-media-retention.test.cjs",
     "test:watch": "vitest"
   },
   "devDependencies": {
