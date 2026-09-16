@@ -106,6 +106,91 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   ok(scheduleErr === null, 'maybeSchedule with checklist.md does not throw');
   ok(scheduled && scheduled.maxIterations === 4, 'maybeSchedule scales maxIterations from checklist');
 
+  // 11. scheduleFromChecklist: no LLM call, mode-independent — checklist alone is enough
+  const wd4 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd4-'));
+  ok((await G.scheduleFromChecklist({ workDir: wd4, sessionId: 's-2', projectDir: fs.mkdtempSync(path.join(os.tmpdir(), 'gtd-noproj-')) })) === null,
+    'scheduleFromChecklist: no checklist -> null');
+  const scheduledFromChecklist = await G.scheduleFromChecklist({
+    workDir: wd4, sessionId: 's-2', chatId: '7', username: 'u', projectDir: projDir,
+  });
+  ok(scheduledFromChecklist && scheduledFromChecklist.status === 'open' && scheduledFromChecklist.maxIterations === 4,
+    'scheduleFromChecklist schedules from unchecked checklist.md alone');
+  ok(scheduledFromChecklist.etaMinutes === G.ETA_MIN_CLAMP, 'scheduleFromChecklist uses fast eta (build-time scale, not 60m default)');
+  const notReScheduled = await G.scheduleFromChecklist({ workDir: wd4, sessionId: 's-2', projectDir: projDir });
+  ok(notReScheduled.createdAt === scheduledFromChecklist.createdAt, 'scheduleFromChecklist does not reset an already-open record');
+
+  // 12. checklistCheapPrecheck: ticks CI/merged off via GitHub API, no LLM, no Claude
+  const prProjDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd-pr-'));
+  fs.writeFileSync(path.join(prProjDir, 'checklist.md'), [
+    'Goal: ship fix (PR https://github.com/acme/widgets/pull/42)',
+    '- [ ] CI green on https://github.com/acme/widgets/pull/42',
+    '- [ ] Merged to main',
+    '- [ ] Deployed to prod — verified live',
+  ].join('\n'));
+  const tokensRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd-tokens-'));
+  fs.mkdirSync(path.join(tokensRoot, 'ghuser'), { recursive: true });
+  fs.writeFileSync(path.join(tokensRoot, 'ghuser', 'github'), 'ghp_fake');
+  const realTokensRoot = process.env.AGENT_TOKENS_ROOT;
+  process.env.AGENT_TOKENS_ROOT = tokensRoot;
+  // Re-require with the env var already set, since TOKENS_ROOT is read at module load time.
+  delete require.cache[require.resolve('../src/gtd-controller.js')];
+  const G2 = require('../src/gtd-controller.js');
+
+  const realFetch2 = global.fetch;
+  global.fetch = async (url) => {
+    if (String(url).includes('/pulls/42')) {
+      return { ok: true, json: async () => ({ merged: true, head: { sha: 'abc123' } }) };
+    }
+    if (String(url).includes('/commits/abc123/check-runs')) {
+      return { ok: true, json: async () => ({ check_runs: [{ status: 'completed', conclusion: 'success' }] }) };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const checklistNoUser = G2.readChecklist(prProjDir);
+  const preNoUser = await G2.checklistCheapPrecheck(checklistNoUser, {});
+  ok(preNoUser.changed === false, 'checklistCheapPrecheck: no username/token -> no-op');
+  const pre = await G2.checklistCheapPrecheck(checklistNoUser, { username: 'ghuser' });
+  ok(pre.changed === true, 'checklistCheapPrecheck: ticks items via GitHub API');
+  ok(pre.items.find(i => /CI green/.test(i.text)).done === true, 'CI item marked done from check-runs');
+  ok(pre.items.find(i => /Merged/.test(i.text)).done === true, 'Merged item marked done from pr.merged');
+  ok(pre.items.find(i => /Deployed/.test(i.text)).done === false, 'Deployed-live item left for the agent (not auto-verifiable)');
+  G2.writeChecklistDone(prProjDir, pre.items);
+  const rewritten = fs.readFileSync(path.join(prProjDir, 'checklist.md'), 'utf8');
+  ok(/- \[x\] CI green/.test(rewritten) && /- \[x\] Merged/.test(rewritten) && /- \[ \] Deployed/.test(rewritten),
+    'writeChecklistDone flips only the resolved checkboxes, preserves the rest');
+  ok(/Goal: ship fix/.test(rewritten), 'writeChecklistDone preserves non-checkbox lines');
+
+  // 13. runDue: fully-resolved-by-precheck checklist closes WITHOUT calling runTask (no Claude spent)
+  const wd5 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd5-'));
+  const userDir5 = path.join(wd5, 'ghuser');
+  fs.mkdirSync(userDir5, { recursive: true });
+  // Simulate precheck seeing everything already resolved (e.g. a prior tick + manual close).
+  fs.writeFileSync(path.join(prProjDir, 'checklist.md'), [
+    '- [x] CI green on https://github.com/acme/widgets/pull/42',
+    '- [x] Merged to main',
+    '- [x] Deployed to prod — verified live',
+  ].join('\n'));
+  G2.writeGtd(userDir5, {
+    sessionId: 's-pr', chatId: '9', username: 'ghuser', createdAt: 1, dueAt: 100,
+    etaMinutes: 20, iterations: 0, maxIterations: 4, status: 'open',
+    originalTask: 'ship fix', projectDir: prProjDir, lastFiredAt: null, closedReason: null,
+  });
+  let runTaskCalled = false;
+  await G2.runDue({
+    secrets: {}, baseUsersDir: wd5, now: 200,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '9' }),
+    runTask: async () => { runTaskCalled = true; return 'x'; },
+  });
+  global.fetch = realFetch2;
+  if (realTokensRoot === undefined) delete process.env.AGENT_TOKENS_ROOT; else process.env.AGENT_TOKENS_ROOT = realTokensRoot;
+  delete require.cache[require.resolve('../src/gtd-controller.js')];
+
+  ok(!runTaskCalled, 'runDue: does not spend Claude when checklist already fully resolved');
+  const closedByPrecheck = G2.readGtd(userDir5, 's-pr');
+  ok(closedByPrecheck && closedByPrecheck.status === 'closed' && closedByPrecheck.closedReason === 'done-precheck',
+    'runDue: closes with done-precheck reason');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
