@@ -25,3 +25,9 @@ test('untrusted references, owners and insecure origins are rejected before netw
  const f=fixture(t);for(const overrides of [{username:'../bob'},{ref:{...f.opts.ref,id:'../a'}},{ref:{...f.opts.ref,size:21*1024*1024}},{gatewayUrl:'http://gateway'},{secret:''}]) await assert.rejects(materializeR2({...f.opts,...overrides}));
  assert.equal(f.calls(),0);
 });
+test('release verification exercises real reader without exposing a persistent probe file',async t=>{
+ const f=fixture(t);const {verifyR2}=require('../src/r2-media');
+ const result=await verifyR2(f.opts);assert.equal(result.verified,true);assert.equal(result.sha256,f.opts.ref.sha256);assert.equal(f.calls(),1);
+ assert.deepEqual(fs.readdirSync(f.dir),[]);
+ await assert.rejects(verifyR2({...f.opts,fetchImpl:async()=>new Response('broken')}),/integrity|size/);
+});

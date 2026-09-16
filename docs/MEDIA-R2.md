@@ -39,8 +39,11 @@ These are not real Cloudflare-account R2 or live Telegram/Deepgram tests.
 
 ## Rollout gate
 
-On 2026-09-16 Cloudflare returned 10042: "Please enable R2 through the Cloudflare
-Dashboard". Provisioning/production activation is blocked until that is resolved.
+Cloudflare initially returned 10042. Later on 2026-09-16 R2 became available;
+private primary/staging buckets were created and a separate live canary verified
+3-byte, 2.45 MB and 20 MiB objects with real R2/DO and mocked Telegram/STT.
+Ingress remains off until the authenticated /intake-media-check probe passes on
+both deployed agent readers. The probe does not launch user tasks.
 https://developers.cloudflare.com/r2/get-started/
 
 1. Enable the account's R2 subscription; create private `trained-assist-media` and
@@ -49,7 +52,7 @@ https://developers.cloudflare.com/r2/get-started/
 2. Provision an isolated canary environment (KV, INTAKE and MEDIA_JOBS, bucket).
    Existing shared staging KV must not be used for a user-data media canary.
    Reuse migration history in wrangler.toml; MEDIA_JOBS classes are prepared but
-   the feature defaults to off and no bucket binding is enabled in this change.
+   the feature defaults to off; both private bucket bindings are configured.
 3. Add `[[r2_buckets]]`, `binding = "MEDIA_BUCKET"`,
    `bucket_name = "trained-assist-media"` for the primary worker. Use
    `[[env.staging.r2_buckets]]` and the separate bucket for isolated staging.

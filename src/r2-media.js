@@ -48,4 +48,11 @@ async function materializeR2({ ref, username, destination, gatewayUrl, secret, f
     fs.rmSync(temporary, { force: true });
   }
 }
-module.exports = { materializeR2, validReference };
+async function verifyR2(options) {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'r2-reader-probe-'));
+  try {
+    await materializeR2({ ...options, destination: path.join(dir, 'data') });
+    return { verified: true, id: options.ref.id, size: options.ref.size, sha256: options.ref.sha256 };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+module.exports = { materializeR2, validReference, verifyR2 };
