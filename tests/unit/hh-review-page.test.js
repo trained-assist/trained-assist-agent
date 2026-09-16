@@ -15,9 +15,9 @@ it('separates dialogs, targets correct cards, and keeps failed rejections action
   const roles = [['employer', 'applicant', 'employer'], ['employer'], ['employer', 'applicant'], [], []];
   const negotiations = roles.map((rs, i) => {
     fs.writeFileSync(path.join(dir, i + '.json'), JSON.stringify({ messages: rs.map(role => ({ role, text: 'test' })), ats_result: i === 0 ? { verdict: 'ПРОПУСТИТЬ', score: 8 } : i === 4 ? { verdict: 'ОТКЛОНИТЬ', score: 2 } : null }));
-    return { id: String(i), resume: { first_name: 'Candidate ' + i }, counters: { messages: 3 } };
+    return { id: String(i), _resume_status: 'full', resume: { first_name: 'Candidate ' + i, skills: 'ABOUT-TAIL <script>bad()</script>', experience: [{ company: 'FIRST' }, { company: 'EARLY', description: 'FULL-DESCRIPTION-END' }] }, counters: { messages: 3 } };
   });
-  const context = vm.createContext({ fs, path, os, process, require: createRequire(import.meta.url), BASE_USERS_DIR: root });
+  const context = vm.createContext({ fs, path, os, process, require: createRequire(import.meta.url), BASE_USERS_DIR: root, ...createRequire(import.meta.url)('../../src/hh-resume') });
   vm.runInContext(fn, context);
   const html = context.generateReviewPageHtml(negotiations, 'Test', 'test', 'http://localhost', root);
   for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) new vm.Script(script[1]);
@@ -35,6 +35,9 @@ it('separates dialogs, targets correct cards, and keeps failed rejections action
     expect(await page.locator('#tab-all .reject-cb').count()).toBe(5);
     expect(await page.locator('.reject-cb:checked').count()).toBe(0);
     await page.getByRole('button', { name: '📨 Все (5)' }).click();
+    expect(await page.locator('#tab-all .resume-text').first().textContent()).toContain('FULL-DESCRIPTION-END');
+    expect(await page.locator('#tab-all .resume-text').first().textContent()).toContain('ABOUT-TAIL <script>bad()</script>');
+    expect(await page.locator('#tab-all .resume-status').first().textContent()).toContain('пересчёта');
     expect(errors).toEqual([]);
     expect(await page.locator('#selCount').textContent()).toBe('1');
     const acceptDialog = d => d.accept();

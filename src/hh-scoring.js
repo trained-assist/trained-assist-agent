@@ -1,4 +1,5 @@
 'use strict';
+const { buildResumeText, resumeHash, RESUME_VERSION } = require('./hh-resume');
 
 // Pure scoring utilities — no global state, no USER_ID dependency.
 // Used by both 90-hh.js MCP tool and server.js /hh/review endpoint.
@@ -291,41 +292,6 @@ function saveCandidateHistory(username, negotiationId, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
-function buildResumeText(neg, candidateMessages = []) {
-  const r = neg.resume || {};
-  const lines = [];
-  const name = [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат';
-  lines.push(`# Кандидат: ${name}`);
-  if (r.title) lines.push(`**Позиция в резюме:** ${r.title}`);
-  if (r.total_experience?.months) {
-    const y = Math.floor(r.total_experience.months / 12);
-    const m = r.total_experience.months % 12;
-    lines.push(`**Опыт:** ${y} лет${m ? ' ' + m + ' мес' : ''}`);
-  }
-  if (r.area?.name) lines.push(`**Локация:** ${r.area.name}`);
-  if (r.salary) lines.push(`**Зарплата:** ${r.salary.amount?.toLocaleString('ru-RU')} ${r.salary.currency}`);
-  if (r.experience?.length) {
-    lines.push('\n**Опыт работы:**');
-    for (const job of r.experience) {
-      const start = job.start?.slice(0, 7) || '';
-      const end = job.end?.slice(0, 7) || 'н.в.';
-      lines.push(`- ${job.company || ''} (${start}–${end}): ${job.position || ''}`);
-      if (job.description) lines.push(`  ${job.description}`);
-    }
-  }
-  if (r.skill_set?.length) lines.push(`\n**Навыки:** ${r.skill_set.slice(0, 25).join(', ')}`);
-  if (r.education?.primary?.length) {
-    const edu = r.education.primary[0];
-    lines.push(`\n**Образование:** ${edu.name || ''}, ${edu.organization || ''} (${edu.year || ''})`);
-  }
-  if (neg.message) lines.push(`\n**Сопроводительное письмо:**\n${neg.message.slice(0, 600)}`);
-  if (candidateMessages.length) {
-    lines.push('\n**Ответы кандидата в переписке:**');
-    for (const m of candidateMessages) lines.push(`- ${(m.text || '').slice(0, 400)}`);
-  }
-  return lines.join('\n');
-}
-
 // ─── Batch scoring: GigaChat primary ─────────────────────────────────────────
 
 async function scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent = 5, msgSyncStats = null } = {}) {
@@ -337,7 +303,9 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
   if (!gigachatKey && !apiKey) return 0;
 
   const unscored = negotiations.filter(neg => {
+    if (neg._resume_status !== 'full') return false;
     const history = readCandidateHistory(username, neg.id);
+    if (neg._resume_status === 'full' && (history.ats_result?.resume_version !== RESUME_VERSION || history.ats_result?.resume_hash !== resumeHash(neg))) return true;
     if (history.ats_result?.score == null) return true; // not scored yet
     // re-score if candidate replied after last scoring
     const scoredAt = history.ats_result.scored_at || 0;
@@ -389,6 +357,8 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
         const result = await module.exports.evaluateCandidate(resumeText, atsConfig, apiKey, gigachatKey);
         if (result.score != null) {
           result.scored_at = Date.now();
+          result.resume_version = RESUME_VERSION;
+          result.resume_hash = resumeHash(neg);
           history.ats_result = result;
           saveCandidateHistory(username, neg.id, history);
           scored++;
@@ -437,6 +407,7 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
     : '';
 
   const needDraft = negotiations.filter(neg => {
+    if (neg._resume_status !== 'full') return false;
     const h = readCandidateHistory(username, neg.id);
     return h.ats_result?.score != null && !h.ats_result?.draft_message;
   });
