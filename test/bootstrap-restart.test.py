@@ -82,4 +82,20 @@ class InstallTest(unittest.TestCase):
     def test_racing_task_sends_no_false_restart_notice(self): self.exercise(race=True,notifications=True)
     def test_racing_task_unfreezes_old_server_without_stopping(self): self.exercise(race=True)
 
+
+
+class ScheduleReplacementTest(unittest.TestCase):
+    def test_only_explicit_waiting_replacement_is_allowed(self):
+        import subprocess, json, os
+        source=(Path(__file__).resolve().parents[1]/'scripts/schedule-bootstrap.sh').read_text()
+        start=source.index('if [ -e "$REQUEST" ]; then')
+        block=source[start:source.index('mkdir -p /home/vova/agent-releases',start)]
+        with tempfile.TemporaryDirectory() as root:
+            request=Path(root)/'request.json'
+            for phase,flag,success in [('waiting','--replace-waiting',True),('waiting','',False),('installing','--replace-waiting',False),('failed','--replace-waiting',False),('complete','--replace-waiting',False)]:
+                request.write_text(json.dumps({'phase':phase,'commit':'old'}))
+                result=subprocess.run(['bash','-c','set -euo pipefail\n'+block],env={**os.environ,'REQUEST':str(request),'TARGET':'new','REPLACE_WAITING':flag},capture_output=True)
+                self.assertEqual(result.returncode==0,success,(phase,result.stderr))
+                self.assertEqual(json.loads(request.read_text())['commit'],'old')
+
 if __name__=='__main__': unittest.main()
