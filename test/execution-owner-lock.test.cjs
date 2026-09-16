@@ -18,6 +18,12 @@ test('exclusive ownership rejects aliases and a failed contender cannot release 
   for (const dir of [data, alias, data]) {
     assert.throws(() => acquireExecutionOwner(dir), { code: 'EXECUTION_OWNER_BUSY' });
   }
+  // A failed contender in this process must not drop the kernel lock held by
+  // our original connection. SQLite's in-process bookkeeping alone is not proof.
+  const probe = spawnSync(process.execPath, ['-e', `try {
+    require(${JSON.stringify(modulePath)}).acquireExecutionOwner(process.argv[1]); process.exit(2);
+  } catch(e) { process.exit(e.code === 'EXECUTION_OWNER_BUSY' ? 0 : 3); }`, alias], { timeout: 5000 });
+  assert.equal(probe.status, 0, probe.stderr?.toString());
   owner.close(); owner.close();
   const next = acquireExecutionOwner(alias); next.close();
   assert.equal(fs.statSync(path.join(data, 'execution-owner.sqlite')).mode & 0o777, 0o600);
@@ -26,8 +32,9 @@ test('exclusive ownership rejects aliases and a failed contender cannot release 
 test('SIGKILL releases ownership across processes without removing or expiring the lock file', { timeout: 10000 }, async t => {
   const root = fixture(t), script = path.join(root, 'owner.cjs');
   fs.writeFileSync(script, `const lock = require(${JSON.stringify(modulePath)}).acquireExecutionOwner(process.argv[2]);
-    process.on('message', () => lock.close()); process.send('owned');`);
-  const child = fork(script, [root], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    process.on('message', () => lock.close());
+    setImmediate(() => { global.gc(); setImmediate(() => process.send('owned')); });`);
+  const child = fork(script, [root], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], execArgv: ['--expose-gc'] });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
   assert.equal((await once(child, 'message'))[0], 'owned');
   const file = path.join(root, 'execution-owner.sqlite'), inode = fs.statSync(file).ino;
