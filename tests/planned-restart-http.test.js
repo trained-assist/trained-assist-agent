@@ -1,11 +1,11 @@
 import { it, expect } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 
-it('real HTTP drain survives process restart and releases the accepted queue exactly once', { timeout: 45000 }, async () => {
+it.each(['restart', 'deploy-target', 'deploy-wrong'])('real HTTP recovery: %s preserves admission and executes queued work once', { timeout: 45000 }, async (scenario) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'planned-restart-http-'));
   const calls = [];
   const telegram = http.createServer((req, res) => {
@@ -45,7 +45,8 @@ it('real HTTP drain survives process restart and releases the accepted queue exa
   }
   try {
     await start();
-    const operation = await api('/maintenance', { action: 'request' });
+    const revision = execFileSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8'}).trim();
+    const operation = await api('/maintenance', { action: 'request', ...(scenario !== 'restart' ? {kind:'deploy', targetCommit: scenario === 'deploy-target' ? revision : '0'.repeat(40), previousCommit: revision} : {}) });
     // Regression: screenshots used to fail with 503 here, while text /run
     // returned 202. Exercise the real HTTP gate and disk store during drain.
     const photo = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x42, 0xff, 0xd9]);
@@ -65,10 +66,18 @@ it('real HTTP drain survives process restart and releases the accepted queue exa
     expect(fs.existsSync(launches)).toBe(false);
     expect((await api('/maintenance', { action: 'claim', id: operation.id })).claimed).toBe(true);
     await stop(); await start();
-    const state = await api('/maintenance'); expect(state.paused).toBe(true); expect(state.bootId).not.toBe(operation.bootId);
-    expect(fs.existsSync(launches)).toBe(false);
+    const state = await api('/maintenance'); expect(state.bootId).not.toBe(operation.bootId);
+    if (scenario === 'deploy-wrong') {
+      expect(state.paused).toBe(true);
+      expect(fs.existsSync(launches)).toBe(false);
+      expect((await api('/maintenance', {action:'ready', id:operation.id})).paused).toBe(true);
+      expect((await api('/run', payload)).duplicate).toBe(true);
+      expect(fs.readdirSync(path.join(root, 'data', 'pending-tasks')).length).toBeGreaterThan(0);
+      return;
+    }
+    expect(state.paused).toBe(false); expect(state.phase).toBe('ready');
+    if (scenario === 'deploy-target') expect(state.deploymentOutcome).toBe('deployed');
     expect((await api('/run', payload)).duplicate).toBe(true);
-    expect((await api('/maintenance', { action: 'ready', id: operation.id })).phase).toBe('ready');
     await until(() => calls.some(c => c.text?.includes('Queue recovered')));
     await until(async () => (await api('/maintenance')).active === 0);
     expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
