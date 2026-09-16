@@ -7,6 +7,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawn } from 'child_process';
 import * as http from 'http';
+import { fileURLToPath } from 'node:url';
 
 const SECRET = 'test-secret-quick-caps';
 const TEST_USER = 'quicktestuser';
@@ -43,7 +44,7 @@ function request(method, pathname, { body, auth = true } = {}) {
 function startServer(env) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', ['src/server.js'], {
-      cwd: join(new URL(import.meta.url).pathname, '..', '..', '..'),
+      cwd: fileURLToPath(new URL('../../', import.meta.url)),
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
