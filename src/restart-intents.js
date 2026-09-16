@@ -35,11 +35,12 @@ function createIntentStore(file, { now = Date.now } = {}) {
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = FULL');
   const version = db.pragma('user_version', { simple: true });
-  if (![0, 1].includes(version)) { db.close(); throw Error('Unsupported intent schema'); }
+  if (![0, 1, 2].includes(version)) { db.close(); throw Error('Unsupported intent schema'); }
   db.exec(`CREATE TABLE IF NOT EXISTS intents (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS actions (intent_id TEXT NOT NULL, action_id TEXT NOT NULL,
       data TEXT NOT NULL, PRIMARY KEY(intent_id, action_id));
-    PRAGMA user_version = 1;`);
+    CREATE TABLE IF NOT EXISTS confirmations (handle TEXT PRIMARY KEY, intent_id TEXT NOT NULL, data TEXT NOT NULL);
+    PRAGMA user_version = 2;`);
   const read = id => {
     const row = db.prepare('SELECT data FROM intents WHERE id = ?').get(id);
     return row ? JSON.parse(row.data) : null;
@@ -62,9 +63,40 @@ function createIntentStore(file, { now = Date.now } = {}) {
     return intent;
   }
   function waiting(intent) {
-    return write({ ...intent, state: 'waiting_confirmation', confirmationToken: randomUUID(),
+    const result = write({ ...intent, state: 'waiting_confirmation', confirmationToken: randomUUID(),
       claimToken: null, claimedBy: null, updatedAt: now() });
+    registerConfirmation(result);
+    return result;
   }
+  function registerConfirmation(intent) {
+    const event = { handle: intent.confirmationToken, intentId: intent.id, createdAt: now(),
+      delivered: {}, decision: null };
+    db.prepare('INSERT OR IGNORE INTO confirmations VALUES (?, ?, ?)')
+      .run(event.handle, intent.id, JSON.stringify(event));
+  }
+  function writeConfirmation(event) {
+    db.prepare('UPDATE confirmations SET data=? WHERE handle=?').run(JSON.stringify(event), event.handle);
+  }
+  function accessible(intent, principal) {
+    if (!principal || principal.username !== intent.owner.username) return false;
+    if (principal.channel === 'web') return true; // verified profile cookie/delegation
+    if (principal.channel !== 'telegram') return false;
+    const o = intent.owner;
+    // Legacy private chats can prove the sender from the chat ID. Never infer an
+    // owner from a group chat, or from a currently selected project/session.
+    const actor = o.telegramUserId ?? (Number(o.chatId) > 0 ? o.chatId : null);
+    return actor != null && principal.telegramUserId != null &&
+      String(actor) === String(principal.telegramUserId) &&
+      String(o.chatId) === String(principal.chatId) &&
+      (o.threadId == null ? principal.threadId == null : String(o.threadId) === String(principal.threadId));
+  }
+  // Upgrade waiting rows atomically; preserve any already issued v1 token.
+  db.transaction(() => {
+    for (const row of db.prepare('SELECT data FROM intents').all()) {
+      const intent = JSON.parse(row.data);
+      if (intent.state === 'waiting_confirmation') registerConfirmation(intent);
+    }
+  }).immediate();
   const unresolved = id => db.prepare('SELECT data FROM actions WHERE intent_id=?').all(id)
     .some(row => JSON.parse(row.data).state === 'started');
   const store = {
@@ -191,6 +223,45 @@ function createIntentStore(file, { now = Date.now } = {}) {
         return !existed && phase === 'waiting_confirmation' && intent.state === 'queued' ? waiting(intent) : intent;
       });
     }),
+    // Transport adapters authenticate the principal; callers never supply owner,
+    // payload, task ID, project, or confirmation time as launch authority.
+    confirmations(principal) {
+      return db.prepare('SELECT data FROM confirmations').all().map(row => JSON.parse(row.data))
+        .flatMap(event => {
+          const intent = read(event.intentId);
+          return intent && accessible(intent, principal) && intent.state === 'waiting_confirmation' &&
+            intent.confirmationToken === event.handle ? [{ event, intent }] : [];
+        });
+    },
+    decide: atomic((handle, principal, action) => {
+      if (!['confirm', 'cancel'].includes(action)) throw Error('Invalid decision');
+      const row = db.prepare('SELECT data FROM confirmations WHERE handle=?').get(handle);
+      const event = row && JSON.parse(row.data);
+      const intent = event && read(event.intentId);
+      if (!intent || !accessible(intent, principal)) throw Error('Confirmation unavailable');
+      // An ACK lost after commit returns the SAME recorded result. Never refresh
+      // confirmedAt on retry, and never consume the next generation's button.
+      if (event.decision) return { accepted: false, replay: true, decision: event.decision, state: intent.state };
+      const result = store[action](intent.id, intent.owner, handle);
+      if (!result.accepted) return { accepted: false, replay: false, decision: null, state: intent.state };
+      event.decision = action; event.decidedAt = now(); writeConfirmation(event);
+      return { accepted: true, replay: false, decision: action, state: result.intent.state };
+    }),
+    pendingConfirmationNotices() {
+      return db.prepare('SELECT data FROM confirmations').all().map(row => JSON.parse(row.data))
+        .flatMap(event => {
+          const intent = read(event.intentId);
+          return intent?.state === 'waiting_confirmation' && intent.confirmationToken === event.handle
+            ? [{ event, intent }] : [];
+        });
+    },
+    acknowledgeConfirmation: atomic((handle, channel) => {
+      if (!['telegram', 'session'].includes(channel)) throw Error('Invalid delivery channel');
+      const row = db.prepare('SELECT data FROM confirmations WHERE handle=?').get(handle);
+      if (!row) throw Error('Confirmation unavailable');
+      const event = JSON.parse(row.data);
+      event.delivered[channel] ??= now(); writeConfirmation(event);
+    }),
     retainedPayloads() {
       return db.prepare('SELECT data FROM intents').all().map(row => JSON.parse(row.data))
         .filter(intent => !TERMINAL.has(intent.state)).map(intent => ({ owner: intent.owner, payload: intent.payload }));
@@ -202,7 +273,7 @@ function retainedIntentPayloads(file) {
   if (!fs.existsSync(file)) return [];
   const db = new Database(file, { readonly: true, fileMustExist: true, timeout: 5000 });
   try {
-    if (db.pragma('user_version', { simple: true }) !== 1) throw Error('Unsupported intent schema');
+    if (![1, 2].includes(db.pragma('user_version', { simple: true }))) throw Error('Unsupported intent schema');
     return db.prepare('SELECT data FROM intents').all().map(row => JSON.parse(row.data))
       .filter(intent => {
         if (!STATES.has(intent.state)) throw Error('Invalid intent state');

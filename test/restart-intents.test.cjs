@@ -159,3 +159,36 @@ test('concurrent confirm versus cancel consumes one token and preserves the winn
   const winner=results.find(r=>r.accepted);assert.equal(f.store.get('decision',owner).state,winner.state);
   assert.equal(!!f.store.claim('decision',owner,'boot',true),winner.state==='queued');
 });
+
+test('transport principals cannot cross profile, actor, chat or topic; web uses authenticated profile', t => {
+  const f=fixture(t);f.enqueue('task',null);f.store.evaluate('task',owner);
+  const principal={channel:'telegram',username:'alice',telegramUserId:42,chatId:-100,threadId:12};
+  const [{event}]=f.store.confirmations(principal);
+  for(const changed of [{username:'bob'},{telegramUserId:7},{chatId:-200},{threadId:13},{threadId:null},{channel:'unknown'}]) {
+    const other={...principal,...changed};
+    assert.deepEqual(f.store.confirmations(other),[]);
+    assert.throws(()=>f.store.decide(event.handle,other,'confirm'),/unavailable/);
+  }
+  assert.equal(f.store.confirmations({channel:'web',username:'alice'}).length,1);
+  assert.equal(f.store.confirmations({channel:'web',username:'bob'}).length,0);
+  assert.equal(f.store.decide(event.handle,principal,'confirm').accepted,true);
+  const at=f.store.get('task',owner).confirmedAt;f.set(1001000);
+  assert.deepEqual(f.store.decide(event.handle,principal,'cancel'),{accepted:false,replay:true,decision:'confirm',state:'queued'});
+  assert.equal(f.store.get('task',owner).confirmedAt,at);
+  f.set(1400000);const next=f.store.evaluate('task',owner);
+  assert.notEqual(next.confirmationToken,event.handle);
+  assert.equal(f.store.decide(event.handle,principal,'confirm').replay,true);
+  assert.equal(f.store.get('task',owner).state,'waiting_confirmation');
+});
+test('confirmation delivery receipts and consumed handles survive process reopen', t => {
+  const f=fixture(t);f.enqueue('task',null);const wait=f.store.evaluate('task',owner);
+  f.store.acknowledgeConfirmation(wait.confirmationToken,'session');
+  const other=createIntentStore(f.file,{now:()=>2000000});
+  try {
+    assert.equal(other.pendingConfirmationNotices()[0].event.delivered.session,1000000);
+    const p={channel:'web',username:'alice'};
+    assert.equal(other.decide(wait.confirmationToken,p,'cancel').accepted,true);
+    assert.equal(f.store.decide(wait.confirmationToken,p,'confirm').decision,'cancel');
+    assert.deepEqual(f.store.pendingConfirmationNotices(),[]);
+  } finally {other.close();}
+});

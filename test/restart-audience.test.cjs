@@ -127,7 +127,7 @@ test('pending journal preserves original age and topic across queue, start and r
   sandbox.savePendingTask('known',{phase:'running',startedAt:300,initiatedAt:299});
   let p=JSON.parse(fs.readFileSync(path.join(sandbox.PENDING_DIR,'known.json')));
   assert.equal(p.initiatedAt,90);assert.equal(p.threadId,42);
-  atomicJson(path.join(sandbox.PENDING_DIR,'unknown.json'),{phase:'running'});
+  atomicJson(path.join(sandbox.PENDING_DIR,'unknown.json'),{phase:'running',startedAt:199});
   sandbox.savePendingTask('unknown',{phase:'running',startedAt:200});
   sandbox.savePendingTask('unknown',{phase:'running',startedAt:300});
   p=JSON.parse(fs.readFileSync(path.join(sandbox.PENDING_DIR,'unknown.json')));

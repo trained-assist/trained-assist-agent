@@ -89,3 +89,39 @@ rollback and durable claims. Included in both normal CJS tests and mandatory sta
 `test/intake-media-retention.test.cjs` covers long-lived waiting media, isolation by
 profile, cancellation releasing retention and corrupt ledger fail-closed behavior.
 `test/restart-audience.test.cjs` checks immutable completion routing.
+
+## Confirmation transports (continuation #670)
+
+SQLite schema 2 adds a durable confirmation-event outbox and decision receipts.
+UUID handles stay under Telegram's 64-byte callback limit (`ri:m:y:<uuid>` or
+`ri:r:n:<uuid>`). The gateway uses the issuing VM, the callback's actual sender,
+chat/topic and authenticated profile. It never reads a new task/project/session
+from the button or a later selected session. No navigation TTL applies.
+
+`restart-confirmation-http.js` exposes Telegram bearer, web cookie and trusted web
+worker delegation adapters. `/web/restart-intents-bearer` accepts the authenticated
+worker's profile, not a browser-supplied profile; the worker allowlists handle and
+action. Server decisions preserve payload, owner and initiatedAt. Replaying an ACK
+lost after commit returns the original decision without refreshing confirmedAt.
+
+Notification receipts survive boot; session append and Telegram delivery retry
+independently. Telegram ACK loss may duplicate a notice, never consume twice.
+No LLM polling. Waiting files and event receipts continue using disk until resolved.
+
+Both the vendored web UI and the separate trained-assist-web worker/UI implement
+real confirm/cancel controls and error/retry states. Browser tests use isolated
+storage and fake authentication; no second production server is started.
+
+**Still preparatory:** existing JSON remains the execution authority. Routes and
+notification polling create no ledger when absent. Confirm saves a queued decision;
+it does NOT yet wake the legacy runner. Do not expose these controls in production
+by populating the SQLite file before the single-authority runner/recovery cutover.
+Deadline and forced shutdown remain disabled. The draft release must not merge until
+that cutover, all-ingress/media/GTD checks and the full restart cycle are complete.
+
+Validation: normal and mandatory staging include restart-intents,
+restart-confirmations and restart-confirmation-http suites. The HTTP fixture tests
+actual cookie/bearer auth across SIGKILL and a new process. Local browser smoke:
+`node scripts/staging/restart-confirmation-browser.cjs`. Gateway tests exercise the
+real callback adapter; the public web repository runs worker delegation and real
+Playwright controls in both CI and mandatory staging.

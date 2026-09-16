@@ -77,7 +77,7 @@ function savePendingTask(taskId, params) {
   catch (e) { if (e.code !== 'ENOENT') throw e; }
   atomicJson(file, { ...previous, ...params, threadId: params.threadId ?? previous?.threadId ?? null,
     // Retries and transition to running must never refresh the original intent.
-    initiatedAt: previous ? (Object.hasOwn(previous, 'initiatedAt') ? previous.initiatedAt : previous.startedAt ?? null) : (Object.hasOwn(params, 'initiatedAt') ? params.initiatedAt : params.startedAt ?? null) });
+    initiatedAt: previous ? (Object.hasOwn(previous, 'initiatedAt') ? previous.initiatedAt : null) : (Object.hasOwn(params, 'initiatedAt') ? params.initiatedAt : null) });
 }
 
 function recordTaskActivity(opts, at = Date.now()) {

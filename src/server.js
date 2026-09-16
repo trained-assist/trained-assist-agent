@@ -536,7 +536,7 @@ async function resumePendingTasks(secrets) {
     const user = { id: p.userId, name: p.username, username: p.username, workDir, profileId: p.profileId, telegramUserId: p.telegramUserId };
     const newTaskId = p.taskId;
     atomicJson(path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${p.taskId}.json`), { taskId: p.taskId, acceptedAt: p.startedAt });
-    runTask({ taskId: newTaskId, user, ...(Object.hasOwn(p, 'activitySessionId') ? { activitySessionId: p.activitySessionId } : {}), threadId: p.threadId, initiatedAt: Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : p.startedAt ?? null, task: p.task, context: p.context || null,
+    runTask({ taskId: newTaskId, user, ...(Object.hasOwn(p, 'activitySessionId') ? { activitySessionId: p.activitySessionId } : {}), threadId: p.threadId, initiatedAt: Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : null, task: p.task, context: p.context || null,
       sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
       forceClaude: !!p.forceClaude, forceNew: !!p.forceNew, mode: p.mode || null,
       projectId: p.projectId || null, newProjectName: p.newProjectName || null,
@@ -551,6 +551,13 @@ async function resumePendingTasks(secrets) {
 async function main() {
   maintenance.beginRecovery();
   const secrets = await loadSecrets();
+  const { existingConfirmationService } = require('./restart-confirmations');
+  existingConfirmationService({ token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN,
+    route: VM_NAME === 'gcp-main' ? 'm' : VM_NAME === 'ru-vm' ? 'r' : null });
+  const flushConfirmationNotices = () => existingConfirmationService()?.flush()
+    .catch(error => console.error('[restart-confirmation]', error.message));
+  setInterval(flushConfirmationNotices, 15000).unref();
+  await flushConfirmationNotices();
   const restartNotifier = createRestartNotifier(maintenance, { token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN });
   const flushRestartNotices = () => Promise.race([
     restartNotifier.flush().catch(e => console.error('[restart-notification]', e.message)),
@@ -580,7 +587,7 @@ async function main() {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     // Keep durable ingress and control reachable. Other in-flight HTTP operations
     // count towards draining; requests arriving after the gate closes retry later.
-    const maintenanceExempt = ['/maintenance', '/run', '/health'].includes(url.pathname) || url.pathname.startsWith('/web/');
+    const maintenanceExempt = ['/maintenance', '/restart/decision', '/run', '/health'].includes(url.pathname) || url.pathname.startsWith('/web/');
     if (!maintenanceExempt) {
       const release = maintenance.acquire();
       if (!release) return json(res, 503, { error: 'planned restart; retry after readiness' });
@@ -2820,6 +2827,8 @@ ${recent || '(пока нет)'}
       res.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }));
       return;
     }
+
+    if (await require('./restart-confirmation-http').handleConfirmationRoute(req, url, res, secrets)) return;
 
     if (url.pathname === '/maintenance') {
       if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: GIT_COMMIT });
