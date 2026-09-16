@@ -124,11 +124,16 @@ let origTgUrl;
 // Isolated tokens root — prevents loadUserTokens from scanning real ~/agent-tokens/
 // and migrating real user data into the test run.
 let testTokensRoot;
+let testDataRoot;
+let origDataRoot;
 
 beforeAll(async () => {
   await startTgServer();
   buildFakeClaudeBinary();
   testTokensRoot = mkdtempSync(join(tmpdir(), 'runner-e2e-tokens-'));
+  testDataRoot = mkdtempSync(join(tmpdir(), 'runner-e2e-data-'));
+  origDataRoot = process.env.AGENT_DATA_DIR;
+  process.env.AGENT_DATA_DIR = testDataRoot; // never inherit the live maintenance journal
 
   // Patch env BEFORE loading runner.js (runner reads TG_API at module level)
   origTgUrl = process.env.TELEGRAM_API_URL;
@@ -145,6 +150,9 @@ afterAll(async () => {
   process.env.TELEGRAM_API_URL = origTgUrl;
   delete process.env.CLAUDE_BIN;
   delete process.env.AGENT_TOKENS_ROOT;
+  if (origDataRoot === undefined) delete process.env.AGENT_DATA_DIR;
+  else process.env.AGENT_DATA_DIR = origDataRoot;
+  rmSync(testDataRoot, { recursive: true, force: true });
   rmSync(testTokensRoot, { recursive: true, force: true });
   await stopTgServer();
   rmSync(fakeBinDir, { recursive: true, force: true });
