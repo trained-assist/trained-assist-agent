@@ -1390,7 +1390,7 @@ const activeTimers = new Map();
 const taskControl = require('./task-control');
 const admittedTasks = new Map();
 
-function controlSession({ username, chatId, sessionId = null, action = 'stop', taskIds = [], expectedEpoch, taskId }) {
+function controlSession({ username, chatId, sessionId = null, action = 'stop', taskIds = [], expectedEpoch, taskId, advanceEpoch = true }) {
   if (!username || chatId == null) throw new Error('username and chatId are required');
   let target = { username, chatId, sessionId };
   if (taskId) {
@@ -1404,11 +1404,16 @@ function controlSession({ username, chatId, sessionId = null, action = 'stop', t
   if (action === 'resume' || action === 'fresh') return { ok: true, held: taskControl.resume(target, action === 'fresh', expectedEpoch), epoch: taskControl.epoch(target) };
   if (!['stop', 'skip'].includes(action)) throw new Error('invalid control action');
   if (action === 'stop') taskControl.pause(target);
+  const skipEpoch = action === 'skip' ? (advanceEpoch ? taskControl.skip(target) : taskControl.epoch(target)) : null;
+  let skipped = false;
   let killed = 0;
   for (const [id, entry] of admittedTasks) {
     if (!taskControl.same(target, taskControl.scope(entry.opts))) continue;
     const active = activeTimers.get(id);
-    if (action === 'skip' && !active) continue;
+    if (action === 'skip') {
+      if (skipped) { entry.opts.controlEpoch = skipEpoch; continue; }
+      skipped = true;
+    }
     entry.cancelled = true;
     entry.stopAction = action;
     if (action === 'stop') { taskControl.retain(entry.opts); entry.retained = true; }
@@ -1554,7 +1559,7 @@ function runTask(opts) {
   if (WAKEUP_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const hadActive = activeTimers.size > 0;
-    const stopped = controlSession({ username, chatId: opts.user.id, sessionId: opts.sessionId, action: 'skip' }).killed > 0;
+    const stopped = controlSession({ username, chatId: opts.user.id, sessionId: opts.sessionId, action: 'skip', advanceEpoch: false }).killed > 0;
     // Keep the lane until the old process exits; deleting it permits overlapping engines.
     const botToken = (opts.secrets?.BOT_TOKEN || opts.secrets?.TELEGRAM_BOT_TOKEN);
     const chatId = opts.user.id;

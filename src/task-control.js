@@ -42,6 +42,11 @@ function durableInput(opts) {
     return '[Файл сохранён: ' + target;
   });
 }
+function skip(target) {
+  pause(target);
+  resume(target, true);
+  return epoch(target);
+}
 function retain(opts) {
   const target = scope(opts);
   const rec = records().find(r => same(r.scope, target)) || { scope: target, paused: true, held: [] };
@@ -71,4 +76,4 @@ function acknowledge(target, taskIds) {
     rec.held = rec.held.filter(x => !taskIds.includes(x.taskId)); write(rec);
   }
 }
-module.exports = { scope, same, paused, pause, retain, resume, acknowledge, epoch };
+module.exports = { scope, same, paused, pause, retain, resume, acknowledge, epoch, skip };
