@@ -38,6 +38,12 @@ def release_ready(api, operation, expected_commit=None):
 
 def _coordinate(api, restart, wait=time.sleep):
     state = api()
+    # A deploy-kind gate stuck in restarting after a machine reboot (coordinator died before
+    # --ready): the new server boot has already recovered; just release the gate.
+    if (state.get('kind') == 'deploy' and state.get('phase') == 'restarting'
+            and state.get('recovered') and state.get('bootId') != state.get('ownerBootId')):
+        release_ready(api, state)
+        return
     if state.get('kind') != 'restart' or state.get('phase') not in ('draining', 'restarting'):
         return
     if state['phase'] == 'draining':

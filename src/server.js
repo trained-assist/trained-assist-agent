@@ -4124,7 +4124,17 @@ ${recent || '(пока нет)'}
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
   scheduleGtdController(secrets);
-  resumePendingTasks(secrets).then(() => maintenance.recovered()).catch(err => { maintenance.fail(err.message); console.error('[resume] startup error:', err.message); });
+  resumePendingTasks(secrets).then(() => {
+    maintenance.recovered();
+    // Auto-clear a stale restarting gate left by a previous boot (e.g. machine reboot
+    // mid-deploy, or coordinator crash before --ready). Safe because ownerBootId belongs
+    // to an old process; the same-boot guard in ready() prevents clearing our own claim.
+    const st = maintenance.status();
+    if (st.phase === 'restarting' && st.ownerBootId !== st.bootId) {
+      maintenance.ready();
+      console.log('[startup] auto-cleared stale restarting gate from boot', st.ownerBootId.slice(0, 8));
+    }
+  }).catch(err => { maintenance.fail(err.message); console.error('[resume] startup error:', err.message); });
 
   // Deploys restart this service frequently (every few minutes during an
   // active PR streak) — without draining, each restart silently kills
