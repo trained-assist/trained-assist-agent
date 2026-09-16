@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import Database from 'better-sqlite3';
+import { pathToFileURL } from 'node:url';
 
 async function restartCycle(kind) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'planned-restart-http-'));
@@ -20,7 +21,7 @@ async function restartCycle(kind) {
   const reserve = http.createServer(); await new Promise(r => reserve.listen(0, '127.0.0.1', r));
   const port = reserve.address().port; await new Promise(r => reserve.close(r));
   const launches = path.join(root, 'launches'); const engine = path.join(root, 'engine.cjs');
-  fs.writeFileSync(engine, `#!/usr/bin/env node\nconst fs=require('fs');const file=${JSON.stringify(launches)};fs.appendFileSync(file, 'run\\n');\nif (${kind == 'forced'} && fs.readFileSync(file,'utf8')==='run\\n') { setInterval(()=>{},1000); } else {\nconsole.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Queue recovered'}]}}));\nconsole.log(JSON.stringify({type:'result',result:'Queue recovered'}));\n}\n`, { mode: 0o700 });
+  fs.writeFileSync(engine, `#!/usr/bin/env node\nconst fs=require('fs');const file=${JSON.stringify(launches)};fs.appendFileSync(file, 'run\\n');\nif (${kind === 'forced' || kind === 'lane'} && fs.readFileSync(file,'utf8')==='run\\n') { setInterval(()=>{ if (${kind === 'lane'} && fs.existsSync(file+'.release')) { console.log(JSON.stringify({type:'result',result:'Queue recovered'})); process.exit(0); } },50); } else {\nconsole.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Queue recovered'}]}}));\nconsole.log(JSON.stringify({type:'result',result:'Queue recovered'}));\n}\n`, { mode: 0o700 });
   const env = { PATH: process.env.PATH, HOME: root, NODE_ENV: 'test', PORT: String(port), SECRETS_SOURCE: 'env',
     AGENT_SECRET: 'fixture-secret', TELEGRAM_BOT_TOKEN: 'fixture-token', TELEGRAM_API_URL: `http://127.0.0.1:${telegram.address().port}`,
     AGENT_DATA_DIR: path.join(root, 'data'), USERS_DIR: path.join(root, 'users'), AGENT_TOKENS_ROOT: path.join(root, 'tokens'), CLAUDE_BIN: engine };
@@ -52,6 +53,20 @@ async function restartCycle(kind) {
     const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true, mode: 'deep', requestId: 'stable',
       fileBase64: Buffer.from('preserved attachment').toString('base64'), fileName:'resume.txt',
       ...(kind === 'stale' ? { initiatedAt: Date.now()-300000 } : {}) };
+    if (kind === 'lane') {
+      await api('/run', payload);
+      await until(() => fs.existsSync(launches));
+      const readDb = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+      const first = JSON.parse(readDb.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
+      readDb.close();
+      await api('/run', { ...payload, requestId: 'explicit', sessionId: first.owner.sessionId });
+      await new Promise(r => setTimeout(r, 350));
+      expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
+      fs.writeFileSync(launches+'.release', 'release');
+      await until(() => fs.readFileSync(launches, 'utf8') === 'run\nrun\n');
+      await until(async () => (await api('/maintenance')).active === 0);
+      return;
+    }
     if(kind==='forced') {
       await api('/run',payload);
       await until(()=>fs.existsSync(launches));
@@ -94,7 +109,23 @@ async function restartCycle(kind) {
       expect(forbidden.status).toBe(404);
       const before=fs.existsSync(launches)?fs.readFileSync(launches,'utf8'):'';
       expect(before).toBe(kind==='forced'?'run\n':'');
-      expect((await api('/restart/decision',decision)).accepted).toBe(true);
+      if (process.env.RESTART_GATEWAY_ADAPTER) {
+        const { handleRestartConfirmation } = await import(pathToFileURL(process.env.RESTART_GATEWAY_ADAPTER).href);
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = (url, options) => originalFetch(String(url).replace('https://api.telegram.org', env.TELEGRAM_API_URL), options);
+        try {
+          const callback = { id: 'real-callback', data: `ri:m:y:${handle}`, from: { id: 123 },
+            message: { chat: { id: 123 }, message_id: 1, text: 'Saved task' } };
+          const gatewayEnv = { AGENT_URL: `http://127.0.0.1:${port}`, AGENT_SECRET: 'fixture-secret', BOT_TOKEN: 'fixture-token' };
+          await handleRestartConfirmation({ ...callback, from: { id: 456 } }, gatewayEnv, { username: 'fixture' });
+          expect((await api('/web/restart-intents-bearer', {username:'fixture',action:'list'})).intents.some(i => i.handle === handle)).toBe(true);
+          await handleRestartConfirmation(callback, gatewayEnv, { username: 'fixture', projectId: 'later-unrelated-project' });
+          await handleRestartConfirmation(callback, gatewayEnv, { username: 'fixture' });
+          expect(calls.some(c => c.text === 'Подтверждение сохранено. Задача ожидает запуска.')).toBe(true);
+        } finally { globalThis.fetch = originalFetch; }
+      } else {
+        expect((await api('/restart/decision',decision)).accepted).toBe(true);
+      }
       expect((await api('/restart/decision',decision)).replay).toBe(true);
     }
     await until(() => calls.some(c => c.text?.includes('Queue recovered')));
@@ -116,3 +147,5 @@ async function restartCycle(kind) {
 it('fresh HTTP queue survives process restart and executes once', {timeout:45000}, () => restartCycle('fresh'));
 it('stale HTTP queue survives boot, requires owner confirmation and preserves media', {timeout:45000}, () => restartCycle('stale'));
 it('40-minute deadline interrupts a real child and requires confirmation after readiness', {timeout:45000}, () => restartCycle('forced'));
+
+it('implicit first request and explicit reply serialize on the bound session', {timeout:45000}, () => restartCycle('lane'));

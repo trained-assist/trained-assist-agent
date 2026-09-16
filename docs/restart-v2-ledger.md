@@ -7,10 +7,10 @@ the preparatory implementation status in the historical sections below. Not yet
 released: production remains on c3b347c. Do not merge this draft until all release
 acceptance items are verified.
 
-Validation: 592 Vitest tests, CJS and Python suites pass locally. Three isolated
-real-server restart cycles cover fresh resume, stale confirmation, and forced
-40-minute interruption; the forced cycle also verifies durable acceptance between
-claim and HTTP shutdown. Gateway: 280 tests. Separate web: authenticated worker and
+Validation: 592 Vitest tests, CJS and Python suites pass locally. Four isolated
+real-server scenarios cover fresh resume, stale confirmation, forced
+40-minute interruption, and implicit/explicit same-session serialization; the forced cycle also verifies durable acceptance between
+claim and HTTP shutdown. Gateway: 282 tests. Separate web: authenticated worker and
 Playwright suites pass. Current-head remote CI/staging still required.
 
 Changed requirement and test replacement: in test/admission-status.test.cjs,
@@ -21,9 +21,10 @@ wait for confirmation. Replaced by test/restart-execution.test.cjs and
 in tests/planned-restart-http.test.js. No suite-wide skip or continue-on-error.
 
 Remaining release risks: arbitrary model/MCP external actions do not yet use the
-action ledger interface; a real gateway-to-restarted-agent integration cycle needs
-verification, and simultaneous buffered references to the same media need durable
-per-buffer ownership. These must not be described as exactly-once side effects or
+action ledger interface; the conservative policy for uncertain external effects awaits owner decision;
+production bootstrap remains guarded. The real gateway confirmation adapter was
+bundled and exercised against the restarted server in all four HTTP scenarios. Buffered media identity was verified
+to include chat and message ID; independent messages do not share retention pins. These must not be described as exactly-once side effects or
 fully verified retention. Production bootstrap remains subject to the active-work
 guard. Rollback to the legacy unconditional resumer is prohibited once the v2
 execution-authority marker exists; keep admission closed for operator recovery.
@@ -157,3 +158,12 @@ actual cookie/bearer auth across SIGKILL and a new process. Local browser smoke:
 `node scripts/staging/restart-confirmation-browser.cjs`. Gateway tests exercise the
 real callback adapter; the public web repository runs worker delegation and real
 Playwright controls in both CI and mandatory staging.
+
+
+Continuation #675: a regression experiment removed the lane fix and reproduced
+two simultaneous child launches against one transcript; restoring the fix passes.
+For the combined gateway/agent run, bundle the real gateway callback module with
+esbuild --bundle --platform=node --format=esm, then set RESTART_GATEWAY_ADAPTER to
+its absolute path when running tests/planned-restart-http.test.js. Only Telegram
+transport is redirected to the isolated fixture; owner rejection, VM routing,
+confirmation/replay and task execution use the real HTTP agent and gateway code.

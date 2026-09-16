@@ -1568,7 +1568,7 @@ function runTask(opts) {
   //     of spawning two claudes (the "one active session per chat" invariant).
   // Cross-session parallelism is bounded only by the per-profile cap (capKey)
   // and the global slot semaphore below — never by this lane.
-  const queueKey = _laneKey(opts.sessionId, opts.user.id);
+  let queueKey = _laneKey(opts.sessionId, opts.user.id);
 
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
@@ -1656,6 +1656,9 @@ function runTask(opts) {
       opts.activitySessionId = opts.sessionId;
     }
   }
+  // Resolve the lane after immutable session binding. An implicit first request
+  // and an explicit reply must serialize on the same transcript.
+  if (currentExecution()) queueKey = _laneKey(opts.sessionId, opts.user.id);
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   const prev = chatLanes.get(queueKey) ?? Promise.resolve();
