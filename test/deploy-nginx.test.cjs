@@ -30,3 +30,12 @@ test('GCP installs the stable hostname as well as relay',t=>{const f=fixture(t);
 test('invalid stable candidate restores both sites',t=>{const f=fixture(t);fs.writeFileSync(path.join(f.dir,'repo/infra/nginx/agent-trainedassist-store.conf'),'BAD');assert.equal(f.run().status,1);assert.equal(fs.readFileSync(f.dst,'utf8'),'GOOD old');assert.equal(fs.readFileSync(path.join(f.dir,'nginx/sites-enabled/agent-trainedassist-store'),'utf8'),'GOOD stable old');});
 test('RU does not install stable GCP hostname',t=>{const f=fixture(t);assert.equal(f.run({DEPLOY_ENV:'ru'}).status,0);assert.equal(fs.readFileSync(path.join(f.dir,'nginx/sites-enabled/agent-trainedassist-store'),'utf8'),'GOOD stable old');});
 test('reload failure restores both hostname configurations',t=>{const f=fixture(t);assert.equal(f.run({FAIL_RELOAD:'1'}).status,1);assert.equal(fs.readFileSync(f.dst,'utf8'),'GOOD old');assert.equal(fs.readFileSync(path.join(f.dir,'nginx/sites-enabled/agent-trainedassist-store'),'utf8'),'GOOD stable old');});
+
+test('both public agent routes retain the 20 MiB upload limit',()=>{
+ for(const name of ['relay','agent-trainedassist-store']) {
+  const config=fs.readFileSync(path.resolve(__dirname,`../infra/nginx/${name}.conf`),'utf8');
+  const agentLocation=config.match(/location \/agent\/\s*\{([^}]+)\}/);
+  assert.ok(agentLocation, name);
+  assert.match(agentLocation[1],/client_max_body_size\s+20m\s*;/,name);
+ }
+});
