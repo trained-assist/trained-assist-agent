@@ -13,9 +13,10 @@ def api(body=None):
 state = api({'action': 'request', 'kind': 'deploy', 'initiator': 'deploy'})
 if state.get('kind') != 'deploy':
     raise SystemExit('Another restart is pending. Deploy did not change the checkout.')
+operation_id = state['id']
 while True:
     state = api()
-    if state.get('kind') != 'deploy' or state.get('phase') not in ('draining', 'restarting'):
+    if state.get('id') != operation_id or state.get('kind') != 'deploy' or state.get('phase') not in ('draining', 'restarting'):
         raise SystemExit('Deploy drain was cancelled; checkout unchanged')
     if state['phase'] == 'restarting' or (state['active'] == 0 and api({'action': 'claim', 'id': state['id']}).get('claimed')):
         break

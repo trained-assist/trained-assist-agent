@@ -55,3 +55,15 @@ test('real global admission blocks queued and new tasks; cancel releases them wi
   gate.cancel(); const release = await second;
   assert.equal(started, true); release(); sandbox._releaseSlot();
 });
+test('startup recovery cannot be cancelled, claimed, or released early', t => {
+  const {file, gate} = fixture(t); const operation = gate.request('operator'); gate.claim(operation.id);
+  const boot = createMaintenance(file, {recovering: true});
+  assert.equal(boot.acquire(), null); assert.throws(() => boot.cancel());
+  assert.equal(boot.claim(operation.id), false); boot.ready(); assert.equal(boot.paused(), true);
+  boot.recovered(); assert.equal(boot.paused(), true); assert.equal(boot.status().recovered, true);
+  boot.ready(); assert.equal(boot.paused(), false);
+});
+test('failed recovery never silently releases queued work', t => {
+  const {gate} = fixture(t); gate.request('operator'); gate.fail('broken pending JSON');
+  assert.throws(() => gate.cancel()); assert.equal(gate.acquire(), null); gate.ready(); assert.equal(gate.paused(), true);
+});

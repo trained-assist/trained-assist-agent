@@ -257,7 +257,7 @@ function scheduleNalogExpiryChecks(secrets) {
         console.error('[nalog-expiry] generateConnectLink failed:', e.message); continue;
       }
       const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-      fetch(`${tgBase}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      await fetch(`${tgBase}/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         signal: AbortSignal.timeout(8000),
         headers: { 'Content-Type': 'application/json' },
@@ -270,8 +270,12 @@ function scheduleNalogExpiryChecks(secrets) {
     }
   }
 
-  setTimeout(check, 60 * 1000); // first check 1 min after start (tokens may be fresh on restart)
-  setInterval(check, CHECK_INTERVAL_MS);
+  const guardedCheck = () => {
+    const release = maintenance.acquire();
+    if (release) check().catch(e => console.warn('[nalog-expiry]', e.message)).finally(release);
+  };
+  setTimeout(guardedCheck, 60 * 1000); // first check 1 min after start (tokens may be fresh on restart)
+  setInterval(guardedCheck, CHECK_INTERVAL_MS);
 }
 
 // Fetch negotiations across all active stages for a vacancy (parallel per-state requests).
@@ -494,7 +498,7 @@ function scheduleGtdController(secrets) {
 async function resumePendingTasks(secrets) {
   const pending = getPendingTasks();
   // No TTL for accepted work: a long maintenance window must not discard it.
-  const toResume = pending.filter(t => t.taskId && t.username && t.userId && (t.task || t.forceClaude))
+  const toResume = pending.filter(t => t.taskId && t.username && t.userId != null && (t.task || t.forceClaude))
     .sort((a, b) => a.startedAt - b.startedAt);
   if (toResume.length !== pending.length) throw Error('Invalid pending journal; operator repair required');
   if (toResume.length === 0) return;
@@ -530,6 +534,7 @@ async function resumePendingTasks(secrets) {
 }
 
 async function main() {
+  maintenance.beginRecovery();
   const secrets = await loadSecrets();
   const intakeQuick = require('./intake-quick').createIntakeQuick({
     baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
@@ -554,7 +559,7 @@ async function main() {
     // count towards draining; requests arriving after the gate closes retry later.
     const maintenanceExempt = ['/maintenance', '/run', '/health'].includes(url.pathname) || url.pathname.startsWith('/web/');
     if (!maintenanceExempt) {
-      const release = maintenance.acquire(undefined, true);
+      const release = maintenance.acquire();
       if (!release) return json(res, 503, { error: 'planned restart; retry after readiness' });
       releaseRequest = release;
     }
@@ -2699,7 +2704,14 @@ ${expLines || '—'}
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
         if (body.action === 'claim') return json(res, 200, { claimed: maintenance.claim(body.id) });
-        if (body.action === 'cancel') return json(res, 200, maintenance.cancel());
+        if (body.action === 'ready') {
+          if (body.id !== maintenance.status().id) return json(res, 409, { error: 'operation changed' });
+          return json(res, 200, maintenance.ready());
+        }
+        if (body.action === 'cancel') {
+          try { return json(res, 200, maintenance.cancel()); }
+          catch (e) { return json(res, 409, { error: e.message }); }
+        }
         if (body.action !== 'request') return json(res, 400, { error: 'invalid action' });
         return json(res, 200, maintenance.request(body.initiator || 'operator', body.kind === 'deploy' ? 'deploy' : 'restart'));
       }
@@ -3038,7 +3050,7 @@ ${expLines || '—'}
     }
 
     if (req.method === 'POST' && url.pathname === '/run') {
-      const body = await readBody(req);
+      const body = await readBody(req, 32 * 1024 * 1024);
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
@@ -3070,11 +3082,11 @@ ${expLines || '—'}
         return json(res, 400, { error: 'invalid newProjectName' });
 
       const requestId = payload.requestId;
-      if (requestId && !/^[a-zA-Z0-9_-]{1,100}$/.test(requestId)) return json(res, 400, { error: 'invalid requestId' });
+      if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
       const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
       const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
       if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
-        return json(res, 202, { taskId, duplicate: true });
+        return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
       }
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
@@ -3099,20 +3111,24 @@ ${expLines || '—'}
         fs.mkdirSync(uploadsDir, { recursive: true });
         const filePath = path.join(uploadsDir, `${require('crypto').randomUUID()}-${safeName}`);
         try {
-          fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'), { mode: 0o600 });
+          const fd = fs.openSync(filePath, 'wx', 0o600);
+          try { fs.writeFileSync(fd, Buffer.from(fileBase64, 'base64')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          const dirFd = fs.openSync(uploadsDir, 'r');
+          try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
           const typeNote = fileMimeType ? ` (${fileMimeType})` : '';
           const fileNote = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
           effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
         } catch (e) {
           console.error('[/run] file save error:', e.message);
+          return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
         }
       }
 
       // runTask journals synchronously, before any await or acknowledgement.
       const completion = runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
-      if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
       completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
-      json(res, 202, { taskId, queued: maintenance.paused() });
+      if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
+      json(res, 202, { taskId, requestId, durable: true, queued: maintenance.paused() });
       return;
     }
 
@@ -3958,13 +3974,17 @@ ${recent || '(пока нет)'}
 
   // Drive watcher: poll every 2 min for new files shared with the SA
   const driveOpts = { botToken: secrets.BOT_TOKEN, tgBase: process.env.TELEGRAM_API_URL };
-  pollDriveChanges(driveOpts).catch(() => {});
-  setInterval(() => pollDriveChanges(driveOpts).catch(() => {}), 2 * 60 * 1000);
+  const drivePoll = () => {
+    const release = maintenance.acquire();
+    if (release) pollDriveChanges(driveOpts).catch(() => {}).finally(release);
+  };
+  drivePoll();
+  setInterval(drivePoll, 2 * 60 * 1000);
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
   scheduleGtdController(secrets);
-  resumePendingTasks(secrets).then(() => maintenance.ready()).catch(err => { maintenance.fail(err.message); console.error('[resume] startup error:', err.message); });
+  resumePendingTasks(secrets).then(() => maintenance.recovered()).catch(err => { maintenance.fail(err.message); console.error('[resume] startup error:', err.message); });
 
   // Deploys restart this service frequently (every few minutes during an
   // active PR streak) — without draining, each restart silently kills
@@ -3980,7 +4000,8 @@ ${recent || '(пока нет)'}
     if (shuttingDown) return;
     shuttingDown = true;
     server.close(); // stop accepting new HTTP connections; existing tasks keep running
-    const active = getActiveTaskCount();
+    const planned = maintenance.status().phase === 'restarting';
+    const active = planned ? maintenance.status().active : getActiveTaskCount();
     if (active > 0) {
       console.log(`[shutdown] draining ${active} active task(s), up to ${DRAIN_TIMEOUT_MS / 1000}s...`);
       const drained = await waitForIdle(DRAIN_TIMEOUT_MS);

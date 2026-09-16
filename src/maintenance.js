@@ -12,34 +12,37 @@ function atomicJson(file, value) {
   const dir = fs.openSync(path.dirname(file), 'r');
   try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
 }
-function createMaintenance(file) {
+function createMaintenance(file, { recovering = false } = {}) {
   const bootId = randomUUID();
   let state = null;
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   const active = new Map();
   const save = next => { atomicJson(file, next); state = next; };
-  const paused = () => !!state && ['draining', 'restarting', 'failed'].includes(state.phase);
+  const paused = () => recovering || (!!state && ['draining', 'restarting', 'failed'].includes(state.phase));
   return {
     paused,
-    status() { return { ...state, bootId, paused: paused(), active: active.size,
+    beginRecovery() { recovering = true; },
+    recovered() { recovering = false; },
+    status() { return { ...state, bootId, recovered: !recovering, paused: paused(), active: active.size,
       oldestStartedAt: active.size ? Math.min(...active.values()) : null }; },
     acquire(id = randomUUID(), allowDuringDrain = false) {
-      if (paused() && !(allowDuringDrain && state.phase === 'draining')) return null;
+      if (recovering || (paused() && !(allowDuringDrain && state?.phase === 'draining'))) return null;
       active.set(id, Date.now());
       let released = false;
       return () => { if (!released) { released = true; active.delete(id); } };
     },
     request(initiator, kind = 'restart') {
+      if (recovering) throw Error('Startup recovery is not complete');
       if (!paused()) save({ id: randomUUID(), phase: 'draining', kind, initiator, requestedAt: Date.now(), ownerBootId: bootId });
       return this.status();
     },
     cancel() {
-      if (state?.phase === 'restarting') throw Error('Перезапуск уже начался; отмена невозможна.');
+      if (recovering || (state && ['restarting', 'failed'].includes(state.phase))) throw Error('Перезапуск начался или восстановление требует проверки; отмена невозможна.');
       if (paused()) save({ ...state, phase: 'cancelled', finishedAt: Date.now() });
       return this.status();
     },
     claim(id) {
-      if (state?.id !== id || state.phase !== 'draining' || active.size) return false;
+      if (recovering || state?.id !== id || state.phase !== 'draining' || active.size) return false;
       save({ ...state, phase: 'restarting', ownerBootId: bootId });
       return true;
     },
@@ -47,7 +50,7 @@ function createMaintenance(file) {
     ready() {
       // Startup recovery only, after queued tasks have been registered. A same-process
       // health check must never reopen a gate claimed by the coordinator.
-      if (state?.phase === 'restarting' && state.ownerBootId !== bootId) {
+      if (!recovering && state?.phase === 'restarting' && state.ownerBootId !== bootId) {
         save({ ...state, phase: 'ready', finishedAt: Date.now() });
       }
       return this.status();

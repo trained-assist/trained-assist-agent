@@ -1610,6 +1610,7 @@ function runTask(opts) {
   // build a bare user object. In-memory Map key only — never a path/env key.
   const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
 
+  let releaseAdmission;
   const current = prev.catch(() => {}).then(async () => {
     status.waiting(maintenance.paused() ? '⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.' : '↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
     // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
@@ -1619,12 +1620,11 @@ function runTask(opts) {
       // Global admission control: wait for a free slot + enough RAM before we
       // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
       await _waitForRam();
-      const releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.'));
+      releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.'));
       try {
         await status.finish('🧠 Начинаю работу…');
         return await _runTask(opts);
       } finally {
-        releaseAdmission?.();
         _releaseSlot();
       }
     } finally {
@@ -1637,10 +1637,12 @@ function runTask(opts) {
   chatLanes.set(queueKey, current);
   current.finally(() => {
     clearPendingTask(opts.taskId);
+    releaseAdmission?.();
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
   });
-  return current;
+  // Await retries for callers, but never hold their predecessor lane/lease.
+  return current.then(result => result?.queuedRetry || result);
 }
 
 // Returns context card string, or null if no skills configured (no pin needed).
@@ -2710,7 +2712,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           initialMsgId: msgId,
           pinnedMsgId,
           secrets,
-          continuationCount: nextCount,
+          continuationCount: nextCount, mode, projectId, internalGtd,
         });
       } else {
         const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
@@ -2760,7 +2762,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
-      runTask({
+      const queuedRetry = runTask({
         taskId: `${user.username}-${Date.now()}`,
         user,
         task,
@@ -2771,8 +2773,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         pinnedMsgId,
         secrets,
         retryCount: retryCount + 1,
+        continuationCount, mode, projectId, internalGtd,
       });
-      return;
+      return { queuedRetry };
     }
     const crashMsg = retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`

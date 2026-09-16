@@ -1,6 +1,6 @@
 #!/bin/bash
 # Deploy script — run on the VM after git pull
-set -eo pipefail
+set -Eeuo pipefail
 
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
@@ -20,13 +20,25 @@ rollback() {
   rm -rf node_modules
   npm ci --omit=dev
   sudo systemctl restart "$SERVICE"
+  python3 "$REPO_DIR/scripts/restart-coordinator.py" --ready
   echo "==> Rolled back to previous version. Deploy failed."
+}
+
+# Any failure after the gate is claimed attempts recovery; never reports success.
+# Rollback failure leaves the queue paused for an operator, not silently dropped.
+on_deploy_error() {
+  local code=$?
+  trap - ERR
+  echo "Deploy failed (exit $code); attempting rollback with admission closed"
+  rollback || echo "ROLLBACK FAILED: queue retained; operator recovery required"
+  exit "$code"
 }
 
 # The CI caller also drains before git reset; direct invocations still must drain.
 python3 "$REPO_DIR/scripts/drain-for-deploy.py"
+trap on_deploy_error ERR
 echo "==> Stopping service before dependency install..."
-sudo systemctl stop "$SERVICE" 2>/dev/null || true
+sudo systemctl stop "$SERVICE"
 
 echo "==> Installing dependencies..."
 cd "$REPO_DIR"
@@ -115,7 +127,7 @@ echo "==> Waiting for service to be healthy (up to 60s)..."
 for i in $(seq 1 12); do
   STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:8080/health 2>/dev/null || echo 000)
   echo "  attempt $i: HTTP $STATUS_CODE"
-  [ "$STATUS_CODE" = "401" ] && break
+  [ "$STATUS_CODE" = "200" ] && break
   sleep 5
 done
 sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
@@ -148,16 +160,8 @@ if [ -x "$REPO_DIR/ops/cron/install.sh" ]; then
   fi
 fi
 
-echo "==> Running smoke tests..."
-AGENT_SECRET=$(gcloud secrets versions access latest --secret=AGENT_SECRET --project=alesa-personal-assistent 2>/dev/null || echo "$AGENT_SECRET")
-if [ -z "$AGENT_SECRET" ]; then
-  echo "  ⚠️  AGENT_SECRET not available — skipping smoke tests"
-else
-  if ! AGENT_URL="http://localhost:8080" AGENT_SECRET="$AGENT_SECRET" bash "$REPO_DIR/scripts/smoke-test.sh"; then
-    echo "==> ❌ Smoke tests FAILED"
-    rollback
-    exit 1
-  fi
-fi
-
+# Check the new boot without spawning an LLM task or messaging a test account.
+echo "==> Verifying new process and recovered queue..."
+python3 "$REPO_DIR/scripts/restart-coordinator.py" --ready
+trap - ERR
 echo "==> Deploy complete ✅"

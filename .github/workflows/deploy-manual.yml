@@ -30,6 +30,9 @@ jobs:
           key: ${{ secrets.VM_SSH_KEY }}
           command_timeout: 90m
           script: |
+            set -euo pipefail
+            exec 9>/tmp/assist-agent-deploy.lock
+            flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             cd /home/vova/trained-assist-agent
             git fetch origin main
@@ -65,6 +68,9 @@ jobs:
           password: ${{ secrets.VM_RU_PASSWORD }}
           command_timeout: 90m
           script: |
+            set -euo pipefail
+            exec 9>/tmp/assist-agent-deploy.lock
+            flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
