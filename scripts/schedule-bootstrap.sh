@@ -8,7 +8,12 @@ REPO=/home/vova/trained-assist-agent
 RELEASE=/home/vova/agent-releases/$TARGET
 REQUEST=/home/vova/agent-data/restart-bootstrap.json
 # Protect the short preparation transaction against another deployment.
-exec 9>/tmp/assist-agent-deploy.lock
+# Linux protected_regular rejects root O_CREAT on a user-owned /tmp file.
+# flock needs only a readable descriptor; retain the shared inode used by CI.
+if [ ! -e /tmp/assist-agent-deploy.lock ]; then
+  sudo -u vova touch /tmp/assist-agent-deploy.lock
+fi
+exec 9</tmp/assist-agent-deploy.lock
 flock -n 9 || { echo 'Deployment lock is held'; exit 1; }
 if [ -e "$REQUEST" ]; then
   python3 - "$REQUEST" "$TARGET" <<'PY'
