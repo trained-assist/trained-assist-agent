@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const vm = require('vm');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'restart-audience-'));
 process.env.USERS_DIR = path.join(root, 'users');
 process.env.AGENT_DATA_DIR = path.join(root, 'data');
@@ -136,4 +137,19 @@ test('queued unknown original age does not borrow a recent running-state timesta
   const f=fixture(t);
   atomicJson(path.join(f.dataRoot,'pending-tasks','unknown.json'),{username:'unknown',userId:11,phase:'queued',initiatedAt:null,startedAt:f.at});
   assert.deepEqual(f.activity.snapshot(),[]);
+});
+
+test('utility task completion stays bound to captured session even after active pointer changes',()=>{
+  const source=fs.readFileSync(require.resolve('../src/runner'),'utf8');
+  const start=source.indexOf('function recordTaskActivity('),end=source.indexOf('\nfunction bindTaskActivity(',start);
+  const events=[];let pointer='original';
+  const sandbox={getCurrentSessionId:()=>pointer,maintenance:{addRecipient:()=>{}},
+    require:()=>({activity:{record:target=>{events.push(target);return target;}}})};
+  vm.createContext(sandbox);vm.runInContext(source.slice(start,end),sandbox);
+  const opts={user:{username:'alice',id:42,workDir:'/fixture'},activitySessionId:'original',threadId:12};
+  sandbox.recordTaskActivity(opts,100);pointer='unrelated';sandbox.recordTaskActivity(opts,200);
+  assert.deepEqual(events.map(e=>e.sessionId),['original','original']);
+  // Explicit absence must never follow a later pointer either.
+  sandbox.recordTaskActivity({...opts,activitySessionId:null},300);
+  assert.equal(events[2].sessionId,null);
 });

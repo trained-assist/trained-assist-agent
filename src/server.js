@@ -536,7 +536,7 @@ async function resumePendingTasks(secrets) {
     const user = { id: p.userId, name: p.username, username: p.username, workDir, profileId: p.profileId, telegramUserId: p.telegramUserId };
     const newTaskId = p.taskId;
     atomicJson(path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${p.taskId}.json`), { taskId: p.taskId, acceptedAt: p.startedAt });
-    runTask({ taskId: newTaskId, user, threadId: p.threadId, initiatedAt: Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : p.startedAt ?? null, task: p.task, context: p.context || null,
+    runTask({ taskId: newTaskId, user, ...(Object.hasOwn(p, 'activitySessionId') ? { activitySessionId: p.activitySessionId } : {}), threadId: p.threadId, initiatedAt: Object.hasOwn(p, 'initiatedAt') ? p.initiatedAt : p.startedAt ?? null, task: p.task, context: p.context || null,
       sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
       forceClaude: !!p.forceClaude, forceNew: !!p.forceNew, mode: p.mode || null,
       projectId: p.projectId || null, newProjectName: p.newProjectName || null,

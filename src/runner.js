@@ -75,14 +75,15 @@ function savePendingTask(taskId, params) {
   let previous = null;
   try { previous = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (e) { if (e.code !== 'ENOENT') throw e; }
-  atomicJson(file, { ...params, threadId: params.threadId ?? previous?.threadId ?? null,
+  atomicJson(file, { ...previous, ...params, threadId: params.threadId ?? previous?.threadId ?? null,
     // Retries and transition to running must never refresh the original intent.
     initiatedAt: previous ? (Object.hasOwn(previous, 'initiatedAt') ? previous.initiatedAt : previous.startedAt ?? null) : (Object.hasOwn(params, 'initiatedAt') ? params.initiatedAt : params.startedAt ?? null) });
 }
 
 function recordTaskActivity(opts, at = Date.now()) {
   const { activity } = require('./restart-activity');
-  const sessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id);
+  const sessionId = Object.hasOwn(opts, 'activitySessionId') ? opts.activitySessionId
+    : opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id);
   if (!opts.user.id && !sessionId) return;
   const target = activity.record({ username: opts.user.username, chatId: opts.user.id,
     sessionId, threadId: opts.threadId }, at);
@@ -92,7 +93,7 @@ function recordTaskActivity(opts, at = Date.now()) {
 function bindTaskActivity(taskId, user, sessionId) {
   const file = path.join(PENDING_DIR, `${taskId}.json`);
   const pending = JSON.parse(fs.readFileSync(file, 'utf8'));
-  atomicJson(file, { ...pending, sessionId });
+  atomicJson(file, { ...pending, sessionId, activitySessionId: sessionId });
   if (Number.isFinite(pending.initiatedAt)) recordTaskActivity({ user, sessionId, threadId: pending.threadId }, pending.initiatedAt);
 }
 
@@ -1616,13 +1617,14 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id) || null;
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   const prev = chatLanes.get(queueKey) ?? Promise.resolve();
 
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
   savePendingTask(opts.taskId, {
-    phase: 'queued', taskId: opts.taskId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
+    phase: 'queued', activitySessionId: opts.activitySessionId, taskId: opts.taskId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
     workDir: opts.user.workDir, task: opts.task, context: opts.context,
     sessionId: opts.sessionId, contextFromSession: opts.contextFromSession,
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode,
@@ -1673,7 +1675,8 @@ function runTask(opts) {
     try {
       const pendingFile = path.join(PENDING_DIR, `${opts.taskId}.json`);
       const pending = fs.existsSync(pendingFile) ? JSON.parse(fs.readFileSync(pendingFile, 'utf8')) : null;
-      recordTaskActivity({ ...opts, sessionId: pending?.sessionId || opts.sessionId });
+      recordTaskActivity({ ...opts, activitySessionId: pending && Object.hasOwn(pending, 'activitySessionId')
+        ? pending.activitySessionId : opts.activitySessionId });
     } catch (error) {
       console.error('[restart-activity] completion:', error.message);
     } finally { clearPendingTask(opts.taskId); releaseAdmission?.(); }
