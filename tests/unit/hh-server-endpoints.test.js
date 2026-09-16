@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'os';
 import { spawn } from 'child_process';
 import * as http from 'http';
@@ -78,7 +79,7 @@ function authHeader() {
 function startServer(env) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', ['src/server.js'], {
-      cwd: join(new URL(import.meta.url).pathname, '..', '..', '..'),
+      cwd: join(fileURLToPath(import.meta.url), '..', '..', '..'),
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -358,7 +359,7 @@ describe('generateReviewHtml source — callback embedding', () => {
     const { readFileSync } = await import('fs');
     const { join: pathJoin } = await import('path');
     const src = readFileSync(
-      pathJoin(new URL(import.meta.url).pathname, '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
+      pathJoin(fileURLToPath(import.meta.url), '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
       'utf8',
     );
 
@@ -372,7 +373,7 @@ describe('generateReviewHtml source — callback embedding', () => {
     const { readFileSync } = await import('fs');
     const { join: pathJoin } = await import('path');
     const src = readFileSync(
-      pathJoin(new URL(import.meta.url).pathname, '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
+      pathJoin(fileURLToPath(import.meta.url), '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
       'utf8',
     );
 
@@ -385,12 +386,46 @@ describe('generateReviewHtml source — callback embedding', () => {
     const { readFileSync } = await import('fs');
     const { join: pathJoin } = await import('path');
     const src = readFileSync(
-      pathJoin(new URL(import.meta.url).pathname, '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
+      pathJoin(fileURLToPath(import.meta.url), '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
       'utf8',
     );
 
     // The handler must use AGENT_PUBLIC_URL to build callbackBase
     expect(src).toContain('AGENT_PUBLIC_URL');
     expect(src).toContain('callbackBase');
+  });
+});
+
+
+describe('first-contact stage synchronization', () => {
+  async function sendFirst({ prior = false, fail = false, id = 'neg-002' } = {}) {
+    const dir = join(dataDir, 'hh', TEST_UID, 'candidates');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, id + '.json'), JSON.stringify({ messages: prior ? [{ role: 'employer', text: 'Здравствуйте!' }] : [] }));
+    mockHh.state.failConsider = fail;
+    return post(`http://127.0.0.1:${serverPort}/hh/send`, {
+      username: TEST_UID, negotiation_id: id, message: 'Спасибо за интерес к вакансии!',
+    }, authHeader());
+  }
+  it('moves a new response to consider after delivery', async () => {
+    expect((await sendFirst()).body.ok).toBe(true);
+    expect(mockHh.state.moves['neg-002']).toBe('consider');
+  });
+  it('does not move an interview back to consider', async () => {
+    mockHh.state.negotiationState = 'interview';
+    expect((await sendFirst()).body.ok).toBe(true);
+    expect(mockHh.state.moves['neg-002']).toBeUndefined();
+  });
+  it('does not repeat transition for follow-ups', async () => {
+    expect((await sendFirst({ prior: true })).body.ok).toBe(true);
+    expect(mockHh.state.moves['neg-002']).toBeUndefined();
+  });
+  it('preserves successful delivery when stage update fails', async () => {
+    expect((await sendFirst({ fail: true })).body.ok).toBe(true);
+    expect(mockHh.state.messages['neg-002']).toHaveLength(1);
+  });
+  it('does not guess the stage when negotiation lookup fails', async () => {
+    expect((await sendFirst({ id: 'unknown' })).body.ok).toBe(true);
+    expect(mockHh.state.moves.unknown).toBeUndefined();
   });
 });

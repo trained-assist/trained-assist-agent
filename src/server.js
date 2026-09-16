@@ -1579,10 +1579,22 @@ async function main() {
         appendGuardBlock(username, negotiation_id, 'сообщение упоминает время/дату — не блокирует отправку, только для истории', guard.checks, false);
       }
 
+      const firstContact = !history.messages.some(m => m.role === 'employer');
       try {
         await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
         history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString() });
         fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
+        // Delivery already succeeded: a stage error must never suggest resending.
+        if (firstContact) {
+          try {
+            const negotiation = await hhApiRequest('GET', `/negotiations/${negotiation_id}`, tokenData.access_token);
+            if (negotiation.state?.id === 'response') {
+              await hhApiPut(`/negotiations/consider/${negotiation_id}`, tokenData.access_token);
+            }
+          } catch (e) {
+            console.warn('[hh/send] stage move to consider failed:', e.message);
+          }
+        }
         console.log(`[hh/send] user=${username} neg=${negotiation_id} len=${message.length}`);
         return json(res, 200, { ok: true });
       } catch (e) {
@@ -4303,15 +4315,15 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
 
   const sorted = sortCandidates(candidates);
   const waitingCandidates = sortCandidates(candidates.filter(c => c.needs_reply));
-  // We wrote at least once, they haven't replied after our last message
+  // We wrote, but the candidate has never replied
   const silentCandidates = sortCandidates(candidates.filter(c =>
-    c.msg_from_us > 0 && c.last_msg_role === 'employer' && !c.needs_reply
+    c.msg_from_us > 0 && c.msg_from_candidate === 0 && !c.needs_reply
   ));
   // No employer message at all — never initiated contact
   const noContactCandidates = sortCandidates(candidates.filter(c => c.msg_from_us === 0));
-  // Active dialog: both sides wrote, last was from candidate (or has unread)
+  // Both sides wrote; our reply is last and no action is pending
   const dialogCandidates = sortCandidates(candidates.filter(c =>
-    c.msg_from_us > 0 && c.msg_from_candidate > 0 && c.last_msg_role === 'applicant' && !c.needs_reply
+    c.msg_from_us > 0 && c.msg_from_candidate > 0 && c.last_msg_role === 'employer' && !c.needs_reply
   ));
 
   const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
@@ -4326,9 +4338,10 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   const scoredMin = lastScoredAt ? Math.round((Date.now() - lastScoredAt) / 60000) : null;
   const scoredText = scoredMin === null ? '' : scoredMin === 0 ? 'скоринг только что' : scoredMin < 60 ? `скоринг ${scoredMin} мин назад` : `скоринг ${Math.round(scoredMin/60)} ч назад`;
 
-  function buildCardsHtml(list, idxOffset) {
-    return list.map((c, localIdx) => {
-      const i = idxOffset + localIdx;
+  let nextCardIndex = 0;
+  function buildCardsHtml(list) {
+    return list.map(c => {
+      const i = nextCardIndex++;
     const hasScore = c.score != null;
     const col = colorMap[c.verdict] || '#94a3b8';
     const bg = bgMap[c.verdict] || '#fff';
@@ -4359,11 +4372,8 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const isActionable = c.verdict && c.verdict !== 'ОТКЛОНИТЬ';
     const isReject = c.verdict === 'ОТКЛОНИТЬ';
 
-    const checkboxHtml = isActionable
-      ? `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" checked onchange="onCheck()">`
-      : isReject
-        ? `<input type="checkbox" class="reject-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()">`
-        : `<input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="0" onchange="onCheck()">`;
+    const checkboxHtml = (isReject ? '' : `<label><input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" ${isActionable ? 'checked' : ''} onchange="onCheck()"> Отправить</label>`)
+      + `<label><input type="checkbox" class="reject-cb" id="reject-cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()"> Отказать</label>`;
 
     const scoreHtml = hasScore
       ? `<div class="score-wrap">
@@ -4390,6 +4400,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const msgSection = isReject
       ? `<div class="msg-section">
            ${msgMeta}
+           ${c.already_sent ? '<span class="meta">Контакт начат</span>' : ''}
            <div class="msg-label-row">
              <label class="msg-label" style="color:#dc2626">Сообщение об отказе</label>
              <button class="btn btn-gen" id="gen-${i}" onclick="generateRejection(${i},'${esc(c.negotiation_id)}','${esc(c.name)}')" title="Сгенерировать отказное сообщение">✦ Сгенерировать отказ</button>
@@ -4403,6 +4414,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
          </div>`
       : `<div class="msg-section">
            ${msgMeta}
+           ${c.already_sent ? '<span class="meta">Контакт начат</span>' : ''}
            <div class="msg-label-row">
              <label class="msg-label">${msgLabel}</label>
              <button class="btn btn-gen" id="gen-${i}" data-idx="${i}" data-negid="${esc(c.negotiation_id)}" data-name="${esc(c.name)}" data-sent="${c.already_sent ? '1' : '0'}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
@@ -4427,6 +4439,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     </div>
     ${scoreHtml}
   </div>
+  <button class="btn btn-skip" onclick="rejectOne(${i},'${esc(c.negotiation_id)}')">🚫 Отказать без сообщения</button>
   ${c.reasoning ? `<p class="reasoning">${esc(c.reasoning)}</p>` : ''}
   ${matched || gaps ? `<div class="tags">${matched}${gaps}</div>` : ''}
   ${histSection}
@@ -4436,11 +4449,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     });
   }
 
-  const waitingCardsHtml = buildCardsHtml(waitingCandidates, 0);
-  const silentCardsHtml = buildCardsHtml(silentCandidates, 0);
-  const noContactCardsHtml = buildCardsHtml(noContactCandidates, 0);
-  const dialogCardsHtml = buildCardsHtml(dialogCandidates, 0);
-  const allCardsHtml = buildCardsHtml(sorted, 0);
+  const waitingCardsHtml = buildCardsHtml(waitingCandidates);
+  const silentCardsHtml = buildCardsHtml(silentCandidates);
+  const noContactCardsHtml = buildCardsHtml(noContactCandidates);
+  const dialogCardsHtml = buildCardsHtml(dialogCandidates);
+  const allCardsHtml = buildCardsHtml(sorted);
 
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -4610,6 +4623,7 @@ function switchTab(id, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + id).classList.add('active');
   btn.classList.add('active');
+  onCheck();
 }
 
 function copyMsg(i) {
@@ -4657,8 +4671,8 @@ async function hhAction(endpoint, payload) {
 }
 
 function onCheck() {
-  const ns = document.querySelectorAll('.card-cb:checked').length;
-  const nr = document.querySelectorAll('.reject-cb:checked').length;
+  const ns = document.querySelectorAll('.tab-panel.active .card-cb:checked').length;
+  const nr = document.querySelectorAll('.tab-panel.active .reject-cb:checked').length;
   document.getElementById('selCount').textContent = ns;
   document.getElementById('rejCount').textContent = nr;
   const sb = document.getElementById('sendAllBtn');
@@ -4672,7 +4686,7 @@ function toggleBucket(n) {
   const btn = document.querySelector('.score-btn[data-bucket="'+n+'"]');
   if (activeBuckets.has(n)) { activeBuckets.delete(n); btn.classList.remove('active'); }
   else { activeBuckets.add(n); btn.classList.add('active'); }
-  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+  document.querySelectorAll('.tab-panel.active .card-cb').forEach(cb => {
     if (done.has(parseInt(cb.dataset.idx))) return;
     const bucket = Math.floor(parseFloat(cb.dataset.score || 0));
     cb.checked = activeBuckets.has(bucket);
@@ -4681,7 +4695,7 @@ function toggleBucket(n) {
 }
 
 function selectAll(checked) {
-  document.querySelectorAll('.card-cb,.reject-cb').forEach(cb => {
+  document.querySelectorAll('.tab-panel.active .card-cb').forEach(cb => {
     if (!done.has(parseInt(cb.dataset.idx))) cb.checked = checked;
   });
   activeBuckets.clear();
@@ -4690,16 +4704,19 @@ function selectAll(checked) {
 }
 
 function markDone(i) {
-  done.add(i);
-  document.getElementById('card-'+i).classList.add('done');
-  const cb = document.getElementById('cb-'+i);
-  if (cb) { cb.checked = false; cb.disabled = true; }
-  document.getElementById('sentCount').textContent = done.size;
+  const negId = document.getElementById('card-'+i).dataset.neg;
+  document.querySelectorAll('.card').forEach(card => {
+    if (card.dataset.neg !== negId) return;
+    done.add(Number(card.id.slice(5)));
+    card.classList.add('done');
+    card.querySelectorAll('input[type=checkbox], button').forEach(el => { el.checked = false; el.disabled = true; });
+  });
+  document.getElementById('sentCount').textContent = new Set([...document.querySelectorAll('.card.done')].map(card => card.dataset.neg)).size;
 }
 
 async function regenerateAll() {
   const btn = document.getElementById('regenAllBtn');
-  const targets = Array.from(document.querySelectorAll('.btn-gen[data-negid]'))
+  const targets = Array.from(document.querySelectorAll('.tab-panel.active .btn-gen[data-negid]'))
     .filter(b => !b.disabled && !done.has(parseInt(b.dataset.idx)));
   if (!targets.length) { showToast('Нечего перегенерировать'); return; }
   const total = targets.length;
@@ -4777,7 +4794,7 @@ async function sendAndRejectOne(i, negId, force) {
     const data = await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg, force: !!force });
     if (data.blocked) {
       if (btn) { btn.disabled = false; btn.textContent = '✗ Отправить отказ'; }
-      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\n\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
+      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\\n\\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
         return sendAndRejectOne(i, negId, true);
       }
       return;
@@ -4818,7 +4835,7 @@ async function sendOne(i, negId, force) {
     const data = await hhAction('/hh/send', { negotiation_id: negId, message: msg, force: !!force });
     if (data.blocked) {
       if (btn) { btn.disabled = false; btn.textContent = '✓ Отправить'; }
-      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\n\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
+      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\\n\\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
         return sendOne(i, negId, true);
       }
       return;
@@ -4833,13 +4850,12 @@ async function sendOne(i, negId, force) {
 function skipOne(i) {
   done.add(i);
   document.getElementById('card-'+i).classList.add('skipped');
-  const cb = document.getElementById('cb-'+i);
-  if (cb) { cb.checked = false; cb.disabled = true; }
+  document.querySelectorAll('#card-'+i+' input[type=checkbox]').forEach(cb => { cb.checked = false; cb.disabled = true; });
   onCheck();
 }
 
 async function sendAll() {
-  const cbs = [...document.querySelectorAll('.card-cb:checked')];
+  const cbs = [...document.querySelectorAll('.tab-panel.active .card-cb:checked')];
   const sb = document.getElementById('sendAllBtn');
   sb.disabled = true; sb.textContent = '⏳ Отправляю...';
   let ok = 0;
@@ -4858,17 +4874,31 @@ async function sendAll() {
   if (ok > 0) showToast('✅ Отправлено ' + ok + ' сообщений');
 }
 
+async function rejectOne(i, negId) {
+  if (done.has(i) || !confirm('Отказать кандидату на HH без сообщения?')) return;
+  try {
+    const res = await hhAction('/hh/reject', { negotiation_ids: [negId] });
+    const result = (res.results || []).find(r => r.negotiation_id === negId);
+    if (!result?.ok) throw new Error(result?.error || 'Отказ не подтверждён');
+    markDone(i); onCheck(); showToast('✅ Кандидату отказано');
+  } catch(e) { showToast('❌ ' + e.message, true); }
+}
+
 async function rejectAll() {
-  const cbs = [...document.querySelectorAll('.reject-cb:checked')];
+  const cbs = [...document.querySelectorAll('.tab-panel.active .reject-cb:checked')];
   const negIds = cbs.map(cb => document.getElementById('card-'+parseInt(cb.dataset.idx))?.dataset.neg || '').filter(Boolean);
-  if (!negIds.length) return;
+  if (!negIds.length || !confirm('Отказать на HH без сообщения: ' + negIds.length + ' кандидатов?')) return;
   const rb = document.getElementById('rejectAllBtn');
   rb.disabled = true; rb.textContent = '⏳ Отклоняю...';
   try {
     const res = await hhAction('/hh/reject', { negotiation_ids: negIds });
-    cbs.forEach(cb => markDone(parseInt(cb.dataset.idx)));
+    const succeeded = new Set((res.results || []).filter(r => r.ok).map(r => r.negotiation_id));
+    cbs.forEach(cb => {
+      const i = parseInt(cb.dataset.idx);
+      if (succeeded.has(document.getElementById('card-'+i)?.dataset.neg)) markDone(i);
+    });
     onCheck();
-    const failed = (res.results || []).filter(r => !r.ok).length;
+    const failed = negIds.filter(id => !succeeded.has(id)).length;
     showToast(failed ? '⚠️ ' + failed + ' ошибок из ' + negIds.length : '✅ Отклонено ' + negIds.length + ' кандидатов');
   } catch(e) {
     showToast('❌ ' + e.message, true);

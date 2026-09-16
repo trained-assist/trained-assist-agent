@@ -4,14 +4,13 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { mkdtempSync } from 'fs';
 import { createRequire } from 'module';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const catalogMod = require('../../src/mcp-skills/tools/88-expo-catalog.js');
 const { expo_build_catalog, expo_deploy_catalog } = catalogMod.tools;
 
-const TEMPLATE_PATH = join(
-  new URL('../../src/catalog-template/index.html', import.meta.url).pathname
-);
+const TEMPLATE_PATH = fileURLToPath(new URL('../../src/catalog-template/index.html', import.meta.url));
 
 let workDir;
 

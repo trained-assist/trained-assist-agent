@@ -1,7 +1,7 @@
 // Unit tests for src/hh-quick.js — all HH API calls go to mock-hh-server.
 // Token files written to a temp dir; workDir is another temp dir.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -199,6 +199,13 @@ describe('hhNewResponses', () => {
 // ── hhAtsEditor ───────────────────────────────────────────────────────────────
 
 describe('hhAtsEditor', () => {
+  it('prefers HH_PLATFORM_URL for HH pages', () => {
+    vi.stubEnv('HH_PLATFORM_URL', 'https://hh.example.test');
+    vi.stubEnv('AGENT_PUBLIC_URL', 'https://agent.example.test');
+    try {
+      expect(freshModule().hhAtsEditor('u')).toContain('https://hh.example.test/');
+    } finally { vi.unstubAllEnvs(); }
+  });
   it('returns URL with userId encoded', () => {
     const { hhAtsEditor } = freshModule();
     const result = hhAtsEditor('my-user');
@@ -207,11 +214,11 @@ describe('hhAtsEditor', () => {
   });
 
   it('uses AGENT_PUBLIC_URL env var if set', () => {
-    process.env.AGENT_PUBLIC_URL = 'https://my-custom-domain.ru';
-    freshModule()._clearCache();
-    const { hhAtsEditor } = freshModule();
-    const result = hhAtsEditor('u');
-    expect(result).toContain('my-custom-domain.ru');
-    delete process.env.AGENT_PUBLIC_URL;
+    vi.stubEnv('HH_PLATFORM_URL', '');
+    vi.stubEnv('AGENT_PUBLIC_URL', 'https://my-custom-domain.ru');
+    try {
+      const { hhAtsEditor } = freshModule();
+      expect(hhAtsEditor('u')).toContain('my-custom-domain.ru');
+    } finally { vi.unstubAllEnvs(); }
   });
 });
