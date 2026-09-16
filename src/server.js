@@ -66,8 +66,9 @@ const NARROW_BOTS = {
 };
 
 const VM_NAME = process.env.VM_NAME || 'unknown';
+let RUNTIME_REVISION = 'unknown';
 let GIT_COMMIT = 'unknown';
-try { GIT_COMMIT = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
+try { RUNTIME_REVISION = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim(); GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
 
 const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
 // Matches assistant replies that signal task completion — session should not be reused
@@ -542,6 +543,9 @@ async function resumePendingTasks(secrets) {
   });
   maintenance.enableV2();
   maintenance.recovered();
+  // Recovery is complete; only the verified target revision may reopen admission.
+  const state = maintenance.ready(RUNTIME_REVISION);
+  if (state.phase === 'restarting') console.error('[startup] maintenance retained: target revision not verified');
   dispatchRestartIntents(secrets); // stays closed until external readiness for planned restarts
   setInterval(() => dispatchRestartIntents(secrets), 1000).unref();
 }
@@ -2831,7 +2835,7 @@ ${recent || '(пока нет)'}
     if (await require('./restart-confirmation-http').handleConfirmationRoute(req, url, res, secrets)) return;
 
     if (url.pathname === '/maintenance') {
-      if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: GIT_COMMIT });
+      if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: RUNTIME_REVISION });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
         if (body.action === 'claim') {
@@ -2846,9 +2850,13 @@ ${recent || '(пока нет)'}
           await flushRestartNotices();
           return json(res, 200, maintenance.status());
         }
+        if (body.action === 'rollback') {
+          try { return json(res, 200, maintenance.rollback(body.id)); }
+          catch (e) { return json(res, 409, { error: e.message }); }
+        }
         if (body.action === 'ready') {
           if (body.id !== maintenance.status().id) return json(res, 409, { error: 'operation changed' });
-          const state = maintenance.ready();
+          const state = maintenance.ready(RUNTIME_REVISION);
           await flushRestartNotices();
           return json(res, 200, state);
         }
@@ -2859,7 +2867,9 @@ ${recent || '(пока нет)'}
         if (body.action !== 'request') return json(res, 400, { error: 'invalid action' });
         const initiator = typeof body.initiator === 'object' && body.initiator !== null
           ? restartTarget(body.initiator) : body.initiator || 'operator';
-        const state = maintenance.request(initiator, body.kind === 'deploy' ? 'deploy' : 'restart');
+        let state;
+        try { state = maintenance.request(initiator, body.kind === 'deploy' ? 'deploy' : 'restart', body.targetCommit, body.previousCommit); }
+        catch (e) { return json(res, 409, { error: e.message }); }
         // Request acknowledgement is returned immediately; delivery uses the durable outbox.
         void flushRestartNotices();
         return json(res, 200, state);

@@ -38,6 +38,26 @@ class CoordinatorTest(unittest.TestCase):
         s,a,api,_=self.fixture(phase='restarting',bootId='new',runtimeCommit='bad1234')
         with self.assertRaises(RuntimeError): mod.release_ready(api,s,'good1234abcdef')
         self.assertEqual(a,[])
+    def test_deploy_new_boot_requires_exact_persisted_revision(self):
+        for revision in [None, 'unknown', 'b'*40, 'a'*7]:
+            with self.subTest(revision=revision):
+                s,a,api,restart=self.fixture(kind='deploy',phase='restarting',bootId='new',targetCommit='a'*40,runtimeCommit=revision)
+                with self.assertRaises(RuntimeError): mod.coordinate(api,restart,lambda _:None)
+                self.assertNotIn('ready',a); self.assertNotIn('restart',a)
+    def test_deploy_target_boot_releases_without_second_restart(self):
+        s,a,api,restart=self.fixture(kind='deploy',phase='restarting',bootId='new',targetCommit='a'*40,runtimeCommit='a'*40)
+        mod.coordinate(api,restart,lambda _:None); self.assertEqual(a,['ready'])
+    def test_deploy_same_boot_and_pending_recovery_stay_closed(self):
+        for boot,recovered in [('old',True),('new',False)]:
+            s,a,api,restart=self.fixture(kind='deploy',phase='restarting',bootId=boot,recovered=recovered,targetCommit='a'*40,runtimeCommit='a'*40)
+            mod.coordinate(api,restart,lambda _:None); self.assertEqual(a,[])
+    def test_legacy_deploy_without_target_does_not_release(self):
+        s,a,api,restart=self.fixture(kind='deploy',phase='restarting',bootId='new',runtimeCommit='a'*40)
+        with self.assertRaises(RuntimeError): mod.coordinate(api,restart,lambda _:None)
+        self.assertNotIn('ready',a)
+    def test_authorized_rollback_validates_rollback_revision(self):
+        s,a,api,_=self.fixture(kind='deploy',phase='restarting',bootId='new',targetCommit='a'*40,rollbackCommit='b'*40,runtimeCommit='b'*40)
+        self.assertTrue(mod.release_ready(api,s,'b'*40)); self.assertEqual(a,['ready'])
     def test_failed_systemctl_does_not_open_gate(self):
         s,a,api,_=self.fixture()
         def restart(): raise OSError('systemctl failed')

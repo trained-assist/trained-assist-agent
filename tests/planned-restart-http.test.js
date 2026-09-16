@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -71,7 +71,21 @@ async function restartCycle(kind) {
       await api('/run',payload);
       await until(()=>fs.existsSync(launches));
     }
-    const operation = await api('/maintenance', { action: 'request' });
+    const revision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const operation = await api('/maintenance', { action: 'request', ...(kind.startsWith('deploy-') ? { kind: 'deploy', targetCommit: kind === 'deploy-target' ? revision : '0'.repeat(40), previousCommit: revision } : {}) });
+    // Regression: screenshots used to fail with 503 here, while text /run
+    // returned 202. Exercise the real HTTP gate and disk store during drain.
+    const photo = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x42, 0xff, 0xd9]);
+    const fileRoute = `/intake-files?username=fixture&id=${'a'.repeat(64)}&name=photo.jpg`;
+    const denied = await fetch(`http://127.0.0.1:${port}${fileRoute}`, { method: 'PUT', body: photo });
+    expect(denied.status).toBe(401);
+    const upload = await fetch(`http://127.0.0.1:${port}${fileRoute}`, {
+      method: 'PUT', headers: { ...headers, 'Content-Type': 'image/jpeg' }, body: photo });
+    expect(upload.status).toBe(200);
+    const ref = await upload.json(); expect(ref.size).toBe(photo.length);
+    const downloaded = await fetch(`http://127.0.0.1:${port}${fileRoute}`, { headers });
+    expect(downloaded.status).toBe(200);
+    expect(Buffer.from(await downloaded.arrayBuffer())).toEqual(photo);
     if(kind!=='forced') {
       const ack = await api('/run', payload); expect(ack.durable).toBe(true); expect(ack.queued).toBe(true);
       expect(fs.existsSync(launches)).toBe(false);
@@ -81,6 +95,14 @@ async function restartCycle(kind) {
       expect((await api('/maintenance')).deadlineReached).toBe(true);
     }
     expect((await api('/maintenance', { action: 'claim', id: operation.id })).claimed).toBe(true);
+    // After claim, durable media still returns its original bytes; execution is closed.
+    const latePhotoRoute = fileRoute.replace('a'.repeat(64), 'b'.repeat(64));
+    const lateUpload = await fetch(`http://127.0.0.1:${port}${latePhotoRoute}`, {
+      method: 'PUT', headers: { ...headers, 'Content-Type': 'image/jpeg' }, body: photo });
+    expect(lateUpload.status).toBe(200);
+    const lateDownload = await fetch(`http://127.0.0.1:${port}${latePhotoRoute}`, { headers });
+    expect(lateDownload.status).toBe(200);
+    expect(Buffer.from(await lateDownload.arrayBuffer())).toEqual(photo);
     if (kind === 'forced') {
       // The coordinator has claimed shutdown, but HTTP is still accepting input.
       // A durable ACK in this window must correspond to an actual ledger row.
@@ -93,11 +115,24 @@ async function restartCycle(kind) {
       expect(JSON.parse(lateRow.data).payload.task).toContain('Late request');
     }
     await stop(); await start();
-    const state = await api('/maintenance'); expect(state.paused).toBe(true); expect(state.bootId).not.toBe(operation.bootId);
-    expect(fs.existsSync(launches)).toBe(kind==='forced');
+    const state = await api('/maintenance'); expect(state.bootId).not.toBe(operation.bootId);
+    if (kind === 'deploy-wrong') {
+      expect(state.paused).toBe(true);
+      expect(fs.existsSync(launches)).toBe(false);
+      expect((await api('/maintenance', { action: 'ready', id: operation.id })).paused).toBe(true);
+      expect((await api('/run', payload)).duplicate).toBe(true);
+      const db = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+      const row = JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
+      db.close();
+      expect(row.state).toBe('queued');
+      expect(row.payload.task).toContain('resume.txt');
+      return;
+    }
+    expect(state.paused).toBe(false); expect(state.phase).toBe('ready');
+    if (kind === 'deploy-target') expect(state.deploymentOutcome).toBe('deployed');
     expect((await api('/run', payload)).duplicate).toBe(true);
     expect((await api('/maintenance', { action: 'ready', id: operation.id })).phase).toBe('ready');
-    if(kind!=='fresh') {
+    if(kind==='stale' || kind==='forced') {
       const listed=await api('/web/restart-intents-bearer',{username:'fixture',action:'list'});
       expect(listed.intents).toHaveLength(kind === 'forced' ? 2 : 1);
       const selectionDb = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
@@ -149,3 +184,5 @@ it('stale HTTP queue survives boot, requires owner confirmation and preserves me
 it('40-minute deadline interrupts a real child and requires confirmation after readiness', {timeout:45000}, () => restartCycle('forced'));
 
 it('implicit first request and explicit reply serialize on the bound session', {timeout:45000}, () => restartCycle('lane'));
+
+it.each(['deploy-target', 'deploy-wrong'])('v2 recovery verifies runtime revision: %s', {timeout:45000}, kind => restartCycle(kind));

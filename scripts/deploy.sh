@@ -25,6 +25,7 @@ git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/maintenance.js" || {
   exit 1
 }
 
+export PREV_COMMIT
 DEPS_STAGE=""
 OLD_DEPS=""
 DEPS_SWAPPED=0
@@ -39,6 +40,11 @@ rollback() {
     return 1
   fi
   echo "==> Rolling back to $PREV_COMMIT with the saved dependencies..."
+  if [ "$(systemctl show "$SERVICE" -p MainPID --value)" != 0 ]; then
+    python3 "$REPO_DIR/scripts/restart-coordinator.py" --rollback || return 1
+  fi
+  sudo systemctl stop "$SERVICE" || return 1
+  python3 "$REPO_DIR/scripts/prepare-deploy-journal.py" --rollback || return 1
   git -C "$REPO_DIR" reset --hard "$PREV_COMMIT" || return 1
   if [ "$DEPS_SWAPPED" = "1" ]; then
     sudo systemctl stop "$SERVICE" || return 1
@@ -75,6 +81,7 @@ npm ci --prefix "$DEPS_STAGE" --omit=dev
 
 echo "==> Stopping drained service and swapping dependencies..."
 sudo systemctl stop "$SERVICE"
+python3 "$REPO_DIR/scripts/prepare-deploy-journal.py"
 OLD_DEPS="$DEPS_STAGE/previous-node_modules"
 if [ -d "$REPO_DIR/node_modules" ]; then
   mv "$REPO_DIR/node_modules" "$OLD_DEPS"

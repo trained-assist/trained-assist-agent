@@ -26,7 +26,11 @@ def release_ready(api, operation, expected_commit=None):
     current = api()
     if current.get('id') != operation['id']:
         raise RuntimeError('Maintenance operation changed; gate not released')
-    if expected_commit and (not current.get('runtimeCommit') or current['runtimeCommit'] == 'unknown' or not expected_commit.startswith(current['runtimeCommit'])):
+    target = current.get('rollbackCommit') or current.get('targetCommit')
+    if current.get('kind') == 'deploy':
+        if not target or len(target) != 40 or current.get('runtimeCommit') != target:
+            raise RuntimeError('Deploy revision not verified; queue remains paused')
+    if expected_commit and current.get('runtimeCommit') != expected_commit:
         raise RuntimeError('Unexpected running revision; queue remains paused')
     if current.get('phase') == 'ready':
         return True
@@ -38,6 +42,12 @@ def release_ready(api, operation, expected_commit=None):
 
 def _coordinate(api, restart, wait=time.sleep):
     state = api()
+    # A deploy-kind gate stuck in restarting after a machine reboot (coordinator died before
+    # --ready): the new server boot has already recovered; just release the gate.
+    if (state.get('kind') == 'deploy' and state.get('phase') == 'restarting'
+            and state.get('recovered') and state.get('bootId') != state.get('ownerBootId')):
+        release_ready(api, state)
+        return
     if state.get('kind') != 'restart' or state.get('phase') not in ('draining', 'restarting'):
         return
     if state['phase'] == 'draining':
@@ -76,6 +86,14 @@ def coordinate(api, restart, wait=time.sleep):
         raise
 
 def main():
+    if '--rollback' in sys.argv:
+        api = client()
+        state = api()
+        if state.get('maintenanceProtocol', 0) >= 2:
+            api({'action': 'rollback', 'id': state['id']})
+        elif not (state.get('kind') == 'deploy' and state.get('phase') in ('restarting', 'failed') and state.get('active') == 0 and state.get('paused')):
+            raise RuntimeError('Legacy rollback is not quiescent')
+        return
     if '--ready' in sys.argv:
         expected = subprocess.check_output(['git', '-c', 'safe.directory=' + str(Path(__file__).resolve().parents[1]), 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
         for _ in range(30):

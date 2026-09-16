@@ -14,9 +14,10 @@ function fixture(t, failure, v2 = false) {
  const log=path.join(root,'calls');const result=spawnSync('/bin/bash',[path.resolve(__dirname,'../scripts/deploy.sh')],{env:{...process.env,PATH:bin+':'+process.env.PATH,DEPLOY_ENV:'ru',REPO_DIR:repo,PREV_COMMIT:'oldcommit',TEST_LOG:log,TEST_FAILURE:failure,TEST_ONCE:path.join(root,'once'),AGENT_DATA_DIR:path.join(root,'data'),ASSIST_DEPLOY_LOCKED:'0',ASSIST_DEPLOY_LOCK_FILE:path.join(root,'deploy.lock')},encoding:'utf8',timeout:10000});
  return {result,repo,log:fs.existsSync(log)?fs.readFileSync(log,'utf8'):''};
 }
-test('dependency download failure preserves installed dependencies and never stops the service',t=>{
+test('dependency download failure preserves dependencies through an explicit stopped-service rollback',t=>{
  const f=fixture(t,'npm');assert.equal(f.result.status,42,f.result.stderr+f.result.stdout);
- assert.equal(fs.readFileSync(path.join(f.repo,'node_modules','old-marker'),'utf8'),'old');assert.doesNotMatch(f.log,/systemctl stop assist-agent/);
+ assert.equal(fs.readFileSync(path.join(f.repo,'node_modules','old-marker'),'utf8'),'old');assert.match(f.log,/prepare-deploy-journal.py --rollback/);
+ assert.ok(f.log.indexOf('systemctl stop assist-agent') < f.log.indexOf('prepare-deploy-journal.py --rollback'));
 });
 test('failed readiness restores saved dependencies without downloading them again',t=>{
  const f=fixture(t,'readiness');assert.equal(f.result.status,43,f.result.stderr+f.result.stdout);

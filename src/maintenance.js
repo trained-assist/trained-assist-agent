@@ -64,7 +64,7 @@ function createMaintenance(file, { recovering = false, snapshotRecipients = null
     },
     beginRecovery() { recovering = true; },
     recovered() { recovering = false; },
-    status() { return { ...state, durableIngress: 1, bootId, recovered: !recovering, paused: paused(), active: active.size,
+    status() { return { ...state, maintenanceProtocol: 2, durableIngress: 1, bootId, recovered: !recovering, paused: paused(), active: active.size,
       deadlineReached: !!(restartV2 && state?.deadlineAt && now() >= state.deadlineAt),
       oldestStartedAt: active.size ? Math.min(...active.values()) : null }; },
     acquire(id = randomUUID(), allowDuringDrain = false) {
@@ -73,15 +73,17 @@ function createMaintenance(file, { recovering = false, snapshotRecipients = null
       let released = false;
       return () => { if (!released) { released = true; active.delete(id); } };
     },
-    request(initiator, kind = 'restart') {
+    request(initiator, kind = 'restart', targetCommit = null, previousCommit = null) {
       if (recovering) throw Error('Startup recovery is not complete');
+      if (kind === 'deploy' && !/^[a-f0-9]{40}$/.test(targetCommit || '')) throw Error('Deploy requires a full targetCommit');
+      if (paused() && kind === 'deploy' && (state.kind !== kind || state.targetCommit !== targetCommit)) throw Error('Another maintenance operation owns the gate');
       if (!paused()) {
         const requestedAt = now();
         // Synchronous snapshot + journal replacement: no admission can interleave.
         // An unreadable source fails the request before closing admission.
         const recipients = snapshotRecipients ? snapshotRecipients(requestedAt) : null;
         if (recipients && initiator && typeof initiator === 'object') recipients.push(initiator);
-        transition({ id: randomUUID(), phase: 'draining', kind, initiator, requestedAt, ownerBootId: bootId,
+        transition({ id: randomUUID(), phase: 'draining', kind, initiator, targetCommit, previousCommit, requestedAt, ownerBootId: bootId,
           ...(recipients ? { audienceVersion: 2, recipients } : {}),
           ...(restartV2 ? { restartVersion: 2, deadlineAt: requestedAt + 40 * 60 * 1000 } : {}) });
       }
@@ -100,11 +102,19 @@ function createMaintenance(file, { recovering = false, snapshotRecipients = null
       return true;
     },
     fail(error) { transition({ id: randomUUID(), kind: 'restart', ownerBootId: bootId, ...state, phase: 'failed', error, failedAt: now() }); },
-    ready() {
+    rollback(id) {
+      if (state?.id !== id || state.kind !== 'deploy' || !['restarting', 'failed'].includes(state.phase) ||
+          !/^[a-f0-9]{40}$/.test(state.previousCommit || '')) throw Error('No verified rollback revision');
+      transition({ ...state, phase: 'restarting', rollbackCommit: state.previousCommit, ownerBootId: bootId });
+      return this.status();
+    },
+    ready(runtimeCommit) {
       // Startup recovery only, after queued tasks have been registered. A same-process
       // health check must never reopen a gate claimed by the coordinator.
       if (!recovering && state?.phase === 'restarting' && state.ownerBootId !== bootId) {
-        transition({ ...state, phase: 'ready', finishedAt: now() });
+        const expected = state.rollbackCommit || state.targetCommit;
+        if (state.kind === 'deploy' && (!/^[a-f0-9]{40}$/.test(expected || '') || runtimeCommit !== expected)) return this.status();
+        transition({ ...state, phase: 'ready', ...(state.kind === 'deploy' ? { deploymentOutcome: state.rollbackCommit ? 'rolled_back' : 'deployed' } : {}), finishedAt: now() });
       }
       return this.status();
     },
