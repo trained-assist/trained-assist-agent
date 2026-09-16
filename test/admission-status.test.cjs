@@ -17,7 +17,7 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
   const lanes = new Map(previous ? [['s1', previous]] : []);
   const sandbox = {
     require: name => { assert.equal(name, './admission-status'); return { createAdmissionStatus }; },
-    console, Promise, Set, Date,
+    console, Promise, Set, Date, maintenance: { paused: () => false },
     _laneKey: s => s, chatLanes: lanes, STOP_TASK_INTENT: /$^/, WAKEUP_INTENT: /$^/,
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
     tgEdit: async (token, chat, id, text) => { assert.equal(token, 'canonical-token'); messages.push(text); return { ok: true }; },
@@ -81,6 +81,7 @@ test('restart restores queued work older than 15 minutes in acceptance order wit
   const sandbox = {
     getPendingTasks: () => [task('later', 1000), task('earlier', 30 * 60000)],
     require: () => ({ clearPendingTask() {} }),
+    atomicJson: () => {}, os: { homedir: () => '/test' },
     console, Date, process: { env: {} }, BASE_USERS_DIR: '/test', path: require('node:path'),
     setTimeout: fn => fn(), runTask: async options => { resumed.push(options); },
   };

@@ -5,6 +5,16 @@ const TTL_MS = 48 * 60 * 60 * 1000;
 // Only new transient intake media; never scan project artifacts or legacy uploads.
 function purgeIntakeMedia(baseDir, now = Date.now()) {
   let deleted = 0;
+  // Corrupt journals fail closed: never purge media while ownership is unknown.
+  const pendingDir = require('path').join(process.env.AGENT_DATA_DIR || require('path').join(require('os').homedir(), 'agent-data'), 'pending-tasks');
+  let pendingText = '';
+  try {
+    for (const file of fs.readdirSync(pendingDir).filter(f => f.endsWith('.json'))) {
+      const raw = fs.readFileSync(require('path').join(pendingDir, file), 'utf8');
+      JSON.parse(raw); pendingText += raw;
+    }
+  } catch (e) { if (e.code !== 'ENOENT') return 0; }
+
   for (const profile of fs.readdirSync(baseDir, { withFileTypes: true })) {
     if (!profile.isDirectory()) continue;
     const dir = path.join(baseDir, profile.name, 'media', 'intake');
@@ -14,7 +24,7 @@ function purgeIntakeMedia(baseDir, now = Date.now()) {
       for (const file of fs.readdirSync(dir, { withFileTypes: true })) {
         if (!file.isFile()) continue;
         const target = path.join(dir, file.name);
-        if (now - fs.lstatSync(target).mtimeMs >= TTL_MS) { fs.unlinkSync(target); deleted++; }
+        if (!pendingText.includes(target) && now - fs.lstatSync(target).mtimeMs >= TTL_MS) { fs.unlinkSync(target); deleted++; }
       }
     } catch (error) { if (error.code !== 'ENOENT') console.warn('[intake-media cleanup]', error.code); }
   }

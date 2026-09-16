@@ -1,12 +1,12 @@
 #!/bin/bash
 # Deploy script — run on the VM after git pull
-set -e
+set -eo pipefail
 
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 
 # Save current commit so we can roll back if smoke tests fail
-PREV_COMMIT=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")
+PREV_COMMIT=${PREV_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")}
 NEW_COMMIT=$(git -C "$REPO_DIR" rev-parse origin/main 2>/dev/null || echo "")
 
 rollback() {
@@ -23,6 +23,8 @@ rollback() {
   echo "==> Rolled back to previous version. Deploy failed."
 }
 
+# The CI caller also drains before git reset; direct invocations still must drain.
+python3 "$REPO_DIR/scripts/drain-for-deploy.py"
 echo "==> Stopping service before dependency install..."
 sudo systemctl stop "$SERVICE" 2>/dev/null || true
 
@@ -100,6 +102,11 @@ echo "==> Ensuring data directories exist..."
 DATA_DIR="${AGENT_DATA_DIR:-/home/vova/agent-data}"
 mkdir -p "$DATA_DIR/system-flags"
 chown -R vova:vova "$DATA_DIR" 2>/dev/null || true
+
+sudo cp "$REPO_DIR/systemd/assist-agent-restart.service" /etc/systemd/system/
+sudo cp "$REPO_DIR/systemd/assist-agent-restart.timer" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now assist-agent-restart.timer
 
 echo "==> Restarting service..."
 sudo systemctl restart "$SERVICE"

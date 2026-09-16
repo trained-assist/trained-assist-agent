@@ -1,0 +1,7 @@
+[Unit]
+Description=Drain-aware agent restart coordinator
+After=assist-agent.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/vova/trained-assist-agent/scripts/restart-coordinator.py
+TimeoutStartSec=240

@@ -1,3 +1,4 @@
+const { maintenance, atomicJson } = require('./maintenance');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -69,10 +70,7 @@ const PENDING_DIR = path.join(
 );
 
 function savePendingTask(taskId, params) {
-  try {
-    fs.mkdirSync(PENDING_DIR, { recursive: true });
-    fs.writeFileSync(path.join(PENDING_DIR, `${taskId}.json`), JSON.stringify(params), { mode: 0o600 });
-  } catch (e) { console.warn('[runner] savePendingTask:', e.message); }
+  atomicJson(path.join(PENDING_DIR, `${taskId}.json`), params);
 }
 
 function clearPendingTask(taskId) {
@@ -80,13 +78,9 @@ function clearPendingTask(taskId) {
 }
 
 function getPendingTasks() {
-  try {
-    if (!fs.existsSync(PENDING_DIR)) return [];
-    return fs.readdirSync(PENDING_DIR)
-      .filter(f => f.endsWith('.json'))
-      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')); } catch (e) { console.warn('[runner] getPendingTasks parse:', e.message); return null; } })
-      .filter(Boolean);
-  } catch (e) { console.warn('[runner] getPendingTasks:', e.message); return []; }
+  if (!fs.existsSync(PENDING_DIR)) return [];
+  return fs.readdirSync(PENDING_DIR).filter(f => f.endsWith('.json'))
+    .map(f => JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')));
 }
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
@@ -1345,10 +1339,15 @@ const RAM_WAIT_MAX_MS = 60000; // never deadlock — proceed after this even if 
 let _runningTasks = 0;
 const _slotWaiters = [];
 
-function _acquireSlot() {
+function _acquireSlot(onPaused = () => {}) {
   return new Promise(resolve => {
+    let reportedPause = false;
     const grab = () => {
-      if (_runningTasks < MAX_CONCURRENT_TASKS) { _runningTasks++; resolve(); }
+      if (maintenance.paused()) { if (!reportedPause) { onPaused(); reportedPause = true; } setTimeout(grab, 500); }
+      else if (_runningTasks < MAX_CONCURRENT_TASKS) {
+        const release = maintenance.acquire();
+        _runningTasks++; resolve(release);
+      }
       else _slotWaiters.push(grab);
     };
     grab();
@@ -1551,23 +1550,16 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // Admin restart command — only for the operator chat. Sends confirmation then exits (systemd restarts).
-  const ADMIN_CHAT_IDS = new Set([-5308931318]);
-  if (/^\/restart$/i.test((opts.task || '').trim()) && ADMIN_CHAT_IDS.has(Number(opts.user.id))) {
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
-    const msg = '🔄 Сервер перезапускается... (systemd поднимет через несколько секунд)';
-    const sendAndExit = () => setTimeout(() => process.exit(0), 600);
-    if (botToken) {
-      const im = opts.initialMsgId;
-      (im
-        ? tgEdit(botToken, chatId, im, msg).catch(() => tgSend(botToken, chatId, msg))
-        : tgSend(botToken, chatId, msg)
-      ).catch(() => {}).finally(sendAndExit);
-    } else {
-      sendAndExit();
-    }
-    return Promise.resolve(msg);
+  // Control commands bypass lanes and admission. Available to every authenticated profile.
+  const restart = /^\/restart(?:@\w+)?(?:\s+(status|cancel))?$/i.exec((opts.task || '').trim());
+  if (restart) {
+    const state = restart[1] === 'cancel' ? maintenance.cancel()
+      : restart[1] === 'status' ? maintenance.status() : maintenance.request(opts.user.username);
+    const msg = state.paused
+      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохранены и ждут.`
+      : '✅ Плановый рестарт не ожидается.';
+    const token = opts.secrets?.BOT_TOKEN;
+    return token ? tgSend(token, opts.user.id, msg).then(() => msg) : Promise.resolve(msg);
   }
 
   // Wakeup command — kill stuck task + clear the queue so new messages can flow through.
@@ -1602,10 +1594,13 @@ function runTask(opts) {
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode,
     projectId: opts.projectId, newProjectName: opts.newProjectName,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId,
-    startedAt: Date.now(),
+    profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
+    continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
+    startedAt: opts.acceptedAt || Date.now(),
   });
   const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  if (chatLanes.has(queueKey)) status.waiting(
+  if (maintenance.paused()) status.waiting('⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.');
+  else if (chatLanes.has(queueKey)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
@@ -1616,7 +1611,7 @@ function runTask(opts) {
   const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
 
   const current = prev.catch(() => {}).then(async () => {
-    status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
+    status.waiting(maintenance.paused() ? '⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.' : '↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
     // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
     // profile's 4-slot cap waits here without holding a scarce global slot.
     await _acquireKeySlot(capKey);
@@ -1624,11 +1619,12 @@ function runTask(opts) {
       // Global admission control: wait for a free slot + enough RAM before we
       // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
       await _waitForRam();
-      await _acquireSlot();
+      const releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.'));
       try {
         await status.finish('🧠 Начинаю работу…');
         return await _runTask(opts);
       } finally {
+        releaseAdmission?.();
         _releaseSlot();
       }
     } finally {
@@ -2011,7 +2007,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const chatId = user.id;
 
   savePendingTask(taskId, {
-    taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
     task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
     initialMsgId, pinnedMsgId,
     startedAt: Date.now(),
@@ -2729,7 +2726,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
-      return runTask({
+      runTask({
         taskId: `${user.username}-${Date.now()}`,
         user,
         task,
@@ -2741,6 +2738,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         secrets,
         retryCount: retryCount + 1,
       });
+      return;
     }
     const crashMsg = retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`

@@ -75,9 +75,12 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          command_timeout: 90m
           script: |
             cd /home/vova/trained-assist-agent
             git fetch origin main
+            python3 scripts/drain-for-deploy.py
+            export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard origin/main
             printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
@@ -113,10 +116,13 @@ jobs:
           host: ${{ secrets.VM_RU_HOST }}
           username: ${{ secrets.VM_RU_USER }}
           password: ${{ secrets.VM_RU_PASSWORD }}
+          command_timeout: 90m
           script: |
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
             git fetch origin main
+            python3 scripts/drain-for-deploy.py
+            export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard origin/main
             printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.TELEGRAM_BOT_TOKEN }}' \

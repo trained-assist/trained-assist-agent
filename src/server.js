@@ -1,3 +1,4 @@
+const { maintenance, atomicJson } = require('./maintenance');
 const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, hydrateResumes, buildResumeText, resumeNotice } = require('./hh-resume');
 const http = require('http');
@@ -466,7 +467,9 @@ function scheduleHhBackgroundScoring() {
     const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
     if (!fs.existsSync(hhTokensBase)) return;
     for (const username of fs.readdirSync(hhTokensBase)) {
-      runHhScoringForUser(username).catch(() => {});
+      const release = maintenance.acquire();
+      if (!release) return;
+      runHhScoringForUser(username).catch(() => {}).finally(release);
       await new Promise(r => setTimeout(r, 1000)); // stagger users to avoid API burst
     }
   }
@@ -490,27 +493,18 @@ function scheduleGtdController(secrets) {
 
 async function resumePendingTasks(secrets) {
   const pending = getPendingTasks();
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  const queueCutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const toResume = pending.filter(t => t.startedAt && t.startedAt > (t.phase === 'queued' ? queueCutoff : cutoff) && t.username && t.userId && t.task)
+  // No TTL for accepted work: a long maintenance window must not discard it.
+  const toResume = pending.filter(t => t.taskId && t.username && t.userId && (t.task || t.forceClaude))
     .sort((a, b) => a.startedAt - b.startedAt);
-  // Clean up stale files that are too old to resume — prevents slow startup after many crashes.
-  const { clearPendingTask: _clearStale } = require('./runner');
-  for (const t of pending) {
-    if (!toResume.includes(t) && t.taskId) _clearStale(t.taskId);
-  }
+  if (toResume.length !== pending.length) throw Error('Invalid pending journal; operator repair required');
   if (toResume.length === 0) return;
 
   console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
-  // Import clearPendingTask to remove original files before re-running
-  const { clearPendingTask: _clearPending } = require('./runner');
-
   for (const p of toResume) {
     console.log(`[resume] task=${p.taskId} user=${p.username} task="${String(p.task).slice(0, 60)}"`);
-    // Delete original file immediately — the new runTask will journal under its own taskId
-    _clearPending(p.taskId);
+    // Preserve the original journal until the same task ID is re-registered.
     if (p.initialMsgId && secrets.BOT_TOKEN) {
       fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
         method: 'POST',
@@ -520,16 +514,18 @@ async function resumePendingTasks(secrets) {
       }).catch(() => {});
     }
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
-    const user = { id: p.userId, name: p.username, username: p.username, workDir };
-    const newTaskId = `${p.username}-resume-${Date.now()}`;
+    const user = { id: p.userId, name: p.username, username: p.username, workDir, profileId: p.profileId, telegramUserId: p.telegramUserId };
+    const newTaskId = p.taskId;
+    atomicJson(path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${p.taskId}.json`), { taskId: p.taskId, acceptedAt: p.startedAt });
     runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
       sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
       forceClaude: !!p.forceClaude, forceNew: !!p.forceNew, mode: p.mode || null,
       projectId: p.projectId || null, newProjectName: p.newProjectName || null,
       initialMsgId: p.initialMsgId || null,
-      pinnedMsgId: p.pinnedMsgId || null, secrets,
+      pinnedMsgId: p.pinnedMsgId || null, secrets, acceptedAt: p.startedAt,
+      continuationCount: p.continuationCount, retryCount: p.retryCount, internalGtd: p.internalGtd,
     }).catch(err => console.error(`[resume] ${newTaskId} error:`, err.message));
-    await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
+    // Admission limits stagger execution; register the full journal before readiness.
   }
 }
 
@@ -551,8 +547,18 @@ async function main() {
 
   require('./intake-media-retention').startIntakeMediaRetention(BASE_USERS_DIR);
   const server = http.createServer(async (req, res) => {
+    let releaseRequest;
     try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
+    // Keep durable ingress and control reachable. Other in-flight HTTP operations
+    // count towards draining; requests arriving after the gate closes retry later.
+    const maintenanceExempt = ['/maintenance', '/run', '/health'].includes(url.pathname) || url.pathname.startsWith('/web/');
+    if (!maintenanceExempt) {
+      const release = maintenance.acquire(undefined, true);
+      if (!release) return json(res, 503, { error: 'planned restart; retry after readiness' });
+      releaseRequest = release;
+    }
+
 
     // ── GET /connect/nalog/code?sessionId=XXX — 2FA code entry page ─────────
     if (req.method === 'GET' && url.pathname === '/connect/nalog/code') {
@@ -2688,6 +2694,17 @@ ${expLines || '—'}
       return;
     }
 
+    if (url.pathname === '/maintenance') {
+      if (req.method === 'GET') return json(res, 200, maintenance.status());
+      if (req.method === 'POST') {
+        const body = JSON.parse(await readBody(req));
+        if (body.action === 'claim') return json(res, 200, { claimed: maintenance.claim(body.id) });
+        if (body.action === 'cancel') return json(res, 200, maintenance.cancel());
+        if (body.action !== 'request') return json(res, 400, { error: 'invalid action' });
+        return json(res, 200, maintenance.request(body.initiator || 'operator', body.kind === 'deploy' ? 'deploy' : 'restart'));
+      }
+    }
+
     // POST /report — create a GitHub issue from a user-submitted bug report
     if (req.method === 'POST' && url.pathname === '/report') {
       let body;
@@ -3052,6 +3069,13 @@ ${expLines || '—'}
       if (newProjectName && (typeof newProjectName !== 'string' || newProjectName.length > 200))
         return json(res, 400, { error: 'invalid newProjectName' });
 
+      const requestId = payload.requestId;
+      if (requestId && !/^[a-zA-Z0-9_-]{1,100}$/.test(requestId)) return json(res, 400, { error: 'invalid requestId' });
+      const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
+      const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
+      if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
+        return json(res, 202, { taskId, duplicate: true });
+      }
       const workDir = path.join(BASE_USERS_DIR, username);
       fs.mkdirSync(workDir, { recursive: true });
 
@@ -3084,14 +3108,11 @@ ${expLines || '—'}
         }
       }
 
-      // Accept request immediately, run task in background
-      const taskId = `${username}-${Date.now()}`;
-      json(res, 202, { taskId });
-
-      // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
-        console.error(`[${taskId}] runTask error:`, err.message)
-      );
+      // runTask journals synchronously, before any await or acknowledgement.
+      const completion = runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
+      if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
+      completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
+      json(res, 202, { taskId, queued: maintenance.paused() });
       return;
     }
 
@@ -3658,7 +3679,10 @@ ${recent || '(пока нет)'}
         CF_API_TOKEN: secrets.CF_API_TOKEN || '',
         OPERATOR_CHAT_ID: secrets.OPERATOR_CHAT_ID || '1714048',
       };
+      const releaseRefresh = maintenance.acquire(undefined, true);
+      if (!releaseRefresh) return;
       const child = spawn('node', [refreshScript], { env, detached: true, stdio: 'inherit' });
+      child.once('exit', releaseRefresh); child.once('error', releaseRefresh);
       child.unref();
       console.log('[weeek-session] Refresh script started, pid:', child.pid);
       return;
@@ -3927,7 +3951,7 @@ ${recent || '(пока нет)'}
     } catch (err) {
       console.error('[request-handler] unhandled error:', err);
       if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: 'internal server error' }));
-    }
+    } finally { releaseRequest?.(); }
   });
 
   server.listen(PORT, () => console.log(`assist-agent listening on :${PORT}`));
@@ -3940,7 +3964,7 @@ ${recent || '(пока нет)'}
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
   scheduleGtdController(secrets);
-  resumePendingTasks(secrets).catch(err => console.error('[resume] startup error:', err.message));
+  resumePendingTasks(secrets).then(() => maintenance.ready()).catch(err => { maintenance.fail(err.message); console.error('[resume] startup error:', err.message); });
 
   // Deploys restart this service frequently (every few minutes during an
   // active PR streak) — without draining, each restart silently kills
