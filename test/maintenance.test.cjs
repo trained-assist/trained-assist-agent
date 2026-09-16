@@ -70,3 +70,37 @@ test('failed recovery never silently releases queued work', t => {
 test('valid JSON with invalid maintenance schema must not open admission', t => {
  const {file}=fixture(t);fs.writeFileSync(file,'{}');assert.throws(()=>createMaintenance(file),/Invalid maintenance journal/);
 });
+
+// Exercise the production middleware, not a duplicate allowlist in the test.
+function requestAdmission(gate, method, pathname) {
+  const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
+  const start = source.indexOf('    const maintenanceExempt =');
+  const end = source.indexOf('    // ── GET /connect/nalog', start);
+  assert.ok(start > 0 && end > start);
+  const sandbox = { maintenance: gate, req: { method }, url: { pathname }, res: {},
+    json: (res, status, data) => Object.assign(res, { status, data }) };
+  vm.createContext(sandbox);
+  return vm.runInContext(`(() => { let releaseRequest; ${source.slice(start, end)}
+    return { status: 200, release: releaseRequest }; })()`, sandbox);
+}
+test('draining accepts photo upload/read and holds restart until transfer completes', t => {
+  const { gate } = fixture(t); const operation = gate.request('operator');
+  const upload = requestAdmission(gate, 'PUT', '/intake-files');
+  assert.equal(upload.status, 200); assert.equal(gate.status().active, 1);
+  assert.equal(gate.claim(operation.id), false);
+  const read = requestAdmission(gate, 'GET', '/intake-files');
+  assert.equal(read.status, 200); assert.equal(gate.status().active, 2);
+  assert.equal(requestAdmission(gate, 'POST', '/intake-quick').status, 503);
+  assert.equal(requestAdmission(gate, 'POST', '/intake-files').status, 503);
+  upload.release(); read.release(); assert.equal(gate.status().active, 0);
+  assert.equal(gate.claim(operation.id), true);
+  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 503);
+});
+test('media admission stays closed in recovery and failure; run ingress remains durable', t => {
+  const { gate } = fixture(t);
+  gate.beginRecovery();
+  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 503);
+  gate.recovered(); gate.fail('unverified boot');
+  assert.equal(requestAdmission(gate, 'GET', '/intake-files').status, 503);
+  assert.equal(requestAdmission(gate, 'POST', '/run').status, 200);
+});
