@@ -8,6 +8,8 @@ def credentials():
     if pid == '0':
         raise RuntimeError('Agent is not running; queue remains on disk')
     env = dict(item.split('=', 1) for item in Path('/proc/' + pid + '/environ').read_bytes().decode().split('\0') if '=' in item)
+    global agent_environment
+    agent_environment = env
     return env['AGENT_SECRET'], env.get('PORT', '8080')
 
 def client():
@@ -34,7 +36,7 @@ def release_ready(api, operation, expected_commit=None):
         return current.get('id') == operation['id'] and current.get('phase') == 'ready'
     return False
 
-def coordinate(api, restart, wait=time.sleep):
+def _coordinate(api, restart, wait=time.sleep):
     state = api()
     if state.get('kind') != 'restart' or state.get('phase') not in ('draining', 'restarting'):
         return
@@ -58,13 +60,31 @@ def coordinate(api, restart, wait=time.sleep):
         wait(2)
     raise RuntimeError('Restart readiness failed; admission remains closed, queue retained')
 
+def coordinate(api, restart, wait=time.sleep):
+    operation = api()
+    global attempted_operation_id
+    attempted_operation_id = operation.get('id')
+    try:
+        return _coordinate(api, restart, wait)
+    except Exception:
+        # The journal retains the recipient across boots. If HTTP is unavailable,
+        # the external process records and delivers the failure using the same outbox.
+        try:
+            api({'action': 'fail', 'id': operation['id']})
+        except Exception:
+            pass
+        raise
+
 def main():
     if '--ready' in sys.argv:
         expected = subprocess.check_output(['git', '-c', 'safe.directory=' + str(Path(__file__).resolve().parents[1]), 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
         for _ in range(30):
             try:
                 api = client()
-                if release_ready(api, api(), expected):
+                state = api()
+                global attempted_operation_id
+                attempted_operation_id = state.get('id')
+                if release_ready(api, state, expected):
                     return
             except (OSError, ValueError, RuntimeError):
                 pass
@@ -77,5 +97,14 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as error:
+        try:
+            import os
+            child_env = os.environ.copy()
+            child_env.update(globals().get('agent_environment', {}))
+            subprocess.run(['node', str(Path(__file__).resolve().parent / 'restart-failure.js'),
+                            globals().get('attempted_operation_id') or 'unknown'],
+                           env=child_env, user='vova', group='vova', timeout=30, check=True)
+        except Exception as notify_error:
+            print('restart failure notice retained or unavailable:', type(notify_error).__name__, file=sys.stderr)
         print('restart-coordinator:', str(error), file=sys.stderr)
         sys.exit(1)

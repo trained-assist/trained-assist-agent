@@ -13,6 +13,7 @@ class CoordinatorTest(unittest.TestCase):
                 if body['action'] == 'claim':
                     state['phase']='restarting'; return {'claimed':True}
                 if body['action'] == 'ready': state['phase']='ready'
+                if body['action'] == 'fail': state['phase']='failed'
             return state.copy()
         def restart(): actions.append('restart'); state['bootId']='new'
         return state, actions, api, restart
@@ -27,7 +28,7 @@ class CoordinatorTest(unittest.TestCase):
     def test_broken_recovery_remains_paused_without_restart_loop(self):
         s,a,api,restart=self.fixture(phase='restarting',bootId='new',recovered=False)
         with self.assertRaises(RuntimeError): mod.coordinate(api,restart,lambda _:None)
-        self.assertEqual(a,[]);self.assertEqual(s['phase'],'restarting')
+        self.assertEqual(a,['fail']);self.assertEqual(s['phase'],'failed')
     def test_deploy_is_never_restarted_by_timer(self):
         s,a,api,restart=self.fixture(kind='deploy');mod.coordinate(api,restart,lambda _:None);self.assertEqual(a,[])
     def test_wrong_running_revision_does_not_release_gate(self):
@@ -38,6 +39,6 @@ class CoordinatorTest(unittest.TestCase):
         s,a,api,_=self.fixture()
         def restart(): raise OSError('systemctl failed')
         with self.assertRaises(OSError): mod.coordinate(api,restart,lambda _:None)
-        self.assertEqual(s['phase'],'restarting');self.assertNotIn('ready',a)
+        self.assertEqual(s['phase'],'failed');self.assertNotIn('ready',a)
 
 if __name__ == '__main__': unittest.main()

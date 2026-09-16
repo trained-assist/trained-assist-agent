@@ -1,4 +1,5 @@
 const { maintenance, atomicJson } = require('./maintenance');
+const { restartTarget, createRestartNotifier } = require('./restart-notifications');
 const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, hydrateResumes, buildResumeText, resumeNotice } = require('./hh-resume');
 const http = require('http');
@@ -550,6 +551,14 @@ async function resumePendingTasks(secrets) {
 async function main() {
   maintenance.beginRecovery();
   const secrets = await loadSecrets();
+  const restartNotifier = createRestartNotifier(maintenance, { token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN });
+  const flushRestartNotices = () => Promise.race([
+    restartNotifier.flush().catch(e => console.error('[restart-notification]', e.message)),
+    // Notification outages must not turn a claimed restart into a coordinator HTTP timeout.
+    new Promise(resolve => { const timer = setTimeout(resolve, 6000); timer.unref(); }),
+  ]);
+  setInterval(flushRestartNotices, 15000).unref();
+  await flushRestartNotices();
   const intakeQuick = require('./intake-quick').createIntakeQuick({
     baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
   });
@@ -2816,17 +2825,34 @@ ${recent || '(пока нет)'}
       if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: GIT_COMMIT });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
-        if (body.action === 'claim') return json(res, 200, { claimed: maintenance.claim(body.id) });
+        if (body.action === 'claim') {
+          const claimed = maintenance.claim(body.id);
+          await flushRestartNotices();
+          return json(res, 200, { claimed });
+        }
+        if (body.action === 'fail') {
+          if (body.id !== maintenance.status().id) return json(res, 409, { error: 'operation changed' });
+          if (maintenance.status().phase === 'restarting') maintenance.fail('Coordinator could not complete restart');
+          await flushRestartNotices();
+          return json(res, 200, maintenance.status());
+        }
         if (body.action === 'ready') {
           if (body.id !== maintenance.status().id) return json(res, 409, { error: 'operation changed' });
-          return json(res, 200, maintenance.ready());
+          const state = maintenance.ready();
+          await flushRestartNotices();
+          return json(res, 200, state);
         }
         if (body.action === 'cancel') {
-          try { return json(res, 200, maintenance.cancel()); }
+          try { const state = maintenance.cancel(); await flushRestartNotices(); return json(res, 200, state); }
           catch (e) { return json(res, 409, { error: e.message }); }
         }
         if (body.action !== 'request') return json(res, 400, { error: 'invalid action' });
-        return json(res, 200, maintenance.request(body.initiator || 'operator', body.kind === 'deploy' ? 'deploy' : 'restart'));
+        const initiator = typeof body.initiator === 'object' && body.initiator !== null
+          ? restartTarget(body.initiator) : body.initiator || 'operator';
+        const state = maintenance.request(initiator, body.kind === 'deploy' ? 'deploy' : 'restart');
+        // Request acknowledgement is returned immediately; delivery uses the durable outbox.
+        void flushRestartNotices();
+        return json(res, 200, state);
       }
     }
 

@@ -23,9 +23,28 @@ function createMaintenance(file, { recovering = false } = {}) {
   }
   const active = new Map();
   const save = next => { atomicJson(file, next); state = next; };
+  const transition = next => {
+    const notifications = [...(state?.notifications || [])];
+    if (next.phase !== state?.phase && next.initiator && typeof next.initiator === 'object') {
+      notifications.push({ id: `${next.id}:${next.phase}`, operationId: next.id,
+        phase: next.phase, target: next.initiator, createdAt: Date.now(), delivered: {} });
+    }
+    save({ ...next, notifications });
+  };
   const paused = () => recovering || (!!state && ['draining', 'restarting', 'failed'].includes(state.phase));
   return {
     paused,
+    pendingNotifications() { return (state?.notifications || []).filter(n => !n.sentAt); },
+    acknowledgeNotification(id, channel) {
+      const notifications = (state?.notifications || []).map(n => {
+        if (n.id !== id) return n;
+        const delivered = { ...n.delivered, [channel]: Date.now() };
+        const done = (!n.target.sessionId || delivered.session) &&
+          (n.target.chatId == null || n.target.chatId === 0 || delivered.telegram);
+        return { ...n, delivered, ...(done ? { sentAt: Date.now() } : {}) };
+      });
+      save({ ...state, notifications });
+    },
     beginRecovery() { recovering = true; },
     recovered() { recovering = false; },
     status() { return { ...state, durableIngress: 1, bootId, recovered: !recovering, paused: paused(), active: active.size,
@@ -38,25 +57,25 @@ function createMaintenance(file, { recovering = false } = {}) {
     },
     request(initiator, kind = 'restart') {
       if (recovering) throw Error('Startup recovery is not complete');
-      if (!paused()) save({ id: randomUUID(), phase: 'draining', kind, initiator, requestedAt: Date.now(), ownerBootId: bootId });
+      if (!paused()) transition({ id: randomUUID(), phase: 'draining', kind, initiator, requestedAt: Date.now(), ownerBootId: bootId });
       return this.status();
     },
     cancel() {
       if (recovering || (state && ['restarting', 'failed'].includes(state.phase))) throw Error('Перезапуск начался или восстановление требует проверки; отмена невозможна.');
-      if (paused()) save({ ...state, phase: 'cancelled', finishedAt: Date.now() });
+      if (paused()) transition({ ...state, phase: 'cancelled', finishedAt: Date.now() });
       return this.status();
     },
     claim(id) {
       if (recovering || state?.id !== id || state.phase !== 'draining' || active.size) return false;
-      save({ ...state, phase: 'restarting', ownerBootId: bootId });
+      transition({ ...state, phase: 'restarting', ownerBootId: bootId });
       return true;
     },
-    fail(error) { save({ id: randomUUID(), kind: 'restart', ownerBootId: bootId, ...state, phase: 'failed', error, failedAt: Date.now() }); },
+    fail(error) { transition({ id: randomUUID(), kind: 'restart', ownerBootId: bootId, ...state, phase: 'failed', error, failedAt: Date.now() }); },
     ready() {
       // Startup recovery only, after queued tasks have been registered. A same-process
       // health check must never reopen a gate claimed by the coordinator.
       if (!recovering && state?.phase === 'restarting' && state.ownerBootId !== bootId) {
-        save({ ...state, phase: 'ready', finishedAt: Date.now() });
+        transition({ ...state, phase: 'ready', finishedAt: Date.now() });
       }
       return this.status();
     },

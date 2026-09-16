@@ -12,6 +12,7 @@
     "test/intake-media-retention.test.cjs",
     "test/admission-status.test.cjs",
     "test/lane-granularity.test.cjs",
-    "test/cap-per-profile.test.cjs"
+    "test/cap-per-profile.test.cjs",
+    "test/restart-notifications.test.cjs"
   ]
 }
