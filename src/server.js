@@ -37,6 +37,20 @@ const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
   path.join(process.env.HOME || '/home/vova', 'users');
 
+// /run idempotency window (see the requestId handling below): in-memory only,
+// resets on restart — acceptable because it's guarding against a retry racing
+// the *same* process, not surviving a redeploy.
+const recentRequestIds = new Map(); // requestId -> { taskId, at }
+const REQUEST_ID_TTL_MS = 10 * 60 * 1000;
+function seenRequestId(id) {
+  const now = Date.now();
+  for (const [k, v] of recentRequestIds) if (now - v.at > REQUEST_ID_TTL_MS) recentRequestIds.delete(k);
+  return recentRequestIds.get(id)?.taskId || null;
+}
+function rememberRequestId(id, taskId) {
+  recentRequestIds.set(id, { taskId, at: Date.now() });
+}
+
 // Narrow ("specialized") bots delegate into a real profile instead of owning their
 // own. @cmr_management_bot ("misha") IS Flexi Consulting — its data (6 expo projects,
 // interviews, contexts) lives under the `flexi-consult` profile, so the bot must
@@ -2787,6 +2801,40 @@ ${recent || '(пока нет)'}
       return;
     }
 
+    // PUT/GET /intake-files?username=X&id=Y&name=Z — durable per-file store for
+    // gateway intake (photos/voice/docs). Replaces base64-in-KV so a retry never
+    // re-sends bytes and isn't capped by KV's 25MB value limit. See intake-files.js
+    // in the gateway repo — id is a sha256 hex of (chatId:messageId:fileUniqueId).
+    if (url.pathname === '/intake-files' && (req.method === 'PUT' || req.method === 'GET')) {
+      const ifUsername = url.searchParams.get('username');
+      const ifId = url.searchParams.get('id');
+      if (!ifUsername || !/^[a-zA-Z0-9_-]{1,64}$/.test(ifUsername)) return json(res, 400, { error: 'invalid username' });
+      if (!ifId || !/^[a-f0-9]{16,64}$/.test(ifId)) return json(res, 400, { error: 'invalid id' });
+      const storeDir = path.join(BASE_USERS_DIR, ifUsername, 'media', 'intake-store', ifId);
+      if (req.method === 'PUT') {
+        const rawName = url.searchParams.get('name') || 'file';
+        const safeName = path.basename(rawName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+        const mime = req.headers['content-type'] || 'application/octet-stream';
+        let buf;
+        try { buf = await readBodyBuffer(req, 20 * 1024 * 1024); }
+        catch { return json(res, 413, { error: 'file too large' }); }
+        fs.mkdirSync(storeDir, { recursive: true });
+        fs.writeFileSync(path.join(storeDir, 'data'), buf, { mode: 0o600 });
+        fs.writeFileSync(path.join(storeDir, 'meta.json'), JSON.stringify({ name: safeName, mime, size: buf.length }));
+        return json(res, 200, { id: ifId, name: safeName, mime, size: buf.length });
+      }
+      // GET
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(storeDir, 'meta.json'), 'utf8'));
+        const buf = fs.readFileSync(path.join(storeDir, 'data'));
+        res.writeHead(200, { 'Content-Type': meta.mime || 'application/octet-stream', 'Content-Length': buf.length });
+        res.end(buf);
+      } catch {
+        return json(res, 404, { error: 'not found' });
+      }
+      return;
+    }
+
     // POST /report — create a GitHub issue from a user-submitted bug report
     if (req.method === 'POST' && url.pathname === '/report') {
       let body;
@@ -3124,10 +3172,12 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode } = payload;
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
-      if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
+      if (!task && !forceClaude && !fileBase64 && !(fileRefs && fileRefs.length)) return json(res, 400, { error: 'missing fields' });
+      if (requestId && !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))
+        return json(res, 400, { error: 'invalid requestId' });
       if (!/^-?\d{1,20}$/.test(String(userId))) {
         console.log('[/run] 400 invalid userId:', userId);
         return json(res, 400, { error: 'invalid userId' });
@@ -3183,8 +3233,43 @@ ${recent || '(пока нет)'}
         }
       }
 
+      // Copy durably-stored intake files (photos/voice/docs referenced by id,
+      // written via PUT /intake-files) into the task's media dir — same
+      // path/notice as the fileBase64 branch, just sourced from disk not the body.
+      if (Array.isArray(fileRefs)) {
+        const uploadsDir = path.join(workDir, 'media', 'intake');
+        for (const ref of fileRefs) {
+          if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) continue;
+          const src = path.join(BASE_USERS_DIR, username, 'media', 'intake-store', ref.id, 'data');
+          try {
+            const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+            fs.mkdirSync(uploadsDir, { recursive: true });
+            const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
+            fs.copyFileSync(src, filePath);
+            const typeNote = ref.mime ? ` (${ref.mime})` : '';
+            const fileNote = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+            effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
+          } catch (e) {
+            console.error('[/run] fileRef copy error:', e.message);
+          }
+        }
+      }
+
+      // Idempotency: the gateway retries /run when it can't tell whether an
+      // earlier attempt was actually accepted (network drop, timeout ≠ down).
+      // A short in-memory window caps that at "same requestId → same taskId",
+      // never a second session, without needing a durable cross-restart store.
+      if (requestId) {
+        const existingTaskId = seenRequestId(requestId);
+        if (existingTaskId) {
+          console.log(`[/run] duplicate requestId ${requestId} — already accepted as ${existingTaskId}`);
+          return json(res, 202, { taskId: existingTaskId, duplicate: true });
+        }
+      }
+
       // Accept request immediately, run task in background
       const taskId = `${username}-${Date.now()}`;
+      if (requestId) rememberRequestId(requestId, taskId);
       json(res, 202, { taskId });
 
       // Fire-and-forget
