@@ -24,7 +24,8 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
     tgSend: async () => { throw Error('unexpected fallback'); },
     _acquireKeySlot: async () => { if (capacity) await capacity; }, _releaseKeySlot: () => {},
     _waitForRam: async () => {}, _acquireSlot: async () => {}, _releaseSlot: () => {},
-    _runTask: run,
+    _runTask: run, admittedTasks: new Map(),
+    taskControl: { epoch: () => 0, scope: x => x, paused: () => false, retain: () => {} },
   };
   vm.createContext(sandbox);
   vm.runInContext(source.slice(start, end), sandbox);
@@ -80,7 +81,7 @@ test('restart restores queued work older than 15 minutes in acceptance order wit
   const task = (id, age) => ({ taskId: id, username: 'test', userId: 42, task: id, phase: 'queued', startedAt: now - age, mode: 'deep', projectId: 'p1', forceNew: true });
   const sandbox = {
     getPendingTasks: () => [task('later', 1000), task('earlier', 30 * 60000)],
-    require: () => ({ clearPendingTask() {} }),
+    require: () => ({ clearPendingTask() {}, paused: () => false }),
     console, Date, process: { env: {} }, BASE_USERS_DIR: '/test', path: require('node:path'),
     setTimeout: fn => fn(), runTask: async options => { resumed.push(options); },
   };

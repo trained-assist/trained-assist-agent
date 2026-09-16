@@ -369,6 +369,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 
       const session = getSession(workDir, rec.sessionId);
       if (!session) { clearGtd(workDir, rec.sessionId); continue; }
+      if (require('./task-control').paused({ username, chatId: rec.chatId || session.liveChatId || session.ownerChatId, sessionId: rec.sessionId })) continue;
 
       // Дешёвая пре-проверка ПЕРЕД тем как будить дорогого Claude/Codex: объективные
       // факты (CI зелёный / замержено) берём напрямую из GitHub API. Если чек-лист

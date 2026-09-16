@@ -38,11 +38,29 @@ jobs:
             exit 1
           fi
 
+  staging-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Isolated real-runner staging (no production server or credentials)
+        run: |
+          npx vitest run tests/runner-e2e.test.js
+          node --test test/task-control.test.cjs test/admission-status.test.cjs
+
   merge:
-    needs: [ci]
+    needs: [ci, staging-regressions]
     if: |
       github.event_name == 'pull_request' &&
-      needs.ci.result == 'success'
+      needs.ci.result == 'success' &&
+      needs.staging-regressions.result == 'success' &&
+      !github.event.pull_request.draft
     runs-on: ubuntu-latest
     concurrency:
       group: merge-${{ github.event.pull_request.number }}
@@ -59,10 +77,11 @@ jobs:
   # Runs after PR auto-merge OR on direct push to main (e.g. GitHub UI squash-merge).
   # always() lets the job run even when `merge` was skipped (merge only runs on PRs).
   deploy-gcp:
-    needs: [ci, merge]
+    needs: [ci, staging-regressions, merge]
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      needs.staging-regressions.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
@@ -98,10 +117,11 @@ jobs:
             DEPLOY_ENV=gcp bash scripts/deploy.sh
 
   deploy-ru:
-    needs: [ci, merge]
+    needs: [ci, staging-regressions, merge]
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      needs.staging-regressions.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest

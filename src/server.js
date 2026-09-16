@@ -492,7 +492,7 @@ async function resumePendingTasks(secrets) {
   const pending = getPendingTasks();
   const cutoff = Date.now() - 15 * 60 * 1000;
   const queueCutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const toResume = pending.filter(t => t.startedAt && t.startedAt > (t.phase === 'queued' ? queueCutoff : cutoff) && t.username && t.userId && t.task)
+  const toResume = pending.filter(t => !require('./task-control').paused({ username: t.username, chatId: t.userId, sessionId: t.sessionId }) && t.startedAt && t.startedAt > (t.phase === 'queued' ? queueCutoff : cutoff) && t.username && t.userId && t.task)
     .sort((a, b) => a.startedAt - b.startedAt);
   // Clean up stale files that are too old to resume — prevents slow startup after many crashes.
   const { clearPendingTask: _clearStale } = require('./runner');
@@ -3012,18 +3012,21 @@ ${recent || '(пока нет)'}
       return json(res, result.ok ? 200 : 404, result);
     }
 
-    // POST /tasks/stop — kill any running Claude process for a user by username
-    // Body: { username: string }
-    if (req.method === 'POST' && url.pathname === '/tasks/stop') {
+    // POST /tasks/control — durable session-scoped stop/skip/resume.
+    // Legacy /tasks/stop now requires the same explicit chat scope.
+    if (req.method === 'POST' && ['/tasks/stop', '/tasks/control'].includes(url.pathname)) {
       const body = await readBody(req);
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'bad json' }); }
-      const { username } = payload || {};
-      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
-        return json(res, 400, { error: 'invalid username' });
-      const { killTaskByUsername } = require('./runner');
-      const killed = killTaskByUsername(username);
-      return json(res, 200, { ok: true, killed });
+      const { username, chatId, sessionId, action = 'stop', taskIds = [], expectedEpoch, taskId } = payload || {};
+      if (!username || !/^[a-zA-Z0-9_-]+$/.test(username) || chatId == null || !Number.isSafeInteger(Number(chatId)))
+        return json(res, 400, { error: 'username and chatId required; profile-wide stop is disabled' });
+      if (!['stop', 'skip', 'resume', 'fresh', 'ack', 'validate'].includes(action)) return json(res, 400, { error: 'invalid action' });
+      const { controlSession } = require('./runner');
+      if (action === 'resume' && expectedEpoch !== require('./task-control').epoch({ username, chatId, sessionId }))
+        return json(res, 409, { error: 'stale control epoch' });
+      try { return json(res, 200, controlSession({ username, chatId, sessionId, action, taskIds, expectedEpoch, taskId })); }
+      catch (error) { return json(res, 409, { error: error.message }); }
     }
 
     // GET /tasks/running?username=xxx — ground truth for whether a Claude
@@ -3125,6 +3128,10 @@ ${recent || '(пока нет)'}
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
       const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, mode } = payload;
+      if (require('./task-control').epoch({ username, chatId: userId, sessionId }) > (payload.controlEpoch || 0))
+        return json(res, 409, { error: 'stale_launch', message: 'Запуск отменён остановкой сессии.' });
+      if (require('./task-control').paused({ username, chatId: userId, sessionId }))
+        return json(res, 409, { error: 'session_stopped', message: 'Сессия остановлена до явного запуска.' });
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64) return json(res, 400, { error: 'missing fields' });
@@ -3183,12 +3190,15 @@ ${recent || '(пока нет)'}
         }
       }
 
+      if (require('./task-control').paused({ username, chatId: userId, sessionId }) || require('./task-control').epoch({ username, chatId: userId, sessionId }) > (payload.controlEpoch || 0))
+        return json(res, 409, { error: 'session_stopped' });
+
       // Accept request immediately, run task in background
       const taskId = `${username}-${Date.now()}`;
       json(res, 202, { taskId });
 
       // Fire-and-forget
-      runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
+      runTask({ taskId, user, task: effectiveTask, controlEpoch: payload.controlEpoch || 0, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null }).catch(err =>
         console.error(`[${taskId}] runTask error:`, err.message)
       );
       return;

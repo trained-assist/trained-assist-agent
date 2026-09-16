@@ -122,11 +122,17 @@ let origTgUrl;
 // Isolated tokens root — prevents loadUserTokens from scanning real ~/agent-tokens/
 // and migrating real user data into the test run.
 let testTokensRoot;
+let testDataRoot;
+let originalDataRoot;
 
 beforeAll(async () => {
   await startTgServer();
   buildFakeClaudeBinary();
   testTokensRoot = mkdtempSync(join(tmpdir(), 'runner-e2e-tokens-'));
+
+  originalDataRoot = process.env.AGENT_DATA_DIR;
+  testDataRoot = mkdtempSync(join(tmpdir(), 'runner-e2e-data-'));
+  process.env.AGENT_DATA_DIR = testDataRoot;
 
   // Patch env BEFORE loading runner.js (runner reads TG_API at module level)
   origTgUrl = process.env.TELEGRAM_API_URL;
@@ -144,6 +150,9 @@ afterAll(async () => {
   delete process.env.CLAUDE_BIN;
   delete process.env.AGENT_TOKENS_ROOT;
   rmSync(testTokensRoot, { recursive: true, force: true });
+  rmSync(testDataRoot, { recursive: true, force: true });
+  if (originalDataRoot === undefined) delete process.env.AGENT_DATA_DIR;
+  else process.env.AGENT_DATA_DIR = originalDataRoot;
   await stopTgServer();
   rmSync(fakeBinDir, { recursive: true, force: true });
 });
@@ -668,4 +677,90 @@ describe('Quick-crash auto-retry', () => {
     expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
   });
 
+});
+
+
+// Real runner + OS processes: cancellation must fence already queued work.
+async function until(check) {
+  const deadline = Date.now() + 5000;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('condition timed out');
+    await new Promise(r => setTimeout(r, 20));
+  }
+}
+function slowEngine() {
+  const launches = join(workDir, 'launches');
+  writeFileSync(join(fakeBinDir, 'claude'), `#!/bin/bash
+  echo "$AGENT_CHAT_ID" >> '${launches}'
+  sleep 1
+  echo '{"type":"result","result":"FINISHED OTHER CHAT"}'
+  `);
+  return launches;
+}
+function launch(chatId, sessionId, suffix) {
+  return runTask({ taskId: `${testUsername}-${suffix}`, user: makeUser(chatId), sessionId,
+    task: 'Carry out this long investigation', forceClaude: true, secrets: { BOT_TOKEN: 'fake:token' } });
+}
+it('stop isolates two chats of one profile, cancels queued spawn, and durably holds input', async () => {
+  const launches = slowEngine();
+  const control = require('../src/runner').controlSession;
+  const first = launch(101, 'stop-session-a', 'one');
+  const queued = launch(101, 'stop-session-a', 'two');
+  const other = launch(202, 'stop-session-b', 'three');
+  try {
+    await until(() => existsSync(launches) && readFileSync(launches, 'utf8').trim().split('\n').length === 2);
+    expect(control({ username: testUsername, chatId: 101, sessionId: 'stop-session-a' }).killed).toBe(1);
+    await Promise.all([first, queued, other]);
+    expect(readFileSync(launches, 'utf8').trim().split('\n').sort()).toEqual(['101', '202']);
+    expect(tgSent().some(x => x.body.chat_id === 202 && x.body.text?.includes('FINISHED OTHER CHAT'))).toBe(true);
+    const held = control({ username: testUsername, chatId: 101, sessionId: 'stop-session-a', action: 'resume' }).held;
+    expect(held.map(x => x.taskId)).toEqual([`${testUsername}-one`, `${testUsername}-two`]);
+  } finally { restoreNormalClaude(); }
+});
+it('skip stops only the active task and allows queued work to start', async () => {
+  const launches = slowEngine();
+  const first = launch(303, 'skip-session', 'first');
+  const queued = launch(303, 'skip-session', 'next');
+  try {
+    await until(() => existsSync(launches));
+    require('../src/runner').controlSession({ username: testUsername, chatId: 303, sessionId: 'skip-session', action: 'skip' });
+    await Promise.all([first, queued]);
+    expect(readFileSync(launches, 'utf8').trim().split('\n')).toEqual(['303', '303']);
+    expect(require('../src/task-control').paused({ username: testUsername, chatId: 303, sessionId: 'skip-session' })).toBe(false);
+  } finally { restoreNormalClaude(); }
+});
+it('a stopped session cannot restart through a late request or automatic continuation', async () => {
+  const launches = slowEngine();
+  const target = { username: testUsername, chatId: 404, sessionId: 'paused-session' };
+  const control = require('../src/runner').controlSession;
+  try {
+    control(target);
+    await launch(404, 'paused-session', 'late');
+    expect(existsSync(launches)).toBe(false);
+    // Reload persisted control state as after a server restart.
+    delete require.cache[require.resolve('../src/task-control')];
+    expect(require('../src/task-control').paused(target)).toBe(true);
+    control({ ...target, action: 'fresh' });
+    expect(require('../src/task-control').paused(target)).toBe(false);
+    expect(control({ ...target, action: 'resume' }).held).toEqual([]);
+  } finally { restoreNormalClaude(); }
+});
+it('stop kills tool subprocesses in the engine process group, not just the engine', async () => {
+  const childFile = join(workDir, 'tool-pid');
+  writeFileSync(join(fakeBinDir, 'claude'), `#!/bin/bash
+    sleep 60 &
+    echo $! > '${childFile}'
+    wait
+  `);
+  const running = launch(505, 'tools-session', 'tool-parent');
+  try {
+    await until(() => existsSync(childFile) && readFileSync(childFile, 'utf8').trim());
+    const child = Number(readFileSync(childFile, 'utf8').trim());
+    require('../src/runner').controlSession({ username: testUsername, chatId: 505, sessionId: 'tools-session' });
+    await running;
+    await until(() => {
+      try { return /State:\s+Z/.test(readFileSync(`/proc/${child}/status`, 'utf8')); }
+      catch (error) { return error.code === 'ENOENT'; }
+    });
+  } finally { restoreNormalClaude(); }
 });

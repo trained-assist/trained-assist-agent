@@ -1387,6 +1387,50 @@ async function _waitForRam() {
 // Active task timer state — allows Claude to extend its own session via MCP tool.
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
 const activeTimers = new Map();
+const taskControl = require('./task-control');
+const admittedTasks = new Map();
+
+function controlSession({ username, chatId, sessionId = null, action = 'stop', taskIds = [], expectedEpoch, taskId }) {
+  if (!username || chatId == null) throw new Error('username and chatId are required');
+  let target = { username, chatId, sessionId };
+  if (taskId) {
+    const active = activeTimers.get(taskId);
+    if (!active || !taskControl.same(target, active.scope)) throw new Error('task is not active in this session');
+    target = active.scope;
+  }
+  if (action === 'validate') return { ok: true, sessionId: target.sessionId };
+
+  if (action === 'ack') { taskControl.acknowledge(target, taskIds); return { ok: true }; }
+  if (action === 'resume' || action === 'fresh') return { ok: true, held: taskControl.resume(target, action === 'fresh', expectedEpoch), epoch: taskControl.epoch(target) };
+  if (!['stop', 'skip'].includes(action)) throw new Error('invalid control action');
+  if (action === 'stop') taskControl.pause(target);
+  let killed = 0;
+  for (const [id, entry] of admittedTasks) {
+    if (!taskControl.same(target, taskControl.scope(entry.opts))) continue;
+    const active = activeTimers.get(id);
+    if (action === 'skip' && !active) continue;
+    entry.cancelled = true;
+    entry.stopAction = action;
+    if (action === 'stop') { taskControl.retain(entry.opts); entry.retained = true; }
+    clearPendingTask(id);
+    if (active) { active.stopAction = action; terminateTask(active); killed++; }
+  }
+  return { ok: true, killed, epoch: taskControl.epoch(target), paused: action === 'stop' };
+}
+
+function terminateTask(state) {
+  state.userStopped = true;
+  // Each engine owns a process group, including its shell/tool descendants.
+  const signal = sig => {
+    try { process.kill(-state.proc.pid, sig); }
+    catch { try { state.proc.kill(sig); } catch {} }
+  };
+  signal('SIGTERM');
+  const timer = setTimeout(() => signal('SIGKILL'), 2000);
+  timer.unref();
+  state.proc.once('close', () => { signal('SIGKILL'); clearTimeout(timer); });
+}
+
 
 /**
  * Extend the timeout for a running task by another CLAUDE_TIMEOUT_MS.
@@ -1396,47 +1440,7 @@ const activeTimers = new Map();
 function stopTask(taskId) {
   const s = activeTimers.get(taskId);
   if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
-  s.userStopped = true;
-  try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopTask SIGTERM:', e.message); }
-  console.log(`[${taskId}] stopped by user`);
-  return { ok: true };
-}
-
-// Stop all running tasks for a given username (used by the /stop quick command).
-function stopUserTask(username) {
-  let stopped = false;
-  for (const [taskId, s] of activeTimers.entries()) {
-    if (taskId.startsWith(username + '-') && s.proc) {
-      s.userStopped = true;
-      try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
-      console.log(`[${taskId}] stopped by user command`);
-      stopped = true;
-    }
-  }
-
-  // Fallback: kill orphaned Claude processes (e.g. from before a service restart)
-  // The mcp-config path contains the username, so we can grep the process list.
-  if (!stopped) {
-    try {
-      const { execSync } = require('child_process');
-      // Find PIDs of claude processes for this user by mcp-config path
-      const pattern = `/users/${username}/`;
-      const out = execSync(`pgrep -f "claude.*${pattern}" 2>/dev/null || true`, { encoding: 'utf8' }).trim();
-      for (const pid of out.split('\n').filter(Boolean)) {
-        try {
-          process.kill(Number(pid), 'SIGTERM');
-          console.log(`[runner] stopUserTask killed orphan PID ${pid} for ${username}`);
-          stopped = true;
-        } catch (e) {
-          console.warn(`[runner] stopUserTask orphan kill ${pid}:`, e.message);
-        }
-      }
-    } catch (e) {
-      console.warn('[runner] stopUserTask orphan search failed:', e.message);
-    }
-  }
-
-  return stopped;
+  return controlSession({ ...s.scope, action: 'stop' });
 }
 
 function extendTaskTimeout(taskId) {
@@ -1482,30 +1486,6 @@ function isTaskRunning(username) {
 }
 
 /**
- * Kill any running Claude process for a given username.
- * Finds all entries in activeTimers whose taskId starts with `${username}-`
- * and sends SIGTERM. Returns how many tasks were killed.
- */
-function killTaskByUsername(username) {
-  let killed = 0;
-  const prefix = `${username}-`;
-  for (const [taskId, state] of activeTimers.entries()) {
-    if (!taskId.startsWith(prefix)) continue;
-    try {
-      if (state.proc) {
-        state.userStopped = true;
-        state.proc.kill('SIGTERM');
-        killed++;
-        console.log(`[runner] killTaskByUsername: killed ${taskId}`);
-      }
-    } catch (e) {
-      console.warn(`[runner] killTaskByUsername error on ${taskId}:`, e.message);
-    }
-  }
-  return killed;
-}
-
-/**
  * Runs `claude --dangerously-skip-permissions` for a task,
  * streams output to Telegram by editing a "thinking" message.
  * Tasks for the same user are serialised — each waits for the previous to finish.
@@ -1538,7 +1518,7 @@ function runTask(opts) {
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
-    const stopped = stopUserTask(username);
+    const stopped = controlSession({ username, chatId: opts.user.id, sessionId: opts.sessionId, action: 'stop' }).killed > 0;
     const msg = stopped ? '⛔ Задача остановлена.' : 'Нет активной задачи для остановки.';
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const chatId = opts.user.id;
@@ -1574,7 +1554,7 @@ function runTask(opts) {
   if (WAKEUP_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const hadActive = activeTimers.size > 0;
-    const stopped = stopUserTask(username);
+    const stopped = controlSession({ username, chatId: opts.user.id, sessionId: opts.sessionId, action: 'stop' }).killed > 0;
     // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
     chatLanes.delete(queueKey);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
@@ -1592,6 +1572,15 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  opts = { ...opts, controlEpoch: opts.controlEpoch ?? taskControl.epoch(taskControl.scope(opts)) };
+  const entry = { opts, cancelled: false };
+  admittedTasks.set(opts.taskId, entry);
+  const isCancelled = () => entry.cancelled || taskControl.paused(taskControl.scope(opts)) || opts.controlEpoch < taskControl.epoch(taskControl.scope(opts));
+  const hold = async () => {
+    if (entry.stopAction !== 'skip' && !entry.retained) { taskControl.retain(opts); entry.retained = true; }
+    await status.finish('⛔ Сессия остановлена. Ввод сохранён до явного запуска.');
+    return 'Session stopped';
+  };
   const prev = chatLanes.get(queueKey) ?? Promise.resolve();
 
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
@@ -1616,17 +1605,22 @@ function runTask(opts) {
   const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
 
   const current = prev.catch(() => {}).then(async () => {
+    if (isCancelled()) return hold();
     status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
     // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
     // profile's 4-slot cap waits here without holding a scarce global slot.
     await _acquireKeySlot(capKey);
     try {
+      if (isCancelled()) return hold();
       // Global admission control: wait for a free slot + enough RAM before we
       // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
       await _waitForRam();
+      if (isCancelled()) return hold();
       await _acquireSlot();
       try {
+        if (isCancelled()) return hold();
         await status.finish('🧠 Начинаю работу…');
+        if (isCancelled()) return hold();
         return await _runTask(opts);
       } finally {
         _releaseSlot();
@@ -1640,6 +1634,7 @@ function runTask(opts) {
   });
   chatLanes.set(queueKey, current);
   current.finally(() => {
+    admittedTasks.delete(opts.taskId);
     clearPendingTask(opts.taskId);
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
@@ -1998,7 +1993,7 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
-async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task, context, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, controlEpoch = 0, mode = null, projectId = null, newProjectName = null }) {
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -2436,7 +2431,13 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         '--print', prompt,
       ]];
 
+  const admission = admittedTasks.get(taskId);
+  if (admission?.cancelled || taskControl.paused({ username: user.username, chatId, sessionId }) || controlEpoch < taskControl.epoch({ username: user.username, chatId, sessionId })) {
+    if (admission && admission.stopAction !== 'skip' && !admission.retained) { taskControl.retain(admission.opts); admission.retained = true; }
+    return 'Session stopped';
+  }
   const proc = spawn(engineBin, engineArgs, {
+    detached: true,
     cwd: user.cwd || user.workDir,
     env: {
       ...cleanEnv,
@@ -2597,7 +2598,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
   let timedOut = false;
-  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false };
+  const sessionState = { scope: { username: user.username, chatId, sessionId: sessionId || null }, killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false };
   activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {
@@ -2647,7 +2648,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     });
   } catch (err) {
     console.error(`[${taskId}] claude process error:`, err.message);
-    if (timedOut) {
+    if (timedOut && !sessionState.userStopped && !taskControl.paused(sessionState.scope)) {
       const nextCount = continuationCount + 1;
       const partialText = fullOutput.text.trim();
       // Durable record keeps the full progress; the Telegram summary shows only the last
@@ -2680,6 +2681,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           pinnedMsgId,
           secrets,
           continuationCount: nextCount,
+          controlEpoch,
         });
       } else {
         const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
@@ -2701,19 +2703,22 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   if (sessionState.userStopped) {
     const partial = fullOutput.text.trim();
     const partialDisplay = pickFinalText(null, lastAssistantMsg, partial);
-    const stoppedMsg = partialDisplay
-      ? `⛔ Остановлено\n\n${partialDisplay.slice(-MAX_MSG_LEN)}`
-      : '⛔ Остановлено. Можешь задать новый вопрос.';
+    const stoppedMsg = sessionState.stopAction === 'skip'
+      ? '⏭ Текущая работа пропущена. Перехожу к следующему вводу, если он есть.'
+      : partialDisplay
+      ? `⛔ Сессия остановлена. Информация сохранена до явного запуска.\n\n${partialDisplay.slice(-MAX_MSG_LEN)}`
+      : '⛔ Сессия остановлена. Вся полученная информация сохранена. При явном запуске продолжу с ней работать.';
+    if (activeSessionId && partial) {
+      sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId);
+    }
     const clearMarkup = { reply_markup: { inline_keyboard: [] } };
     if (msgId) {
       await tgEdit(BOT_TOKEN, chatId, msgId, stoppedMsg, clearMarkup).catch(() => tgSend(BOT_TOKEN, chatId, stoppedMsg));
     } else {
       await tgSend(BOT_TOKEN, chatId, stoppedMsg);
     }
-    if (activeSessionId && partial) {
-      sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
-      setCurrentSessionId(user.workDir, activeSessionId, chatId);
-    }
+
     return stoppedMsg;
   }
 
@@ -2740,6 +2745,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         pinnedMsgId,
         secrets,
         retryCount: retryCount + 1,
+        controlEpoch,
       });
     }
     const crashMsg = retryCount > 0
@@ -2964,7 +2970,7 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
 
 module.exports = {
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  controlSession, waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
   // Exported for pin-state tests only
