@@ -34,7 +34,7 @@ test('queued media survives TTL and a corrupt journal stops cleanup', () => {
   } finally { if(before===undefined)delete process.env.AGENT_DATA_DIR;else process.env.AGENT_DATA_DIR=before;fs.rmSync(root,{recursive:true,force:true}); }
 });
 
-test('48h purge also drops expired intake-store refs (PUT /intake-files) but keeps fresh ones', () => {
+test('48h cache purge preserves legacy originals needed by unseen gateway retries', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'media-ttl-store-'));
   try {
     const storeDir = path.join(root, 'alice', 'media', 'intake-store');
@@ -46,13 +46,13 @@ test('48h purge also drops expired intake-store refs (PUT /intake-files) but kee
     }
     const aged = new Date(Date.now() - TTL_MS - 1000);
     fs.utimesSync(path.join(oldRef, 'meta.json'), aged, aged);
-    assert.equal(purgeIntakeMedia(root), 1);
-    assert.equal(fs.existsSync(oldRef), false);
+    assert.equal(purgeIntakeMedia(root), 0);
+    assert.equal(fs.existsSync(oldRef), true);
     assert.equal(fs.existsSync(freshRef), true);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('waiting-confirmation retains old intake-store media only for its owner; cancel releases it', () => {
+test('waiting-confirmation retains only its owner materialized copy; legacy originals survive cancellation', () => {
   const { createIntentStore } = require('../src/restart-intents');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'waiting-media-'));
   const before = process.env.AGENT_DATA_DIR; process.env.AGENT_DATA_DIR = path.join(root, 'state');
@@ -63,13 +63,17 @@ test('waiting-confirmation retains old intake-store media only for its owner; ca
       const dir=path.join(profiles,username,'media','intake-store','same-id');fs.mkdirSync(dir,{recursive:true});
       const meta=path.join(dir,'meta.json');fs.writeFileSync(meta,'{}');
       const aged=new Date(Date.now()-TTL_MS-1000);fs.utimesSync(meta,aged,aged);
+      const copyDir=path.join(profiles,username,'media','intake');fs.mkdirSync(copyDir,{recursive:true});
+      const copy=path.join(copyDir,'same-id.pdf');fs.writeFileSync(copy,'bytes');fs.utimesSync(copy,aged,aged);
     }
     const owner={username:'alice',profileId:'alice',telegramUserId:1,chatId:1,threadId:null,projectId:null,sessionId:null};
-    store.enqueue({id:'task',owner,initiatedAt:null,payload:{fileRefs:[{id:'same-id'}]}});
+    store.enqueue({id:'task',owner,initiatedAt:null,payload:{fileRefs:[{id:'same-id'}],task:path.join(profiles,'alice','media','intake','same-id.pdf')}});
     const wait=store.evaluate('task',owner);
     assert.equal(purgeIntakeMedia(profiles),1);
     assert.equal(fs.existsSync(path.join(profiles,'alice','media','intake-store','same-id')),true);
-    assert.equal(fs.existsSync(path.join(profiles,'bob','media','intake-store','same-id')),false);
+    assert.equal(fs.existsSync(path.join(profiles,'bob','media','intake-store','same-id')),true);
+    assert.equal(fs.existsSync(path.join(profiles,'bob','media','intake','same-id.pdf')),false);
+    assert.equal(fs.existsSync(path.join(profiles,'alice','media','intake','same-id.pdf')),true);
     store.cancel('task',owner,wait.confirmationToken);
     assert.equal(purgeIntakeMedia(profiles),1);
   } finally {store.close();if(before===undefined)delete process.env.AGENT_DATA_DIR;else process.env.AGENT_DATA_DIR=before;fs.rmSync(root,{recursive:true,force:true});}
@@ -87,7 +91,7 @@ test('corrupt intent database stops all media cleanup',()=>{
   } finally {if(before===undefined)delete process.env.AGENT_DATA_DIR;else process.env.AGENT_DATA_DIR=before;fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('gateway buffer pin retains files beyond TTL until explicit release, corrupt metadata is retained',()=>{
+test('legacy originals survive pin release and corrupt metadata without TTL deletion',()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'buffer-pin-'));const before=process.env.AGENT_DATA_DIR;process.env.AGENT_DATA_DIR=path.join(root,'state');
  try{
   const profiles=path.join(root,'profiles'),dir=path.join(profiles,'alice','media','intake-store','a'.repeat(64));fs.mkdirSync(dir,{recursive:true});
@@ -95,6 +99,6 @@ test('gateway buffer pin retains files beyond TTL until explicit release, corrup
   const old=new Date(Date.now()-TTL_MS-1000);fs.utimesSync(meta,old,old);
   assert.equal(purgeIntakeMedia(profiles),0);assert.equal(fs.readFileSync(path.join(dir,'data'),'utf8'),'bytes');
   fs.writeFileSync(meta,'{broken');fs.utimesSync(meta,old,old);assert.equal(purgeIntakeMedia(profiles),0);
-  fs.writeFileSync(meta,JSON.stringify({buffered:false}));fs.utimesSync(meta,old,old);assert.equal(purgeIntakeMedia(profiles),1);
+  fs.writeFileSync(meta,JSON.stringify({buffered:false}));fs.utimesSync(meta,old,old);assert.equal(purgeIntakeMedia(profiles),0);assert.equal(fs.readFileSync(path.join(dir,'data'),'utf8'),'bytes');
  }finally{if(before===undefined)delete process.env.AGENT_DATA_DIR;else process.env.AGENT_DATA_DIR=before;fs.rmSync(root,{recursive:true,force:true});}
 });

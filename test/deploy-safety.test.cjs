@@ -11,9 +11,7 @@ function fixture(t, failure, v2 = false) {
  mock('sudo','exit 0');mock('systemctl','exit 0');mock('curl','case "$*" in *metadata.google*) exit 1;; *) printf 200;; esac');mock('sleep','exit 0');mock('npx','exit 0');
  mock('npm','[ "$TEST_FAILURE" = npm ] && exit 42\nwhile [ "$1" != --prefix ]; do shift; done\nshift\nmkdir -p "$1/node_modules"\nprintf new > "$1/node_modules/new-marker"');
  mock('python3','case "$*" in *--ready*) if [ "$TEST_FAILURE" = readiness ] && [ ! -f "$TEST_ONCE" ]; then touch "$TEST_ONCE"; exit 43; fi;; esac\nexit 0');
- // This fixture tests dependency/readiness rollback, not the host deployment lock.
- // Model the CI caller owning its lock; never contend with real deployments.
- const log=path.join(root,'calls');const result=spawnSync('/bin/bash',[path.resolve(__dirname,'../scripts/deploy.sh')],{env:{...process.env,PATH:bin+':'+process.env.PATH,DEPLOY_ENV:'ru',REPO_DIR:repo,PREV_COMMIT:'oldcommit',ASSIST_DEPLOY_LOCKED:'1',TEST_LOG:log,TEST_FAILURE:failure,TEST_ONCE:path.join(root,'once'),AGENT_DATA_DIR:path.join(root,'data')},encoding:'utf8',timeout:10000});
+ const log=path.join(root,'calls');const result=spawnSync('/bin/bash',[path.resolve(__dirname,'../scripts/deploy.sh')],{env:{...process.env,PATH:bin+':'+process.env.PATH,DEPLOY_ENV:'ru',REPO_DIR:repo,PREV_COMMIT:'oldcommit',TEST_LOG:log,TEST_FAILURE:failure,TEST_ONCE:path.join(root,'once'),AGENT_DATA_DIR:path.join(root,'data'),ASSIST_DEPLOY_LOCKED:'0',ASSIST_DEPLOY_LOCK_FILE:path.join(root,'deploy.lock')},encoding:'utf8',timeout:10000});
  return {result,repo,log:fs.existsSync(log)?fs.readFileSync(log,'utf8'):''};
 }
 test('dependency download failure preserves installed dependencies and never stops the service',t=>{

@@ -44,24 +44,11 @@ function purgeIntakeMedia(baseDir, now = Date.now()) {
       }
     } catch (error) { if (error.code !== 'ENOENT') console.warn('[intake-media cleanup]', error.code); }
 
-    // Durable per-id store behind PUT/GET /intake-files (gateway retry input).
-    // Same transient-media TTL — it exists so a retry can reuse bytes without
-    // re-sending them, not to keep them around indefinitely.
-    const storeDir = path.join(baseDir, profile.name, 'media', 'intake-store');
-    try {
-      if (fs.lstatSync(path.dirname(storeDir)).isSymbolicLink() || !fs.lstatSync(storeDir).isDirectory() || fs.lstatSync(storeDir).isSymbolicLink()) continue;
-      for (const entry of fs.readdirSync(storeDir, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const target = path.join(storeDir, entry.name);
-        let mtimeMs;
-        try {
-          const meta=JSON.parse(fs.readFileSync(path.join(target,'meta.json'),'utf8'));
-          if(meta.buffered===true)continue;
-          mtimeMs = fs.lstatSync(path.join(target, 'meta.json')).mtimeMs;
-        } catch (error) { if (error.code !== 'ENOENT') continue; mtimeMs = fs.lstatSync(target).mtimeMs; }
-        if (!retainedRefs.has(JSON.stringify([profile.name, entry.name])) && !pendingText.includes(target) && now - mtimeMs >= TTL_MS) { fs.rmSync(target, { recursive: true, force: true }); deleted++; }
-      }
-    } catch (error) { if (error.code !== 'ENOENT') console.warn('[intake-media cleanup]', error.code); }
+    // intake-store contains legacy ORIGINALS, not a disposable cache. The
+    // gateway can still reference them in an unlaunched/failed batch, invisible
+    // to this VM's pending journal. Keep until reference-aware retirement exists.
+    // R2 originals likewise have no blanket age-based lifecycle rule.
+
   }
   return deleted;
 }
