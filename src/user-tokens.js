@@ -327,16 +327,21 @@ async function generateConnectLink(userId, service, inlineSchema) {
     }
   }
 
-  // Legacy path: local connect-pending token + /connect/:service on this server
-  return generateLegacyConnectLink(userId, service);
+  // Legacy path: local connect-pending token + /connect/:service on this server.
+  // Carry the schema along so the generic multi-field renderer in server.js can
+  // still serve a real form for services with no dedicated handler (e.g. anything
+  // created via credentials_form_create) — without it, unknown services 404.
+  return generateLegacyConnectLink(userId, service, schema);
 }
 
-function generateLegacyConnectLink(userId, service) {
+function generateLegacyConnectLink(userId, service, schema) {
   const token = crypto.randomBytes(16).toString('hex');
   fs.mkdirSync(CONNECT_PENDING_DIR, { recursive: true });
+  const pending = { uid: String(userId), service, expires: Date.now() + 30 * 60 * 1000 };
+  if (schema) pending.schema = schema;
   fs.writeFileSync(
     path.join(CONNECT_PENDING_DIR, `${token}.json`),
-    JSON.stringify({ uid: String(userId), service, expires: Date.now() + 30 * 60 * 1000 }),
+    JSON.stringify(pending),
     { mode: 0o600 }
   );
   return `${AGENT_PUBLIC_URL}/connect/${service}?t=${token}`;
