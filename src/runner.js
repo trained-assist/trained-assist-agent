@@ -1594,19 +1594,20 @@ function runTask(opts) {
 
   const prev = chatLanes.get(queueKey) ?? Promise.resolve();
 
-  // If there's already a queued task, show "В очереди (Xs)" while waiting.
-  let queueWaitTimer = null;
-  const isQueued = chatLanes.has(queueKey);
-  if (isQueued && opts.initialMsgId && opts.secrets?.TELEGRAM_BOT_TOKEN) {
-    const queueStart = Date.now();
-    const botToken = opts.secrets.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
-    const msgId = opts.initialMsgId;
-    queueWaitTimer = setInterval(() => {
-      const secs = Math.round((Date.now() - queueStart) / 1000);
-      tgEdit(botToken, chatId, msgId, `⏳ В очереди… (${secs}с)`).catch(() => {});
-    }, 3000);
-  }
+  // Journal BEFORE waiting: a restart must not silently lose accepted work.
+  savePendingTask(opts.taskId, {
+    phase: 'queued', taskId: opts.taskId, userId: opts.user.id, username: opts.user.username,
+    workDir: opts.user.workDir, task: opts.task, context: opts.context,
+    sessionId: opts.sessionId, contextFromSession: opts.contextFromSession,
+    forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode,
+    projectId: opts.projectId, newProjectName: opts.newProjectName,
+    initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId,
+    startedAt: Date.now(),
+  });
+  const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
+  if (chatLanes.has(queueKey)) status.waiting(
+    '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
+  );
 
   // Per-profile cap key ("repository" = one profile's workspace). The owner is a
   // PROFILE (L1 shim sets user.profileId = payload.profileId ?? username), so key on
@@ -1614,8 +1615,8 @@ function runTask(opts) {
   // build a bare user object. In-memory Map key only — never a path/env key.
   const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
 
-  const current = prev.then(async () => {
-    if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
+  const current = prev.catch(() => {}).then(async () => {
+    status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
     // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
     // profile's 4-slot cap waits here without holding a scarce global slot.
     await _acquireKeySlot(capKey);
@@ -1625,6 +1626,7 @@ function runTask(opts) {
       await _waitForRam();
       await _acquireSlot();
       try {
+        await status.finish('🧠 Начинаю работу…');
         return await _runTask(opts);
       } finally {
         _releaseSlot();
@@ -1632,8 +1634,8 @@ function runTask(opts) {
     } finally {
       _releaseKeySlot(capKey);
     }
-  }).catch(err => {
-    if (queueWaitTimer) { clearInterval(queueWaitTimer); queueWaitTimer = null; }
+  }).catch(async err => {
+    await status.finish('❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.');
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
   chatLanes.set(queueKey, current);
@@ -2010,7 +2012,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
 
   savePendingTask(taskId, {
     taskId, userId: user.id, username: user.username, workDir: user.workDir,
-    task, context, sessionId, contextFromSession, forceClaude, forceNew,
+    task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
     initialMsgId, pinnedMsgId,
     startedAt: Date.now(),
   });
@@ -2239,7 +2241,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // Use bot's pinned placeholder if provided; otherwise send our own
   let msgId = initialMsgId || null;
   if (!msgId) {
-    const thinkMsg = await tgSend(BOT_TOKEN, chatId, '⏳ Думаю…');
+    const thinkMsg = await tgSend(BOT_TOKEN, chatId, '🧠 Думаю…');
     msgId = thinkMsg?.result?.message_id;
   }
   const thinkingStart = Date.now();
@@ -2480,7 +2482,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const extra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
         ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
         : {};
-      await tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${label} (${secs}с)`, extra).catch(() => {});
+      await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, extra).catch(() => {});
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -2501,14 +2503,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         if (snippet) {
           // Show text + current tool activity (always updating so user sees seconds ticking)
           const activitySuffix = lastActivity ? `\n\n${lastActivity} (${secs}с)` : ` (${secs}с)`;
-          const newText = `⏳ ${snippet}${activitySuffix}`;
+          const newText = `🧠 ${snippet}${activitySuffix}`;
           if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
           if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
         } else {
           // No text yet (e.g. Claude running tools) — show activity + elapsed
           const label = lastActivity || 'Думаю…';
-          const newText = `⏳ ${label} (${secs}с)`;
+          const newText = `🧠 ${label} (${secs}с)`;
           if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
           if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
@@ -2541,7 +2543,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
             lastActivity = formatToolActivity('Bash', { command: event.item.command });
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${lastActivity} (${secs}с)`).catch(() => {});
+              tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
             }
           } else if (event.type === 'turn.completed') {
             claudeUsage = event.usage || null;
@@ -2570,7 +2572,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
               lastActivity = formatToolActivity(block.name, block.input);
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
-                tgEdit(BOT_TOKEN, chatId, msgId, `⏳ ${lastActivity} (${secs}с)`).catch(() => {});
+                tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
               }
             }
           }
