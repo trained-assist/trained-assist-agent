@@ -45,7 +45,7 @@ def notify(request, state, phase, env=None):
             env = dict(v.split('=', 1) for v in Path(f'/proc/{pid}/environ').read_bytes().decode().split('\0') if '=' in v)
         directory = REPO if state['phase'] == 'complete' else Path(state['release'])
         subprocess.run(['node', str(directory / 'scripts/restart-bootstrap-notify.js'), str(request), phase],
-                       env=env, check=True, timeout=25)
+                       env=env, user='vova', group='vova', check=True, timeout=25)
     except Exception as error:
         print('Bootstrap notification pending:', type(error).__name__, flush=True)
 

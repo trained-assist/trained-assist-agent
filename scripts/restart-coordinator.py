@@ -103,7 +103,7 @@ if __name__ == '__main__':
             child_env.update(globals().get('agent_environment', {}))
             subprocess.run(['node', str(Path(__file__).resolve().parent / 'restart-failure.js'),
                             globals().get('attempted_operation_id') or 'unknown'],
-                           env=child_env, timeout=30, check=True)
+                           env=child_env, user='vova', group='vova', timeout=30, check=True)
         except Exception as notify_error:
             print('restart failure notice retained or unavailable:', type(notify_error).__name__, file=sys.stderr)
         print('restart-coordinator:', str(error), file=sys.stderr)

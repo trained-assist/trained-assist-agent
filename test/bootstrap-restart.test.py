@@ -39,6 +39,9 @@ class InstallTest(unittest.TestCase):
                 return ''
             def checked(args, **kwargs):
                 calls.append(tuple(args))
+                if args[0] == 'node':
+                    self.assertEqual(kwargs.get('user'), 'vova')
+                    self.assertEqual(kwargs.get('group'), 'vova')
                 if failure and args[0]=='python3': raise RuntimeError('readiness failed')
             original_text=Path.read_text; original_bytes=Path.read_bytes
             def read_text(path,*a,**kw):
