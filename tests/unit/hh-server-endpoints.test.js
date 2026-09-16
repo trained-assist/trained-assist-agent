@@ -440,3 +440,20 @@ describe('first-contact stage synchronization', () => {
     expect(mockHh.state.moves.unknown).toBeUndefined();
   });
 });
+
+
+describe('POST /hh/send-and-reject', () => {
+  it('keeps delivered message on an empty HTTP error and retries only the HH stage', async () => {
+    const body = { username: TEST_UID, negotiation_id: 'neg-001', message: 'Спасибо за отклик. Мы решили продолжить с другими кандидатами.' };
+    const url = `http://127.0.0.1:${serverPort}/hh/send-and-reject`;
+    mockHh.state.failDiscard = true;
+    const partial = await post(url, body, authHeader());
+    expect(partial.body).toMatchObject({ ok: false, message_sent: true });
+    expect(mockHh.state.messages['neg-001']).toEqual([body.message]);
+    mockHh.state.failDiscard = false;
+    expect((await post(url, body, authHeader())).body.ok).toBe(true);
+    expect((await post(url, body, authHeader())).body.ok).toBe(true);
+    expect(mockHh.state.messages['neg-001']).toEqual([body.message]);
+    expect(mockHh.state.discarded.has('neg-001')).toBe(true);
+  });
+});

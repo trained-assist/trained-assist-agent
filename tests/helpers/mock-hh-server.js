@@ -269,6 +269,7 @@ function createMockHhServer(options = {}) {
     // PUT /negotiations/discard_vacancy_closed/{id}
     const discard = p.match(/^\/negotiations\/discard_vacancy_closed\/([^/]+)$/);
     if (req.method === 'PUT' && discard) {
+      if (state.failDiscard) { res.writeHead(503); return res.end(); }
       state.discarded.add(discard[1]);
       return send(204, null);
     }
@@ -307,6 +308,7 @@ function createMockHhServer(options = {}) {
     reset() {
       state.negotiationState = null;
       state.failConsider = false;
+      state.failDiscard = false;
       state.messages = {};
       state.moves = {};
       state.discarded.clear();

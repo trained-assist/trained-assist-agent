@@ -73,7 +73,7 @@ it('separates dialogs, targets correct cards, and keeps failed rejections action
     page.on('dialog', dismissDialog);
     await rejectButton.click();
     const template = await card.locator('textarea').inputValue();
-    expect(template).toContain('Благодарим за отклик и уделённое время');
+    expect(template).toBe('Candidate 2, здравствуйте! Спасибо за отклик и уделённое время. Мы изучили ваше резюме и решили продолжить с другими кандидатами. Желаем успехов в поиске работы!');
     expect(dialogs[0]).toBe('Отправить отказ кандидату со следующим сообщением?\n\n' + template);
     expect(sendRequests).toEqual([]);
     page.removeListener('dialog', dismissDialog);
@@ -85,8 +85,8 @@ it('separates dialogs, targets correct cards, and keeps failed rejections action
 
     const customCard = page.locator('#tab-all .card[data-neg="3"]');
     const customButton = customCard.locator('.btn-send-reject');
-    await customCard.locator('textarea').fill('Спасибо за встречу. Сейчас не готовы предложить работу.');
-    // A failed request preserves the draft and lets the recruiter retry.
+    await customCard.locator('textarea').fill('Всё круто у вас, давайте дальше работать!');
+    // Invitation drafts are always replaced, including after a failed request.
     status = 500;
     response = { error: 'test failure' };
     await customButton.click();
@@ -94,6 +94,9 @@ it('separates dialogs, targets correct cards, and keeps failed rejections action
     expect(await customCard.getAttribute('class')).not.toContain('done');
     expect(await customButton.textContent()).toBe('🚫 Отказать');
     expect(sendRequests[1].message).toBe(await customCard.locator('textarea').inputValue());
+    expect(sendRequests[1].message).toContain('решили продолжить с другими кандидатами');
+    expect(sendRequests[1].message).not.toContain('давайте дальше работать');
+    expect(await customCard.locator('.rejection-status').textContent()).toContain('test failure');
     status = 200;
     response = { blocked: true, reason: 'test guard' };
     page.removeListener('dialog', acceptDialog);
@@ -105,17 +108,46 @@ it('separates dialogs, targets correct cards, and keeps failed rejections action
     expect(await customCard.getAttribute('class')).not.toContain('done');
     page.removeListener('dialog', guardDialog);
     page.on('dialog', acceptDialog);
+    response = { ok: false, message_sent: true, error: 'Сообщение отправлено, статус HH не подтверждён' };
+    await customButton.click();
+    await page.waitForFunction(() => document.querySelector('#tab-all .card[data-neg="3"] .rejection-status').textContent.includes('не подтверждён'));
+    expect(await customCard.getAttribute('class')).not.toContain('done');
+    await page.route('**/hh/send-and-reject', route => route.abort());
+    await customButton.click();
+    await page.waitForFunction(() => document.querySelector('#tab-all .card[data-neg="3"] .rejection-status').textContent.includes('Запрос мог выполниться'));
+    expect(await customButton.isEnabled()).toBe(true);
+    await page.unroute('**/hh/send-and-reject');
+    await page.route('**/hh/send-and-reject', async route => {
+      sendRequests.push(route.request().postDataJSON());
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await route.fulfill({ json: { ok: true } });
+    });
     response = { ok: true };
     await customButton.click();
+    expect(await customCard.locator('.rejection-status').textContent()).toContain('Отправляем отказ');
+    expect(await customButton.isDisabled()).toBe(true);
     await page.waitForFunction(() => document.querySelector('#tab-all .card[data-neg="3"]').classList.contains('done'));
-    expect(sendRequests[3].message).toBe(sendRequests[1].message);
+    expect(sendRequests[4].message).toBe(sendRequests[1].message);
 
-    // Existing ATS rejection continues to send its edited draft.
+    // ATS rejection also replaces a stale invitation and confirms the standard text.
     const atsCard = page.locator('#tab-all .card[data-neg="4"]');
     await atsCard.locator('textarea').fill('Спасибо за отклик. К сожалению, сейчас отказ.');
     await atsCard.getByRole('button', { name: '✗ Отправить отказ' }).click();
     await page.waitForFunction(() => document.querySelector('#tab-all .card[data-neg="4"]').classList.contains('done'));
-    expect(sendRequests[4]).toMatchObject({ negotiation_id: '4', message: 'Спасибо за отклик. К сожалению, сейчас отказ.' });
+    expect(sendRequests[5].negotiation_id).toBe('4');
+    expect(sendRequests[5].message).toContain('Candidate 4, здравствуйте!');
+    expect(sendRequests[5].message).toContain('решили продолжить с другими кандидатами');
+    expect(await atsCard.locator('.rejection-status').textContent()).toContain('Кандидат переведён в отказ на HH');
+    // A hung connection must leave a permanent, honest status instead of a spinner.
+    await page.clock.install();
+    await page.unroute('**/hh/send-and-reject');
+    await page.route('**/hh/send-and-reject', () => {});
+    const timeoutCard = page.locator('#tab-all .card[data-neg="1"]');
+    await timeoutCard.locator('.btn-send-reject').click();
+    await page.clock.fastForward(60001);
+    await page.waitForFunction(() => document.querySelector('#tab-all .card[data-neg="1"] .rejection-status').textContent.includes('Запрос мог выполниться'));
+    expect(await timeoutCard.getAttribute('class')).not.toContain('done');
+    expect(await timeoutCard.locator('.btn-send-reject').isEnabled()).toBe(true);
     expect(errors).toEqual([]);
   } finally { await browser.close(); fs.rmSync(root, { recursive: true, force: true }); }
 }, 20000);

@@ -1,3 +1,4 @@
+const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, hydrateResumes, buildResumeText, resumeNotice } = require('./hh-resume');
 const http = require('http');
 const https = require('https');
@@ -1909,16 +1910,14 @@ async function main() {
       }
 
       try {
-        // Send rejection message first
-        await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
-        // Then reject in HH
-        await hhApiPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData.access_token);
-
-        history2.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString(), type: 'rejection' });
-        fs.writeFileSync(histFile2, JSON.stringify(history2, null, 2), { mode: 0o600 });
-
-        console.log(`[hh/send-and-reject] user=${username} neg=${negotiation_id}`);
-        return json(res, 200, { ok: true });
+        const result = await sendRejection({
+          historyFile: histFile2,
+          message,
+          send: text => hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message: text }),
+          discard: () => hhApiPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData.access_token),
+        });
+        console.log(`[hh/send-and-reject] user=${username} neg=${negotiation_id} ok=${result.ok}`);
+        return json(res, 200, result);
       } catch (e) {
         console.error('[hh/send-and-reject] error:', e.message);
         return json(res, 500, { error: e.message });
@@ -4295,6 +4294,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     return {
       negotiation_id: neg.id,
       neg_state: neg._state || 'response',
+      first_name: r.first_name || '',
       name: [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат',
       score: ats?.score ?? null,
       verdict: ats?.verdict ?? null,
@@ -4439,7 +4439,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            </div>
            <textarea class="msg-area" id="msg-${i}" rows="4">${hasDraft ? esc(c.draft_message) : ''}</textarea>
            <div class="btns">
-             <button class="btn btn-send-reject" onclick="sendAndRejectOne(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
+             <button class="btn btn-send-reject" onclick="rejectWithMessage(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
              <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
              <button class="btn btn-skip" onclick="skipOne(${i})">Пропустить</button>
            </div>
@@ -4461,7 +4461,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
          </div>`;
 
     const salaryNote = c.salary ? `<span class="meta"> · зп ${esc(c.salary)}</span>` : '';
-    return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" style="background:${bg};border-left:4px solid ${col}">
+    return `<div class="card" id="card-${i}" data-score="${hasScore ? (c.score || 0).toFixed(1) : '0'}" data-neg="${esc(c.negotiation_id)}" data-first-name="${esc(c.first_name)}" style="background:${bg};border-left:4px solid ${col}">
   <div class="card-header">
     <div class="card-header-left">
       ${checkboxHtml}
@@ -4692,14 +4692,23 @@ function showToast(msg, isError) {
 }
 
 async function hhAction(endpoint, payload) {
-  const r = await fetch(CALLBACK_BASE + endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
-    body: JSON.stringify({ username: HH_USER, ...payload }),
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || r.statusText);
-  return data;
+  const controller = new AbortController();
+  const timer = endpoint === '/hh/send-and-reject' ? setTimeout(() => controller.abort(), 60000) : null;
+  try {
+    const r = await fetch(CALLBACK_BASE + endpoint, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
+      body: JSON.stringify({ username: HH_USER, ...payload }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    return data;
+  } catch(e) {
+    if (e.name === 'AbortError' || e instanceof TypeError || e instanceof SyntaxError) {
+      throw new Error('Не удалось получить подтверждение. Запрос мог выполниться — проверьте переписку и статус на HH перед повтором.');
+    }
+    throw e;
+  } finally { clearTimeout(timer); }
 }
 
 function onCheck() {
@@ -4796,47 +4805,54 @@ async function generateOne(i, negId, candidateName, alreadySent) {
   }
 }
 
-async function generateRejection(i, negId, candidateName) {
-  const btn = document.getElementById('gen-'+i);
-  const ta = document.getElementById('msg-'+i);
-  if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
-  if (ta) { ta.classList.add('generating'); ta.placeholder = '⏳ Генерирую...'; }
-  try {
-    const data = await hhAction('/hh/generate-message', {
-      negotiation_id: negId,
-      candidate_name: candidateName,
-      message_type: 'rejection',
+function generateRejection(i) {
+  const ta = document.getElementById('msg-' + i);
+  if (ta) ta.value = standardRejection(i);
+}
+
+const rejecting = new Set();
+function rejectionStatus(negId, text, busy) {
+  document.querySelectorAll('.card').forEach(card => {
+    if (card.dataset.neg !== negId) return;
+    let status = card.querySelector('.rejection-status');
+    if (!status) {
+      status = document.createElement('p');
+      status.className = 'rejection-status';
+      status.setAttribute('role', 'status');
+      card.appendChild(status);
+    }
+    status.textContent = text;
+    card.querySelectorAll('button, input[type=checkbox], textarea').forEach(el => {
+      el.disabled = busy || card.classList.contains('done');
+      if (busy && el.type === 'checkbox') el.checked = false;
     });
-    if (ta) { ta.value = data.message || ''; ta.classList.remove('generating'); ta.placeholder = ''; }
-    if (btn) { btn.disabled = false; btn.textContent = '✦ Переписать отказ'; }
-    if (data.guard_warning) showToast('⚠️ Черновик после перегенерации всё ещё под вопросом: ' + data.guard_warning, true);
-  } catch(e) {
-    if (ta) { ta.classList.remove('generating'); ta.placeholder = ''; }
-    if (btn) { btn.disabled = false; btn.textContent = '✦ Сгенерировать отказ'; }
-    showToast('❌ ' + e.message, true);
-  }
+  });
 }
 
 async function sendAndRejectOne(i, negId, force) {
-  if (done.has(i)) return;
+  if (done.has(i) || rejecting.has(negId)) return;
   const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
-  if (!msg) { showToast('Напишите или сгенерируйте сообщение', true); return; }
-  const btn = document.querySelector('#card-' + i + ' .btn-send-reject');
-  const buttonText = btn?.textContent;
-  if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+  if (!msg) return;
+  rejecting.add(negId);
+  rejectionStatus(negId, '⏳ Отправляем отказ. Дождитесь результата…', true);
+  onCheck();
   try {
     const data = await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg, force: !!force });
     if (data.blocked) {
-      if (btn) { btn.disabled = false; btn.textContent = buttonText; }
-      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\\n\\nЭто ты лично проверяешь и отправляешь — всё равно отправить?')) {
-        return sendAndRejectOne(i, negId, true);
+      rejecting.delete(negId);
+      rejectionStatus(negId, 'Отказ не отправлен: ' + (data.reason || 'сообщение заблокировано'), false);
+      if (confirm('🚫 Guard: ' + (data.reason || 'сообщение заблокировано') + '\\n\\nВсё равно отправить?')) {
+        return await sendAndRejectOne(i, negId, true);
       }
       return;
     }
-    markDone(i); onCheck(); showToast('✅ Отказ отправлен');
+    if (!data.ok) throw new Error(data.error || 'Результат отказа не подтверждён. Проверьте HH перед повтором.');
+    markDone(i); onCheck();
+    rejectionStatus(negId, '✅ Сообщение отправлено. Кандидат переведён в отказ на HH.', true);
   } catch(e) {
-    showToast('❌ ' + e.message, true);
-    if (btn) { btn.disabled = false; btn.textContent = buttonText; }
+    rejectionStatus(negId, '⚠️ ' + e.message, false);
+  } finally {
+    rejecting.delete(negId);
   }
 }
 
@@ -4908,18 +4924,18 @@ async function sendAll() {
   if (ok > 0) showToast('✅ Отправлено ' + ok + ' сообщений');
 }
 
-const STANDARD_REJECTION_TEXT =
-  'Добрый день! Благодарим за отклик и уделённое время. ' +
-  'На данный момент мы решили продолжить с другими кандидатами, ' +
-  'чей опыт ближе к требованиям вакансии. Желаем успехов в поиске ' +
-  'и будем рады видеть вас среди откликнувшихся на другие наши вакансии!';
+function standardRejection(i) {
+  const name = document.getElementById('card-' + i)?.dataset.firstName?.trim();
+  return (name ? name + ', здравствуйте! ' : 'Здравствуйте! ') +
+    'Спасибо за отклик и уделённое время. Мы изучили ваше резюме и решили продолжить с другими кандидатами. Желаем успехов в поиске работы!';
+}
 
 async function rejectWithMessage(i, negId) {
-  if (done.has(i)) return;
+  if (done.has(i) || rejecting.has(negId)) return;
   const ta = document.getElementById('msg-' + i);
   if (!ta) return;
-  if (!ta.value.trim()) ta.value = STANDARD_REJECTION_TEXT;
-  if (!confirm('Отправить отказ кандидату со следующим сообщением?\\n\\n' + ta.value.trim())) return;
+  ta.value = standardRejection(i);
+  if (!confirm('Отправить отказ кандидату со следующим сообщением?\\n\\n' + ta.value)) return;
   return sendAndRejectOne(i, negId);
 }
 
@@ -4978,8 +4994,8 @@ function hhApiRequest(method, apiPath, accessToken, body) {
       r.on('data', c => chunks.push(c));
       r.on('end', () => {
         const data = Buffer.concat(chunks).toString('utf8');
-        if (r.statusCode === 204 || !data) return resolve({});
         if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
+        if (r.statusCode === 204 || !data) return resolve({});
         try { resolve(JSON.parse(data)); } catch { resolve({}); }
       });
     });
@@ -5020,8 +5036,8 @@ function hhApiPostForm(apiPath, token, fields) {
       r.on('data', c => chunks.push(c));
       r.on('end', () => {
         const data = Buffer.concat(chunks).toString('utf8');
-        if (r.statusCode === 204 || !data) return resolve({});
         if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
+        if (r.statusCode === 204 || !data) return resolve({});
         try { resolve(JSON.parse(data)); } catch { resolve({}); }
       });
     });
