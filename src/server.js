@@ -490,7 +490,9 @@ function scheduleGtdController(secrets) {
 async function resumePendingTasks(secrets) {
   const pending = getPendingTasks();
   const cutoff = Date.now() - 15 * 60 * 1000;
-  const toResume = pending.filter(t => t.startedAt && t.startedAt > cutoff && t.username && t.userId && t.task);
+  const queueCutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const toResume = pending.filter(t => t.startedAt && t.startedAt > (t.phase === 'queued' ? queueCutoff : cutoff) && t.username && t.userId && t.task)
+    .sort((a, b) => a.startedAt - b.startedAt);
   // Clean up stale files that are too old to resume — prevents slow startup after many crashes.
   const { clearPendingTask: _clearStale } = require('./runner');
   for (const t of pending) {
@@ -521,7 +523,9 @@ async function resumePendingTasks(secrets) {
     const newTaskId = `${p.username}-resume-${Date.now()}`;
     runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
       sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
-      forceClaude: !!p.forceClaude, initialMsgId: p.initialMsgId || null,
+      forceClaude: !!p.forceClaude, forceNew: !!p.forceNew, mode: p.mode || null,
+      projectId: p.projectId || null, newProjectName: p.newProjectName || null,
+      initialMsgId: p.initialMsgId || null,
       pinnedMsgId: p.pinnedMsgId || null, secrets,
     }).catch(err => console.error(`[resume] ${newTaskId} error:`, err.message));
     await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
