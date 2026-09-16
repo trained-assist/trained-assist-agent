@@ -7,7 +7,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'restart-notices-'));
 process.env.USERS_DIR = path.join(root, 'users');
 process.env.AGENT_DATA_DIR = path.join(root, 'data');
 const { createMaintenance } = require('../src/maintenance');
-const { restartTarget, createRestartNotifier } = require('../src/restart-notifications');
+const { restartTarget, createRestartNotifier, message } = require('../src/restart-notifications');
 const sessions = require('../src/session-store');
 process.on('exit', () => fs.rmSync(root, {recursive:true,force:true}));
 function fixture(t) {
@@ -116,4 +116,9 @@ test('external bootstrap notifier persists outcomes outside the service and retr
  await notify('restarting');await notify('ready');await notify('ready',true);
  assert.equal(calls.length,3);assert.match(calls.at(-1).text,/перезапущен/);
  assert.equal(sessions.getSession(f.dir,f.sid).messages.length,4);
+});
+
+test('failure outcome does not claim the queue is paused after a legacy rollback',()=>{
+ assert.doesNotMatch(message({phase:'failed',operationId:'bootstrap'}), /приостановлена/);
+ assert.match(message({phase:'failed',operationId:'bootstrap'}), /не завершены/);
 });
