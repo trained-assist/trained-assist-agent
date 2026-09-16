@@ -17,4 +17,59 @@ class IdleTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             request=Path(root)/'request.json'; mod.atomic(request,{'phase':'complete'})
             with patch.object(mod,'run',side_effect=AssertionError('must not touch service')): mod.tick(request)
+
+class InstallTest(unittest.TestCase):
+    def exercise(self, failure=False, race=False):
+        import os, time, json
+        from contextlib import ExitStack
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root); repo=root/'repo'; release=root/'release'; data=root/'data'
+            for directory in (repo/'node_modules', release/'node_modules', data/'pending-tasks'):
+                directory.mkdir(parents=True)
+            (repo/'node_modules'/'old').write_text('old'); (release/'node_modules'/'new').write_text('new')
+            request=data/'bootstrap.json'; mod.atomic(request,dict(phase='waiting',release=str(release),commit='target',quietSince=time.time()-30,pid=os.getpid()))
+            calls=[]
+            def command(*args):
+                calls.append(args)
+                if args[0]=='git':
+                    if 'rev-parse' in args: return 'target' if args[2]==str(release) else 'previous'
+                    return ''
+                if 'MainPID' in args: return str(os.getpid())
+                if 'ControlGroup' in args: return '/fixture'
+                return ''
+            def checked(args, **kwargs):
+                calls.append(tuple(args))
+                if failure and args[0]=='python3': raise RuntimeError('readiness failed')
+            original_text=Path.read_text; original_bytes=Path.read_bytes
+            def read_text(path,*a,**kw):
+                if str(path)==f'/proc/{os.getpid()}/stat': return f'{os.getpid()} (fixture) T 0'
+                return original_text(path,*a,**kw)
+            def read_bytes(path,*a,**kw):
+                if str(path)==f'/proc/{os.getpid()}/environ': return f'AGENT_DATA_DIR={data}\0'.encode()
+                return original_bytes(path,*a,**kw)
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(mod,'REPO',repo)); stack.enter_context(patch.object(mod,'run',side_effect=command))
+                stack.enter_context(patch.object(mod,'idle',side_effect=[True,not race]))
+                stack.enter_context(patch.object(Path,'read_text',read_text)); stack.enter_context(patch.object(Path,'read_bytes',read_bytes))
+                kill=stack.enter_context(patch.object(mod.os,'kill'))
+                stack.enter_context(patch.object(mod.subprocess,'run',side_effect=checked))
+                if failure:
+                    with self.assertRaisesRegex(RuntimeError,'readiness failed'): mod.tick(request)
+                else: mod.tick(request)
+            state=json.loads(request.read_text())
+            if race:
+                self.assertEqual(state['phase'],'waiting');self.assertTrue((repo/'node_modules'/'old').exists())
+                self.assertFalse(any(c[:2]==('systemctl','stop') for c in calls))
+                self.assertEqual(kill.call_args.args[1],mod.signal.SIGCONT)
+            elif failure:
+                self.assertEqual(state['phase'],'failed');self.assertTrue((repo/'node_modules'/'old').exists())
+                self.assertFalse((data/'maintenance.json').exists())
+                self.assertIn(('git','-C',str(repo),'reset','--hard','previous'),calls)
+            else:
+                self.assertEqual(state['phase'],'complete');self.assertTrue((repo/'node_modules'/'new').exists())
+                self.assertIn(('systemctl','enable','--now','assist-agent-restart.timer'),calls)
+    def test_successful_install_checks_readiness_before_enabling_timer(self): self.exercise()
+    def test_failed_readiness_rolls_back_code_and_dependencies(self): self.exercise(failure=True)
+    def test_racing_task_unfreezes_old_server_without_stopping(self): self.exercise(race=True)
+
 if __name__=='__main__': unittest.main()

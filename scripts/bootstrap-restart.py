@@ -19,6 +19,8 @@ def atomic(file, value):
     os.replace(temporary, file)
 
 def run(*args):
+    if args[0] == 'git' and args[1] == '-C':
+        args = ('git', '-c', 'safe.directory=' + args[2], *args[1:])
     return subprocess.check_output(args, text=True).strip()
 
 def idle(pid, cgroup, pending):
