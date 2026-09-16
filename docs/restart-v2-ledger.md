@@ -7,7 +7,7 @@ the preparatory implementation status in the historical sections below. Not yet
 released: production remains on c3b347c. Do not merge this draft until all release
 acceptance items are verified.
 
-Validation: 592 Vitest tests, CJS and Python suites pass locally. Four isolated
+Validation: 593 Vitest tests, CJS and Python suites pass locally. Four isolated
 real-server scenarios cover fresh resume, stale confirmation, forced
 40-minute interruption, and implicit/explicit same-session serialization; the forced cycle also verifies durable acceptance between
 claim and HTTP shutdown. Gateway: 282 tests. Separate web: authenticated worker and
@@ -167,3 +167,29 @@ esbuild --bundle --platform=node --format=esm, then set RESTART_GATEWAY_ADAPTER 
 its absolute path when running tests/planned-restart-http.test.js. Only Telegram
 transport is redirected to the isolated fixture; owner rejection, VM routing,
 confirmation/replay and task execution use the real HTTP agent and gateway code.
+
+
+## Main integration and test isolation (2026-09-16, #675)
+
+Merged main bf92965, retaining the kernel execution-owner lock and R2 reader.
+Legacy intake-store originals now follow main's stronger retention rule: no TTL
+deletion until reference-aware retirement exists. Waiting tasks still retain their
+materialized intake copies, scoped to the owner; cancellation releases those copies.
+In test/intake-media-retention.test.cjs the old assertions that cancellation/pin
+release deletes legacy originals were replaced by executable assertions that
+originals survive and only unreferenced materialized copies expire. This follows
+main #683; both modified tests and the full retention suite pass.
+
+Vitest setup now assigns temporary system/user roots BEFORE imports, so tests do
+not read the live maintenance gate or write fixture tasks into the production
+queue. The previous full run was interrupted when this leak was discovered; its
+fixture-only pending/activity records were quarantined reversibly in the task
+workspace. A subsequent full run passed 593 Vitest tests plus CJS/Python checks;
+mandatory local staging passed against merged code. Token-specific fixtures retain
+their existing independent setup. Deployment rollback fixtures use main's isolated
+lock-file override, never the live deployment mutex.
+
+Release remains blocked on the unresolved external-effects recovery policy and
+its implementation. The owner was asked whether an uncertain external action must
+hold the task for result reconciliation even inside the five-minute fresh window.
+No answer is assumed; forced restart must not be released ahead of this decision.
