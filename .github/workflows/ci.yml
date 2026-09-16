@@ -22,6 +22,26 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Unit tests
         run: npm test
+      - name: Checkout pinned recruiter gateway
+        uses: actions/checkout@v4
+        with:
+          repository: trained-assist/trained-assist-tg-bot
+          ref: 469e30170f99bcfde072e7e9f415d5f5662d4b16
+          path: .recruiter-gateway
+          persist-credentials: false
+      - name: Install gateway dependencies
+        run: npm ci --prefix .recruiter-gateway
+      - name: Isolated recruiter acceptance journey
+        run: npm run test:recruiter
+        env:
+          RECRUITER_GATEWAY_DIR: ${{ github.workspace }}/.recruiter-gateway
+      - name: Upload recruiter evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recruiter-acceptance
+          path: artifacts/recruiter/
+          retention-days: 14
       - name: Env-sync check
         run: node scripts/check-env-sync.js
       - name: No direct connect-pending outside user-tokens.js

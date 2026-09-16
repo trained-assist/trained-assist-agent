@@ -22,9 +22,9 @@ const registry = require('./mcp-skills/registry');
 const INDEX_PATH = path.join(__dirname, 'mcp-skills', 'index.js');
 const DEFAULT_TIMEOUT_MS = 45_000;
 
-// Safe in-process: listTools() is static tool metadata, not user-scoped execution.
+// Safe in-process: all tool metadata, independent of the shared server identity.
 function listActionTools() {
-  return registry.listTools();
+  return registry.listAllTools();
 }
 
 function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEOUT_MS }) {

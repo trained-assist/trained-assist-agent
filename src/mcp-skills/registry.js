@@ -6,6 +6,7 @@ const path = require('path');
 const toolsDir = process.env.TOOLS_DIR || path.join(__dirname, 'tools');
 const handlers = {};
 const defs = [];
+const allDefs = [];
 
 // Auto-discover all tool files in tools/
 // Each module may export:
@@ -17,6 +18,7 @@ for (const file of fs.readdirSync(toolsDir).filter(f => f.endsWith('.js')).sort(
   const setupSet = new Set(mod.setupTools || []);
 
   for (const [name, tool] of Object.entries(mod.tools || {})) {
+    allDefs.push({ name, description: tool.description, inputSchema: tool.inputSchema || { type: 'object', properties: {} } });
     if (!ready && !setupSet.has(name)) continue;
     if (handlers[name]) {
       console.error(`[registry] duplicate tool name: ${name} in ${file}`);
@@ -33,6 +35,8 @@ for (const file of fs.readdirSync(toolsDir).filter(f => f.endsWith('.js')).sort(
 
 module.exports = {
   listTools: () => defs,
+  // Static metadata only: per-user readiness is enforced in the fresh MCP child.
+  listAllTools: () => allDefs,
   callTool: (name, args) => {
     const fn = handlers[name];
     if (!fn) throw new Error(`Unknown tool: ${name}`);

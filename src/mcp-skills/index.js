@@ -3,6 +3,9 @@
 // Raw JSON-RPC 2.0 over stdio (no SDK dependency, avoids ESM/CJS issues)
 'use strict';
 
+// stdout is exclusively JSON-RPC; tool diagnostics belong on stderr.
+console.log = console.error.bind(console);
+console.info = console.error.bind(console);
 const readline = require('readline');
 const registry = require('./registry.js');
 

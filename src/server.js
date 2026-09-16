@@ -1415,7 +1415,15 @@ async function main() {
       return res.end();
     }
 
-    // ── HH browser-facing endpoints (no AGENT_SECRET — authenticated by HH token file) ──
+    // Message mutations must authenticate the caller, not just find a user's HH token.
+    if (req.method === 'POST' && ['/hh/send', '/hh/reject', '/hh/send-and-reject'].includes(url.pathname)) {
+      const secret = secrets.AGENT_SECRET || process.env.AGENT_SECRET;
+      if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+        return json(res, 403, { error: 'unauthorized' });
+      }
+    }
+
+    // ── HH browser-facing endpoints (review links use HMAC; message mutations require bearer) ──
 
     // GET /hh/review?username=X&token=Y — on-demand candidate review page
     if (req.method === 'GET' && url.pathname === '/hh/review') {

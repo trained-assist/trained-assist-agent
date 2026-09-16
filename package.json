@@ -9,9 +9,11 @@
     "check": "node --check src/server.js src/runner.js src/session-store.js src/secrets.js src/browser.js",
     "test": "vitest run && npm run test:cjs",
     "test:cjs": "node test/answer-router.test.cjs && node test/gtd-controller.test.cjs && node test/session-context-batch.test.cjs && node test/final-text-select.test.cjs && node test/session-store-recency.test.cjs && node test/lane-granularity.test.cjs && node test/cap-per-profile.test.cjs && node --test test/admission-status.test.cjs test/intake-quick.test.cjs test/intake-media-retention.test.cjs",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:recruiter": "node e2e/recruiter/run.cjs"
   },
   "devDependencies": {
+    "esbuild": "^0.25.12",
     "nock": "^14.0.17",
     "vitest": "^2.1.9"
   },

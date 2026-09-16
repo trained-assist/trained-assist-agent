@@ -34,6 +34,8 @@ describe('listActionTools', () => {
     expect(names).toContain('list_skills');
     expect(names).toContain('context_get');
     expect(names).toContain('context_set');
+    // The shared server has no HH identity; the authenticated child does.
+    expect(names).toContain('hh_batch_evaluate');
   });
 });
 
