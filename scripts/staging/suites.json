@@ -13,6 +13,7 @@
     "test/admission-status.test.cjs",
     "test/lane-granularity.test.cjs",
     "test/cap-per-profile.test.cjs",
-    "test/restart-notifications.test.cjs"
+    "test/restart-notifications.test.cjs",
+    "test/execution-owner-lock.test.cjs"
   ]
 }
