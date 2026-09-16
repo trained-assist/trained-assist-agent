@@ -1,0 +1,17 @@
+{
+  "vitest": [
+    "tests/runner-e2e.test.js",
+    "tests/quick-answers.test.js",
+    "tests/unit/intake-files-endpoint.test.js",
+    "tests/planned-restart-http.test.js"
+  ],
+  "node": [
+    "test/maintenance.test.cjs",
+    "test/run-ingress.test.cjs",
+    "test/deploy-safety.test.cjs",
+    "test/intake-media-retention.test.cjs",
+    "test/admission-status.test.cjs",
+    "test/lane-granularity.test.cjs",
+    "test/cap-per-profile.test.cjs"
+  ]
+}

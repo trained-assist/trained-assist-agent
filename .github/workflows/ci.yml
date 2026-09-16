@@ -7,6 +7,31 @@ on:
     branches: [main]
 
 jobs:
+  staging-gate:
+    name: staging-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci --include=dev
+      - name: Replay mandatory user scenarios
+        run: npm run test:staging
+      - name: Save scenario results and tested revision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-${{ github.run_id }}-${{ github.run_attempt }}
+          path: staging-results/
+          if-no-files-found: error
+
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -39,10 +64,11 @@ jobs:
           fi
 
   merge:
-    needs: [ci]
+    needs: [ci, staging-gate]
     if: |
-      github.event_name == 'pull_request' &&
-      needs.ci.result == 'success'
+      github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+      needs.ci.result == 'success' &&
+      needs.staging-gate.result == 'success'
     runs-on: ubuntu-latest
     concurrency:
       group: merge-${{ github.event.pull_request.number }}
@@ -50,19 +76,25 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      sha: ${{ steps.merge.outputs.sha }}
     steps:
       - name: Squash-merge the PR
-        run: gh pr merge --squash "${{ github.event.pull_request.html_url }}"
+        id: merge
+        run: |
+          gh pr merge --squash --match-head-commit "${{ github.event.pull_request.head.sha }}" "${{ github.event.pull_request.html_url }}"
+          echo "sha=$(gh pr view '${{ github.event.pull_request.html_url }}' --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Runs after PR auto-merge OR on direct push to main (e.g. GitHub UI squash-merge).
   # always() lets the job run even when `merge` was skipped (merge only runs on PRs).
   deploy-gcp:
-    needs: [ci, merge]
+    needs: [ci, staging-gate, merge]
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      needs.staging-gate.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
@@ -76,10 +108,17 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          command_timeout: 90m
           script: |
+            set -euo pipefail
+            exec 9>/tmp/assist-agent-deploy.lock
+            flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
+            export ASSIST_DEPLOY_LOCKED=1
             cd /home/vova/trained-assist-agent
-            git fetch origin main
-            git reset --hard origin/main
+            git fetch origin "${{ needs.merge.outputs.sha || github.sha }}"
+            python3 scripts/drain-for-deploy.py
+            export PREV_COMMIT=$(git rev-parse HEAD)
+            git reset --hard FETCH_HEAD
             printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
@@ -98,10 +137,11 @@ jobs:
             DEPLOY_ENV=gcp bash scripts/deploy.sh
 
   deploy-ru:
-    needs: [ci, merge]
+    needs: [ci, staging-gate, merge]
     if: |
       always() &&
       needs.ci.result == 'success' &&
+      needs.staging-gate.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
       (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
@@ -115,11 +155,18 @@ jobs:
           host: ${{ secrets.VM_RU_HOST }}
           username: ${{ secrets.VM_RU_USER }}
           password: ${{ secrets.VM_RU_PASSWORD }}
+          command_timeout: 90m
           script: |
+            set -euo pipefail
+            exec 9>/tmp/assist-agent-deploy.lock
+            flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
+            export ASSIST_DEPLOY_LOCKED=1
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
-            git fetch origin main
-            git reset --hard origin/main
+            git fetch origin "${{ needs.merge.outputs.sha || github.sha }}"
+            python3 scripts/drain-for-deploy.py
+            export PREV_COMMIT=$(git rev-parse HEAD)
+            git reset --hard FETCH_HEAD
             printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.TELEGRAM_BOT_TOKEN }}' \
               '${{ secrets.ANTHROPIC_API_KEY }}' \

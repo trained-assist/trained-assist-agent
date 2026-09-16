@@ -18,7 +18,33 @@ on:
         type: string
 
 jobs:
+  staging-gate:
+    name: staging-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci --include=dev
+      - name: Replay mandatory user scenarios
+        run: npm run test:staging
+      - name: Save scenario results and tested revision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-${{ github.run_id }}-${{ github.run_attempt }}
+          path: staging-results/
+          if-no-files-found: error
+
   deploy-gcp:
+    needs: staging-gate
     if: inputs.target == 'gcp' || inputs.target == 'both'
     runs-on: ubuntu-latest
     steps:
@@ -28,11 +54,18 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          command_timeout: 90m
           script: |
+            set -euo pipefail
+            exec 9>/tmp/assist-agent-deploy.lock
+            flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
+            export ASSIST_DEPLOY_LOCKED=1
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             cd /home/vova/trained-assist-agent
-            git fetch origin main
-            git reset --hard origin/main
+            git fetch origin "${{ github.sha }}"
+            python3 scripts/drain-for-deploy.py
+            export PREV_COMMIT=$(git rev-parse HEAD)
+            git reset --hard FETCH_HEAD
             printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
@@ -51,6 +84,7 @@ jobs:
             DEPLOY_ENV=gcp bash scripts/deploy.sh
 
   deploy-ru:
+    needs: staging-gate
     if: inputs.target == 'ru' || inputs.target == 'both'
     runs-on: ubuntu-latest
     steps:
@@ -60,12 +94,19 @@ jobs:
           host: ${{ secrets.VM_RU_HOST }}
           username: ${{ secrets.VM_RU_USER }}
           password: ${{ secrets.VM_RU_PASSWORD }}
+          command_timeout: 90m
           script: |
+            set -euo pipefail
+            exec 9>/tmp/assist-agent-deploy.lock
+            flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
+            export ASSIST_DEPLOY_LOCKED=1
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
-            git fetch origin main
-            git reset --hard origin/main
+            git fetch origin "${{ github.sha }}"
+            python3 scripts/drain-for-deploy.py
+            export PREV_COMMIT=$(git rev-parse HEAD)
+            git reset --hard FETCH_HEAD
             printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
               '${{ secrets.TELEGRAM_BOT_TOKEN }}' \
               '${{ secrets.ANTHROPIC_API_KEY }}' \

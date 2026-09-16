@@ -1,3 +1,4 @@
+const { maintenance, atomicJson } = require('./maintenance');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -69,10 +70,7 @@ const PENDING_DIR = path.join(
 );
 
 function savePendingTask(taskId, params) {
-  try {
-    fs.mkdirSync(PENDING_DIR, { recursive: true });
-    fs.writeFileSync(path.join(PENDING_DIR, `${taskId}.json`), JSON.stringify(params), { mode: 0o600 });
-  } catch (e) { console.warn('[runner] savePendingTask:', e.message); }
+  atomicJson(path.join(PENDING_DIR, `${taskId}.json`), params);
 }
 
 function clearPendingTask(taskId) {
@@ -80,13 +78,9 @@ function clearPendingTask(taskId) {
 }
 
 function getPendingTasks() {
-  try {
-    if (!fs.existsSync(PENDING_DIR)) return [];
-    return fs.readdirSync(PENDING_DIR)
-      .filter(f => f.endsWith('.json'))
-      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')); } catch (e) { console.warn('[runner] getPendingTasks parse:', e.message); return null; } })
-      .filter(Boolean);
-  } catch (e) { console.warn('[runner] getPendingTasks:', e.message); return []; }
+  if (!fs.existsSync(PENDING_DIR)) return [];
+  return fs.readdirSync(PENDING_DIR).filter(f => f.endsWith('.json'))
+    .map(f => JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')));
 }
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
@@ -1345,10 +1339,15 @@ const RAM_WAIT_MAX_MS = 60000; // never deadlock — proceed after this even if 
 let _runningTasks = 0;
 const _slotWaiters = [];
 
-function _acquireSlot() {
+function _acquireSlot(onPaused = () => {}) {
   return new Promise(resolve => {
+    let reportedPause = false;
     const grab = () => {
-      if (_runningTasks < MAX_CONCURRENT_TASKS) { _runningTasks++; resolve(); }
+      if (maintenance.paused()) { if (!reportedPause) { onPaused(); reportedPause = true; } setTimeout(grab, 500); }
+      else if (_runningTasks < MAX_CONCURRENT_TASKS) {
+        const release = maintenance.acquire();
+        _runningTasks++; resolve(release);
+      }
       else _slotWaiters.push(grab);
     };
     grab();
@@ -1551,23 +1550,16 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // Admin restart command — only for the operator chat. Sends confirmation then exits (systemd restarts).
-  const ADMIN_CHAT_IDS = new Set([-5308931318]);
-  if (/^\/restart$/i.test((opts.task || '').trim()) && ADMIN_CHAT_IDS.has(Number(opts.user.id))) {
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
-    const msg = '🔄 Сервер перезапускается... (systemd поднимет через несколько секунд)';
-    const sendAndExit = () => setTimeout(() => process.exit(0), 600);
-    if (botToken) {
-      const im = opts.initialMsgId;
-      (im
-        ? tgEdit(botToken, chatId, im, msg).catch(() => tgSend(botToken, chatId, msg))
-        : tgSend(botToken, chatId, msg)
-      ).catch(() => {}).finally(sendAndExit);
-    } else {
-      sendAndExit();
-    }
-    return Promise.resolve(msg);
+  // Control commands bypass lanes and admission. Available to every authenticated profile.
+  const restart = /^\/restart(?:@\w+)?(?:\s+(status|cancel))?$/i.exec((opts.task || '').trim());
+  if (restart) {
+    const state = restart[1] === 'cancel' ? maintenance.cancel()
+      : restart[1] === 'status' ? maintenance.status() : maintenance.request(opts.user.username);
+    const msg = state.paused
+      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохранены и ждут.`
+      : '✅ Плановый рестарт не ожидается.';
+    const token = opts.secrets?.BOT_TOKEN;
+    return token ? tgSend(token, opts.user.id, msg).then(() => msg) : Promise.resolve(msg);
   }
 
   // Wakeup command — kill stuck task + clear the queue so new messages can flow through.
@@ -1602,10 +1594,13 @@ function runTask(opts) {
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode,
     projectId: opts.projectId, newProjectName: opts.newProjectName,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId,
-    startedAt: Date.now(),
+    profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
+    continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
+    startedAt: opts.acceptedAt || Date.now(),
   });
   const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  if (chatLanes.has(queueKey)) status.waiting(
+  if (maintenance.paused()) status.waiting('⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.');
+  else if (chatLanes.has(queueKey)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
@@ -1615,8 +1610,9 @@ function runTask(opts) {
   // build a bare user object. In-memory Map key only — never a path/env key.
   const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
 
+  let releaseAdmission;
   const current = prev.catch(() => {}).then(async () => {
-    status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
+    status.waiting(maintenance.paused() ? '⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.' : '↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
     // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
     // profile's 4-slot cap waits here without holding a scarce global slot.
     await _acquireKeySlot(capKey);
@@ -1624,7 +1620,7 @@ function runTask(opts) {
       // Global admission control: wait for a free slot + enough RAM before we
       // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
       await _waitForRam();
-      await _acquireSlot();
+      releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. Ожидается перезапуск сервера; начну автоматически после него.'));
       try {
         await status.finish('🧠 Начинаю работу…');
         return await _runTask(opts);
@@ -1641,10 +1637,12 @@ function runTask(opts) {
   chatLanes.set(queueKey, current);
   current.finally(() => {
     clearPendingTask(opts.taskId);
+    releaseAdmission?.();
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
   });
-  return current;
+  // Await retries for callers, but never hold their predecessor lane/lease.
+  return current.then(result => result?.queuedRetry || result);
 }
 
 // Returns context card string, or null if no skills configured (no pin needed).
@@ -2011,7 +2009,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const chatId = user.id;
 
   savePendingTask(taskId, {
-    taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
     task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
     initialMsgId, pinnedMsgId,
     startedAt: Date.now(),
@@ -2468,9 +2467,29 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   let lineBuffer = '';
   let claudeResult = null;  // text from result event
   let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
+  let terminalSuccess = false; // explicit engine completion, never inferred from narration
+  let processSignal = null;
+  let processError = null;
   let claudeUsage = null;   // usage from result event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
+
+  // Drain in-flight progress edits before posting a terminal message.
+  const progressEdits = new Set();
+  let progressStopped = false;
+  function progressEdit(...args) {
+    if (progressStopped) return Promise.resolve();
+    const pending = tgEdit(...args).catch(() => {});
+    progressEdits.add(pending);
+    pending.finally(() => progressEdits.delete(pending));
+    return pending;
+  }
+  async function stopProgress() {
+    progressStopped = true;
+    clearInterval(streamTimer);
+    clearInterval(heartbeatTimer);
+    await Promise.allSettled([...progressEdits]);
+  }
 
   // Heartbeat: show elapsed seconds while Claude hasn't produced output yet
   let stopButtonShown = false;
@@ -2482,12 +2501,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const extra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
         ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
         : {};
-      await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, extra).catch(() => {});
+      await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, extra).catch(() => {});
     }, HEARTBEAT_INTERVAL_MS);
   }
 
   function scheduleStream() {
-    if (streamTimer) return;
+    if (streamTimer || progressStopped) return;
     outputStarted = true;
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     let streamEditInProgress = false;
@@ -2506,14 +2525,14 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           const newText = `🧠 ${snippet}${activitySuffix}`;
           if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
-          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
+          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
         } else {
           // No text yet (e.g. Claude running tools) — show activity + elapsed
           const label = lastActivity || 'Думаю…';
           const newText = `🧠 ${label} (${secs}с)`;
           if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
-          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
+          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
         }
       } finally {
         streamEditInProgress = false;
@@ -2522,10 +2541,12 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   }
 
   let firstJsonEventSeen = false;
-  proc.stdout.on('data', chunk => {
-    lineBuffer += chunk.toString();
+  proc.stdout.setEncoding('utf8'); // preserve Cyrillic split across byte chunks
+  function consumeOutput(chunk, flush = false) {
+    lineBuffer += chunk;
     const lines = lineBuffer.split('\n');
     lineBuffer = lines.pop(); // keep trailing incomplete line
+    if (flush && lineBuffer) { lines.push(lineBuffer); lineBuffer = ''; }
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -2536,16 +2557,19 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
             fullOutput.text += event.item.text;
             lastAssistantMsg = event.item.text;
-            claudeResult = event.item.text;
+            // A message alone is not proof that the turn completed.
             if (outputCallback) try { outputCallback(event.item.text); } catch {}
             scheduleStream();
           } else if (event.type === 'item.started' && event.item?.type === 'command_execution') {
+            lastAssistantMsg = '';
             lastActivity = formatToolActivity('Bash', { command: event.item.command });
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
             }
           } else if (event.type === 'turn.completed') {
+            terminalSuccess = true;
+            claudeResult = lastAssistantMsg;
             claudeUsage = event.usage || null;
             if (claudeUsage) {
               console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cached_input_tokens || 0} cache_write=${claudeUsage.cache_write_input_tokens || 0}`);
@@ -2556,6 +2580,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           continue;
         }
         if (event.type === 'result') {
+          terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
           claudeUsage = event.usage || null;
           if (claudeUsage) {
@@ -2572,14 +2597,17 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
               lastActivity = formatToolActivity(block.name, block.input);
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
-                tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
+                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
               }
             }
           }
           // Only treat as a final-answer candidate if the turn has no tool calls.
           // Text + tool_use in the same event = narration ("Смотрю X:"), not a conclusion.
           const turnHasTool = event.message.content.some(b => b.type === 'tool_use');
-          if (turnText.trim() && !turnHasTool) lastAssistantMsg = turnText;
+          // Claude emits text and tool blocks separately, with stop_reason=tool_use
+          // even on the text-only event. A later tool event also invalidates old text.
+          if (turnHasTool || event.message.stop_reason === 'tool_use') lastAssistantMsg = '';
+          else if (turnText.trim() && event.message.stop_reason === 'end_turn') lastAssistantMsg = turnText;
           scheduleStream();
         }
       } catch {
@@ -2592,7 +2620,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         scheduleStream();
       }
     }
-  });
+  }
+  proc.stdout.on('data', chunk => consumeOutput(chunk));
+  proc.stdout.on('end', () => consumeOutput('', true));
 
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
@@ -2625,7 +2655,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       };
       sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
 
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
+        processSignal = signal;
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
         if (code !== 0) {
@@ -2646,6 +2677,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       });
     });
   } catch (err) {
+    processError = err.message;
+    await stopProgress();
     console.error(`[${taskId}] claude process error:`, err.message);
     if (timedOut) {
       const nextCount = continuationCount + 1;
@@ -2679,7 +2712,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
           initialMsgId: msgId,
           pinnedMsgId,
           secrets,
-          continuationCount: nextCount,
+          continuationCount: nextCount, mode, projectId, internalGtd,
         });
       } else {
         const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
@@ -2693,8 +2726,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     }
   } finally {
     activeTimers.delete(taskId);
-    clearInterval(streamTimer);
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    await stopProgress();
+    heartbeatTimer = null;
   }
 
   // User pressed Stop — show partial result and exit cleanly
@@ -2729,7 +2762,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
-      return runTask({
+      const queuedRetry = runTask({
         taskId: `${user.username}-${Date.now()}`,
         user,
         task,
@@ -2740,7 +2773,9 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
         pinnedMsgId,
         secrets,
         retryCount: retryCount + 1,
+        continuationCount, mode, projectId, internalGtd,
       });
+      return { queuedRetry };
     }
     const crashMsg = retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`
@@ -2750,20 +2785,23 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     return crashMsg;
   }
 
-  // Prefer the clean result string from the result event; fall back to accumulated stream text
-  const scratchpadFallback = isScratchpadFallback(claudeResult, lastAssistantMsg) && fullOutput.text.trim();
-  let result = pickFinalText(claudeResult, lastAssistantMsg, fullOutput.text) || '(нет вывода)';
-  // No clean answer and no captured turn on a normal (non-timeout, non-stopped) completion —
-  // this is a cut-off narration, not a conclusion. Mark it so the user doesn't read it as a
-  // finished answer (the SIGTERM/stop paths above already frame theirs as interrupted).
-  if (scratchpadFallback) {
-    result = `⚠️ Не получил чистого финального ответа — процесс оборвался посреди действия. Вот последнее, что успел:\n\n${result}`;
+  // A successful process exit is insufficient: require the engine's terminal event.
+  const interrupted = exitCode !== 0 || processSignal || processError || !terminalSuccess;
+  const answer = terminalSuccess ? pickFinalText(claudeResult, lastAssistantMsg, '') : '';
+  const incomplete = interrupted || !answer;
+  let result = answer;
+  if (incomplete) {
+    const reason = processSignal ? `сигнал ${processSignal}`
+      : exitCode !== 0 ? `код ${exitCode}` : 'нет подтверждённого финального ответа';
+    result = `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
+    console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
   }
 
   // Detect Claude Code auth failure — set flag and send clear message instead of raw error
-  if (isAuthError(result)) {
-    const reason = detectReason(result);
-    setAuthFailedFlag({ reason, error_text: result });
+  const authText = claudeResult || fullOutput.text || result;
+  if (isAuthError(authText)) {
+    const reason = detectReason(authText);
+    setAuthFailedFlag({ reason, error_text: authText });
     const authMsg = '⚠️ Авторизация Claude Code истекла — оператор уже уведомлён, скоро починим.';
     if (msgId) {
       await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg));
@@ -2799,7 +2837,7 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   // Плана нет → кнопки нет (actionButtons/oneshotActionMarkup и так null, §9.2).
   let finalMarkup = null;
   let buttonReason = internalGtd ? 'internalGtd-suppressed' : 'no-session';
-  if (!internalGtd) {
+  if (!internalGtd && !incomplete) {
     if (activeSessionId) {
       const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
       if (hasPlan) {
@@ -2825,6 +2863,17 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
   const buttonLabels = (finalMarkup?.inline_keyboard || []).flat().map(b => b.text);
   console.log(`[buttons] session=${activeSessionId || '-'} internalGtd=${internalGtd} reason=${buttonReason} textLen=${final.length} attached=${JSON.stringify(buttonLabels)}`);
 
+  // Preserve interrupted progress for continuation, distinctly from the user-facing status.
+  if (incomplete && activeSessionId && fullOutput.text.trim()) {
+    sessions.appendReply(user.workDir, activeSessionId, `[Незавершённый ход; промежуточный текст, не итог]\n${fullOutput.text.trim()}`);
+  }
+  // Append assistant reply to session history
+  if (activeSessionId) {
+    sessions.appendReply(user.workDir, activeSessionId, result);
+    setCurrentSessionId(user.workDir, activeSessionId, chatId);
+
+  }
+
   // Send result (clear stop button; attach action buttons unless suppressed)
   if (msgId) {
     await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, finalExtra).catch(() =>
@@ -2841,12 +2890,8 @@ async function _runTask({ taskId, user, task, context, sessionId, contextFromSes
     if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
   }
 
-  // Append assistant reply to session history
   if (activeSessionId) {
-    sessions.appendReply(user.workDir, activeSessionId, result);
-    setCurrentSessionId(user.workDir, activeSessionId, chatId);
-
-    // GTD controller: schedule a durable check-back.
+    // Schedule durable GTD checks after terminal delivery.
     // Skip на внутренних GTD re-runs (no self-loop).
     if (!internalGtd) {
       try {
@@ -2939,7 +2984,9 @@ async function tgSend(token, chatId, text, extra = {}) {
     body: JSON.stringify({ chat_id: chatId, text: f.text, ...f.extra }),
     signal: AbortSignal.timeout(10_000),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(`Telegram sendMessage failed (${data.error_code || res.status})`);
+  return data;
 }
 
 async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
@@ -2958,8 +3005,13 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
       await new Promise(r => setTimeout(r, wait));
       continue;
     }
+    if (!res.ok || !data.ok) {
+      if (data.error_code === 400 && /message is not modified/i.test(data.description || '')) return data;
+      throw new Error(`Telegram editMessageText failed (${data.error_code || res.status})`);
+    }
     return data;
   }
+  throw new Error('Telegram editMessageText rate limit retries exhausted');
 }
 
 module.exports = {

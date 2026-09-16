@@ -1,0 +1,8 @@
+[Unit]
+Description=Check planned agent restart every 10 seconds
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=10
+Unit=assist-agent-restart.service
+[Install]
+WantedBy=timers.target

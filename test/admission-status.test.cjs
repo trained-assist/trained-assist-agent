@@ -17,7 +17,7 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
   const lanes = new Map(previous ? [['s1', previous]] : []);
   const sandbox = {
     require: name => { assert.equal(name, './admission-status'); return { createAdmissionStatus }; },
-    console, Promise, Set, Date,
+    console, Promise, Set, Date, maintenance: { paused: () => false },
     _laneKey: s => s, chatLanes: lanes, STOP_TASK_INTENT: /$^/, WAKEUP_INTENT: /$^/,
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
     tgEdit: async (token, chat, id, text) => { assert.equal(token, 'canonical-token'); messages.push(text); return { ok: true }; },
@@ -79,14 +79,17 @@ test('restart restores queued work older than 15 minutes in acceptance order wit
   const now = Date.now(); const resumed = [];
   const task = (id, age) => ({ taskId: id, username: 'test', userId: 42, task: id, phase: 'queued', startedAt: now - age, mode: 'deep', projectId: 'p1', forceNew: true });
   const sandbox = {
-    getPendingTasks: () => [task('later', 1000), task('earlier', 30 * 60000)],
+    getPendingTasks: () => [task('later', 1000), {...task('earlier', 72 * 60 * 60000), userId: 0, profileId: 'profile', continuationCount: 3}],
     require: () => ({ clearPendingTask() {} }),
+    atomicJson: () => {}, os: { homedir: () => '/test' },
     console, Date, process: { env: {} }, BASE_USERS_DIR: '/test', path: require('node:path'),
     setTimeout: fn => fn(), runTask: async options => { resumed.push(options); },
   };
   vm.createContext(sandbox); vm.runInContext(source.slice(start, end), sandbox);
   await sandbox.resumePendingTasks({});
   assert.deepEqual(resumed.map(x => x.task), ['earlier', 'later']);
+  assert.equal(resumed[0].taskId, 'earlier'); assert.equal(resumed[0].user.id, 0);
+  assert.equal(resumed[0].user.profileId, 'profile'); assert.equal(resumed[0].continuationCount, 3);
   for (const task of resumed) {
     assert.equal(task.mode, 'deep'); assert.equal(task.projectId, 'p1'); assert.equal(task.forceNew, true);
   }
