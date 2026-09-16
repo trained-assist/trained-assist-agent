@@ -224,7 +224,7 @@ function createMockHhServer(options = {}) {
     // GET /negotiations/{id}  (single negotiation)
     if (req.method === 'GET' && negList && !LIST_STATES.has(negList[1])) {
       const neg = negotiations.find(n => n.id === negList[1]);
-      return neg ? send(200, neg) : send(404, { error: 'Not found' });
+      return neg ? send(200, state.negotiationState ? { ...neg, state: { id: state.negotiationState } } : neg) : send(404, { error: 'Not found' });
     }
 
     // GET/POST /negotiations/{id}/messages
@@ -251,6 +251,13 @@ function createMockHhServer(options = {}) {
           send(201, { ok: true });
         });
       }
+    }
+
+    const consider = p.match(/^\/negotiations\/consider\/([^/]+)$/);
+    if (req.method === 'PUT' && consider) {
+      if (state.failConsider) return send(503, { error: 'stage unavailable' });
+      state.moves[consider[1]] = 'consider';
+      return send(204, null);
     }
 
     // PUT /negotiations/discard_vacancy_closed/{id}
@@ -292,6 +299,8 @@ function createMockHhServer(options = {}) {
     },
 
     reset() {
+      state.negotiationState = null;
+      state.failConsider = false;
       state.messages = {};
       state.moves = {};
       state.discarded.clear();

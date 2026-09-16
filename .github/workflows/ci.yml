@@ -18,6 +18,8 @@ jobs:
       - run: npm ci
       - name: Syntax check
         run: npm run check
+      - name: Install Chromium for review page regression
+        run: npx playwright install --with-deps chromium
       - name: Unit tests
         run: npm test
       - name: Env-sync check
