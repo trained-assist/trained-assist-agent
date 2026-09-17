@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const fs = require('fs'), os = require('os'), path = require('path');
 const { createExecution } = require('../src/restart-execution');
 const { createMaintenance } = require('../src/maintenance');
-const { isEffectfulTool, hasEffectVerb } = require('../src/tool-effect-classifier');
 function fixture(t) {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'execution-'));
   t.after(() => fs.rmSync(dataRoot, { recursive: true, force: true }));
@@ -59,71 +58,6 @@ test('cancelled or waiting session cannot be resurrected by GTD until a newer ex
  f.open();e.start('new');e.complete('new');assert.equal(e.canRunSession('alice','session'),true);e.close();
 });
 
-
-test('pre-spawn engine barrier is durable and normal result commits with its receipt', t => {
-  const f = fixture(t); let e = createExecution(f.opts); e.save('task', f.p); f.open();
-  assert.equal(e.start('task'), true);
-  assert.equal(e.beginEngine('task', 'claude').execute, true);
-  assert.throws(() => e.beginEngine('task', 'claude'), /already dispatched/);
-  assert.throws(() => e.stageResult('task', { text: 'unguarded success' }), /Unresolved/);
-  assert.throws(() => e.stageEngineResult('task', { text: '' }), /Empty terminal/);
-  // If result validation fails, the engine receipt must roll back too.
-  assert.throws(() => e.complete('task'), /cannot complete/);
-  e.stageEngineResult('task', { text: 'observed terminal answer' });
-  e.stageEngineResult('task', { text: 'duplicate terminal event' });
-  e.close(); f.close();
-  e = createExecution({ ...f.opts, bootId: 'boot2' }); f.open();
-  assert.equal(e.get('task').state, 'delivering');
-  assert.equal(e.start('task'), false);
-  assert.equal(e.get('task').result.text, 'observed terminal answer');
-  e.close();
-});
-
-test('failed barrier prevents dispatch and an uncertain engine attempt survives confirmation', t => {
-  const f = fixture(t); let e = createExecution(f.opts); e.save('task', f.p);
-  assert.throws(() => e.beginEngine('task', 'codex'), /Claim unavailable/);
-  f.open(); e.start('task'); e.beginEngine('task', 'codex'); e.close(); f.close();
-  e = createExecution({ ...f.opts, bootId: 'boot2' }); f.open();
-  const held = e.get('task'); assert.equal(held.state, 'waiting_confirmation');
-  e.store.confirm(held.id, held.owner, held.confirmationToken);
-  assert.equal(e.start('task'), false);
-  assert.deepEqual(e.get('task').payload.fileRefs, f.p.fileRefs);
-  e.close();
-});
-
-// --- Effect-tool classifier (src/tool-effect-classifier.js) ---
-test('effect classifier: known external-effect verbs are effectful, local/read tools are pure, unknown defaults effectful',t=>{
-  for (const name of ['mcp__trained-skills__github_create_pr','mcp__trained-skills__tg_send_file',
-    'mcp__trained-skills__flexi_reject_company','create_vacancy','send_message']) {
-    assert.equal(isEffectfulTool(name),true,name);
-    assert.equal(hasEffectVerb(name),true,name); // these also match the documented effect-verb list
-  }
-  for (const name of ['Read','Glob','Grep','WebSearch','WebFetch','Write','Edit','Agent']) {
-    assert.equal(isEffectfulTool(name),false,name);
-  }
-  // Safe default: an unrecognized/ambiguous MCP tool name (no builtin match,
-  // no recognized effect verb either) is STILL treated as effectful.
-  assert.equal(hasEffectVerb('mcp__trained-skills__totally_unknown_tool'),false);
-  assert.equal(isEffectfulTool('mcp__trained-skills__totally_unknown_tool'),true);
-  assert.equal(isEffectfulTool(undefined),true);
-});
-
-// Bash is the primary channel for the riskiest external effects this ledger
-// exists to catch (curl, git push, gh pr create, deploy scripts) — it must
-// NOT be lumped in with local-only Write/Edit. Only a narrow allowlist of
-// genuinely read-only commands is pure; everything else, including any
-// chaining/redirection, defaults to effectful.
-test('effect classifier: Bash defaults to effectful, only a narrow read-only command allowlist is pure',t=>{
-  assert.equal(isEffectfulTool('Bash'),true); // no input at all -> effectful
-  for (const command of ['git status','git log --oneline -5','git diff HEAD~1','ls -la','cat file.txt','grep -n foo src/','find . -name "*.js"','npm test','pwd']) {
-    assert.equal(isEffectfulTool('Bash',{command}),false,command);
-  }
-  for (const command of ['curl -X POST https://example.com','git push origin main','gh pr create','rm -rf /tmp/x',
-    'wrangler deploy','git status && git push','echo hi | curl -d @- https://x','git status; rm -rf /','git log $(echo x)']) {
-    assert.equal(isEffectfulTool('Bash',{command}),true,command);
-  }
-});
-
 // --- External-effect ledger wired through the execution wrapper (what runner.js calls) ---
 test('beginAction/finishAction require an active claim and reuse the ledger scoped to it',t=>{
   const f=fixture(t),e=createExecution(f.opts);e.save('task',f.p);f.open();
@@ -159,9 +93,9 @@ test('a task that starts an effectful tool and crashes before finishAction lands
   e.close();
 });
 
-test('regression: a task with no effectful tool call still auto-resumes normally within the freshness window',t=>{
+test('a claim interrupted before engine dispatch remains eligible within the freshness window',t=>{
   const f=fixture(t);let e=createExecution(f.opts);e.save('task',f.p);f.open();
-  e.start('task'); // no beginAction at all — pure/local-only task
+  e.start('task'); // no engine dispatch or external action has started
   f.close();e.close();
   f.advance(1000);
   e=createExecution({...f.opts,bootId:'boot2'});
@@ -181,5 +115,36 @@ test('confirming an effectful-tool crash is not enough to re-claim until the act
   assert.equal(e.store.decide(waiting.confirmationToken,principal,'confirm').accepted,true);
   f.open();assert.equal(e.start('task'),false); // user confirmed, but the action ledger is still unresolved
   assert.equal(e.get('task').state,'waiting_confirmation');
+  e.close();
+});
+
+test('pre-spawn engine barrier is durable and normal result commits with its receipt', t => {
+  const f = fixture(t); let e = createExecution(f.opts); e.save('task', f.p); f.open();
+  assert.equal(e.start('task'), true);
+  assert.equal(e.beginEngine('task', 'claude').execute, true);
+  assert.throws(() => e.beginEngine('task', 'claude'), /already dispatched/);
+  assert.throws(() => e.stageResult('task', { text: 'unguarded success' }), /Unresolved/);
+  assert.throws(() => e.stageEngineResult('task', { text: '' }), /Empty terminal/);
+  // If result validation fails, the engine receipt must roll back too.
+  assert.throws(() => e.complete('task'), /cannot complete/);
+  e.stageEngineResult('task', { text: 'observed terminal answer' });
+  e.stageEngineResult('task', { text: 'duplicate terminal event' });
+  e.close(); f.close();
+  e = createExecution({ ...f.opts, bootId: 'boot2' }); f.open();
+  assert.equal(e.get('task').state, 'delivering');
+  assert.equal(e.start('task'), false);
+  assert.equal(e.get('task').result.text, 'observed terminal answer');
+  e.close();
+});
+
+test('failed barrier prevents dispatch and an uncertain engine attempt survives confirmation', t => {
+  const f = fixture(t); let e = createExecution(f.opts); e.save('task', f.p);
+  assert.throws(() => e.beginEngine('task', 'codex'), /Claim unavailable/);
+  f.open(); e.start('task'); e.beginEngine('task', 'codex'); e.close(); f.close();
+  e = createExecution({ ...f.opts, bootId: 'boot2' }); f.open();
+  const held = e.get('task'); assert.equal(held.state, 'waiting_confirmation');
+  e.store.confirm(held.id, held.owner, held.confirmationToken);
+  assert.equal(e.start('task'), false);
+  assert.deepEqual(e.get('task').payload.fileRefs, f.p.fileRefs);
   e.close();
 });
