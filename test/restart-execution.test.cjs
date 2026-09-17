@@ -57,3 +57,35 @@ test('cancelled or waiting session cannot be resurrected by GTD until a newer ex
  assert.equal(e.canRunSession('alice','session'),false);f.advance(1);e.save('new',{...f.p,taskId:'new',initiatedAt:f.p.initiatedAt+300001});
  f.open();e.start('new');e.complete('new');assert.equal(e.canRunSession('alice','session'),true);e.close();
 });
+
+
+test('pre-spawn engine barrier is durable and normal result commits with its receipt', t => {
+  const f = fixture(t); let e = createExecution(f.opts); e.save('task', f.p); f.open();
+  assert.equal(e.start('task'), true);
+  assert.equal(e.beginEngine('task', 'claude').execute, true);
+  assert.throws(() => e.beginEngine('task', 'claude'), /already dispatched/);
+  assert.throws(() => e.stageResult('task', { text: 'unguarded success' }), /Unresolved/);
+  assert.throws(() => e.stageEngineResult('task', { text: '' }), /Empty terminal/);
+  // If result validation fails, the engine receipt must roll back too.
+  assert.throws(() => e.complete('task'), /cannot complete/);
+  e.stageEngineResult('task', { text: 'observed terminal answer' });
+  e.stageEngineResult('task', { text: 'duplicate terminal event' });
+  e.close(); f.close();
+  e = createExecution({ ...f.opts, bootId: 'boot2' }); f.open();
+  assert.equal(e.get('task').state, 'delivering');
+  assert.equal(e.start('task'), false);
+  assert.equal(e.get('task').result.text, 'observed terminal answer');
+  e.close();
+});
+
+test('failed barrier prevents dispatch and an uncertain engine attempt survives confirmation', t => {
+  const f = fixture(t); let e = createExecution(f.opts); e.save('task', f.p);
+  assert.throws(() => e.beginEngine('task', 'codex'), /Claim unavailable/);
+  f.open(); e.start('task'); e.beginEngine('task', 'codex'); e.close(); f.close();
+  e = createExecution({ ...f.opts, bootId: 'boot2' }); f.open();
+  const held = e.get('task'); assert.equal(held.state, 'waiting_confirmation');
+  e.store.confirm(held.id, held.owner, held.confirmationToken);
+  assert.equal(e.start('task'), false);
+  assert.deepEqual(e.get('task').payload.fileRefs, f.p.fileRefs);
+  e.close();
+});

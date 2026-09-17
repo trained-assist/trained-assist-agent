@@ -7,7 +7,7 @@ import http from 'node:http';
 import Database from 'better-sqlite3';
 import { pathToFileURL } from 'node:url';
 
-async function restartCycle(kind) {
+async function restartCycle(kind, selectedEngine = 'claude') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'planned-restart-http-'));
   const calls = [];
   const telegram = http.createServer((req, res) => {
@@ -21,10 +21,25 @@ async function restartCycle(kind) {
   const reserve = http.createServer(); await new Promise(r => reserve.listen(0, '127.0.0.1', r));
   const port = reserve.address().port; await new Promise(r => reserve.close(r));
   const launches = path.join(root, 'launches'); const engine = path.join(root, 'engine.cjs');
-  fs.writeFileSync(engine, `#!/usr/bin/env node\nconst fs=require('fs');const file=${JSON.stringify(launches)};fs.appendFileSync(file, 'run\\n');\nif (${kind === 'forced' || kind === 'lane'} && fs.readFileSync(file,'utf8')==='run\\n') { setInterval(()=>{ if (${kind === 'lane'} && fs.existsSync(file+'.release')) { console.log(JSON.stringify({type:'result',result:'Queue recovered'})); process.exit(0); } },50); } else {\nconsole.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Queue recovered'}]}}));\nconsole.log(JSON.stringify({type:'result',result:'Queue recovered'}));\n}\n`, { mode: 0o700 });
+  const finalEvents = selectedEngine === 'codex'
+    ? [{ type: 'item.completed', item: { type: 'agent_message', text: 'Queue recovered' } }, { type: 'turn.completed' }]
+    : [{ type: 'assistant', message: { content: [{ type: 'text', text: 'Queue recovered' }] } }, { type: 'result', result: 'Queue recovered' }];
+  fs.writeFileSync(engine, `#!/usr/bin/env node
+const fs=require('fs');const file=${JSON.stringify(launches)};fs.appendFileSync(file, 'run\\n');
+if (${kind === 'quick-crash'}) process.exit(1);
+if (${['forced', 'lane', 'effect-crash'].includes(kind)} && fs.readFileSync(file,'utf8')==='run\\n') {
+  setInterval(()=>{ if (${kind === 'lane'} && fs.existsSync(file+'.release')) {
+    for (const event of ${JSON.stringify(finalEvents)}) console.log(JSON.stringify(event)); process.exit(0);
+  } },50);
+} else {
+  for (const event of ${JSON.stringify(finalEvents)}) console.log(JSON.stringify(event));
+}
+`, { mode: 0o700 });
   const env = { PATH: process.env.PATH, HOME: root, NODE_ENV: 'test', PORT: String(port), SECRETS_SOURCE: 'env',
     AGENT_SECRET: 'fixture-secret', TELEGRAM_BOT_TOKEN: 'fixture-token', TELEGRAM_API_URL: `http://127.0.0.1:${telegram.address().port}`,
-    AGENT_DATA_DIR: path.join(root, 'data'), USERS_DIR: path.join(root, 'users'), AGENT_TOKENS_ROOT: path.join(root, 'tokens'), CLAUDE_BIN: engine };
+    AGENT_DATA_DIR: path.join(root, 'data'), USERS_DIR: path.join(root, 'users'), AGENT_TOKENS_ROOT: path.join(root, 'tokens'), CLAUDE_BIN: engine, CODEX_BIN: engine };
+  fs.mkdirSync(path.join(env.USERS_DIR, 'fixture'), { recursive: true });
+  fs.writeFileSync(path.join(env.USERS_DIR, 'fixture', 'profile.json'), JSON.stringify({ engine: selectedEngine }));
   const clockFile=path.join(root,'clock');fs.writeFileSync(clockFile,'0');
   const preload=path.join(root,'clock.cjs');
   fs.writeFileSync(preload,`const fs=require('fs'),real=Date.now;Date.now=()=>real()+Number(fs.readFileSync(${JSON.stringify(clockFile)},'utf8'));`);
@@ -53,6 +68,38 @@ async function restartCycle(kind) {
     const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true, mode: 'deep', requestId: 'stable',
       fileBase64: Buffer.from('preserved attachment').toString('base64'), fileName:'resume.txt',
       ...(kind === 'stale' ? { initiatedAt: Date.now()-300000 } : {}) };
+    if (kind === 'effect-crash' || kind === 'quick-crash') {
+      await api('/run', payload);
+      await until(() => fs.existsSync(launches));
+      if (kind === 'quick-crash') {
+        await until(async () => (await api('/maintenance')).active === 0);
+        expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
+      }
+      await stop('SIGKILL');
+      await start();
+      await until(async () => (await api('/maintenance')).active === 0);
+      const listed = await api('/web/restart-intents-bearer', { username: 'fixture', action: 'list' });
+      expect(listed.intents).toHaveLength(1);
+      expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
+      const decision = { handle: listed.intents[0].handle, action: 'confirm', username: 'fixture', telegramUserId: 123, chatId: 123 };
+      await api('/restart/decision', decision);
+      await new Promise(r => setTimeout(r, 400));
+      expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
+      expect((await api('/restart/decision', decision)).replay).toBe(true);
+      await stop('SIGKILL'); await start();
+      expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
+      const db = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+      const row = JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
+      const actions = db.prepare('SELECT data FROM actions WHERE intent_id=?').all('fixture-stable').map(r => JSON.parse(r.data));
+      db.close();
+      expect(actions).toHaveLength(1);
+      expect(actions[0].request.engine).toBe(selectedEngine);
+      expect(actions[0].state).toBe('started');
+      expect(row.state).toBe('waiting_confirmation');
+      expect(row.payload.task).toContain('resume.txt');
+      expect(row.initiatedAt).toBeLessThanOrEqual(Date.now());
+      return;
+    }
     if (kind === 'lane') {
       await api('/run', payload);
       await until(() => fs.existsSync(launches));
@@ -123,7 +170,11 @@ async function restartCycle(kind) {
       expect((await api('/run', payload)).duplicate).toBe(true);
       const db = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
       const row = JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
+      const actions = db.prepare('SELECT data FROM actions WHERE intent_id=?').all('fixture-stable').map(r => JSON.parse(r.data));
       db.close();
+      expect(actions).toHaveLength(1);
+      expect(actions[0].request.engine).toBe(selectedEngine);
+      expect(actions[0].state).toBe('started');
       expect(row.state).toBe('queued');
       expect(row.payload.task).toContain('resume.txt');
       return;
@@ -162,6 +213,24 @@ async function restartCycle(kind) {
         expect((await api('/restart/decision',decision)).accepted).toBe(true);
       }
       expect((await api('/restart/decision',decision)).replay).toBe(true);
+      if (kind === 'forced') {
+        // The process ran before the deadline. Confirmation alone cannot
+        // reconcile its unknown effects or authorize replay of that attempt.
+        await new Promise(r => setTimeout(r, 400));
+        expect(fs.readFileSync(launches, 'utf8')).toBe('run\n');
+        await until(() => {
+          const probe = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+          try { return JSON.parse(probe.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data).state === 'waiting_confirmation'; }
+          finally { probe.close(); }
+        });
+        const heldDb = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+        const held = JSON.parse(heldDb.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
+        heldDb.close();
+        expect(held.state).toBe('waiting_confirmation');
+        expect(held.payload.task).toContain('resume.txt');
+        expect(calls.some(c => c.text?.includes('Queue recovered'))).toBe(false);
+        return;
+      }
     }
     await until(() => calls.some(c => c.text?.includes('Queue recovered')));
     await until(async () => (await api('/maintenance')).active === 0);
@@ -175,7 +244,7 @@ async function restartCycle(kind) {
     expect(intents[0].state).toBe('completed');
     expect(intents[0].payload.task).toContain('resume.txt');
     expect(intents[0].payload.mode).toBe('deep');
-    expect(intents[0].payload.engine).toBe('claude');
+    expect(intents[0].payload.engine).toBe(selectedEngine);
   } finally { await stop('SIGKILL'); await new Promise(r => telegram.close(r)); fs.rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -186,3 +255,11 @@ it('40-minute deadline interrupts a real child and requires confirmation after r
 it('implicit first request and explicit reply serialize on the bound session', {timeout:45000}, () => restartCycle('lane'));
 
 it.each(['deploy-target', 'deploy-wrong'])('v2 recovery verifies runtime revision: %s', {timeout:45000}, kind => restartCycle(kind));
+
+it('fresh real engine effect is not replayed after SIGKILL, confirmation or second boot', {timeout:45000}, () => restartCycle('effect-crash'));
+
+it('Codex fresh real engine effect is not replayed after SIGKILL or confirmation', {timeout:45000}, () => restartCycle('effect-crash', 'codex'));
+
+it('normal Codex terminal receipt survives restart without replay', {timeout:45000}, () => restartCycle('fresh', 'codex'));
+
+it.each(['claude', 'codex'])('quick failure cannot retry an uncertain %s engine attempt', {timeout:45000}, engine => restartCycle('quick-crash', engine));
