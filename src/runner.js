@@ -166,6 +166,7 @@ const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|созд
 const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|напиш[иь]).{0,40}(?:приложени|сервис(?!\s*аккаунт)|бот(?!\s*токен|\s*ключ)(?!\s*weeek|\s*hh|\s*tilda|\s*nalog)|сайт(?!\s*с\s+tilda)(?!\s+tilda)|систем|скрипт(?!\s+для\s+(?:выставки|expo))|библиотек|пакет|модул|апи-сервис)|implement\s+\S|build\s+(?:app|service|bot|api)|develop\s+(?:app|feature|bot)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
+const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
@@ -1566,14 +1567,47 @@ function runTask(opts) {
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
+    const workDir = opts.user.workDir;
     const stopped = stopUserTask(username);
-    const msg = stopped ? '⛔ Задача остановлена.' : 'Нет активной задачи для остановки.';
+    let gtdCancelled = 0;
+    if (workDir) {
+      try { gtdCancelled = require('./gtd-controller').clearAllGtd(workDir); }
+      catch (e) { console.warn('[runner] stop gtd clear:', e.message); }
+    }
+    const parts = [];
+    if (stopped) parts.push('⛔ Задача остановлена.');
+    if (gtdCancelled > 0) parts.push(`GTD-трекинг отменён (${gtdCancelled} проверок).`);
+    if (!parts.length) parts.push('Нет активной задачи для остановки.');
+    const msg = parts.join(' ');
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const chatId = opts.user.id;
     if (botToken) {
       const markup = { reply_markup: { inline_keyboard: [] } };
       const im = opts.initialMsgId;
       if (im) tgEdit(botToken, chatId, im, msg, markup).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+      else     tgSend(botToken, chatId, msg).catch(() => {});
+    }
+    return Promise.resolve(msg);
+  }
+
+  // GTD hard-stop: cancel all open GTD tracking + kill any running task.
+  if (GTD_STOP_INTENT.test((opts.task || '').trim())) {
+    const username = opts.user.username;
+    const workDir = opts.user.workDir;
+    stopUserTask(username);
+    let gtdCancelled = 0;
+    if (workDir) {
+      try { gtdCancelled = require('./gtd-controller').clearAllGtd(workDir); }
+      catch (e) { console.warn('[runner] gtd_stop clear:', e.message); }
+    }
+    const msg = gtdCancelled > 0
+      ? `🛑 GTD остановлен — ${gtdCancelled} запланированных проверок отменено.`
+      : '🛑 Нет активных GTD-проверок для отмены.';
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    if (botToken) {
+      const im = opts.initialMsgId;
+      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
       else     tgSend(botToken, chatId, msg).catch(() => {});
     }
     return Promise.resolve(msg);

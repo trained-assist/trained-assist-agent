@@ -329,9 +329,15 @@ function buildReopenMessage(rec) {
   // отмеченные [x] предыдущей попыткой, вместо статичного усечённого task.
   const checklist = rec.projectDir ? readChecklist(rec.projectDir) : null;
   const summary = checklistSummary(checklist);
+  // Предупреждение об усложнении появляется начиная со 2-й попытки — первая
+  // попытка имеет право попробовать; если не получилось дважды, скорее всего
+  // задача сложнее оценки и дальнейшее упорство только создаёт больше кода.
+  const escalateWarning = rec.iterations >= 2
+    ? `\n\n⚠️ Это уже ${rec.iterations}-я попытка. Если задача требует существенно больше кода/компонентов, чем предполагалась изначально — НЕ усложняй дальше. Вместо этого напиши строкой: GTD: escalated`
+    : '';
   return [
     REOPEN_INTRO,
-    `Ты взялся довести эту задачу до конца. Попытка ${rec.iterations} из ${rec.maxIterations}.`,
+    `Ты взялся довести эту задачу до конца. Попытка ${rec.iterations} из ${rec.maxIterations}.${escalateWarning}`,
     '',
     'Проверь по ФАКТУ (с диска / из сети, не по памяти): всё ли реально доехало — прод/PR/деплой/результат, а не только «лежит в коде»?',
     summary
@@ -342,12 +348,30 @@ function buildReopenMessage(rec) {
         + '\n  (или подними уже открытый issue с прошлого шага и двигай его), потом выполни, отмечая закрытые пункты в checklist.md. В конце напиши строкой: GTD: continue'
       : '• Если нет — сделай ещё одну попытку (можно другим путём, чем прошлая). ПЕРЕД работой создай GitHub issue на то, что собираешься сделать'
         + '\n  (или подними уже открытый issue с прошлого шага и двигай его), потом выполни. В конце напиши строкой: GTD: continue',
+    '• Если задача оказалась существенно сложнее первоначальной оценки (нужно намного больше кода, затрагивает много новых компонентов) — не усложняй. Напиши строкой: GTD: escalated',
     '',
     summary || `Исходная задача: ${rec.originalTask || '(см. историю сессии)'}`,
   ].join('\n');
 }
 
-const DONE_RE = /GTD:\s*done/i;
+const DONE_RE      = /GTD:\s*done/i;
+const ESCALATED_RE = /GTD:\s*escalated/i;
+
+// Cancel all open GTD records for a user (e.g. on /stop or /gtd_stop command).
+// Returns count of cancelled records.
+function clearAllGtd(workDir) {
+  const recs = listGtd(workDir);
+  let count = 0;
+  for (const rec of recs) {
+    if (rec.status === 'open') {
+      rec.status = 'closed';
+      rec.closedReason = 'user-stop';
+      writeGtd(workDir, rec);
+      count++;
+    }
+  }
+  return count;
+}
 
 // Серверный tick. Аргументы инжектятся из server.js, чтобы модуль не тянул
 // зависимости и был тестируем: { secrets, baseUsersDir, isTaskRunning, runTask, getSession }.
@@ -433,14 +457,24 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         continue;
       }
 
-      // Терминал: итерация сказала done, либо исчерпали cap на этом же шаге.
+      // Терминал: итерация сказала done/escalated, либо исчерпали cap на этом же шаге.
       const said = typeof reply === 'string' ? reply : '';
-      const doneNow = DONE_RE.test(said) || DONE_RE.test(session.summary?.ended || '');
+      const doneNow      = DONE_RE.test(said) || DONE_RE.test(session.summary?.ended || '');
+      const escalatedNow = ESCALATED_RE.test(said);
       const fresh = readGtd(workDir, rec.sessionId) || rec; // мог измениться в _runTask
       if (doneNow) {
         fresh.status = 'closed'; fresh.closedReason = 'done';
         writeGtd(workDir, fresh);
         console.log(`[gtd] closed ${rec.sessionId}: done`);
+      } else if (escalatedNow) {
+        fresh.status = 'closed'; fresh.closedReason = 'complexity-escalated';
+        writeGtd(workDir, fresh);
+        console.log(`[gtd] closed ${rec.sessionId}: complexity-escalated`);
+        _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+          `⚠️ GTD остановлен — задача оказалась сложнее первоначальной оценки.\n`
+          + `Агент остановил попытки (было ${fresh.iterations}), чтобы не усложнять.\n`
+          + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`
+        ).catch(() => {});
       } else if (fresh.iterations >= fresh.maxIterations) {
         fresh.status = 'closed'; fresh.closedReason = 'max-iterations';
         writeGtd(workDir, fresh);
@@ -455,7 +489,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 
 module.exports = {
   detectIntent, maybeSchedule, scheduleFromChecklist, runDue, buildReopenMessage,
-  readGtd, writeGtd, clearGtd, listGtd,
+  readGtd, writeGtd, clearGtd, clearAllGtd, listGtd,
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
