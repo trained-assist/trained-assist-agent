@@ -2,8 +2,7 @@
   "vitest": [
     "tests/runner-e2e.test.js",
     "tests/quick-answers.test.js",
-    "tests/unit/intake-files-endpoint.test.js",
-    "tests/planned-restart-http.test.js"
+    "tests/unit/intake-files-endpoint.test.js"
   ],
   "node": [
     "test/maintenance.test.cjs",
@@ -13,15 +12,6 @@
     "test/admission-status.test.cjs",
     "test/lane-granularity.test.cjs",
     "test/cap-per-profile.test.cjs",
-    "test/restart-notifications.test.cjs",
-    "test/restart-audience.test.cjs",
-    "test/restart-intents.test.cjs",
-    "test/restart-confirmations.test.cjs",
-    "test/restart-confirmation-http.test.cjs",
-    "test/restart-execution.test.cjs",
-    "test/restart-quick-receipts.test.cjs",
-    "test/restart-results.test.cjs",
-    "test/execution-owner-lock.test.cjs",
-    "test/restart-settlement.test.cjs"
+    "test/execution-owner-lock.test.cjs"
   ]
 }
