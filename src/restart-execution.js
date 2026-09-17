@@ -29,6 +29,19 @@ function createExecution({ dataRoot, gate, bootId, now = Date.now, deliveryOptio
     stageResult(id, result) { return store.stageResult(id, claims.get(id), result); },
     beginEngine(id, engine) { return store.beginEngine(id, claims.get(id), engine); },
     stageEngineResult(id, result) { return store.stageEngineResult(id, claims.get(id), result); },
+    // External-effect action ledger, scoped to the current claim. No-op (never
+    // silently swallowed) when there is no active claim for id — callers must
+    // not begin/finish actions outside a running claim.
+    beginAction(id, actionId, request) {
+      const token = claims.get(id);
+      if (!token) throw Error('No active claim for action');
+      return store.beginAction(id, token, actionId, request);
+    },
+    finishAction(id, actionId, result) {
+      const token = claims.get(id);
+      if (!token) throw Error('No active claim for action');
+      return store.finishAction(id, token, actionId, result);
+    },
     pending() { return store.all().filter(i => !['completed', 'cancelled'].includes(i.state))
       .map(i => ({ ...i.payload, phase: i.state, initiatedAt: i.initiatedAt })); },
     get(id) { return store.find(id); },
