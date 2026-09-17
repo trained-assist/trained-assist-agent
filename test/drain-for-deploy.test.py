@@ -53,4 +53,14 @@ class DrainTests(unittest.TestCase):
         code, _ = exercise([state('restarting',2), state('restarting',2)])
         self.assertNotEqual(code,0)
 
+    def test_deadline_reached_forces_claim_despite_active_work(self):
+        code, calls = exercise([
+            dict(state('draining',4), deadlineReached=True),
+            dict(state('draining',4), deadlineReached=True),
+            dict(state('restarting',2), claimed=True, forced=True),
+            dict(state('restarting',2), forced=True),
+        ])
+        self.assertEqual(code,0)
+        self.assertEqual([c for c in calls if c], [{'action':'claim','id':'original-operation'}])
+
 if __name__ == '__main__': unittest.main()
