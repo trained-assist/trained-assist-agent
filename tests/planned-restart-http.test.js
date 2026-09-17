@@ -92,12 +92,31 @@ if (${['forced', 'lane', 'effect-crash'].includes(kind)} && fs.readFileSync(file
       const row = JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
       const actions = db.prepare('SELECT data FROM actions WHERE intent_id=?').all('fixture-stable').map(r => JSON.parse(r.data));
       db.close();
-      expect(actions).toHaveLength(1);
-      expect(actions[0].request.engine).toBe(selectedEngine);
-      expect(actions[0].state).toBe('started');
+      expect(actions).toHaveLength(2);
+      expect(actions.find(a => a.actionId === 'quick-dispatch-v1')?.state).toBe('completed');
+      const engineAction = actions.find(a => a.request.engine === selectedEngine);
+      expect(engineAction.request.engine).toBe(selectedEngine);
+      expect(engineAction.state).toBe('started');
       expect(row.state).toBe('waiting_confirmation');
       expect(row.payload.task).toContain('resume.txt');
       expect(row.initiatedAt).toBeLessThanOrEqual(Date.now());
+      return;
+    }
+    if (kind === 'quick') {
+      const quick = { userId: 123, username: 'fixture', task: '/persona Durable quick test', requestId: 'quick', initiatedAt: Date.now() };
+      await api('/run', quick);
+      await until(async () => (await api('/maintenance')).active === 0);
+      const db = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+      try {
+        const receipt = JSON.parse(db.prepare('SELECT data FROM actions WHERE intent_id=? AND action_id=?').get('fixture-quick', 'quick-dispatch-v1').data);
+        expect(receipt.state).toBe('completed');
+        expect(typeof receipt.result.reply).toBe('string');
+        expect(JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-quick').data).state).toBe('completed');
+      } finally { db.close(); }
+      expect(fs.existsSync(launches)).toBe(false);
+      await stop('SIGKILL'); await start();
+      expect((await api('/run', quick)).duplicate).toBe(true);
+      expect(fs.existsSync(launches)).toBe(false);
       return;
     }
     if (kind === 'lane') {
@@ -261,3 +280,4 @@ it('Codex fresh real engine effect is not replayed after SIGKILL or confirmation
 it('normal Codex terminal receipt survives restart without replay', {timeout:45000}, () => restartCycle('fresh', 'codex'));
 
 it.each(['claude', 'codex'])('quick failure cannot retry an uncertain %s engine attempt', {timeout:45000}, engine => restartCycle('quick-crash', engine));
+it('real quick handler persists its receipt and deduplicates after process restart', {timeout:45000}, () => restartCycle('quick'));
