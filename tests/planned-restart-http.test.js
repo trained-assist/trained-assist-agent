@@ -7,7 +7,7 @@ import http from 'node:http';
 import Database from 'better-sqlite3';
 import { pathToFileURL } from 'node:url';
 
-async function restartCycle(kind, selectedEngine = 'claude') {
+async function restartCycle(kind, selectedEngine = 'claude', forceClaude = true) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'planned-restart-http-'));
   const calls = [];
   const telegram = http.createServer((req, res) => {
@@ -65,7 +65,7 @@ if (${['forced', 'lane', 'effect-crash'].includes(kind)} && fs.readFileSync(file
   }
   try {
     await start();
-    const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true, mode: 'deep', requestId: 'stable',
+    const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude, mode: 'deep', requestId: 'stable',
       fileBase64: Buffer.from('preserved attachment').toString('base64'), fileName:'resume.txt',
       ...(kind === 'stale' ? { initiatedAt: Date.now()-300000 } : {}) };
     if (kind === 'effect-crash' || kind === 'quick-crash') {
@@ -92,8 +92,8 @@ if (${['forced', 'lane', 'effect-crash'].includes(kind)} && fs.readFileSync(file
       const row = JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
       const actions = db.prepare('SELECT data FROM actions WHERE intent_id=?').all('fixture-stable').map(r => JSON.parse(r.data));
       db.close();
-      expect(actions).toHaveLength(2);
-      expect(actions.find(a => a.request.kind === 'quick-dispatch')?.state).toBe('completed');
+      expect(actions).toHaveLength(forceClaude ? 1 : 2);
+      if (!forceClaude) expect(actions.find(a => a.request.kind === 'quick-dispatch')?.result).toEqual({ reply: null });
       const engineAction = actions.find(a => a.request.engine === selectedEngine);
       expect(engineAction.request.engine).toBe(selectedEngine);
       expect(engineAction.state).toBe('started');
@@ -281,3 +281,5 @@ it('normal Codex terminal receipt survives restart without replay', {timeout:450
 
 it.each(['claude', 'codex'])('quick failure cannot retry an uncertain %s engine attempt', {timeout:45000}, engine => restartCycle('quick-crash', engine));
 it('real quick handler persists its receipt and deduplicates after process restart', {timeout:45000}, () => restartCycle('quick'));
+
+it.each(['claude', 'codex'])('quick no-match receipt composes with %s engine crash protection', {timeout:45000}, engine => restartCycle('effect-crash', engine, false));
