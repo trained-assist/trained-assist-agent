@@ -123,7 +123,7 @@ jobs:
             python3 /tmp/assist-drain-for-deploy.py
             export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard FETCH_HEAD
-            printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
+            printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nOPENCODE_MODEL=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
               '${{ secrets.INN_DADATA_SECRET }}' \
@@ -135,6 +135,7 @@ jobs:
               '${{ secrets.OPENROUTER_API_KEY }}' \
               '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
               '${{ secrets.GITHUB_ISSUES_TOKEN }}' \
+              '' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
@@ -174,7 +175,7 @@ jobs:
             python3 /tmp/assist-drain-for-deploy.py
             export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard FETCH_HEAD
-            printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\n' \
+            printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nOPENCODE_MODEL=%s\n' \
               '${{ secrets.TELEGRAM_BOT_TOKEN }}' \
               '${{ secrets.ANTHROPIC_API_KEY }}' \
               '${{ secrets.AGENT_SECRET }}' \
@@ -191,6 +192,7 @@ jobs:
               '${{ secrets.OPENROUTER_API_KEY }}' \
               '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
               '${{ secrets.GITHUB_ISSUES_TOKEN }}' \
+              '' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
