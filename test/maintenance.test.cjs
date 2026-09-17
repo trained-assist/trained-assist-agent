@@ -104,3 +104,40 @@ test('media admission stays closed in recovery and failure; run ingress remains 
   assert.equal(requestAdmission(gate, 'GET', '/intake-files').status, 503);
   assert.equal(requestAdmission(gate, 'POST', '/run').status, 200);
 });
+const targetRevision = 'a'.repeat(40), previousRevision = 'b'.repeat(40);
+test('deploy recovery verifies persisted target and cannot be forged by a new boot', t => {
+  const {file, gate} = fixture(t);
+  assert.throws(() => gate.request('deploy', 'deploy'), /targetCommit/);
+  const op = gate.request('deploy', 'deploy', targetRevision, previousRevision);
+  assert.equal(op.targetCommit, targetRevision);
+  assert.throws(() => gate.request('other', 'deploy', previousRevision), /owns the gate/);
+  gate.claim(op.id);
+  assert.equal(gate.ready(targetRevision).paused, true);
+  const boot = createMaintenance(file, {recovering: true});
+  assert.equal(boot.ready(targetRevision).paused, true);
+  boot.recovered();
+  for (const revision of [undefined, 'unknown', previousRevision, targetRevision.slice(0, 7)]) {
+    assert.equal(boot.ready(revision).paused, true);
+  }
+  assert.equal(boot.ready(targetRevision).paused, false);
+  assert.equal(boot.status().deploymentOutcome, 'deployed');
+  assert.equal(boot.status().id, op.id);
+});
+test('legacy deploy without target remains paused after reboot', t => {
+  const {file} = fixture(t);
+  fs.writeFileSync(file, JSON.stringify({id:'legacy',kind:'deploy',phase:'restarting',ownerBootId:'old'}));
+  const boot = createMaintenance(file);
+  assert.equal(boot.ready(targetRevision).paused, true);
+});
+test('explicit rollback keeps original target, verifies previous revision and reports rollback', t => {
+  const {file, gate} = fixture(t);
+  const op = gate.request('deploy', 'deploy', targetRevision, previousRevision); gate.claim(op.id);
+  assert.throws(() => gate.rollback('other'));
+  gate.rollback(op.id);
+  assert.equal(gate.ready(previousRevision).paused, true);
+  const boot = createMaintenance(file);
+  assert.equal(boot.ready(targetRevision).paused, true);
+  assert.equal(boot.ready(previousRevision).paused, false);
+  assert.equal(boot.status().deploymentOutcome, 'rolled_back');
+  assert.equal(boot.status().targetCommit, targetRevision);
+});

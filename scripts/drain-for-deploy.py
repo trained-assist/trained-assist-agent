@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Must run BEFORE changing the live checkout or dependencies. No forced timeout."""
-import json, subprocess, time, urllib.request
+import json, os, subprocess, time, urllib.request
 from pathlib import Path
 pid = subprocess.check_output(['systemctl', 'show', 'assist-agent', '-p', 'MainPID', '--value'], text=True).strip()
 env = dict(item.split('=', 1) for item in Path('/proc/' + pid + '/environ').read_bytes().decode().split('\0') if '=' in item)
@@ -10,7 +10,14 @@ def api(body=None):
         headers={'Authorization': 'Bearer ' + env['AGENT_SECRET'], 'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
-state = api({'action': 'request', 'kind': 'deploy', 'initiator': 'deploy'})
+target = subprocess.check_output(['git', 'rev-parse', os.environ.get('DEPLOY_TARGET_COMMIT', 'HEAD') + '^{commit}'], text=True).strip()
+current = api()
+previous = current.get('runtimeCommit')
+if previous and len(previous) != 40:
+    previous = subprocess.check_output(['git', 'rev-parse', previous + '^{commit}'], text=True).strip()
+state = api({'action': 'request', 'kind': 'deploy', 'initiator': 'deploy', 'targetCommit': target, 'previousCommit': previous})
+if current.get('maintenanceProtocol', 0) >= 2 and state.get('targetCommit') != target:
+    raise SystemExit('Runtime does not persist deploy target; upgrade maintenance protocol before deployment')
 if state.get('kind') != 'deploy':
     raise SystemExit('Another restart is pending. Deploy did not change the checkout.')
 operation_id = state['id']
