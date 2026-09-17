@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Must run BEFORE changing the live checkout or dependencies. No forced timeout."""
+"""Must run BEFORE changing the live checkout or dependencies. Waits for active
+work to finish, but honors the same 40-minute forced-claim deadline as
+scripts/restart-coordinator.py once maintenance.enableV2() is active — a deploy
+must not be able to hang forever behind long-running sessions."""
 import json, os, subprocess, sys, time, urllib.request
 from pathlib import Path
 pid = subprocess.check_output(['systemctl', 'show', 'assist-agent', '-p', 'MainPID', '--value'], text=True).strip()
@@ -34,11 +37,13 @@ while True:
     if state.get('id') != operation_id or state.get('kind') != 'deploy' or state.get('phase') not in ('draining', 'restarting'):
         raise SystemExit('Deploy drain was cancelled; checkout unchanged')
     if state['phase'] == 'restarting':
-        if state.get('active') != 0:
+        if state.get('active') and not state.get('forced'):
             raise SystemExit('Claimed gate still has active work; checkout unchanged')
         break
-    if state.get('active') == 0 and api({'action': 'claim', 'id': state['id']}).get('claimed'):
+    if (state.get('active') == 0 or state.get('deadlineReached')) and api({'action': 'claim', 'id': state['id']}).get('claimed'):
         continue  # Re-read identity, phase and active count before authorizing deploy.
     print('Waiting for active work:', state['active'], flush=True)
     time.sleep(5)
-print('Admission closed and all work finished; safe to deploy', flush=True)
+if state.get('forced'):
+    print('Deadline reached with active work still running; deploying anyway (forced, matches restart-coordinator.py)', flush=True)
+print('Admission closed; safe to deploy', flush=True)
