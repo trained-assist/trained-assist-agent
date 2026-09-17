@@ -34,6 +34,11 @@ rollback() {
     echo "No previous commit recorded; queue remains paused"
     return 1
   fi
+  if [ -f "${AGENT_DATA_DIR:-$HOME/agent-data}/execution-authority.json" ] &&
+     ! git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/restart-execution.js"; then
+    echo "Rollback refused: legacy runtime cannot safely read v2 execution authority; admission stays closed"
+    return 1
+  fi
   echo "==> Rolling back to $PREV_COMMIT with the saved dependencies..."
   if [ "$(systemctl show "$SERVICE" -p MainPID --value)" != 0 ]; then
     python3 "$REPO_DIR/scripts/restart-coordinator.py" --rollback || return 1

@@ -5,7 +5,7 @@ const sessions = require('./session-store');
 
 // Uses the same verified async handlers as /run, but never spawns an agent.
 // Saved exchanges make qa_more replayable and retries idempotent.
-function createIntakeQuick({ baseDir, answer, apiKey }) {
+function createIntakeQuick({ baseDir, answer, apiKey, recordActivity = () => {} }) {
   const inflight = new Map();
   return async payload => {
     const { username, userId, query, messageId, telegramUserId, projectId } = payload;
@@ -31,6 +31,7 @@ function createIntakeQuick({ baseDir, answer, apiKey }) {
       // Do not replace the chat's current deep session with this utility exchange.
       if (!previous) sessions.createSession(workDir, { task: query, id, projectId: projectId || null });
       sessions.appendReply(workDir, id, result);
+      recordActivity({username,chatId:Number(userId),sessionId:id});
       return { answer: result, sessionId: id };
     })();
     inflight.set(id, pending);

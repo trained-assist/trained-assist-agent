@@ -37,3 +37,27 @@ Changed executable tests:
 
 Required validation: npm test, npm run test:staging, npm run check,
 node scripts/check-env-sync.js. No required check is skipped or allowed to fail.
+
+## Restart v2 integration
+
+V2 recovers its SQLite execution authority once at startup and then calls
+`maintenance.ready(RUNTIME_REVISION)` before dispatch. A mismatched deploy target
+keeps admission closed even after a successful process boot. The previous duplicate
+legacy recovery startup hook is not retained: it would initialize authority twice.
+
+`tests/planned-restart-http.test.js` now covers six actual-process cases, including
+correct and wrong deployment revisions alongside fresh/stale/forced/lane scenarios.
+The wrong revision preserves the queued intent and attachment without launching it.
+
+Replaced main's two middleware tests in `test/maintenance.test.cjs`:
+- `draining accepts photo upload/read and holds restart until transfer completes`
+- `media admission stays closed in recovery and failure; run ingress remains durable`
+
+Their media-503 contract conflicts with restart-v2-task requirement 1: preserve new
+messages and attachments during maintenance without executing tasks. The replacement
+`v2 durable media stays admitted during maintenance without permitting new execution`
+and `v2 recovery and failure preserve durable ingress while execution remains closed`
+keep the execution gate assertions. Actual HTTP coverage verifies authenticated photo
+upload/download both during drain and after claim, in isolated temporary storage.
+Atomic media writes/ACK and gateway retries preserve accepted data across interruption;
+no production data or notifications are used by these tests.

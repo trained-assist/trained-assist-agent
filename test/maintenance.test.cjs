@@ -83,26 +83,27 @@ function requestAdmission(gate, method, pathname) {
   return vm.runInContext(`(() => { let releaseRequest; ${source.slice(start, end)}
     return { status: 200, release: releaseRequest }; })()`, sandbox);
 }
-test('draining accepts photo upload/read and holds restart until transfer completes', t => {
+test('v2 durable media stays admitted during maintenance without permitting new execution', t => {
   const { gate } = fixture(t); const operation = gate.request('operator');
-  const upload = requestAdmission(gate, 'PUT', '/intake-files');
-  assert.equal(upload.status, 200); assert.equal(gate.status().active, 1);
-  assert.equal(gate.claim(operation.id), false);
-  const read = requestAdmission(gate, 'GET', '/intake-files');
-  assert.equal(read.status, 200); assert.equal(gate.status().active, 2);
+  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 200);
+  assert.equal(requestAdmission(gate, 'GET', '/intake-files').status, 200);
+  assert.equal(gate.status().active, 0);
   assert.equal(requestAdmission(gate, 'POST', '/intake-quick').status, 503);
-  assert.equal(requestAdmission(gate, 'POST', '/intake-files').status, 503);
-  upload.release(); read.release(); assert.equal(gate.status().active, 0);
+  assert.equal(gate.acquire('new-execution'), null);
   assert.equal(gate.claim(operation.id), true);
-  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 503);
+  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 200);
+  assert.equal(gate.acquire('new-execution'), null);
 });
-test('media admission stays closed in recovery and failure; run ingress remains durable', t => {
+test('v2 recovery and failure preserve durable ingress while execution remains closed', t => {
   const { gate } = fixture(t);
   gate.beginRecovery();
-  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 503);
+  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 200);
+  assert.equal(gate.acquire(), null);
   gate.recovered(); gate.fail('unverified boot');
-  assert.equal(requestAdmission(gate, 'GET', '/intake-files').status, 503);
+  assert.equal(requestAdmission(gate, 'GET', '/intake-files').status, 200);
   assert.equal(requestAdmission(gate, 'POST', '/run').status, 200);
+  assert.equal(requestAdmission(gate, 'POST', '/intake-quick').status, 503);
+  assert.equal(gate.acquire(), null);
 });
 const targetRevision = 'a'.repeat(40), previousRevision = 'b'.repeat(40);
 test('deploy recovery verifies persisted target and cannot be forged by a new boot', t => {

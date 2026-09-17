@@ -51,7 +51,7 @@ def _coordinate(api, restart, wait=time.sleep):
     if state.get('kind') != 'restart' or state.get('phase') not in ('draining', 'restarting'):
         return
     if state['phase'] == 'draining':
-        if state['active'] or not api({'action': 'claim', 'id': state['id']}).get('claimed'):
+        if (state['active'] and not state.get('deadlineReached')) or not api({'action': 'claim', 'id': state['id']}).get('claimed'):
             return
     current = api()
     if current.get('id') != state['id'] or current.get('phase') != 'restarting':

@@ -507,54 +507,60 @@ function scheduleGtdController(secrets) {
   const gtd = require('./gtd-controller');
   const { isTaskRunning } = require('./runner');
   const { getSession } = require('./session-store');
-  const run = () => gtd.runDue({
-    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning, runTask, getSession,
+  const run = () => {
+    if (maintenance.paused()) return Promise.resolve();
+    return gtd.runDue({
+    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: username => isTaskRunning(username) || getPendingTasks().some(p => p.username === username), runTask, getSession,
+    canRunSession: (username, sessionId) => require('./restart-execution').currentExecution()?.canRunSession(username, sessionId) !== false,
   }).catch(err => console.error('[gtd] tick error:', err.message));
+  };
   setTimeout(run, 2 * 60 * 1000);      // first tick 2 min after start
   setInterval(run, 5 * 60 * 1000);     // then every 5 min
 }
 
-async function resumePendingTasks(secrets) {
-  const pending = getPendingTasks();
-  // No TTL for accepted work: a long maintenance window must not discard it.
-  const toResume = pending.filter(t => t.taskId && t.username && t.userId != null && (t.task || t.forceClaude))
-    .sort((a, b) => a.startedAt - b.startedAt);
-  if (toResume.length !== pending.length) throw Error('Invalid pending journal; operator repair required');
-  if (toResume.length === 0) return;
-
-  console.log(`[resume] ${toResume.length} pending task(s) from before restart — resuming`);
-  const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-
-  for (const p of toResume) {
-    console.log(`[resume] task=${p.taskId} user=${p.username} task="${String(p.task).slice(0, 60)}"`);
-    // Preserve the original journal until the same task ID is re-registered.
-    if (p.initialMsgId && secrets.BOT_TOKEN) {
-      fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
-        method: 'POST',
-        signal: AbortSignal.timeout(8000),
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: p.userId, message_id: p.initialMsgId, text: '🔄 Перезапускаю после сбоя…' }),
-      }).catch(() => {});
-    }
-    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
-    const user = { id: p.userId, name: p.username, username: p.username, workDir, profileId: p.profileId, telegramUserId: p.telegramUserId };
-    const newTaskId = p.taskId;
-    atomicJson(path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${p.taskId}.json`), { taskId: p.taskId, acceptedAt: p.startedAt });
-    runTask({ taskId: newTaskId, user, task: p.task, context: p.context || null,
-      sessionId: p.sessionId || null, contextFromSession: p.contextFromSession || null,
-      forceClaude: !!p.forceClaude, forceNew: !!p.forceNew, mode: p.mode || null,
-      projectId: p.projectId || null, newProjectName: p.newProjectName || null,
-      initialMsgId: p.initialMsgId || null,
-      pinnedMsgId: p.pinnedMsgId || null, secrets, acceptedAt: p.startedAt,
-      continuationCount: p.continuationCount, retryCount: p.retryCount, internalGtd: p.internalGtd,
-    }).catch(err => console.error(`[resume] ${newTaskId} error:`, err.message));
-    // Admission limits stagger execution; register the full journal before readiness.
+function dispatchRestartIntents(secrets) {
+  const execution = require('./restart-execution').currentExecution();
+  if (!execution) return;
+  void execution.flushResults();
+  if (maintenance.paused()) return;
+  for (const intent of execution.candidates()) {
+    if (!execution.eligible(intent.id)) continue;
+    const p = intent.payload;
+    const user = { id: intent.owner.chatId, name: intent.owner.username, username: intent.owner.username,
+      workDir: p.workDir || path.join(BASE_USERS_DIR, intent.owner.username),
+      profileId: intent.owner.profileId, telegramUserId: intent.owner.telegramUserId };
+    runTask({ ...p, taskId: intent.id, user, sessionId: intent.owner.sessionId,
+      projectId: intent.owner.projectId, threadId: intent.owner.threadId, initiatedAt: intent.initiatedAt,
+      secrets }).catch(error => console.error('[restart-execution]', intent.id, error.message));
   }
+}
+
+async function resumePendingTasks(secrets) {
+  // Boot owns recovery; no second server is permitted to steal live claims.
+  require('./restart-execution').initializeExecution({
+    dataRoot: require('./data-paths').SYSTEM_ROOT, gate: maintenance, bootId: maintenance.status().bootId,
+    deliveryOptions: { token: secrets.BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN },
+  });
+  maintenance.enableV2();
+  maintenance.recovered();
+  // Recovery is complete; only the verified target revision may reopen admission.
+  const state = maintenance.ready(RUNTIME_REVISION);
+  if (state.phase === 'restarting') console.error('[startup] maintenance retained: target revision not verified');
+  dispatchRestartIntents(secrets); // stays closed until external readiness for planned restarts
+  setInterval(() => dispatchRestartIntents(secrets), 1000).unref();
 }
 
 async function main() {
   maintenance.beginRecovery();
   const secrets = await loadSecrets();
+  await resumePendingTasks(secrets);
+  const { existingConfirmationService } = require('./restart-confirmations');
+  existingConfirmationService({ token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN,
+    route: VM_NAME === 'gcp-main' ? 'm' : VM_NAME === 'ru-vm' ? 'r' : null });
+  const flushConfirmationNotices = () => existingConfirmationService()?.flush()
+    .catch(error => console.error('[restart-confirmation]', error.message));
+  setInterval(flushConfirmationNotices, 15000).unref();
+  await flushConfirmationNotices();
   const restartNotifier = createRestartNotifier(maintenance, { token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN });
   const flushRestartNotices = () => Promise.race([
     restartNotifier.flush().catch(e => console.error('[restart-notification]', e.message)),
@@ -565,6 +571,7 @@ async function main() {
   await flushRestartNotices();
   const intakeQuick = require('./intake-quick').createIntakeQuick({
     baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
+    recordActivity: target => require('./restart-activity').activity.record(target),
   });
 
   const GDRIVE_CLIENT_ID     = secrets.GOOGLE_OAUTH_CLIENT_ID;
@@ -584,13 +591,9 @@ async function main() {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     // Keep durable ingress and control reachable. Other in-flight HTTP operations
     // count towards draining; requests arriving after the gate closes retry later.
-    const maintenanceExempt = ['/maintenance', '/run', '/health'].includes(url.pathname) || url.pathname.startsWith('/web/');
+    const maintenanceExempt = ['/maintenance', '/restart/decision', '/run', '/health', '/intake-files', '/intake-files/release', '/restart/activity'].includes(url.pathname) || url.pathname.startsWith('/web/');
     if (!maintenanceExempt) {
-      // Attachments are durable ingress too. Accept them during drain, but hold
-      // a lease so the coordinator cannot restart halfway through a transfer.
-      // Once restart/recovery begins, acquire still fails closed.
-      const mediaIngress = url.pathname === '/intake-files' && ['PUT', 'GET'].includes(req.method);
-      const release = maintenance.acquire(undefined, mediaIngress);
+      const release = maintenance.acquire();
       if (!release) return json(res, 503, { error: 'planned restart; retry after readiness' });
       releaseRequest = release;
     }
@@ -2829,12 +2832,15 @@ ${recent || '(пока нет)'}
       return;
     }
 
+    if (await require('./restart-confirmation-http').handleConfirmationRoute(req, url, res, secrets)) return;
+
     if (url.pathname === '/maintenance') {
       if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: RUNTIME_REVISION });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
         if (body.action === 'claim') {
           const claimed = maintenance.claim(body.id);
+          if (claimed && maintenance.status().forced) require('./runner').interruptForRestart();
           await flushRestartNotices();
           return json(res, 200, { claimed });
         }
@@ -2870,6 +2876,26 @@ ${recent || '(пока нет)'}
       }
     }
 
+    if (req.method === 'POST' && url.pathname === '/restart/activity') {
+      const p = JSON.parse(await readBody(req));
+      const target = restartTarget({ username: p.username, chatId: p.chatId, threadId: p.threadId ?? null });
+      const at = p.at;
+      if (!Number.isSafeInteger(at) || at < 0 || at > Date.now() + 30000) return json(res,400,{error:'invalid activity time'});
+      require('./restart-activity').activity.record(target, Math.min(at, Date.now()));
+      maintenance.addRecipient(target);
+      return json(res,200,{paused:maintenance.paused(),deadlineAt:maintenance.status().deadlineAt});
+    }
+    if (req.method === 'POST' && url.pathname === '/intake-files/release') {
+      const p = JSON.parse(await readBody(req));
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(p.username || '') || !Array.isArray(p.ids) || p.ids.length > 100 || p.ids.some(id=>!/^[a-f0-9]{64}$/.test(id))) return json(res,400,{error:'invalid refs'});
+      for (const id of p.ids) {
+        const file = path.join(BASE_USERS_DIR,p.username,'media','intake-store',id,'meta.json');
+        try { const meta=JSON.parse(fs.readFileSync(file,'utf8'));atomicJson(file,{...meta,buffered:false}); }
+        catch(error){if(error.code!=='ENOENT')throw error;}
+      }
+      return json(res,200,{ok:true});
+    }
+
     // Authenticated release probe: exercises the same verified reader as /run,
     // without starting a user task or sending anything to Telegram.
     if (url.pathname === '/intake-media-check' && req.method === 'POST') {
@@ -2902,7 +2928,7 @@ ${recent || '(пока нет)'}
         catch { return json(res, 413, { error: 'file too large' }); }
         fs.mkdirSync(storeDir, { recursive: true });
         fs.writeFileSync(path.join(storeDir, 'data'), buf, { mode: 0o600 });
-        fs.writeFileSync(path.join(storeDir, 'meta.json'), JSON.stringify({ name: safeName, mime, size: buf.length }));
+        fs.writeFileSync(path.join(storeDir, 'meta.json'), JSON.stringify({ name: safeName, mime, size: buf.length, buffered: true }));
         return json(res, 200, { id: ifId, name: safeName, mime, size: buf.length });
       }
       // GET
@@ -3254,7 +3280,9 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt } = payload;
+      if (initiatedAt != null && (!Number.isSafeInteger(initiatedAt) || initiatedAt < 0 || initiatedAt > Date.now() + 30000)) return json(res, 400, { error: 'invalid initiatedAt' });
+      if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return json(res, 400, { error: 'invalid threadId' });
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64 && !(fileRefs && fileRefs.length)) return json(res, 400, { error: 'missing fields' });
@@ -3286,7 +3314,7 @@ ${recent || '(пока нет)'}
       if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
       const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
       const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
-      if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
+      if (requestId && (fs.existsSync(receipt) || require('./restart-execution').currentExecution()?.get(taskId) || getPendingTasks().some(p => p.taskId === taskId))) {
         return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
       }
       const workDir = path.join(BASE_USERS_DIR, username);
@@ -3359,7 +3387,7 @@ ${recent || '(пока нет)'}
       }
 
       // runTask journals synchronously, before any await or acknowledgement.
-      const completion = runTask({ taskId, user, task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
+      const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
       completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
       if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
       json(res, 202, { taskId, requestId, durable: true, queued: maintenance.paused() });
@@ -3846,7 +3874,7 @@ ${recent || '(пока нет)'}
         CF_API_TOKEN: secrets.CF_API_TOKEN || '',
         OPERATOR_CHAT_ID: secrets.OPERATOR_CHAT_ID || '1714048',
       };
-      const releaseRefresh = maintenance.acquire(undefined, true);
+      const releaseRefresh = maintenance.acquire();
       if (!releaseRefresh) return;
       const child = spawn('node', [refreshScript], { env, detached: true, stdio: 'inherit' });
       child.once('exit', releaseRefresh); child.once('error', releaseRefresh);
@@ -4135,13 +4163,7 @@ ${recent || '(пока нет)'}
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
   scheduleGtdController(secrets);
-  resumePendingTasks(secrets).then(() => {
-    maintenance.recovered();
-    // The journal and the revision captured at process startup must agree.
-    // A new boot alone is insufficient proof that deployment completed.
-    const state = maintenance.ready(RUNTIME_REVISION);
-    if (state.phase === 'restarting') console.error('[startup] maintenance retained: target revision not verified');
-  }).catch(err => { maintenance.fail(err.message); console.error('[resume] startup error:', err.message); });
+
 
   // Deploys restart this service frequently (every few minutes during an
   // active PR streak) — without draining, each restart silently kills
@@ -4157,11 +4179,14 @@ ${recent || '(пока нет)'}
     if (shuttingDown) return;
     shuttingDown = true;
     server.close(); // stop accepting new HTTP connections; existing tasks keep running
+    const forced = maintenance.status().forced === true;
+    maintenance.beginRecovery(); // block every ingress/retry during shutdown
+    if (forced) require('./runner').interruptForRestart();
     const planned = maintenance.status().phase === 'restarting';
     const active = planned ? maintenance.status().active : getActiveTaskCount();
     if (active > 0) {
       console.log(`[shutdown] draining ${active} active task(s), up to ${DRAIN_TIMEOUT_MS / 1000}s...`);
-      const drained = await waitForIdle(DRAIN_TIMEOUT_MS);
+      const drained = await waitForIdle(forced ? 5000 : DRAIN_TIMEOUT_MS);
       console.log(drained ? '[shutdown] all tasks drained' : '[shutdown] drain timeout — remaining tasks will resume on next startup');
     }
     // Close any open Playwright browsers so Node exits cleanly

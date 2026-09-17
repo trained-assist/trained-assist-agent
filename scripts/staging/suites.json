@@ -14,6 +14,12 @@
     "test/lane-granularity.test.cjs",
     "test/cap-per-profile.test.cjs",
     "test/restart-notifications.test.cjs",
+    "test/restart-audience.test.cjs",
+    "test/restart-intents.test.cjs",
+    "test/restart-confirmations.test.cjs",
+    "test/restart-confirmation-http.test.cjs",
+    "test/restart-execution.test.cjs",
+    "test/restart-results.test.cjs",
     "test/execution-owner-lock.test.cjs"
   ]
 }

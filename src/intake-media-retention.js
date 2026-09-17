@@ -8,12 +8,28 @@ function purgeIntakeMedia(baseDir, now = Date.now()) {
   // Corrupt journals fail closed: never purge media while ownership is unknown.
   const pendingDir = require('path').join(process.env.AGENT_DATA_DIR || require('path').join(require('os').homedir(), 'agent-data'), 'pending-tasks');
   let pendingText = '';
+  const retainedRefs = new Set();
+  const retain = (username, payload) => {
+    pendingText += JSON.stringify(payload);
+    for (const ref of payload?.fileRefs || []) {
+      if (username && typeof ref?.id === 'string') retainedRefs.add(JSON.stringify([username, ref.id]));
+    }
+  };
   try {
-    for (const file of fs.readdirSync(pendingDir).filter(f => f.endsWith('.json'))) {
+    const legacy = fs.existsSync(path.join(path.dirname(pendingDir), 'execution-authority.json')) ? [] : fs.readdirSync(pendingDir);
+    for (const file of legacy.filter(f => f.endsWith('.json'))) {
       const raw = fs.readFileSync(require('path').join(pendingDir, file), 'utf8');
-      JSON.parse(raw); pendingText += raw;
+      const entry = JSON.parse(raw); retain(entry.username, entry);
     }
   } catch (e) { if (e.code !== 'ENOENT') return 0; }
+  // Waiting confirmations have no TTL. Read only: cleanup never creates/migrates
+  // the ledger or enables the v2 launch policy. Unknown/corrupt state stops purge.
+  try {
+    const ledgerFile = path.join(path.dirname(pendingDir), 'restart-intents.sqlite');
+    for (const entry of require('./restart-intents').retainedIntentPayloads(ledgerFile)) {
+      retain(entry.owner.username, entry.payload);
+    }
+  } catch { return 0; }
 
   for (const profile of fs.readdirSync(baseDir, { withFileTypes: true })) {
     if (!profile.isDirectory()) continue;

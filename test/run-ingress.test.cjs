@@ -8,7 +8,7 @@ function fixture(t) {
  const start=source.indexOf("    if (req.method === 'POST' && url.pathname === '/run') {");
  const end=source.indexOf('    // POST /action',start);
  const runs=[];const pending=new Map();
- const sandbox={fs,path,os,Buffer,require,console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
+ const sandbox={fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
   maintenance:{paused:()=>true},isValidProjectId:()=>true,trackChat:()=>{},getPendingTasks:()=>[...pending.values()],atomicJson,
   readBody:async req=>JSON.stringify(req.body),json:(res,status,data)=>Object.assign(res,{status,data}),
   runTask:opts=>{pending.set(opts.taskId,opts);runs.push(opts);return Promise.resolve();},
@@ -50,6 +50,26 @@ test('file references survive acceptance and missing references are never acknow
  assert.equal(missing.status,503);assert.equal(f.runs.length,1);
 });
 
+test('topic routing is retained and malformed topics are rejected before accepting work', async t => {
+ const f=fixture(t);
+ assert.equal((await f.send({threadId:42,initiatedAt:1234})).status,202);
+ assert.equal(f.runs[0].threadId,42);
+ assert.equal(f.runs[0].initiatedAt,1234);
+ for (const threadId of [0,-1,1.5,'42']) {
+   assert.equal((await f.send({requestId:'bad-'+String(threadId),threadId})).status,400);
+ }
+ assert.equal(f.runs.length,1);
+});
+
+test('invalid future/original timestamps cannot enter the durable queue; unknown remains explicit', async t => {
+ const f=fixture(t);
+ for (const initiatedAt of [-1, '1234', Date.now()+60000]) {
+   assert.equal((await f.send({initiatedAt})).status,400);
+ }
+ assert.equal((await f.send({initiatedAt:null})).status,202);
+ assert.equal(f.runs[0].initiatedAt,null);
+});
+
 test('R2 refs are fetched and verified before run acceptance, without a legacy store copy', async t => {
  const f=fixture(t);const crypto=require('node:crypto');const bytes=Buffer.from('r2-original');
  const ref={storage:'r2',version:1,id:'c'.repeat(64),name:'voice.ogg',mime:'audio/ogg',size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
@@ -58,7 +78,7 @@ test('R2 refs are fetched and verified before run acceptance, without a legacy s
  f.sandbox.process.env.MEDIA_GATEWAY_URL='https://gateway.example';f.sandbox.secrets.AGENT_SECRET='secret';
  f.sandbox.require=name=>name==='./r2-media'?{materializeR2:opts=>materialize({...opts,fetchImpl:async url=>{
   reads++;assert.equal(url.searchParams.get('username'),'alice');return new Response(bytes);
- }})}:require(name);
+ }})}:name==='./restart-execution'?{currentExecution:()=>null}:require(name);
  const response=await f.send({fileRefs:[ref]});assert.equal(response.status,202);assert.equal(reads,1);
  const file=path.join(f.root,'users','alice','media','intake',ref.id+'-voice.ogg');assert.deepEqual(fs.readFileSync(file),bytes);
  assert.ok(f.runs[0].task.includes(file));
@@ -67,7 +87,7 @@ test('R2 refs are fetched and verified before run acceptance, without a legacy s
 test('a failed R2 integrity check prevents acknowledgement or text-only launch', async t => {
  const f=fixture(t);f.sandbox.process.env.MEDIA_GATEWAY_URL='https://gateway.example';f.sandbox.secrets.AGENT_SECRET='secret';
  const materialize=require('../src/r2-media').materializeR2;
- f.sandbox.require=name=>name==='./r2-media'?{materializeR2:opts=>materialize({...opts,fetchImpl:async()=>new Response('bad')})}:require(name);
+ f.sandbox.require=name=>name==='./r2-media'?{materializeR2:opts=>materialize({...opts,fetchImpl:async()=>new Response('bad')})}:name==='./restart-execution'?{currentExecution:()=>null}:require(name);
  const ref={storage:'r2',version:1,id:'d'.repeat(64),name:'doc.pdf',size:3,sha256:'0'.repeat(64)};
  const response=await f.send({fileRefs:[ref]});assert.equal(response.status,503);assert.equal(f.runs.length,0);
  assert.equal(fs.existsSync(path.join(f.root,'accepted-requests','request-1.json')),false);

@@ -17,6 +17,8 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
   const lanes = new Map(previous ? [['s1', previous]] : []);
   const sandbox = {
     require: name => { assert.equal(name, './admission-status'); return { createAdmissionStatus }; },
+    recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
+    restartShutdown: false, currentExecution: () => null, intentRuns: new Map(),
     console, Promise, Set, Date, maintenance: { paused: () => false },
     _laneKey: s => s, chatLanes: lanes, STOP_TASK_INTENT: /$^/, WAKEUP_INTENT: /$^/,
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
@@ -72,25 +74,5 @@ test('slow queue edit cannot overwrite running status; Telegram ok:false trigger
   assert.deepEqual(messages, ['waiting', 'fallback:waiting', 'running', 'fallback:running']);
 });
 
-test('restart restores queued work older than 15 minutes in acceptance order with deep/project binding', async () => {
-  const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
-  const start = source.indexOf('async function resumePendingTasks(secrets) {');
-  const end = source.indexOf('\nasync function main()', start);
-  const now = Date.now(); const resumed = [];
-  const task = (id, age) => ({ taskId: id, username: 'test', userId: 42, task: id, phase: 'queued', startedAt: now - age, mode: 'deep', projectId: 'p1', forceNew: true });
-  const sandbox = {
-    getPendingTasks: () => [task('later', 1000), {...task('earlier', 72 * 60 * 60000), userId: 0, profileId: 'profile', continuationCount: 3}],
-    require: () => ({ clearPendingTask() {} }),
-    atomicJson: () => {}, os: { homedir: () => '/test' },
-    console, Date, process: { env: {} }, BASE_USERS_DIR: '/test', path: require('node:path'),
-    setTimeout: fn => fn(), runTask: async options => { resumed.push(options); },
-  };
-  vm.createContext(sandbox); vm.runInContext(source.slice(start, end), sandbox);
-  await sandbox.resumePendingTasks({});
-  assert.deepEqual(resumed.map(x => x.task), ['earlier', 'later']);
-  assert.equal(resumed[0].taskId, 'earlier'); assert.equal(resumed[0].user.id, 0);
-  assert.equal(resumed[0].user.profileId, 'profile'); assert.equal(resumed[0].continuationCount, 3);
-  for (const task of resumed) {
-    assert.equal(task.mode, 'deep'); assert.equal(task.projectId, 'p1'); assert.equal(task.forceNew, true);
-  }
-});
+// Legacy unconditional resume assertion replaced by restart-execution.test.cjs
+// and planned-restart-http.test.js: >=5m work is retained and requires confirmation.

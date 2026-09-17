@@ -154,8 +154,11 @@ async function startMockServer(port = 14443) {
   const cert = readFileSync(certPath);
 
   server = https.createServer({ key, cert }, handler);
-  await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
-  return port;
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
+  return server.address().port;
 }
 
 async function stopMockServer() {

@@ -39,7 +39,7 @@ const TEST_USER = 'hh-bg-test-77777';
 // BASE_USERS_DIR defaults to ~/users when USERS_DIR is not set
 const BASE_USERS_DIR = process.env.USERS_DIR || join(homedir(), 'users');
 const WORK_DIR = join(BASE_USERS_DIR, TEST_USER);
-const DATA_DIR = join(homedir(), 'agent-data');   // matches AGENT_DATA_DIR default
+const DATA_DIR = process.env.AGENT_DATA_DIR;   // matches AGENT_DATA_DIR default
 const TOKEN_DIR = join(homedir(), 'agent-tokens', TEST_USER);
 const CAND_DIR = join(DATA_DIR, 'hh', TEST_USER, 'candidates');
 
@@ -313,7 +313,7 @@ describe('scoreUnscoredCandidates — actual scoring (monkey-patched LLM)', () =
     const { existsSync, readFileSync } = require('fs');
     const { join } = require('path');
     const { homedir } = require('os');
-    const logFile = join(homedir(), 'agent-data', 'hh', TEST_USER, 'last-scoring.json');
+    const logFile = join(DATA_DIR, 'hh', TEST_USER, 'last-scoring.json');
 
     await scoring.scoreUnscoredCandidates(DEFAULT_NEGOTIATIONS, TEST_USER, WORK_DIR, { maxConcurrent: 2 });
 

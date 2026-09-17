@@ -62,6 +62,11 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   const stillOpen = G.readGtd(userDir3, 's-1');
   ok(!called && stillOpen.status === 'open' && stillOpen.iterations === 0, 're-entrancy: skip while running');
 
+  // Restart cancellation/confirmation hold must not create a new GTD execution.
+  await G.runDue({secrets:{},baseUsersDir:wd3,now:200,isTaskRunning:()=>false,
+    canRunSession:()=>false,getSession:()=>({ownerChatId:'42'}),runTask:async()=>{called=true;}});
+  ok(!called && G.readGtd(userDir3,'s-1').iterations===0,'restart session hold blocks GTD without consuming an iteration');
+
   // 7. checklist.md: readChecklist parses goal + items, checklistSummary lists unchecked
   const projDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd-proj-'));
   fs.writeFileSync(path.join(projDir, 'checklist.md'), [
