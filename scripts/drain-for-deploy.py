@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Must run BEFORE changing the live checkout or dependencies. No forced timeout."""
-import json, os, subprocess, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 from pathlib import Path
 pid = subprocess.check_output(['systemctl', 'show', 'assist-agent', '-p', 'MainPID', '--value'], text=True).strip()
 env = dict(item.split('=', 1) for item in Path('/proc/' + pid + '/environ').read_bytes().decode().split('\0') if '=' in item)
@@ -10,8 +10,14 @@ def api(body=None):
         headers={'Authorization': 'Bearer ' + env['AGENT_SECRET'], 'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
+# Check current state BEFORE requesting — if the gate is already claimed (draining/restarting),
+# another deploy owns it. Exit 0 so the caller does nothing and lets the owner finish.
+before = api()
+if before.get('phase') in ('draining', 'restarting'):
+    print('Gate already claimed; this invocation is a no-op.', flush=True)
+    sys.exit(0)
 target = subprocess.check_output(['git', 'rev-parse', os.environ.get('DEPLOY_TARGET_COMMIT', 'HEAD') + '^{commit}'], text=True).strip()
-current = api()
+current = before
 previous = current.get('runtimeCommit')
 if previous and len(previous) != 40:
     previous = subprocess.check_output(['git', 'rev-parse', previous + '^{commit}'], text=True).strip()
