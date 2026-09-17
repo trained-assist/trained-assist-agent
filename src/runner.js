@@ -1,5 +1,6 @@
 const { maintenance, atomicJson } = require('./maintenance');
 const { currentExecution } = require('./restart-execution');
+const { isEffectfulTool } = require('./tool-effect-classifier');
 const intentRuns = new Map();
 let restartShutdown = false;
 const { restartTarget } = require('./restart-notifications');
@@ -2650,6 +2651,17 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
 
   let firstJsonEventSeen = false;
   let outputPersistenceError = null;
+  // Action ids (tool_use.id) begun via beginAction this run, finished together
+  // once the task reaches a genuine terminal success — see finishStartedActions.
+  const startedActionIds = new Set();
+  function finishStartedActions(outcome) {
+    if (!startedActionIds.size) return;
+    for (const actionId of startedActionIds) {
+      try { currentExecution()?.finishAction(taskId, actionId, outcome); }
+      catch (error) { console.warn(`[${taskId}] finishAction:`, error.message); }
+    }
+    startedActionIds.clear();
+  }
   proc.stdout.setEncoding('utf8'); // preserve Cyrillic split across byte chunks
   function consumeOutput(chunk, flush = false) {
     lineBuffer += chunk;
@@ -2679,6 +2691,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
             claudeResult = lastAssistantMsg;
+            finishStartedActions({ observed: 'task_completed' });
             if (!restartShutdown && claudeResult?.trim()) currentExecution()?.stageResult(taskId, { text: claudeResult, messageId: msgId });
             claudeUsage = event.usage || null;
             if (claudeUsage) {
@@ -2692,6 +2705,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
         if (event.type === 'result') {
           terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
+          if (terminalSuccess) finishStartedActions({ observed: 'task_completed' });
           if (terminalSuccess && !restartShutdown) {
             const terminalText = pickFinalText(claudeResult, lastAssistantMsg, '');
             if (terminalText) currentExecution()?.stageResult(taskId, { text: terminalText, messageId: msgId });
@@ -2712,6 +2726,16 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
                 progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
+              }
+              // Durable pre-execution barrier for external-effect tools: record the
+              // start BEFORE the tool actually runs, so a crash between "tool started"
+              // and "task completed" is visible on restart and forces waiting_confirmation
+              // (see restart-intents.js unresolved()/claim()/evaluate()) instead of a
+              // silent auto-resume that could repeat the effect (e.g. a duplicate send).
+              // block.id is Anthropic's per-call tool_use id — unique per action attempt.
+              if (isEffectfulTool(block.name, block.input) && block.id) {
+                try { currentExecution()?.beginAction(taskId, block.id, { tool: block.name, input: block.input }); startedActionIds.add(block.id); }
+                catch (error) { console.warn(`[${taskId}] beginAction:`, error.message); }
               }
             }
           }
