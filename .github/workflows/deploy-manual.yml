@@ -63,6 +63,7 @@ jobs:
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             cd /home/vova/trained-assist-agent
             git fetch origin "${{ github.sha }}"
+            export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
             python3 scripts/drain-for-deploy.py
             export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard FETCH_HEAD
@@ -104,6 +105,7 @@ jobs:
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
             git fetch origin "${{ github.sha }}"
+            export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
             python3 scripts/drain-for-deploy.py
             export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard FETCH_HEAD
