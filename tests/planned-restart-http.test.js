@@ -93,7 +93,7 @@ if (${['forced', 'lane', 'effect-crash'].includes(kind)} && fs.readFileSync(file
       const actions = db.prepare('SELECT data FROM actions WHERE intent_id=?').all('fixture-stable').map(r => JSON.parse(r.data));
       db.close();
       expect(actions).toHaveLength(2);
-      expect(actions.find(a => a.actionId === 'quick-dispatch-v1')?.state).toBe('completed');
+      expect(actions.find(a => a.request.kind === 'quick-dispatch')?.state).toBe('completed');
       const engineAction = actions.find(a => a.request.engine === selectedEngine);
       expect(engineAction.request.engine).toBe(selectedEngine);
       expect(engineAction.state).toBe('started');
