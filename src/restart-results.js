@@ -6,7 +6,7 @@ function createResultDelivery(store, { token, fetchImpl = fetch, append = append
   async function deliver(id) {
     if (inflight.has(id)) return inflight.get(id);
     const promise = (async () => {
-      let intent = store.find(id);
+      let intent = store.resultForDelivery(id);
       if (intent?.state !== 'delivering') return;
       const target = intent.owner;
       if (!intent.resultReceipts.session) {

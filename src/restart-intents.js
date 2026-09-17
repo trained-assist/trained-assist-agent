@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { randomUUID, timingSafeEqual } = require('crypto');
+const { isDeepStrictEqual } = require('node:util');
 const Database = require('better-sqlite3');
 const FRESH_MS = 5 * 60 * 1000;
 const TERMINAL = new Set(['completed', 'cancelled']);
@@ -110,9 +111,15 @@ function createIntentStore(file, { now = Date.now } = {}) {
       return write({ ...intent, owner, payload: { ...intent.payload, sessionId: owner.sessionId,
         activitySessionId: owner.sessionId, projectId: owner.projectId }, updatedAt: now() });
     }),
+    resultForDelivery(id) {
+      const intent = read(id);
+      if (intent?.state === 'delivering' && unresolved(id)) throw Error('Unresolved external action');
+      return intent;
+    },
     stageResult: atomic((id, token, result) => {
       const intent = claimed(id, token);
       if (!['running', 'delivering'].includes(intent.state)) throw Error('Result cannot be staged');
+      if (unresolved(id)) throw Error('Unresolved external action');
       if (intent.result) return intent;
       if (!result || typeof result.text !== 'string' || !result.text.trim()) throw Error('Empty terminal result');
       return write({ ...intent, state: 'delivering', result, resultReceipts: {}, updatedAt: now() });
@@ -129,6 +136,7 @@ function createIntentStore(file, { now = Date.now } = {}) {
     finishResult: atomic(id => {
       const intent = read(id);
       if (!intent || intent.state !== 'delivering') return;
+      if (unresolved(id)) throw Error('Unresolved external action');
       if (!intent.resultReceipts?.session || !intent.resultReceipts?.telegram) throw Error('Result not delivered');
       return write({ ...intent, state: 'completed', completedAt: now(), updatedAt: now() });
     }),
@@ -218,14 +226,22 @@ function createIntentStore(file, { now = Date.now } = {}) {
     beginAction: atomic((id, token, actionId, request) => {
       claimed(id, token, 'running');
       if (typeof actionId !== 'string' || !actionId) throw Error('Action id required');
+      const encoded = JSON.stringify(request);
+      if (encoded === undefined) throw Error('Action request required');
+      const persistedRequest = JSON.parse(encoded);
       const previous = db.prepare('SELECT data FROM actions WHERE intent_id=? AND action_id=?').get(id, actionId);
-      if (previous) return { execute: false, action: JSON.parse(previous.data) };
+      if (previous) {
+        const action = JSON.parse(previous.data);
+        if (!isDeepStrictEqual(action.request, persistedRequest)) throw Error('Action request mismatch');
+        return { execute: false, action };
+      }
       const action = { state: 'started', request, startedAt: now() };
       db.prepare('INSERT INTO actions VALUES (?, ?, ?)').run(id, actionId, JSON.stringify(action));
       return { execute: true, action };
     }),
     finishAction: atomic((id, token, actionId, result) => {
       claimed(id, token, 'running');
+      if (JSON.stringify(result) === undefined) throw Error('Observed action result required');
       const row = db.prepare('SELECT data FROM actions WHERE intent_id=? AND action_id=?').get(id, actionId);
       if (!row) throw Error('Action unavailable');
       const previous = JSON.parse(row.data);

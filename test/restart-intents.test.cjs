@@ -192,3 +192,65 @@ test('confirmation delivery receipts and consumed handles survive process reopen
     assert.deepEqual(f.store.pendingConfirmationNotices(),[]);
   } finally {other.close();}
 });
+
+test('unresolved external effects cannot enter result delivery or release retained media', t => {
+  const f=fixture(t);f.enqueue('task');
+  const claim=f.store.claim('task',owner,'boot',true);f.store.start('task',claim.claimToken,true);
+  f.store.beginAction('task',claim.claimToken,'send',{recipient:'alice'});
+  assert.throws(()=>f.store.stageResult('task',claim.claimToken,{text:'Done'}),/Unresolved external action/);
+  assert.equal(f.store.get('task',owner).state,'running');
+  assert.equal(f.store.retainedPayloads().length,1);
+  f.store.finishAction('task',claim.claimToken,'send',{externalId:'receipt'});
+  f.store.stageResult('task',claim.claimToken,{text:'Done'});
+  f.store.acknowledgeResult('task','session');f.store.acknowledgeResult('task','telegram');
+  f.store.finishResult('task');assert.equal(f.store.get('task',owner).state,'completed');
+});
+
+test('action identity binds persisted request across boot and rejects changed recipients', t => {
+  const f=fixture(t);f.enqueue('task');
+  const claim=f.store.claim('task',owner,'boot',true);f.store.start('task',claim.claimToken,true);
+  f.store.beginAction('task',claim.claimToken,'send',{recipient:'alice',body:'hello'});
+  f.store.finishAction('task',claim.claimToken,'send',{externalId:'receipt'});
+  f.store.recover('next');
+  const next=f.store.claim('task',owner,'next',true);f.store.start('task',next.claimToken,true);
+  const second=createIntentStore(f.file,{now:()=>1000000});
+  try {
+    const replay=second.beginAction('task',next.claimToken,'send',{body:'hello',recipient:'alice'});
+    assert.equal(replay.execute,false);assert.equal(replay.action.result.externalId,'receipt');
+    assert.throws(()=>second.beginAction('task',next.claimToken,'send',{recipient:'bob',body:'hello'}),/Action request mismatch/);
+    assert.throws(()=>second.beginAction('task',next.claimToken,'send',{recipient:'alice',body:'changed'}),/Action request mismatch/);
+  } finally {second.close();}
+});
+
+test('missing action receipts cannot erase uncertainty before recovery', t => {
+  const f=fixture(t);f.enqueue('task');
+  const claim=f.store.claim('task',owner,'boot',true);f.store.start('task',claim.claimToken,true);
+  assert.throws(()=>f.store.beginAction('task',claim.claimToken,'invalid',undefined),/Action request required/);
+  f.store.beginAction('task',claim.claimToken,'send',{recipient:'alice'});
+  assert.throws(()=>f.store.finishAction('task',claim.claimToken,'send',undefined),/Observed action result required/);
+  f.store.recover('next');assert.equal(f.store.claim('task',owner,'next',true),null);
+  assert.equal(f.store.get('task',owner).state,'waiting_confirmation');
+});
+
+test('legacy delivering rows with unresolved actions cannot become terminal after boot', async t => {
+  const f=fixture(t);f.enqueue('task');
+  const claim=f.store.claim('task',owner,'boot',true);f.store.start('task',claim.claimToken,true);
+  f.store.beginAction('task',claim.claimToken,'send',{recipient:'alice'});
+  // Model the durable row produced by the old stageResult bypass before upgrade.
+  const Database=require('better-sqlite3');const db=new Database(f.file);
+  const old={...f.store.get('task',owner),state:'delivering',result:{text:'Done'},resultReceipts:{}};
+  db.prepare('UPDATE intents SET data=? WHERE id=?').run(JSON.stringify(old),'task');db.close();
+  const second=createIntentStore(f.file,{now:()=>1000000});
+  try {
+    second.recover('next');
+    let deliveries=0;
+    const delivery=require('../src/restart-results').createResultDelivery(second,{
+      token:'fixture',append:async()=>{deliveries++;},fetchImpl:async()=>{deliveries++;throw Error('must not send');}});
+    await assert.rejects(delivery.deliver('task'),/Unresolved external action/);
+    assert.equal(deliveries,0);
+    assert.throws(()=>second.finishResult('task'),/Unresolved external action/);
+    assert.throws(()=>second.stageResult('task',claim.claimToken,{text:'Done'}),/Unresolved external action/);
+    assert.equal(second.get('task',owner).state,'delivering');
+    assert.equal(second.retainedPayloads().length,1);
+  } finally {second.close();}
+});
