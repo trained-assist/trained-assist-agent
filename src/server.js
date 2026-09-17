@@ -2,7 +2,6 @@
 const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
 process.once('exit', () => executionOwner.close());
 const { maintenance, atomicJson } = require('./maintenance');
-const { restartTarget, createRestartNotifier } = require('./restart-notifications');
 const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, hydrateResumes, buildResumeText, resumeNotice } = require('./hh-resume');
 const http = require('http');
@@ -511,67 +510,24 @@ function scheduleGtdController(secrets) {
     if (maintenance.paused()) return Promise.resolve();
     return gtd.runDue({
     secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: username => isTaskRunning(username) || getPendingTasks().some(p => p.username === username), runTask, getSession,
-    canRunSession: (username, sessionId) => require('./restart-execution').currentExecution()?.canRunSession(username, sessionId) !== false,
+    canRunSession: (_username, _sessionId) => true,
   }).catch(err => console.error('[gtd] tick error:', err.message));
   };
   setTimeout(run, 2 * 60 * 1000);      // first tick 2 min after start
   setInterval(run, 5 * 60 * 1000);     // then every 5 min
 }
 
-function dispatchRestartIntents(secrets) {
-  const execution = require('./restart-execution').currentExecution();
-  if (!execution) return;
-  void execution.flushResults();
-  if (maintenance.paused()) return;
-  for (const intent of execution.candidates()) {
-    if (!execution.eligible(intent.id)) continue;
-    const p = intent.payload;
-    const user = { id: intent.owner.chatId, name: intent.owner.username, username: intent.owner.username,
-      workDir: p.workDir || path.join(BASE_USERS_DIR, intent.owner.username),
-      profileId: intent.owner.profileId, telegramUserId: intent.owner.telegramUserId };
-    runTask({ ...p, taskId: intent.id, user, sessionId: intent.owner.sessionId,
-      projectId: intent.owner.projectId, threadId: intent.owner.threadId, initiatedAt: intent.initiatedAt,
-      secrets }).catch(error => console.error('[restart-execution]', intent.id, error.message));
-  }
-}
-
-async function resumePendingTasks(secrets) {
-  // Boot owns recovery; no second server is permitted to steal live claims.
-  require('./restart-execution').initializeExecution({
-    dataRoot: require('./data-paths').SYSTEM_ROOT, gate: maintenance, bootId: maintenance.status().bootId,
-    deliveryOptions: { token: secrets.BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN },
-  });
-  maintenance.enableV2();
+async function resumePendingTasks() {
   maintenance.recovered();
-  // Recovery is complete; only the verified target revision may reopen admission.
-  const state = maintenance.ready(RUNTIME_REVISION);
-  if (state.phase === 'restarting') console.error('[startup] maintenance retained: target revision not verified');
-  dispatchRestartIntents(secrets); // stays closed until external readiness for planned restarts
-  setInterval(() => dispatchRestartIntents(secrets), 1000).unref();
+  // Drain flag may still be set (deploy in progress); coordinator --ready will clear it.
 }
 
 async function main() {
   maintenance.beginRecovery();
   const secrets = await loadSecrets();
-  await resumePendingTasks(secrets);
-  const { existingConfirmationService } = require('./restart-confirmations');
-  existingConfirmationService({ token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN,
-    route: VM_NAME === 'gcp-main' ? 'm' : VM_NAME === 'ru-vm' ? 'r' : null });
-  const flushConfirmationNotices = () => existingConfirmationService()?.flush()
-    .catch(error => console.error('[restart-confirmation]', error.message));
-  setInterval(flushConfirmationNotices, 15000).unref();
-  await flushConfirmationNotices();
-  const restartNotifier = createRestartNotifier(maintenance, { token: secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN });
-  const flushRestartNotices = () => Promise.race([
-    restartNotifier.flush().catch(e => console.error('[restart-notification]', e.message)),
-    // Notification outages must not turn a claimed restart into a coordinator HTTP timeout.
-    new Promise(resolve => { const timer = setTimeout(resolve, 6000); timer.unref(); }),
-  ]);
-  setInterval(flushRestartNotices, 15000).unref();
-  await flushRestartNotices();
+  await resumePendingTasks();
   const intakeQuick = require('./intake-quick').createIntakeQuick({
     baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
-    recordActivity: target => require('./restart-activity').activity.record(target),
   });
 
   const GDRIVE_CLIENT_ID     = secrets.GOOGLE_OAUTH_CLIENT_ID;
@@ -2832,58 +2788,28 @@ ${recent || '(пока нет)'}
       return;
     }
 
-    if (await require('./restart-confirmation-http').handleConfirmationRoute(req, url, res, secrets)) return;
-
     if (url.pathname === '/maintenance') {
       if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: RUNTIME_REVISION });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
-        if (body.action === 'claim') {
-          const claimed = maintenance.claim(body.id);
-          if (claimed && maintenance.status().forced) require('./runner').interruptForRestart();
-          await flushRestartNotices();
-          return json(res, 200, { claimed });
-        }
-        if (body.action === 'fail') {
-          if (body.id !== maintenance.status().id) return json(res, 409, { error: 'operation changed' });
-          if (maintenance.status().phase === 'restarting') maintenance.fail('Coordinator could not complete restart');
-          await flushRestartNotices();
+        // pause / resume with compat aliases for old scripts
+        if (body.action === 'pause' || body.action === 'request') {
+          maintenance.pause();
           return json(res, 200, maintenance.status());
         }
-        if (body.action === 'rollback') {
-          try { return json(res, 200, maintenance.rollback(body.id)); }
-          catch (e) { return json(res, 409, { error: e.message }); }
+        if (body.action === 'resume' || body.action === 'ready' || body.action === 'cancel') {
+          maintenance.resume();
+          return json(res, 200, maintenance.status());
         }
-        if (body.action === 'ready') {
-          if (body.id !== maintenance.status().id) return json(res, 409, { error: 'operation changed' });
-          const state = maintenance.ready(RUNTIME_REVISION);
-          await flushRestartNotices();
-          return json(res, 200, state);
-        }
-        if (body.action === 'cancel') {
-          try { const state = maintenance.cancel(); await flushRestartNotices(); return json(res, 200, state); }
-          catch (e) { return json(res, 409, { error: e.message }); }
-        }
-        if (body.action !== 'request') return json(res, 400, { error: 'invalid action' });
-        const initiator = typeof body.initiator === 'object' && body.initiator !== null
-          ? restartTarget(body.initiator) : body.initiator || 'operator';
-        let state;
-        try { state = maintenance.request(initiator, body.kind === 'deploy' ? 'deploy' : 'restart', body.targetCommit, body.previousCommit); }
-        catch (e) { return json(res, 409, { error: e.message }); }
-        // Request acknowledgement is returned immediately; delivery uses the durable outbox.
-        void flushRestartNotices();
-        return json(res, 200, state);
+        if (body.action === 'claim') return json(res, 200, { claimed: true });
+        if (body.action === 'fail') { console.error('[maintenance] fail:', body.error); return json(res, 200, maintenance.status()); }
+        return json(res, 400, { error: 'invalid action' });
       }
     }
 
     if (req.method === 'POST' && url.pathname === '/restart/activity') {
-      const p = JSON.parse(await readBody(req));
-      const target = restartTarget({ username: p.username, chatId: p.chatId, threadId: p.threadId ?? null });
-      const at = p.at;
-      if (!Number.isSafeInteger(at) || at < 0 || at > Date.now() + 30000) return json(res,400,{error:'invalid activity time'});
-      require('./restart-activity').activity.record(target, Math.min(at, Date.now()));
-      maintenance.addRecipient(target);
-      return json(res,200,{paused:maintenance.paused(),deadlineAt:maintenance.status().deadlineAt});
+      // Compat endpoint — still accepted but does nothing beyond recording paused state.
+      return json(res, 200, { paused: maintenance.paused() });
     }
     if (req.method === 'POST' && url.pathname === '/intake-files/release') {
       const p = JSON.parse(await readBody(req));
@@ -3314,7 +3240,7 @@ ${recent || '(пока нет)'}
       if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
       const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
       const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
-      if (requestId && (fs.existsSync(receipt) || require('./restart-execution').currentExecution()?.get(taskId) || getPendingTasks().some(p => p.taskId === taskId))) {
+      if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
         return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
       }
       const workDir = path.join(BASE_USERS_DIR, username);
