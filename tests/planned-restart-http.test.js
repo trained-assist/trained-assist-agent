@@ -53,6 +53,23 @@ async function restartCycle(kind) {
     const payload = { userId: 123, username: 'fixture', task: 'Inspect the fixture', forceClaude: true, mode: 'deep', requestId: 'stable',
       fileBase64: Buffer.from('preserved attachment').toString('base64'), fileName:'resume.txt',
       ...(kind === 'stale' ? { initiatedAt: Date.now()-300000 } : {}) };
+    if (kind === 'quick') {
+      const quick = { userId: 123, username: 'fixture', task: '/persona Durable quick test', requestId: 'quick', initiatedAt: Date.now() };
+      await api('/run', quick);
+      await until(async () => (await api('/maintenance')).active === 0);
+      const db = new Database(path.join(root, 'data', 'restart-intents.sqlite'), { readonly: true });
+      try {
+        const receipt = JSON.parse(db.prepare('SELECT data FROM actions WHERE intent_id=? AND action_id=?').get('fixture-quick', 'quick-dispatch-v1').data);
+        expect(receipt.state).toBe('completed');
+        expect(typeof receipt.result.reply).toBe('string');
+        expect(JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-quick').data).state).toBe('completed');
+      } finally { db.close(); }
+      expect(fs.existsSync(launches)).toBe(false);
+      await stop('SIGKILL'); await start();
+      expect((await api('/run', quick)).duplicate).toBe(true);
+      expect(fs.existsSync(launches)).toBe(false);
+      return;
+    }
     if (kind === 'lane') {
       await api('/run', payload);
       await until(() => fs.existsSync(launches));
@@ -186,3 +203,5 @@ it('40-minute deadline interrupts a real child and requires confirmation after r
 it('implicit first request and explicit reply serialize on the bound session', {timeout:45000}, () => restartCycle('lane'));
 
 it.each(['deploy-target', 'deploy-wrong'])('v2 recovery verifies runtime revision: %s', {timeout:45000}, kind => restartCycle(kind));
+
+it('real quick handler persists its receipt and deduplicates after process restart', {timeout:45000}, () => restartCycle('quick'));

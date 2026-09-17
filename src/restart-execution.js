@@ -52,6 +52,20 @@ function createExecution({ dataRoot, gate, bootId, now = Date.now, deliveryOptio
       claims.set(id, started.claimToken);
       return true;
     },
+    async runQuick(id, handler) {
+      // Persist before invoking even synchronous handlers: they can mutate external state.
+      const token = claims.get(id);
+      const entry = store.beginAction(id, token, 'quick-dispatch-v1', { kind: 'quick-dispatch', version: 1 });
+      if (!entry.execute) {
+        if (entry.action.state !== 'completed') throw Error('Unresolved quick dispatch');
+        return entry.action.result.reply;
+      }
+      const reply = await handler();
+      // Null means no quick match. Persist it too, so engine recovery cannot re-run dispatch.
+      if (reply !== null && typeof reply !== 'string') throw Error('Invalid quick reply');
+      store.finishAction(id, token, 'quick-dispatch-v1', { reply });
+      return reply;
+    },
     bind(id, sessionId, projectId) {
       return store.bindContext(id, claims.get(id), { sessionId, projectId });
     },
