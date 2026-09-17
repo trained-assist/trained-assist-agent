@@ -1,8 +1,7 @@
 const { maintenance, atomicJson } = require('./maintenance');
-const { currentExecution } = require('./restart-execution');
+const currentExecution = () => null;
 const intentRuns = new Map();
 let restartShutdown = false;
-const { restartTarget } = require('./restart-notifications');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -84,14 +83,8 @@ function savePendingTask(taskId, params) {
     initiatedAt: previous ? (Object.hasOwn(previous, 'initiatedAt') ? previous.initiatedAt : null) : (Object.hasOwn(params, 'initiatedAt') ? params.initiatedAt : null) });
 }
 
-function recordTaskActivity(opts, at = Date.now()) {
-  const { activity } = require('./restart-activity');
-  const sessionId = Object.hasOwn(opts, 'activitySessionId') ? opts.activitySessionId
-    : opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id);
-  if (!opts.user.id && !sessionId) return;
-  const target = activity.record({ username: opts.user.username, chatId: opts.user.id,
-    sessionId, threadId: opts.threadId }, at);
-  maintenance.addRecipient(target);
+function recordTaskActivity(_opts, _at = Date.now()) {
+  // no-op: restart-activity tracking removed
 }
 
 function bindTaskActivity(taskId, user, sessionId) {
@@ -1594,7 +1587,7 @@ function runTask(opts) {
       restartSessionId = sessions.createSession(opts.user.workDir, { task: opts.task, chatId: 0 });
     }
     const state = restart[1] === 'cancel' ? maintenance.cancel()
-      : restart[1] === 'status' ? maintenance.status() : maintenance.request(restartTarget({ username: opts.user.username, chatId: opts.user.id, sessionId: restartSessionId }));
+      : restart[1] === 'status' ? maintenance.status() : maintenance.request();
     const msg = state.phase === 'failed'
       ? '⚠️ Восстановление не завершено; очередь сохранена. Требуется проверка сервера.'
       : state.phase === 'restarting'

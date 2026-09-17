@@ -5,70 +5,92 @@ const os = require('os');
 const path = require('path');
 const vm = require('vm');
 const { createMaintenance } = require('../src/maintenance');
+
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maintenance-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'state.json');
-  return { file, gate: createMaintenance(file) };
+  return { file, drainFlag: file + '.drain', gate: createMaintenance(file) };
 }
-test('drain waits for delivery lease; duplicates coalesce; new starts blocked until next boot', t => {
-  const { file, gate } = fixture(t);
-  const finishDelivery = gate.acquire('task');
-  const op = gate.request('any-engineer');
-  assert.equal(gate.request('another').id, op.id);
-  assert.equal(gate.acquire('new'), null);
-  assert.equal(gate.claim(op.id), false);
-  finishDelivery(); finishDelivery();
-  assert.equal(gate.status().active, 0);
-  assert.equal(gate.claim(op.id), true);
-  assert.throws(() => gate.cancel());
-  gate.ready(); assert.equal(gate.paused(), true);
-  const nextBoot = createMaintenance(file);
-  assert.equal(nextBoot.acquire(), null);
-  nextBoot.ready(); assert.equal(nextBoot.paused(), false);
-  assert.equal(typeof nextBoot.acquire(), 'function');
-});
-test('cancel opens admission; corrupt state fails closed', t => {
-  const { file, gate } = fixture(t);
-  gate.request('user'); gate.cancel();
+
+test('pause blocks new tasks; resume reopens admission', t => {
+  const { drainFlag, gate } = fixture(t);
   assert.equal(typeof gate.acquire(), 'function');
-  fs.writeFileSync(file, '{'); assert.throws(() => createMaintenance(file));
+  gate.pause();
+  assert.equal(gate.paused(), true);
+  assert.equal(gate.acquire(), null);
+  gate.resume();
+  assert.equal(gate.paused(), false);
+  assert.equal(typeof gate.acquire(), 'function');
 });
-test('crash during drain retains pause and operation identity', t => {
-  const { file, gate } = fixture(t); const op = gate.request('user');
-  const next = createMaintenance(file); next.ready();
-  assert.equal(next.paused(), true); assert.equal(next.status().id, op.id);
+
+test('drain flag file is the source of truth — persists across instances', t => {
+  const { file, drainFlag } = fixture(t);
+  const g1 = createMaintenance(file);
+  g1.pause();
+  const g2 = createMaintenance(file);
+  assert.equal(g2.paused(), true);
+  g2.resume();
+  const g3 = createMaintenance(file);
+  assert.equal(g3.paused(), false);
 });
-test('real global admission blocks queued and new tasks; cancel releases them without holding leases', async t => {
+
+test('beginRecovery blocks admission; recovered() unblocks if flag not set', t => {
   const { gate } = fixture(t);
-  const source = fs.readFileSync(require.resolve('../src/runner'), 'utf8');
-  const start = source.indexOf('let _runningTasks = 0;');
-  const end = source.indexOf('// Per-profile', start);
-  const sandbox = { maintenance: gate, MAX_CONCURRENT_TASKS: 1, setTimeout: fn => setTimeout(fn, 5) };
-  vm.createContext(sandbox); vm.runInContext(source.slice(start, end), sandbox);
-  const first = await sandbox._acquireSlot(); let started = false;
-  const second = sandbox._acquireSlot().then(release => { started = true; return release; });
-  const op = gate.request('user'); first(); sandbox._releaseSlot();
-  await new Promise(r => setTimeout(r, 20));
-  assert.equal(started, false); assert.equal(gate.status().active, 0);
-  assert.equal(gate.status().id, op.id);
-  gate.cancel(); const release = await second;
-  assert.equal(started, true); release(); sandbox._releaseSlot();
+  gate.beginRecovery();
+  assert.equal(gate.paused(), true);
+  assert.equal(gate.acquire(), null);
+  gate.recovered();
+  assert.equal(gate.paused(), false);
+  assert.equal(typeof gate.acquire(), 'function');
 });
-test('startup recovery cannot be cancelled, claimed, or released early', t => {
-  const {file, gate} = fixture(t); const operation = gate.request('operator'); gate.claim(operation.id);
-  const boot = createMaintenance(file, {recovering: true});
-  assert.equal(boot.acquire(), null); assert.throws(() => boot.cancel());
-  assert.equal(boot.claim(operation.id), false); boot.ready(); assert.equal(boot.paused(), true);
-  boot.recovered(); assert.equal(boot.paused(), true); assert.equal(boot.status().recovered, true);
-  boot.ready(); assert.equal(boot.paused(), false);
+
+test('recovering=true at construction blocks; recovered() then unblocks', t => {
+  const { file } = fixture(t);
+  const boot = createMaintenance(file, { recovering: true });
+  assert.equal(boot.acquire(), null);
+  boot.recovered();
+  assert.equal(boot.paused(), false);
+  assert.equal(typeof boot.acquire(), 'function');
 });
-test('failed recovery never silently releases queued work', t => {
-  const {gate} = fixture(t); gate.request('operator'); gate.fail('broken pending JSON');
-  assert.throws(() => gate.cancel()); assert.equal(gate.acquire(), null); gate.ready(); assert.equal(gate.paused(), true);
+
+test('flag persists during recovery — resumed only by coordinator --ready', t => {
+  const { file, gate } = fixture(t);
+  gate.pause();
+  const boot = createMaintenance(file, { recovering: true });
+  assert.equal(boot.acquire(), null);
+  boot.recovered();
+  assert.equal(boot.paused(), true); // still paused — flag still set
+  boot.resume();
+  assert.equal(boot.paused(), false);
 });
-test('valid JSON with invalid maintenance schema must not open admission', t => {
- const {file}=fixture(t);fs.writeFileSync(file,'{}');assert.throws(()=>createMaintenance(file),/Invalid maintenance journal/);
+
+test('resume is idempotent even if flag is missing', t => {
+  const { gate } = fixture(t);
+  assert.doesNotThrow(() => gate.resume());
+  assert.doesNotThrow(() => gate.resume());
+});
+
+test('compat stubs: request() pauses, cancel()/ready() resume', t => {
+  const { gate } = fixture(t);
+  const s1 = gate.request();
+  assert.equal(s1.paused, true);
+  const s2 = gate.cancel();
+  assert.equal(s2.paused, false);
+  gate.request();
+  const s3 = gate.ready();
+  assert.equal(s3.paused, false);
+});
+
+test('active count tracked correctly', t => {
+  const { gate } = fixture(t);
+  const r1 = gate.acquire('a');
+  const r2 = gate.acquire('b');
+  assert.equal(gate.status().active, 2);
+  r1();
+  assert.equal(gate.status().active, 1);
+  r2();
+  assert.equal(gate.status().active, 0);
 });
 
 // Exercise the production middleware, not a duplicate allowlist in the test.
@@ -83,62 +105,34 @@ function requestAdmission(gate, method, pathname) {
   return vm.runInContext(`(() => { let releaseRequest; ${source.slice(start, end)}
     return { status: 200, release: releaseRequest }; })()`, sandbox);
 }
-test('v2 durable media stays admitted during maintenance without permitting new execution', t => {
-  const { gate } = fixture(t); const operation = gate.request('operator');
-  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 200);
-  assert.equal(requestAdmission(gate, 'GET', '/intake-files').status, 200);
-  assert.equal(gate.status().active, 0);
-  assert.equal(requestAdmission(gate, 'POST', '/intake-quick').status, 503);
-  assert.equal(gate.acquire('new-execution'), null);
-  assert.equal(gate.claim(operation.id), true);
-  assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 200);
-  assert.equal(gate.acquire('new-execution'), null);
-});
-test('v2 recovery and failure preserve durable ingress while execution remains closed', t => {
+
+test('intake-files is exempt from maintenance gate; intake-quick is not', t => {
   const { gate } = fixture(t);
-  gate.beginRecovery();
+  gate.pause();
   assert.equal(requestAdmission(gate, 'PUT', '/intake-files').status, 200);
-  assert.equal(gate.acquire(), null);
-  gate.recovered(); gate.fail('unverified boot');
   assert.equal(requestAdmission(gate, 'GET', '/intake-files').status, 200);
-  assert.equal(requestAdmission(gate, 'POST', '/run').status, 200);
   assert.equal(requestAdmission(gate, 'POST', '/intake-quick').status, 503);
-  assert.equal(gate.acquire(), null);
+  assert.equal(gate.status().active, 0);
 });
-const targetRevision = 'a'.repeat(40), previousRevision = 'b'.repeat(40);
-test('deploy recovery verifies persisted target and cannot be forged by a new boot', t => {
-  const {file, gate} = fixture(t);
-  assert.throws(() => gate.request('deploy', 'deploy'), /targetCommit/);
-  const op = gate.request('deploy', 'deploy', targetRevision, previousRevision);
-  assert.equal(op.targetCommit, targetRevision);
-  assert.throws(() => gate.request('other', 'deploy', previousRevision), /owns the gate/);
-  gate.claim(op.id);
-  assert.equal(gate.ready(targetRevision).paused, true);
-  const boot = createMaintenance(file, {recovering: true});
-  assert.equal(boot.ready(targetRevision).paused, true);
-  boot.recovered();
-  for (const revision of [undefined, 'unknown', previousRevision, targetRevision.slice(0, 7)]) {
-    assert.equal(boot.ready(revision).paused, true);
-  }
-  assert.equal(boot.ready(targetRevision).paused, false);
-  assert.equal(boot.status().deploymentOutcome, 'deployed');
-  assert.equal(boot.status().id, op.id);
+
+test('gate open — all requests admitted', t => {
+  const { gate } = fixture(t);
+  assert.equal(requestAdmission(gate, 'POST', '/run').status, 200);
+  assert.equal(requestAdmission(gate, 'POST', '/intake-quick').status, 200);
 });
-test('legacy deploy without target remains paused after reboot', t => {
-  const {file} = fixture(t);
-  fs.writeFileSync(file, JSON.stringify({id:'legacy',kind:'deploy',phase:'restarting',ownerBootId:'old'}));
-  const boot = createMaintenance(file);
-  assert.equal(boot.ready(targetRevision).paused, true);
-});
-test('explicit rollback keeps original target, verifies previous revision and reports rollback', t => {
-  const {file, gate} = fixture(t);
-  const op = gate.request('deploy', 'deploy', targetRevision, previousRevision); gate.claim(op.id);
-  assert.throws(() => gate.rollback('other'));
-  gate.rollback(op.id);
-  assert.equal(gate.ready(previousRevision).paused, true);
-  const boot = createMaintenance(file);
-  assert.equal(boot.ready(targetRevision).paused, true);
-  assert.equal(boot.ready(previousRevision).paused, false);
-  assert.equal(boot.status().deploymentOutcome, 'rolled_back');
-  assert.equal(boot.status().targetCommit, targetRevision);
+
+test('real global admission blocks queued and new tasks; cancel releases them without holding leases', async t => {
+  const { gate } = fixture(t);
+  const source = fs.readFileSync(require.resolve('../src/runner'), 'utf8');
+  const start = source.indexOf('let _runningTasks = 0;');
+  const end = source.indexOf('// Per-profile', start);
+  const sandbox = { maintenance: gate, MAX_CONCURRENT_TASKS: 1, setTimeout: fn => setTimeout(fn, 5) };
+  vm.createContext(sandbox); vm.runInContext(source.slice(start, end), sandbox);
+  const first = await sandbox._acquireSlot(); let started = false;
+  const second = sandbox._acquireSlot().then(release => { started = true; return release; });
+  gate.request(); first(); sandbox._releaseSlot();
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(started, false); assert.equal(gate.status().active, 0);
+  gate.cancel(); const release = await second;
+  assert.equal(started, true); release(); sandbox._releaseSlot();
 });
