@@ -22,18 +22,21 @@ function toContext(profile, workDir) {
   return parts.join('\n') || null;
 }
 
-// Which CLI (claude|codex) runs this profile's tasks. Two levels, same as projects.js's
+// Which CLI (claude|codex|opencode) runs this profile's tasks. Two levels, same as projects.js's
 // active-project-per-chat: a per-chat override (engineByChat[chatId], set via the
-// /switch2klod, /switch2codex chat command) wins over the profile-wide default (`engine`,
-// set via scripts/set-engine.mjs). chatId is optional — omit it to read/write the default.
+// /switch2klod, /switch2codex, /switch2opencode chat command) wins over the profile-wide default
+// (`engine`, set via scripts/set-engine.mjs). chatId is optional — omit it to read/write default.
 function getEngine(workDir, chatId) {
   const p = load(workDir);
   const override = chatId != null ? p.engineByChat?.[String(chatId)] : null;
-  return (override || p.engine) === 'codex' ? 'codex' : 'claude';
+  const raw = override || p.engine;
+  if (raw === 'codex') return 'codex';
+  if (raw === 'opencode') return 'opencode';
+  return 'claude';
 }
 
 function setEngine(workDir, engine, chatId) {
-  const clean = engine === 'codex' ? 'codex' : 'claude';
+  const clean = engine === 'codex' ? 'codex' : engine === 'opencode' ? 'opencode' : 'claude';
   const current = load(workDir);
   if (chatId != null) {
     save(workDir, { ...current, engineByChat: { ...current.engineByChat, [String(chatId)]: clean } });

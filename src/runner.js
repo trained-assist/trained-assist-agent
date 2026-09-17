@@ -205,7 +205,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // its engine; the switch takes effect on the next task started in this chat.
 // \b doesn't fire after a Cyrillic letter in JS, so both alternatives end on
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
-const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|клод|кодекс)(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|клод|кодекс)(?=\s|$)/i;
+const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -437,9 +437,9 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   const engineSwitchM = task.trim().match(ENGINE_SWITCH_INTENT);
   if (engineSwitchM && workDir) {
     const raw = (engineSwitchM[1] || engineSwitchM[2] || '').toLowerCase();
-    const engine = /^(codex|кодекс)$/.test(raw) ? 'codex' : 'claude';
+    const engine = /^(codex|кодекс)$/.test(raw) ? 'codex' : raw === 'opencode' ? 'opencode' : 'claude';
     profiles.setEngine(workDir, engine, chatId);
-    const label = engine === 'codex' ? 'Codex CLI' : 'Claude Code';
+    const label = engine === 'codex' ? 'Codex CLI' : engine === 'opencode' ? 'OpenCode (MiniMax M3)' : 'Claude Code';
     return `🔀 Для этого чата переключил движок на ${label}.\nСледующая задача в этом чате пойдёт через него (текущая, если выполняется, — доработает на старом).`;
   }
 
@@ -2554,6 +2554,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
   } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
   const systemPromptText = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
+  const opencodeModel = process.env.OPENCODE_MODEL || 'openrouter/minimax/minimax-m3';
   const [engineBin, engineArgs] = engine === 'codex'
     ? [process.env.CODEX_BIN || 'codex', [
         'exec',
@@ -2561,6 +2562,12 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
         '--skip-git-repo-check',
         '--dangerously-bypass-approvals-and-sandbox',
         '-C', user.cwd || user.workDir,
+        systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
+      ]]
+    : engine === 'opencode'
+    ? [process.env.OPENCODE_BIN || 'opencode', [
+        'run',
+        '-m', opencodeModel,
         systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
       ]]
     : [process.env.CLAUDE_BIN || 'claude', [
@@ -2593,10 +2600,9 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
       AGENT_TASK_ID: taskId,
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
     },
-    // codex exec blocks reading stdin for EOF when it's an unclosed pipe (Node's spawn
-    // default) — verified by hang repro. claude doesn't read stdin in --print mode, so
-    // only codex needs it explicitly closed.
-    ...(engine === 'codex' ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
+    // codex exec and opencode run both block on open stdin — close it explicitly.
+    // claude doesn't read stdin in --print mode.
+    ...(engine === 'codex' || engine === 'opencode' ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
   });
 
   let streamTimer = null;
@@ -2690,6 +2696,13 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
 
     for (const line of lines) {
       if (!line.trim()) continue;
+      // OpenCode outputs plain text, not JSON events
+      if (engine === 'opencode') {
+        fullOutput.text += line + '\n';
+        lastAssistantMsg = fullOutput.text.trim();
+        scheduleStream();
+        continue;
+      }
       try {
         const event = JSON.parse(line);
         firstJsonEventSeen = true;
@@ -2789,7 +2802,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
         console.log(`[${taskId}] timeout warning — sending SIGTERM, 2 min left`);
         try { proc.kill('SIGTERM'); } catch {}
         const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
-        const engineLabel = engine === 'codex' ? 'Кодекс' : 'Клод';
+        const engineLabel = engine === 'codex' ? 'Кодекс' : engine === 'opencode' ? 'OpenCode' : 'Клод';
         tgSend(BOT_TOKEN, chatId,
           `⚠️ ${engineLabel} работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
           `Получил сигнал завершить текущий шаг и вывести итоги.`
@@ -2949,6 +2962,12 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
     else await tgSend(BOT_TOKEN, chatId, crashMsg);
     return crashMsg;
+  }
+
+  // OpenCode outputs plain text — no terminal event, success = clean exit.
+  if (engine === 'opencode' && exitCode === 0 && !processSignal && !processError) {
+    terminalSuccess = true;
+    claudeResult = fullOutput.text.trim() || null;
   }
 
   // A successful process exit is insufficient: require the engine's terminal event.
