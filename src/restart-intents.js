@@ -3,7 +3,7 @@
 // claim immediately before launch. Kept separate until both clients speak v2.
 const fs = require('fs');
 const path = require('path');
-const { randomUUID, timingSafeEqual } = require('crypto');
+const { randomUUID, timingSafeEqual, createHash } = require('crypto');
 const { isDeepStrictEqual } = require('node:util');
 const Database = require('better-sqlite3');
 const FRESH_MS = 5 * 60 * 1000;
@@ -100,7 +100,44 @@ function createIntentStore(file, { now = Date.now } = {}) {
   }).immediate();
   const unresolved = id => db.prepare('SELECT data FROM actions WHERE intent_id=?').all(id)
     .some(row => JSON.parse(row.data).state === 'started');
+  const recoverySnapshot = (id, owner) => {
+    const intent = owned(id, owner);
+    const actions = db.prepare('SELECT action_id, data FROM actions WHERE intent_id=? ORDER BY action_id').all(id)
+      .map(row => ({ id: row.action_id, ...JSON.parse(row.data) }));
+    const digest = createHash('sha256').update(JSON.stringify({ intent, actions })).digest('hex');
+    return { id, owner: intent.owner, digest, actions };
+  };
   const store = {
+    // Host-operator interface only. Never expose as a Telegram/web confirmation.
+    recoverySnapshot: atomic(recoverySnapshot),
+    settleRecovery: atomic(request => {
+      const { snapshot, operator, evidence, text } = request || {};
+      for (const value of [operator, evidence, text]) {
+        if (typeof value !== 'string' || !value.trim()) throw Error('Operator, evidence and terminal text required');
+      }
+      if (!snapshot || typeof snapshot.digest !== 'string') throw Error('Recovery snapshot required');
+      const intent = owned(snapshot.id, snapshot.owner);
+      const receipt = { snapshot, operator, evidence, text };
+      if (intent.recoverySettlement) {
+        if (!isDeepStrictEqual(intent.recoverySettlement.request, receipt)) throw Error('Settlement retry mismatch');
+        return intent; // ACK loss, including after delivery or another boot
+      }
+      if (!['waiting_confirmation', 'interrupted_by_restart', 'queued'].includes(intent.state)) throw Error('Intent is not recovering');
+      if (!isDeepStrictEqual(recoverySnapshot(intent.id, intent.owner), snapshot)) throw Error('Stale recovery snapshot');
+      if (!unresolved(intent.id)) throw Error('No unresolved external action');
+      // The operator has checked the entire outcome. Atomically settle all unknown
+      // actions AND stage the final report; never make the original prompt runnable.
+      for (const action of snapshot.actions.filter(action => action.state === 'started')) {
+        const { id, ...previous } = action;
+        const settled = { ...previous, state: 'completed', reconciledAt: now(),
+          result: { kind: 'operator-settlement', operator, evidence } };
+        db.prepare('UPDATE actions SET data=? WHERE intent_id=? AND action_id=?')
+          .run(JSON.stringify(settled), intent.id, id);
+      }
+      return write({ ...intent, state: 'delivering', claimToken: null, claimedBy: null,
+        confirmationToken: null, result: { text }, resultReceipts: {}, updatedAt: now(),
+        recoverySettlement: { request: receipt, settledAt: now() } });
+    }),
     close() { db.close(); },
     find(id) { return read(id); },
     all() { return db.prepare('SELECT data FROM intents').all().map(row => JSON.parse(row.data)); },
