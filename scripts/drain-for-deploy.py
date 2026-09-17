@@ -10,18 +10,20 @@ def api(body=None):
         headers={'Authorization': 'Bearer ' + env['AGENT_SECRET'], 'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
-# Check current state BEFORE requesting — if the gate is already claimed (draining/restarting),
-# another deploy owns it. Exit 0 so the caller does nothing and lets the owner finish.
 before = api()
-if before.get('phase') in ('draining', 'restarting'):
-    print('Gate already claimed; this invocation is a no-op.', flush=True)
-    sys.exit(0)
 target = subprocess.check_output(['git', 'rev-parse', os.environ.get('DEPLOY_TARGET_COMMIT', 'HEAD') + '^{commit}'], text=True).strip()
 current = before
 previous = current.get('runtimeCommit')
 if previous and len(previous) != 40:
     previous = subprocess.check_output(['git', 'rev-parse', previous + '^{commit}'], text=True).strip()
-state = api({'action': 'request', 'kind': 'deploy', 'initiator': 'deploy', 'targetCommit': target, 'previousCommit': previous})
+# A successful return authorizes the caller to mutate the checkout. Reuse an
+# existing matching operation without changing its deadline, but never skip drain.
+if before.get('phase') in ('draining', 'restarting'):
+    if before.get('kind') != 'deploy' or before.get('targetCommit') != target:
+        raise SystemExit('Another maintenance operation owns the gate; checkout unchanged')
+    state = before
+else:
+    state = api({'action': 'request', 'kind': 'deploy', 'initiator': 'deploy', 'targetCommit': target, 'previousCommit': previous})
 if current.get('maintenanceProtocol', 0) >= 2 and state.get('targetCommit') != target:
     raise SystemExit('Runtime does not persist deploy target; upgrade maintenance protocol before deployment')
 if state.get('kind') != 'deploy':
@@ -31,8 +33,12 @@ while True:
     state = api()
     if state.get('id') != operation_id or state.get('kind') != 'deploy' or state.get('phase') not in ('draining', 'restarting'):
         raise SystemExit('Deploy drain was cancelled; checkout unchanged')
-    if state['phase'] == 'restarting' or (state['active'] == 0 and api({'action': 'claim', 'id': state['id']}).get('claimed')):
+    if state['phase'] == 'restarting':
+        if state.get('active') != 0:
+            raise SystemExit('Claimed gate still has active work; checkout unchanged')
         break
+    if state.get('active') == 0 and api({'action': 'claim', 'id': state['id']}).get('claimed'):
+        continue  # Re-read identity, phase and active count before authorizing deploy.
     print('Waiting for active work:', state['active'], flush=True)
     time.sleep(5)
 print('Admission closed and all work finished; safe to deploy', flush=True)
