@@ -32,11 +32,10 @@ const { getcourseFormHtml } = require('../src/connect-forms/getcourse.js');
 const { loginCredsFormHtml } = require('../src/connect-forms/login-creds.js');
 const { revokeService, listConnectedServices } = require('../src/user-tokens.js');
 
-const MOCK_PORT = 14443;
-const MOCK_DOMAIN = `127.0.0.1:${MOCK_PORT}`;
+let MOCK_DOMAIN;
 
 // Test user isolated from production data
-const TEST_USER_ID = 'e2e-test-99999';
+const TEST_USER_ID = `e2e-test-${process.pid}-${Date.now()}`;
 const TOKEN_DIR = join(homedir(), 'agent-tokens', TEST_USER_ID);
 const GC_CONFIG_DIR = join(TOKEN_DIR, 'getcourse');
 const GC_CONFIG_FILE = join(GC_CONFIG_DIR, 'config.json');
@@ -70,7 +69,7 @@ const ctx = { userId: TEST_USER_ID };
 
 beforeAll(async () => {
   process.env.USER_ID = TEST_USER_ID;
-  await startMockServer(MOCK_PORT);
+  MOCK_DOMAIN = `127.0.0.1:${await startMockServer(0)}`;
 }, 20000);
 
 afterAll(async () => {
