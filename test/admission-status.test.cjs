@@ -20,7 +20,7 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
     recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
     restartShutdown: false, currentExecution: () => null, intentRuns: new Map(),
     console, Promise, Set, Date, maintenance: { paused: () => false },
-    _laneKey: s => s, chatLanes: lanes, STOP_TASK_INTENT: /$^/, WAKEUP_INTENT: /$^/,
+    _laneKey: s => s, chatLanes: lanes, STOP_TASK_INTENT: /$^/, GTD_STOP_INTENT: /$^/, WAKEUP_INTENT: /$^/,
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
     tgEdit: async (token, chat, id, text) => { assert.equal(token, 'canonical-token'); messages.push(text); return { ok: true }; },
     tgSend: async () => { throw Error('unexpected fallback'); },
