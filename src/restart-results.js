@@ -1,6 +1,16 @@
 // Terminal output is durable before delivery. Retry may repeat a Telegram notice,
 // never the model or its external effects. Plain text, no classifier/LLM on replay.
 const { appendEvent } = require('./restart-notifications');
+// Presentation cannot replace the immutable recipient, message or result text.
+// Filter when sending too: older persisted rows may contain arbitrary extras.
+function presentation(extra) {
+  const result = {};
+  for (const key of ['reply_markup', 'parse_mode', 'entities', 'link_preview_options',
+    'disable_web_page_preview', 'disable_notification', 'protect_content']) {
+    if (extra && Object.hasOwn(extra, key)) result[key] = extra[key];
+  }
+  return result;
+}
 function createResultDelivery(store, { token, fetchImpl = fetch, append = appendEvent } = {}) {
   const inflight = new Map();
   async function deliver(id) {
@@ -26,7 +36,7 @@ function createResultDelivery(store, { token, fetchImpl = fetch, append = append
                 method:'POST', headers:{'Content-Type':'application/json'}, signal:AbortSignal.timeout(5000),
                 body:JSON.stringify({chat_id:target.chatId,text:pieces[i],
                   ...(edit ? {message_id:intent.result.messageId} : target.threadId ? {message_thread_id:target.threadId}: {}),
-                  ...(i===pieces.length-1 ? intent.result.extra || {reply_markup:{inline_keyboard:[]}} : {})}),
+                  ...(i===pieces.length-1 ? presentation(intent.result.extra || {reply_markup:{inline_keyboard:[]}}) : {})}),
               });
               const data=await response.json();
               if (edit && /message is not modified/i.test(data.description||'')) return;
