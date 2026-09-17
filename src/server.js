@@ -3240,7 +3240,7 @@ ${recent || '(пока нет)'}
       if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
       const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
       const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
-      if (requestId && (fs.existsSync(receipt) || require('./restart-execution').currentExecution()?.get(taskId) || getPendingTasks().some(p => p.taskId === taskId))) {
+      if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
         return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
       }
       const workDir = path.join(BASE_USERS_DIR, username);

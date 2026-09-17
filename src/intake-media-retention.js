@@ -22,14 +22,7 @@ function purgeIntakeMedia(baseDir, now = Date.now()) {
       const entry = JSON.parse(raw); retain(entry.username, entry);
     }
   } catch (e) { if (e.code !== 'ENOENT') return 0; }
-  // Waiting confirmations have no TTL. Read only: cleanup never creates/migrates
-  // the ledger or enables the v2 launch policy. Unknown/corrupt state stops purge.
-  try {
-    const ledgerFile = path.join(path.dirname(pendingDir), 'restart-intents.sqlite');
-    for (const entry of require('./restart-intents').retainedIntentPayloads(ledgerFile)) {
-      retain(entry.owner.username, entry.payload);
-    }
-  } catch { return 0; }
+  // restart-intents.sqlite removed in simplification — SQLite intent retention no longer needed
 
   for (const profile of fs.readdirSync(baseDir, { withFileTypes: true })) {
     if (!profile.isDirectory()) continue;
