@@ -223,6 +223,21 @@ function createIntentStore(file, { now = Date.now } = {}) {
       if (intent.state !== 'running' || unresolved(id)) throw Error('Intent cannot complete');
       return write({ ...intent, state: 'completed', completedAt: now(), updatedAt: now() });
     }),
+    // The CLI may execute tools before emitting stdout. Persist one conservative
+    // uncertainty boundary for the entire process BEFORE spawning either engine.
+    // A terminal engine event and its deliverable result commit together; a crash
+    // anywhere before that commit cannot make an already-started run replayable.
+    beginEngine: atomic((id, token, engine) => {
+      if (!['claude', 'codex'].includes(engine)) throw Error('Unknown engine');
+      const result = store.beginAction(id, token, `engine-run:${token}`, { kind: 'engine-run', engine });
+      if (!result.execute) throw Error('Engine attempt already dispatched');
+      return result;
+    }),
+    stageEngineResult: atomic((id, token, result) => {
+      if (claimed(id, token).state === 'delivering') return store.stageResult(id, token, result);
+      store.finishAction(id, token, `engine-run:${token}`, { kind: 'engine-terminal', result });
+      return store.stageResult(id, token, result);
+    }),
     beginAction: atomic((id, token, actionId, request) => {
       claimed(id, token, 'running');
       if (typeof actionId !== 'string' || !actionId) throw Error('Action id required');

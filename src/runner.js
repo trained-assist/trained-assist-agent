@@ -1,6 +1,5 @@
 const { maintenance, atomicJson } = require('./maintenance');
 const { currentExecution } = require('./restart-execution');
-const { isEffectfulTool } = require('./tool-effect-classifier');
 const intentRuns = new Map();
 let restartShutdown = false;
 const { restartTarget } = require('./restart-notifications');
@@ -1721,7 +1720,9 @@ function runTask(opts) {
     currentExecution()?.interrupt(opts.taskId, true);
     await status.finish(currentExecution()?.get(opts.taskId)?.state === 'delivering'
       ? '⏸ Результат сохранён. Повторю доставку ответа без повторного выполнения задачи.'
-      : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.');
+      : currentExecution()?.get(opts.taskId)?.state === 'waiting_confirmation'
+        ? '⏸ Работа прервана и сохранена. Перед продолжением нужно проверить результат уже выполненных действий; повторный запуск пока заблокирован.'
+        : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.');
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
   chatLanes.set(queueKey, current);
@@ -2544,6 +2545,8 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
         '--print', prompt,
       ]];
 
+  // Fail closed: no child may start if its durable uncertainty record fails.
+  currentExecution()?.beginEngine(taskId, engine);
   const proc = spawn(engineBin, engineArgs, {
     cwd: user.cwd || user.workDir,
     env: {
@@ -2651,17 +2654,6 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
 
   let firstJsonEventSeen = false;
   let outputPersistenceError = null;
-  // Action ids (tool_use.id) begun via beginAction this run, finished together
-  // once the task reaches a genuine terminal success — see finishStartedActions.
-  const startedActionIds = new Set();
-  function finishStartedActions(outcome) {
-    if (!startedActionIds.size) return;
-    for (const actionId of startedActionIds) {
-      try { currentExecution()?.finishAction(taskId, actionId, outcome); }
-      catch (error) { console.warn(`[${taskId}] finishAction:`, error.message); }
-    }
-    startedActionIds.clear();
-  }
   proc.stdout.setEncoding('utf8'); // preserve Cyrillic split across byte chunks
   function consumeOutput(chunk, flush = false) {
     lineBuffer += chunk;
@@ -2691,8 +2683,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
             claudeResult = lastAssistantMsg;
-            finishStartedActions({ observed: 'task_completed' });
-            if (!restartShutdown && claudeResult?.trim()) currentExecution()?.stageResult(taskId, { text: claudeResult, messageId: msgId });
+            if (!restartShutdown && claudeResult?.trim()) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             claudeUsage = event.usage || null;
             if (claudeUsage) {
               console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cached_input_tokens || 0} cache_write=${claudeUsage.cache_write_input_tokens || 0}`);
@@ -2705,10 +2696,9 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
         if (event.type === 'result') {
           terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
-          if (terminalSuccess) finishStartedActions({ observed: 'task_completed' });
           if (terminalSuccess && !restartShutdown) {
             const terminalText = pickFinalText(claudeResult, lastAssistantMsg, '');
-            if (terminalText) currentExecution()?.stageResult(taskId, { text: terminalText, messageId: msgId });
+            if (terminalText) currentExecution()?.stageEngineResult(taskId, { text: terminalText, messageId: msgId });
           }
           claudeUsage = event.usage || null;
           if (claudeUsage) {
@@ -2726,16 +2716,6 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
                 progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
-              }
-              // Durable pre-execution barrier for external-effect tools: record the
-              // start BEFORE the tool actually runs, so a crash between "tool started"
-              // and "task completed" is visible on restart and forces waiting_confirmation
-              // (see restart-intents.js unresolved()/claim()/evaluate()) instead of a
-              // silent auto-resume that could repeat the effect (e.g. a duplicate send).
-              // block.id is Anthropic's per-call tool_use id — unique per action attempt.
-              if (isEffectfulTool(block.name, block.input) && block.id) {
-                try { currentExecution()?.beginAction(taskId, block.id, { tool: block.name, input: block.input }); startedActionIds.add(block.id); }
-                catch (error) { console.warn(`[${taskId}] beginAction:`, error.message); }
               }
             }
           }
@@ -2823,6 +2803,14 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
     processError = err.message;
     await stopProgress();
     console.error(`[${taskId}] claude process error:`, err.message);
+    if (timedOut && currentExecution()) {
+      const partial = fullOutput.text.trim();
+      if (activeSessionId && partial) {
+        sessions.appendReply(user.workDir, activeSessionId, `[прервано таймаутом]\n${partial}`);
+        setCurrentSessionId(user.workDir, activeSessionId, chatId);
+      }
+      throw new Error('Engine interrupted; external effects require reconciliation before continuation');
+    }
     if (timedOut) {
       const nextCount = continuationCount + 1;
       const partialText = fullOutput.text.trim();
@@ -2908,7 +2896,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
   // surfaced immediately (a slow failure is much more likely to be about the task itself).
   if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
     const crashDurationMs = Date.now() - thinkingStart;
-    if (!restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
+    if (!currentExecution() && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
