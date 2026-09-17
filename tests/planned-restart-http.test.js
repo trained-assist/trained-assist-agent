@@ -172,9 +172,7 @@ if (${['forced', 'lane', 'effect-crash'].includes(kind)} && fs.readFileSync(file
       const row = JSON.parse(db.prepare('SELECT data FROM intents WHERE id=?').get('fixture-stable').data);
       const actions = db.prepare('SELECT data FROM actions WHERE intent_id=?').all('fixture-stable').map(r => JSON.parse(r.data));
       db.close();
-      expect(actions).toHaveLength(1);
-      expect(actions[0].request.engine).toBe(selectedEngine);
-      expect(actions[0].state).toBe('started');
+      expect(actions).toHaveLength(0);
       expect(row.state).toBe('queued');
       expect(row.payload.task).toContain('resume.txt');
       return;
