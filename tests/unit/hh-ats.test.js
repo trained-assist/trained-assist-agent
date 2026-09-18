@@ -413,6 +413,18 @@ describe('hh_batch_evaluate — reads vacancy_id and ats_config from context', (
     const r = await tools().hh_batch_evaluate.handler({});
     expect(r.error).toMatch(/вакансия/i);
   });
+
+  it('ats_config saved for a different vacancy_id than the active one → error, no silent scoring', async () => {
+    // Recruiter switched active vacancy but never regenerated the ATS config for it
+    writeFileSync(join(ctxDir, 'contexts', 'hh', 'ats_config.json'), JSON.stringify({
+      value: { ...ATS, vacancy_id: 'vac-OLD', vacancy_title: undefined },
+      updated_at: new Date().toISOString(),
+    }));
+
+    const r = await tools().hh_batch_evaluate.handler({});
+    expect(r.error).toMatch(/друг(ой|ую|ая) вакансии/i);
+    expect(r.error).toContain('vac-OLD');
+  });
 });
 
 // ── hh_send_message — history persistence ────────────────────────────────────

@@ -692,10 +692,17 @@ module.exports = {
 
         try {
           const config = await extractAtsConfig(vacancy_text, apiKey);
+          const activeVacancy = readContext('hh', 'active_vacancy')?.value;
+          if (activeVacancy?.id) {
+            config.vacancy_id = activeVacancy.id;
+            config.vacancy_title = activeVacancy.title;
+          }
           return {
             ok: true,
             config,
-            note: 'Проверь конфиг и передай его в hh_evaluate_candidate. Можешь скорректировать веса и пороги.',
+            note: activeVacancy?.id
+              ? `Проверь конфиг и сохрани через context_set("hh","ats_config", <config>) — привязан к активной вакансии «${activeVacancy.title}». Можешь скорректировать веса и пороги.`
+              : 'Проверь конфиг и передай его в hh_evaluate_candidate. Активная вакансия не выбрана (hh_set_active_vacancy) — конфиг не будет привязан к вакансии, при переключении вакансий его не отличить от чужого.',
           };
         } catch (e) {
           return { error: `Не удалось извлечь конфиг: ${e.message}` };
@@ -947,6 +954,9 @@ module.exports = {
             return { error: 'ATS конфиг не задан. Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config",...).' };
           }
           ats_config = ctx.value;
+          if (ats_config?.vacancy_id && ats_config.vacancy_id !== vacancy_id) {
+            return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${ats_config.vacancy_title || ats_config.vacancy_id}»), а оцениваем «${vacancy_id}». Вызови hh_extract_ats_config заново для текущей вакансии.` };
+          }
         }
         // Guard: context_set sometimes stores value as JSON string instead of object
         if (typeof ats_config === 'string') {
@@ -1108,6 +1118,9 @@ module.exports = {
             return { error: 'ATS конфиг не задан. Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config",...).' };
           }
           ats_config = ctx.value;
+          if (ats_config?.vacancy_id && ats_config.vacancy_id !== vacancy_id) {
+            return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${ats_config.vacancy_title || ats_config.vacancy_id}»), а обновляем сообщения для «${vacancy_id}». Вызови hh_extract_ats_config заново для текущей вакансии.` };
+          }
         }
         if (typeof ats_config === 'string') {
           try { ats_config = JSON.parse(ats_config); } catch { return { error: 'ATS конфиг повреждён: не удалось распарсить JSON.' }; }
