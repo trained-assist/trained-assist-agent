@@ -152,6 +152,31 @@ describe('Path consistency — ats_config.json', () => {
   });
 });
 
+// ── Test: vacancy isolation — a recruiter switching active vacancy must not have the
+//    previous vacancy's ATS config silently applied to the new vacancy's candidates ──
+
+describe('readAtsConfig — vacancy mismatch guard', () => {
+  it('returns the config when its vacancy_id matches the expected (active) vacancy', () => {
+    writeAtsConfig(WORK_DIR, { ...ATS_CONFIG, vacancy_id: 'vac-A' });
+    const config = scoring.readAtsConfig(WORK_DIR, 'vac-A');
+    expect(config).not.toBeNull();
+    expect(config.vacancy_id).toBe('vac-A');
+  });
+
+  it('returns null (skips scoring) when config.vacancy_id does not match the active vacancy', () => {
+    writeAtsConfig(WORK_DIR, { ...ATS_CONFIG, vacancy_id: 'vac-A' });
+    // Recruiter switched to vac-B without regenerating the ATS config for it
+    const config = scoring.readAtsConfig(WORK_DIR, 'vac-B');
+    expect(config).toBeNull();
+  });
+
+  it('legacy configs with no vacancy_id are still trusted (no expectedVacancyId, or config predates this guard)', () => {
+    writeAtsConfig(WORK_DIR, { ...ATS_CONFIG, vacancy_id: undefined });
+    expect(scoring.readAtsConfig(WORK_DIR, 'vac-B')).not.toBeNull();
+    expect(scoring.readAtsConfig(WORK_DIR)).not.toBeNull();
+  });
+});
+
 // ── Test 2: saveCandidateHistory / readCandidateHistory roundtrip ─────────────
 
 describe('Candidate history — write & read (disk persistence)', () => {

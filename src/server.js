@@ -469,10 +469,10 @@ async function runHhScoringForUser(username) {
     }).catch(e => { console.error(`[hh-bg] msg-sync error for ${username}:`, e.message); return { synced: 0, newMessages: 0 }; });
     if (msgSync.newMessages > 0) console.log(`[hh-bg] msg-sync ${username}: +${msgSync.newMessages} new messages across ${msgSync.synced} candidates`);
 
-    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4, msgSyncStats: msgSync });
+    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4, msgSyncStats: msgSync, vacancyId: vacancy.id });
     if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
 
-    const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3 });
+    const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3, vacancyId: vacancy.id });
     if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
 
     const proactiveScored = await scoreUnscoredProactiveCandidates(username);

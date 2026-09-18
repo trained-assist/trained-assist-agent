@@ -251,7 +251,7 @@ async function evaluateCandidate(candidateText, atsConfig, apiKey, gigachatKey) 
 
 // ─── Read tokens ──────────────────────────────────────────────────────────────
 
-function readAtsConfig(workDir) {
+function readAtsConfig(workDir, expectedVacancyId = null) {
   const file = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
   if (!fs.existsSync(file)) return null;
   try {
@@ -259,6 +259,13 @@ function readAtsConfig(workDir) {
     let value = data?.value || null;
     // Guard: context_set sometimes stores value as JSON string instead of object
     if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return null; } }
+    // Guard: config was extracted for a different vacancy and never regenerated after
+    // hh_set_active_vacancy switched — using it here would silently score the wrong
+    // vacancy's candidates against the wrong criteria.
+    if (value?.vacancy_id && expectedVacancyId && value.vacancy_id !== expectedVacancyId) {
+      console.warn(`[hh-scoring] skipping: ats_config is for vacancy ${value.vacancy_id}, active vacancy is ${expectedVacancyId} — regenerate via hh_extract_ats_config`);
+      return null;
+    }
     return value;
   } catch { return null; }
 }
@@ -294,8 +301,8 @@ function saveCandidateHistory(username, negotiationId, data) {
 
 // ─── Batch scoring: GigaChat primary ─────────────────────────────────────────
 
-async function scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent = 5, msgSyncStats = null } = {}) {
-  const atsConfig = readAtsConfig(workDir);
+async function scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent = 5, msgSyncStats = null, vacancyId = null } = {}) {
+  const atsConfig = readAtsConfig(workDir, vacancyId);
   if (!atsConfig) return 0;
 
   const gigachatKey = readGigachatKey(username);
@@ -375,8 +382,8 @@ async function scoreUnscoredCandidates(negotiations, username, workDir, { maxCon
 
 // ─── Draft generation: GigaChat primary ──────────────────────────────────────
 
-async function generateDraftMessages(negotiations, username, workDir, { maxConcurrent = 3 } = {}) {
-  const atsConfig = readAtsConfig(workDir);
+async function generateDraftMessages(negotiations, username, workDir, { maxConcurrent = 3, vacancyId = null } = {}) {
+  const atsConfig = readAtsConfig(workDir, vacancyId);
   if (!atsConfig) return 0;
 
   const gigachatKey = readGigachatKey(username);

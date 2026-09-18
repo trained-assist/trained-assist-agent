@@ -253,6 +253,18 @@ async function runProactiveSearch(username, workDir) {
   }
   if (!atsConfig) throw new Error('ATS конфиг пуст. Настрой критерии оценки кандидатов.');
 
+  // Guard: if the recruiter switched active vacancy (hh_set_active_vacancy) after this
+  // config was extracted for a different one, don't silently search with the wrong criteria.
+  try {
+    const activeVacancy = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
+    if (activeVacancy?.id && atsConfig.vacancy_id && atsConfig.vacancy_id !== activeVacancy.id) {
+      throw new Error(`ATS конфиг настроен для другой вакансии («${atsConfig.vacancy_title || atsConfig.vacancy_id}»), а активна «${activeVacancy.title || activeVacancy.id}». Вызови hh_extract_ats_config заново для текущей вакансии.`);
+    }
+  } catch (e) {
+    if (e instanceof SyntaxError || e.code === 'ENOENT') { /* no active_vacancy context yet — legacy config, allow */ }
+    else throw e;
+  }
+
   // Read OpenRouter key for AI enrichment + query generation
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
