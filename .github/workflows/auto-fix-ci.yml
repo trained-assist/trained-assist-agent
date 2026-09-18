@@ -49,8 +49,15 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Cheap-model auto-fix attempt (OpenRouter)
-        id: openrouter
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: 3-stage auto-fix (OpenRouter free models)
+        id: autofix
         if: steps.guard.outputs.skip == 'false'
         continue-on-error: true
         env:
@@ -59,30 +66,12 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-          MODEL: deepseek/deepseek-chat
-        run: node scripts/autofix-openrouter.mjs
-
-      - name: Strong-model auto-fix attempt (OpenRouter fallback)
-        id: openrouter-strong
-        if: steps.guard.outputs.skip == 'false' && steps.openrouter.outcome != 'success'
-        continue-on-error: true
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          MODEL: qwen/qwen3-coder
-          MAX_ATTEMPTS: 3
         run: node scripts/autofix-openrouter.mjs
 
       - name: Report unfixed failure
-        if: >
-          steps.guard.outputs.skip == 'false' &&
-          steps.openrouter.outcome != 'success' &&
-          steps.openrouter-strong.outcome != 'success'
+        if: steps.guard.outputs.skip == 'false' && steps.autofix.outcome != 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr comment ${{ steps.pr.outputs.number }} -R ${{ github.repository }} --body \
-            "🤖 Auto-fix could not confidently resolve the failure in run ${{ github.event.workflow_run.id }} (tried \`deepseek/deepseek-chat\` then \`qwen/qwen3-coder\` via OpenRouter). Needs a human look."
+            "🤖 3-stage auto-fix pipeline could not resolve the failure in run ${{ github.event.workflow_run.id }}. Needs a human look."
