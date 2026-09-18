@@ -2121,7 +2121,9 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
-async function _runTask({ taskId, user, task, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+  // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
+  const task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -2567,6 +2569,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
     : engine === 'opencode'
     ? [process.env.OPENCODE_BIN || 'opencode', [
         'run',
+        '--format', 'json',
         '-m', opencodeModel,
         systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
       ]]
@@ -2696,16 +2699,23 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
 
     for (const line of lines) {
       if (!line.trim()) continue;
-      // OpenCode outputs plain text, not JSON events
-      if (engine === 'opencode') {
-        fullOutput.text += line + '\n';
-        lastAssistantMsg = fullOutput.text.trim();
-        scheduleStream();
-        continue;
-      }
       try {
         const event = JSON.parse(line);
         firstJsonEventSeen = true;
+        if (engine === 'opencode') {
+          if (event.type === 'text' && typeof event.part?.text === 'string') {
+            fullOutput.text += event.part.text;
+            lastAssistantMsg = fullOutput.text;
+            scheduleStream();
+          } else if (event.type === 'step_finish') {
+            terminalSuccess = true;
+            claudeResult = fullOutput.text.trim() || null;
+            if (!restartShutdown && claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
+            const usage = event.part?.tokens;
+            if (usage) console.log(`[${taskId}] opencode usage: in=${usage.input} out=${usage.output} cost=${event.part.cost || 0}`);
+          }
+          continue;
+        }
         if (engine === 'codex') {
           if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
             fullOutput.text += event.item.text;
@@ -2962,12 +2972,6 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
     else await tgSend(BOT_TOKEN, chatId, crashMsg);
     return crashMsg;
-  }
-
-  // OpenCode outputs plain text — no terminal event, success = clean exit.
-  if (engine === 'opencode' && exitCode === 0 && !processSignal && !processError) {
-    terminalSuccess = true;
-    claudeResult = fullOutput.text.trim() || null;
   }
 
   // A successful process exit is insufficient: require the engine's terminal event.
