@@ -8,6 +8,8 @@ import json, os, subprocess, tempfile, sys
 from pathlib import Path
 
 def prepare(file, target, previous, main_pid, rollback=False):
+    if not file.exists():
+        return  # no v1 journal present — nothing to migrate
     if main_pid != '0':
         raise RuntimeError('Service must be stopped before journal migration')
     import re
