@@ -2142,7 +2142,8 @@ async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: t.slice(0, 3000) },
+          // Plans appear at the END of long responses — take tail, not head.
+          { role: 'user', content: t.length > 3000 ? t.slice(0, 1000) + '\n[...]\n' + t.slice(-2000) : t },
         ],
       }),
     });
@@ -2194,7 +2195,8 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: t.slice(0, 3000) },
+          // Choices appear at the END of long responses — take tail, not head.
+          { role: 'user', content: t.length > 3000 ? t.slice(0, 1000) + '\n[...]\n' + t.slice(-2000) : t },
         ],
       }),
     });
@@ -3200,16 +3202,21 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let buttonReason = internalGtd ? 'internalGtd-suppressed' : 'no-session';
   if (!internalGtd && !incomplete) {
     if (activeSessionId) {
-      const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
+      // Run both detectors in parallel — plan + menu are mutually exclusive outcomes
+      // but checking in parallel halves the latency vs sequential await.
+      const [hasPlan, menuLabels] = await Promise.all([
+        detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY),
+        detectMenuInAnswer(final, secrets.OPENROUTER_API_KEY),
+      ]);
       if (hasPlan) {
         finalMarkup = { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] };
         buttonReason = 'plan';
+      } else if (menuLabels) {
+        finalMarkup = { inline_keyboard: menuLabels.map((label, idx) => [{ text: `${idx + 1}. ${label}`.slice(0, 60), callback_data: `menu|${activeSessionId}|${idx}` }]) };
+        buttonReason = 'menu';
       } else {
-        const menuLabels = await detectMenuInAnswer(final, secrets.OPENROUTER_API_KEY);
-        finalMarkup = menuLabels
-          ? { inline_keyboard: menuLabels.map((label, idx) => [{ text: `${idx + 1}. ${label}`.slice(0, 60), callback_data: `menu|${activeSessionId}|${idx}` }]) }
-          : actionButtons(activeSessionId, { deep: finalDeep });
-        buttonReason = menuLabels ? 'menu' : 'none';
+        finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
+        buttonReason = 'none';
       }
     } else {
       finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
