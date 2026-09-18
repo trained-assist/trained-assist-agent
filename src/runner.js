@@ -208,6 +208,7 @@ const NEW_JOB_INTENT            = /новая вакансия|new job post|\/ne
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
 const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
+const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
 const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|опубликуй.{0,20}(?:страниц|лендинг)|создай.{0,20}(?:страниц.{0,20}вакансии|лендинг)|сгенерир.{0,20}страниц|сделай.{0,20}страниц.{0,20}вакансии|страниц.{0,30}(?:вакансии.{0,30})?(?:сгенерир|создай|опубликуй|сделай)|страниц.{0,20}готов/i;
@@ -1394,6 +1395,10 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 // Map<laneKey(string), Promise> — the tail of each lane. laneKey is
 // `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
+// Outer per-chat serialization gate. Ensures only ONE task per Telegram chat runs at a time,
+// even when the tasks belong to different sessions. Keyed by String(chatId). Internal/system
+// calls with chatId=0 are excluded so they never block each other.
+const perChatQueue = new Map();
 
 // Session serialization lane + per-profile cap primitives live in a pure module
 // (runner-lanes.js) so the REAL admission logic is vendorable/testable in staging
@@ -1740,6 +1745,24 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  // Skip command — kill current task, let next queued task run automatically.
+  // Unlike /stop (which is a dead-end), /skip advances the chat queue.
+  if (SKIP_TASK_INTENT.test((opts.task || '').trim())) {
+    const username = opts.user.username;
+    const stopped = stopUserTask(username);
+    const msg = stopped
+      ? '⏭ Текущая задача пропущена. Следующая начнётся автоматически.'
+      : '✅ Нет активной задачи для пропуска.';
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    if (botToken) {
+      const im = opts.initialMsgId;
+      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+      else     tgSend(botToken, chatId, msg).catch(() => {});
+    }
+    return Promise.resolve(msg);
+  }
+
   if (currentExecution() && intentRuns.has(opts.taskId)) return intentRuns.get(opts.taskId);
   if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id) || null;
   if (currentExecution()) {
@@ -1772,7 +1795,14 @@ function runTask(opts) {
   if (currentExecution()) queueKey = _laneKey(opts.sessionId, opts.user.id);
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
-  const prev = chatLanes.get(queueKey) ?? Promise.resolve();
+  const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
+  // Per-chat outer gate: if a different session is running in the same Telegram chat,
+  // wait for it to finish first. chatId=0 is excluded (internal/system callers).
+  const _chatLaneKey = opts.user.id ? String(opts.user.id) : null;
+  const chatOuterPrev = (_chatLaneKey && perChatQueue.has(_chatLaneKey)) ? perChatQueue.get(_chatLaneKey) : null;
+  const prev = chatOuterPrev
+    ? Promise.allSettled([sessionPrev, chatOuterPrev]).then(() => {})
+    : sessionPrev;
 
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
   savePendingTask(opts.taskId, {
@@ -1792,7 +1822,7 @@ function runTask(opts) {
     return status.finish(text).then(() => ({ deferred: true }));
   }
   if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
-  else if (chatLanes.has(queueKey)) status.waiting(
+  else if (chatLanes.has(queueKey) || chatOuterPrev) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
@@ -1844,6 +1874,7 @@ function runTask(opts) {
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
   chatLanes.set(queueKey, current);
+  if (_chatLaneKey) perChatQueue.set(_chatLaneKey, current);
   if (currentExecution()) intentRuns.set(opts.taskId, current);
   current.finally(() => {
     try {
@@ -1856,6 +1887,7 @@ function runTask(opts) {
     } finally { clearPendingTask(opts.taskId); releaseAdmission?.(); intentRuns.delete(opts.taskId); }
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
+    if (_chatLaneKey && perChatQueue.get(_chatLaneKey) === current) perChatQueue.delete(_chatLaneKey);
   });
   // Await retries for callers, but never hold their predecessor lane/lease.
   return current.then(result => result?.queuedRetry || result);
