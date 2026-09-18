@@ -14,9 +14,9 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000; // per file in stage 2
 const MAX_FILES = 8;
 
-const STAGE1_MODEL = 'deepseek/deepseek-r1:free';
-const STAGE2_MODEL = 'google/gemini-2.5-flash-lite-preview-06-17:free';
-const STAGE3_MODEL = 'qwen/qwen3-235b-a22b:free';
+const STAGE1_MODEL = process.env.STAGE1_MODEL || 'deepseek/deepseek-r1:free';
+const STAGE2_MODEL = process.env.STAGE2_MODEL || 'google/gemini-2.5-flash-lite-preview-06-17:free';
+const STAGE3_MODEL = process.env.STAGE3_MODEL || 'qwen/qwen3-235b-a22b:free';
 
 const {
   OPENROUTER_API_KEY,

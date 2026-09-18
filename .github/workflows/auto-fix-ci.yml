@@ -66,6 +66,13 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
+          # Override any stage model via repo secrets (optional):
+          # STAGE1_MODEL: deepseek/deepseek-r1:free       (diagnosis)
+          # STAGE2_MODEL: google/gemini-2.5-flash-lite-preview-06-17:free  (context, needs large ctx)
+          # STAGE3_MODEL: qwen/qwen3-235b-a22b:free       (patch writing)
+          STAGE1_MODEL: ${{ secrets.AUTOFIX_STAGE1_MODEL }}
+          STAGE2_MODEL: ${{ secrets.AUTOFIX_STAGE2_MODEL }}
+          STAGE3_MODEL: ${{ secrets.AUTOFIX_STAGE3_MODEL }}
         run: node scripts/autofix-openrouter.mjs
 
       - name: Report unfixed failure
