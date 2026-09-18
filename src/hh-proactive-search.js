@@ -32,6 +32,32 @@ function extractKeywords(name) {
     .filter(w => w.length >= 4);
 }
 
+// Normalize ATS config to the canonical shape that this module reads.
+// The ATS editor UI and the LLM `hh_extract_ats_config` tool historically produced
+// different field names for the same concept — without normalization the proactive
+// search ends up looking at an empty `required`/`preferred` list, generates queries
+// from the vacancy title alone, and returns 30 "Аналитик данных" for a "Финансовый
+// советник" vacancy. Mirrors the same logic used in src/hh-scoring.js.
+function normalizeAtsConfig(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const required = raw.required?.length
+    ? raw.required.map(c => ({ name: c.name || c.skill || c.criterion || '', weight: Number(c.weight) || 0 }))
+    : (raw.required_skills || []).map(c => ({ name: c.skill || c.name || c.criterion || '', weight: Number(c.weight) || 0 }));
+  const preferred = raw.preferred?.length
+    ? raw.preferred.map(c => ({ name: c.name || c.skill || c.criterion || '', weight: Number(c.weight) || 0 }))
+    : (raw.preferred_skills || []).map(c => ({ name: c.skill || c.name || c.criterion || '', weight: Number(c.weight) || 0 }));
+  const knockout = (raw.knockout || [])
+    .map(k => (typeof k === 'string' ? k : (k.criterion || k.name || k.skill || '')))
+    .filter(Boolean);
+  return {
+    ...raw,
+    vacancy_title: raw.vacancy_title || raw.title || 'Вакансия',
+    required,
+    preferred,
+    knockout,
+  };
+}
+
 // Generic pre-filter: driven entirely by this vacancy's ATS config (min experience +
 // required/preferred criteria with weights), no hardcoded domain keywords. This is only
 // a cheap sort to pick the top-30 for AI enrichment below — the AI step does the real,
@@ -73,15 +99,16 @@ function scoreCandidate(r, atsConfig) {
 
 // AI enrichment: plus/yellow/red tags + 2-para summary for one candidate
 async function enrichCandidate(candidate, atsConfig, orKey) {
-  const knockoutStr = (atsConfig.knockout || []).map(k => `- ${k}`).join('\n') || '—';
-  const requiredStr = (atsConfig.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
-  const preferredStr = (atsConfig.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
+  const cfg = normalizeAtsConfig(atsConfig);
+  const knockoutStr = (cfg.knockout || []).map(k => `- ${k}`).join('\n') || '—';
+  const requiredStr = (cfg.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
+  const preferredStr = (cfg.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
   const expStr = (candidate.experience || [])
     .map(e => `${e.position} — ${e.company} (${e.start || '?'} – ${e.end || 'н.в.'})`)
     .join('\n') || '—';
 
-  const prompt = `Оцени кандидата для вакансии "${atsConfig.vacancy_title || 'Вакансия'}".
-${atsConfig.vacancy_context ? `\nКонтекст вакансии: ${atsConfig.vacancy_context}` : ''}
+  const prompt = `Оцени кандидата для вакансии "${cfg.vacancy_title || 'Вакансия'}".
+${cfg.vacancy_context ? `\nКонтекст вакансии: ${cfg.vacancy_context}` : ''}
 
 СТОП-ФАКТОРЫ (knockout, критичны):
 ${knockoutStr}
@@ -162,10 +189,11 @@ async function enrichCandidates(candidates, atsConfig, orKey) {
 // Generate HH resume-search queries for this specific vacancy (title + context + criteria)
 // instead of a fixed list — makes cold-search work for any vacancy, not just one domain.
 async function generateSearchQueries(atsConfig, orKey) {
-  const criteriaStr = [...(atsConfig.required || []), ...(atsConfig.preferred || [])]
-    .map(c => c.name).join(', ') || '—';
+  const cfg = normalizeAtsConfig(atsConfig);
+  const criteriaStr = [...(cfg.required || []), ...(cfg.preferred || [])]
+    .map(c => c.name).filter(Boolean).join(', ') || '—';
 
-  const prompt = `Вакансия: "${atsConfig.vacancy_title || 'без названия'}"
+  const prompt = `Вакансия: "${cfg.vacancy_title || 'без названия'}"
 Контекст: ${atsConfig.vacancy_context || '—'}
 Ключевые критерии: ${criteriaStr}
 
@@ -213,14 +241,14 @@ function buildScoringPromptText(username) {
     return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
   }
 
-  const cfg = latest.ats_config || {};
+  const cfg = normalizeAtsConfig(latest.ats_config || {});
   const queriesStr = (latest.search_queries || []).map(q => `• "${q}"`).join('\n') || '—';
   const knockoutStr = (cfg.knockout || []).map(k => `• ${k}`).join('\n') || '(не задано)';
   const minExp = cfg.filters?.min_experience_years ?? 2;
   const reqStr = (cfg.required || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
   const prefStr = (cfg.preferred || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
 
-  return `Как мы подбираем кандидатов для «${latest.vacancy_title || 'вакансии'}» (проактивный поиск):
+  return `Как мы подбираем кандидатов для «${cfg.vacancy_title || 'вакансии'}» (проактивный поиск):
 
 🔍 Поисковые запросы в базе резюме HH (сгенерированы под эту вакансию):
 ${queriesStr}
@@ -252,6 +280,12 @@ async function runProactiveSearch(username, workDir) {
     throw new Error('ATS конфиг не найден. Сначала настрой вакансию и критерии оценки.');
   }
   if (!atsConfig) throw new Error('ATS конфиг пуст. Настрой критерии оценки кандидатов.');
+
+  // Normalize legacy (UI: title/required_skills[].skill) and current (LLM:
+  // vacancy_title/required[].name) shapes into one canonical shape. Without this,
+  // scoreCandidate / generateSearchQueries silently read empty criteria and the
+  // search returns 30 random "Аналитик данных" for a "Финансовый советник" vacancy.
+  atsConfig = normalizeAtsConfig(atsConfig);
 
   // Guard: if the recruiter switched active vacancy (hh_set_active_vacancy) after this
   // config was extracted for a different one, don't silently search with the wrong criteria.
