@@ -4075,7 +4075,10 @@ ${recent || '(пока нет)'}
     } finally { releaseRequest?.(); }
   });
 
-  server.listen(PORT, () => console.log(`assist-agent listening on :${PORT}`));
+  server.listen(PORT, () => {
+    console.log(`assist-agent listening on :${PORT}`);
+    notifyActiveChatsOnStartup(secrets).catch(e => console.error('[startup-notify] error:', e.message));
+  });
 
   // Drive watcher: poll every 2 min for new files shared with the SA
   const driveOpts = { botToken: secrets.BOT_TOKEN, tgBase: process.env.TELEGRAM_API_URL };
@@ -4121,6 +4124,38 @@ ${recent || '(пока нет)'}
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT',  shutdown);
+}
+
+async function notifyActiveChatsOnStartup(secrets) {
+  const ACTIVE_WINDOW_MS = 15 * 60 * 1000;
+  const AGENT_TOKENS_DIR = path.join(os.homedir(), 'agent-tokens');
+  if (!fs.existsSync(AGENT_TOKENS_DIR)) return;
+  const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
+  if (!botToken) return;
+  const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+  const now = Date.now();
+  const notified = new Set();
+  for (const username of fs.readdirSync(AGENT_TOKENS_DIR)) {
+    const chatId = readChatId(username);
+    if (!chatId || notified.has(chatId)) continue;
+    const workDir = path.join(BASE_USERS_DIR, username);
+    let lastAt = 0;
+    try {
+      const sessionsFile = path.join(workDir, 'sessions.json');
+      if (!fs.existsSync(sessionsFile)) continue;
+      const sessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
+      if (!sessions.length) continue;
+      lastAt = Math.max(...sessions.map(s => s.lastAt || s.createdAt || 0).filter(Number.isFinite));
+    } catch { continue; }
+    if (!Number.isFinite(lastAt) || now - lastAt > ACTIVE_WINDOW_MS) continue;
+    notified.add(chatId);
+    console.log(`[startup-notify] sending to ${username} (chat ${chatId}), lastAt ${new Date(lastAt).toISOString()}`);
+    fetch(`${tgBase}/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: '✅ Рестарт завершён. Готов к работе.' }),
+    }).catch(e => console.error(`[startup-notify] ${username}:`, e.message));
+  }
 }
 
 function tgNotifyNalog(botToken, chatId, expires) {
