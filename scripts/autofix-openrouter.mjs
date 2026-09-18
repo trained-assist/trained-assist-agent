@@ -14,9 +14,13 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000; // per file in stage 2
 const MAX_FILES = 8;
 
+// Stage model defaults — override via AUTOFIX_STAGE{1,2,3}_MODEL repo secrets
+// Stage 1 alternatives: microsoft/phi-4-reasoning-plus:free, qwen/qwen3-235b-a22b:free
+// Stage 2 alternatives: google/gemini-2.0-flash-exp:free (also 1M ctx)
+// Stage 3 alternatives: qwen/qwen3-235b-a22b:free, deepseek/deepseek-chat-v3-0324:free, meta-llama/llama-3.3-70b-instruct:free
 const STAGE1_MODEL = process.env.STAGE1_MODEL || 'deepseek/deepseek-r1:free';
 const STAGE2_MODEL = process.env.STAGE2_MODEL || 'google/gemini-2.5-flash-lite-preview-06-17:free';
-const STAGE3_MODEL = process.env.STAGE3_MODEL || 'qwen/qwen3-235b-a22b:free';
+const STAGE3_MODEL = process.env.STAGE3_MODEL || 'nvidia/llama-3.1-nemotron-70b-instruct:free';
 
 const {
   OPENROUTER_API_KEY,
