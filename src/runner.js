@@ -89,6 +89,7 @@ function isScratchpadFallback(claudeResult, lastAssistantMsg) {
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
+const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-restart (all engines)
 const MAX_SOFT_CONTINUATIONS = 3; // auto-continue after "still working" response, max 3 rounds
 const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth 1 retry
 const MAX_QUICK_RETRIES = 1; // cap so a repeatable crash doesn't loop forever
@@ -2750,6 +2751,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
   let codexErrorMsg = null;  // last turn.failed / error message from codex/opencode
+  let lastOutputAt = Date.now(); // updated on any raw stdout data for inactivity detection
+  let inactivityKill = false;   // true when killed due to silence, not 40-min timeout
+  let inactivityCheckTimer = null;
 
   // Drain in-flight progress edits before posting a terminal message.
   const progressEdits = new Set();
@@ -2766,6 +2770,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     clearInterval(streamTimer);
     clearInterval(heartbeatTimer);
     clearInterval(typingTimer); typingTimer = null;
+    clearInterval(inactivityCheckTimer); inactivityCheckTimer = null;
     await Promise.allSettled([...progressEdits]);
   }
 
@@ -2810,7 +2815,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           : {};
         if (snippet) {
           // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
-          const activitySuffix = lastActivity ? `\n\n⚡ ${lastActivity} (${secs}с)` : `\n\n⚡ Пишу… (${secs}с)`;
+          const silentMins = Math.round((Date.now() - lastOutputAt) / 60000);
+          const silentSuffix = silentMins >= 1 ? ` — молчит ${silentMins}мин` : '';
+          const activitySuffix = lastActivity ? `\n\n⚡ ${lastActivity} (${secs}с)${silentSuffix}` : `\n\n⚡ Пишу… (${secs}с)${silentSuffix}`;
           const newText = `🧠 ${snippet}${activitySuffix}`;
           if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
@@ -2948,7 +2955,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       }
     }
   }
-  proc.stdout.on('data', chunk => consumeOutput(chunk));
+  proc.stdout.on('data', chunk => { lastOutputAt = Date.now(); consumeOutput(chunk); });
   proc.stdout.on('end', () => consumeOutput('', true));
 
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
@@ -2982,10 +2989,27 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       };
       sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
 
+      // Inactivity check: if no stdout for 5 min, kill + auto-restart (works for all engines).
+      // Checked every 30s; lastOutputAt updated on any raw stdout chunk before JSON parsing.
+      inactivityCheckTimer = setInterval(() => {
+        if (timedOut || sessionState.userStopped) return;
+        const silentMs = Date.now() - lastOutputAt;
+        if (silentMs >= INACTIVITY_TIMEOUT_MS) {
+          clearInterval(inactivityCheckTimer); inactivityCheckTimer = null;
+          inactivityKill = true;
+          timedOut = true;
+          const silentMins = Math.round(silentMs / 60000);
+          console.warn(`[${taskId}] inactivity: no stdout for ${silentMins}min — SIGTERM`);
+          try { proc.kill('SIGTERM'); } catch {}
+          reject(new Error(`inactivity timeout: no output for ${silentMins}min`));
+        }
+      }, 30_000);
+
       proc.on('close', (code, signal) => {
         processSignal = signal;
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
+        clearInterval(inactivityCheckTimer); inactivityCheckTimer = null;
         if (code !== null && code !== 0) {
           console.error(`[${taskId}] claude exited with code ${code}`);
           exitCode = code;
@@ -3024,19 +3048,23 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
       // Save partial progress so the next run sees what was done
       if (activeSessionId && partialText) {
-        sessions.appendReply(user.workDir, activeSessionId, `[прервано таймаутом]\n${partialText}`);
+        sessions.appendReply(user.workDir, activeSessionId, `[${inactivityKill ? 'прервано: молчал 5 мин' : 'прервано таймаутом'}]\n${partialText}`);
         setCurrentSessionId(user.workDir, activeSessionId, chatId);
       }
 
       if (continuationCount < MAX_CONTINUATIONS) {
-        const statusLine = `⏱ Прервал по 40-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
+        const statusLine = inactivityKill
+          ? `⏱ Молчал 5 мин — перезапускаю (${nextCount}/${MAX_CONTINUATIONS})...`
+          : `⏱ Прервал по 40-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
         const tgMsg = partialDisplay.length > 20
           ? `🧠 ${partialDisplay.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
           : statusLine;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
         else await tgSend(BOT_TOKEN, chatId, tgMsg);
 
-        const continuationTask = `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
+        const continuationTask = inactivityKill
+          ? `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Процесс завис (молчал 5 мин без вывода) и был перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`
+          : `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
         runTask({
           taskId: `${user.username}-${Date.now()}`,
           user,
