@@ -2113,6 +2113,10 @@ function ensureSkillDir(workDir, domainPath, description) {
 // дальнейших действий («дальше предлагаю сделать так и так», перечень шагов к
 // реализации). Если да — под ответом покажем «▶️ Действуй дальше по плану». Строго
 // консервативно: сомнение / короткий ответ / нет ключа → false (кнопку не показываем).
+// Free model is sufficient for simple binary classification (plan / menu detection).
+// Override via BUTTON_DETECT_MODEL env var if quality issues arise.
+const BUTTON_DETECT_MODEL = process.env.BUTTON_DETECT_MODEL || 'google/gemini-2.0-flash-exp:free';
+
 async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   const t = String(text || '').trim();
   // Порог был 200 — резал короткие, но настоящие планы («Дальше предлагаю: 1)…2)…»
@@ -2122,7 +2126,7 @@ async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   if (t.length < 100) return false;
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return false;
-  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
+  const model = BUTTON_DETECT_MODEL;
   const system = [
     'Ты смотришь на ответ ассистента и решаешь: описан ли в нём ПЛАН дальнейших действий,',
     'который ассистент предлагает выполнить СЛЕДУЮЩИМ шагом («дальше предлагаю сделать…»,',
@@ -2172,7 +2176,7 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   if (t.length < 100) return null;
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return null;
-  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
+  const model = BUTTON_DETECT_MODEL;
   const system = [
     'Ты смотришь на ответ ассистента и решаешь: предлагает ли он пользователю ЯВНЫЙ ВЫБОР',
     'из 2-4 конкретных самостоятельных альтернатив (напр. "Вариант А: ... Вариант Б: ...",',
@@ -2218,7 +2222,7 @@ async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {})
   if (t.length < 80) return { incomplete: false };
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return { incomplete: false };
-  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
+  const model = BUTTON_DETECT_MODEL;
   try {
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
