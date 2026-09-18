@@ -168,8 +168,8 @@ const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие)
 const GDRIVE_SHARED_CONFIRM_INTENT = /^(?:пошарил|поделился|расшарил|дал\s+доступ|открыл\s+доступ|готово|ок|сделал|расшарен|добавил)\.?$/i;
 // "можешь читать гугл шит", "умеешь работать с гугл таблицами"
 const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
-const GDRIVE_NOTIF_OFF_INTENT  = /\/google_drive_sharing_notifications_switch_off|выключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|отключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|не.{0,10}уведомля.{0,30}(?:гугл|google|drive|шаринг|файл)|без.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
-const GDRIVE_NOTIF_ON_INTENT   = /\/google_drive_sharing_notifications_switch_on|включи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|верн.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
+const GDRIVE_NOTIF_OFF_INTENT  = /\/gdrive_notif_off|\/google_drive_sharing_notifications_switch_off|выключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|отключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|не.{0,10}уведомля.{0,30}(?:гугл|google|drive|шаринг|файл)|без.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
+const GDRIVE_NOTIF_ON_INTENT   = /\/gdrive_notif_on|\/google_drive_sharing_notifications_switch_on|включи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|верн.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
 // /bug_or_feature — FAST capture: last messages + logs + note → GitHub issue, no Claude session.
 // Distinct from the older free-text BUG_REPORT_INTENT (line ~67) which spawns a full session.
@@ -792,7 +792,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   if (GDRIVE_NOTIF_OFF_INTENT.test(task) && userId) {
     const mutedFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-notif-muted');
     fs.writeFileSync(mutedFile, JSON.stringify({ muted_at: new Date().toISOString() }), { mode: 0o600 });
-    return '🔕 Уведомления о шаринге Google Drive отключены.\n\nФайлы продолжают добавляться в каталог — просто без уведомлений в чат. Включить обратно: `/google_drive_sharing_notifications_switch_on`';
+    return '🔕 Уведомления о шаринге Google Drive отключены.\n\nФайлы продолжают добавляться в каталог — просто без уведомлений в чат. Включить обратно: `/gdrive_notif_on`';
   }
   if (GDRIVE_NOTIF_ON_INTENT.test(task) && userId) {
     const mutedFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-notif-muted');
