@@ -6,13 +6,13 @@
 // the rule for every caller.
 //
 // Two orthogonal controls live here:
-//   • _laneKey(sessionId, chatId) — the SERIALIZATION lane. Its ONLY job is to
+//   • _laneKey(sessionId, chatId) — the TRANSCRIPT lane. Its ONLY job is to
 //     stop two `claude` processes appending the SAME transcript at once, so the
-//     key is the SESSION — NOT the workDir (two sessions sharing a workDir MUST
-//     run in parallel: the owner-required "several parallel sessions per profile"
-//     invariant) and NOT the profile (that would over-serialize). A brand-new
-//     session has no id yet → key on the chat so two concurrent first-messages in
-//     one chat collapse into one session instead of spawning two claudes.
+//     key is the SESSION. A brand-new session has no id yet → key on the chat
+//     so two concurrent first-messages in one chat collapse into one session.
+//     NOTE: per-chat "one active task" is enforced by the outer perChatQueue
+//     in runner.js, NOT here. Different sessions from the same chat still get
+//     distinct lane keys but are queued by perChatQueue.
 //   • the per-profile cap (_acquireKeySlot / _releaseKeySlot / setKeyCap) — a
 //     fairness bound: one profile can hold at most N live `claude` processes.
 //     R7: the cap is resolved PER PROFILE (a limit scoped to one profile via
