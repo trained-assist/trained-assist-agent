@@ -197,6 +197,12 @@ const HH_REJECT_CONFIRM_INTENT = /^\/hh_reject_(?:yes|confirm|go)|^\/hh_reject\s
 const HH_REJECT_CANCEL_INTENT  = /^\/hh_reject_(?:no|cancel|stop|отмена)\b/i;
 // /hh_scan — manual trigger of proactive search outside cron schedule
 const HH_SCAN_INTENT         = /\/hh_scan|запусти скан|просканируй|обнови скан|ручн.{0,15}скан/i;
+// /hh_disconnect — revoke stored HH OAuth token. Lives OUTSIDE the hhConnected
+// block (runner.js:1334) because the action is symmetric: must work even when no
+// token is saved (returns "HH не подключён"), and the intent must NOT be in
+// hhIntents (which gates on hhConnected) — otherwise disconnected users could
+// not type /hh_disconnect to clean up a stale token file.
+const HH_DISCONNECT_INTENT   = /\/hh_disconnect|отключи(?:ть)?\s*(?:hh|хх|headhunter)|удали(?:ть)?\s*(?:hh|хх|headhunter)|hh.{0,15}(?:отключи|удали|разъедин|сброс)|сброс.{0,15}(?:hh|хх|headhunter|авторизац)|выключи.{0,15}(?:hh|хх|headhunter)|reset.{0,15}hh/i;
 const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
 const ILLUSTRATE_ENABLE_INTENT = /включ.{0,20}(?:рисован|иллюстр|картинк|рисунок)|добав.{0,20}(?:рисован|иллюстр|генерац)|активируй.{0,20}(?:рисован|иллюстр|скил.{0,10}рисован)|\/enable_illustrate/i;
 // Matches concrete draw commands with subject content — these go to Claude even when skill is enabled
@@ -979,7 +985,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       if (service === 'hh') {
         const hhPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'hh');
         if (fs.existsSync(hhPath)) {
-          return 'HeadHunter уже подключён ✅ Могу искать кандидатов, писать сообщения, создавать вакансии.';
+          return 'HeadHunter уже подключён ✅ Могу искать кандидатов, писать сообщения, создавать вакансии.\n\nЕсли хочешь переподключиться под другим аккаунтом — сначала /hh_disconnect.';
         }
       }
       return { __connectLink: true, service, hint };
@@ -1371,6 +1377,17 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     if (HH_REJECT_INTENT.test(task)) return await hhRejectDryRun(userId, workDir, task).catch(() => '⚠️ Не удалось подготовить dry-run.');
     if (HH_EVALUATE_INTENT.test(task)) return await hhBatchEvaluate(userId, workDir).catch(() => '⚠️ Не удалось запустить оценку.');
     if (HH_SCAN_INTENT.test(task)) return await hhManualScan(userId, workDir).catch(() => '⚠️ Не удалось запустить скан.');
+  }
+
+  // /hh_disconnect — revoke HH token. Outside the hhConnected gate so it works
+  // both when a token is saved (revoke it) and when no token exists (idempotent
+  // "HH не подключён"). Slash form bypasses verifyQuickAnswerIntent because
+  // task starts with '/'.
+  if (userId && HH_DISCONNECT_INTENT.test(task)) {
+    const revoked = revokeService(userId, 'hh');
+    return revoked === 'not_found'
+      ? '⚠️ HeadHunter не подключён. Скажи /hh_connect чтобы добавить.'
+      : '✅ HeadHunter отключён — токен удалён. Чтобы подключить снова: /hh_connect';
   }
 
   return null;
