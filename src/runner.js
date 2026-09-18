@@ -3007,8 +3007,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     claudeResult = fullOutput.text.trim();
   }
 
-  // A successful process exit is insufficient: require the engine's terminal event.
-  const interrupted = exitCode !== 0 || processSignal || processError || !terminalSuccess;
+  // terminalSuccess = engine emitted its completion event (result / step_finish / turn.completed).
+  // That is the authoritative signal — exit code and OS signal are secondary.
+  // Exception: a Node-level processError (spawn fail, pipe break) overrides terminalSuccess.
+  const interrupted = !terminalSuccess || processError;
   const answer = terminalSuccess ? pickFinalText(claudeResult, lastAssistantMsg, '') : '';
   const incomplete = interrupted || !answer;
   let result = answer;
