@@ -997,10 +997,9 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
   if (!orKey) return false;
   const vs = readVacancyState(workDir);
   if (!vs?.draft) return false; // no draft — nothing to publish
-
   try {
     const body = JSON.stringify({
-      model: 'deepseek/deepseek-v4-flash-0731',
+      model: 'google/gemini-2.0-flash-exp:free',
       messages: [
         {
           role: 'system',
@@ -1041,7 +1040,7 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
   if (!orKey || !answerPreview) return true;
   try {
     const body = JSON.stringify({
-      model: 'deepseek/deepseek-v4-flash-0731',
+      model: 'google/gemini-2.0-flash-exp:free',
       messages: [
         {
           role: 'system',

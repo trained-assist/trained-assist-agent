@@ -8,7 +8,7 @@
 // once and storing it — rather than re-deriving a preview from raw messages on
 // every render — is the whole point: previews stay stable, cheap, and bilingual.
 
-const DEFAULT_MODEL = process.env.SESSION_SUMMARY_MODEL || 'google/gemini-2.5-flash';
+const DEFAULT_MODEL = process.env.SESSION_SUMMARY_MODEL || 'google/gemini-2.0-flash-exp:free';
 
 // Build a compact transcript for the model: the opening (goal) + the tail (how it
 // ended), each message clipped, total bounded. Keeps token cost predictable.

@@ -115,7 +115,7 @@ ${sessionDescriptions}
         'Authorization': `Bearer ${openrouterKey}`,
       },
       body: JSON.stringify({
-        model: 'openai/gpt-4o-mini',
+        model: 'google/gemini-2.0-flash-exp:free',
         max_tokens: 64,
         messages: [{ role: 'user', content: prompt }],
       }),
@@ -170,7 +170,7 @@ ${trimmed.slice(0, 1200)}
       'Authorization': `Bearer ${openrouterKey}`,
     },
     body: JSON.stringify({
-      model: 'openai/gpt-4o-mini',
+      model: 'google/gemini-2.0-flash-exp:free',
       max_tokens: 8,
       messages: [{ role: 'user', content: prompt }],
     }),
@@ -2766,7 +2766,7 @@ ${recent || '(пока нет)'}
           'Authorization': `Bearer ${openrouterKey}`,
         },
         body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
+          model: 'google/gemini-2.0-flash-exp:free',
           max_tokens: 300,
           messages: [{ role: 'user', content: promptText }],
         }),
