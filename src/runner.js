@@ -998,29 +998,13 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
   const vs = readVacancyState(workDir);
   if (!vs?.draft) return false; // no draft — nothing to publish
   try {
-    const body = JSON.stringify({
-      model: 'google/gemini-2.0-flash-exp:free',
+    const answer = (await openrouterClassify({
+      orKey, maxTokens: 5, timeoutMs: 2500,
       messages: [
-        {
-          role: 'system',
-          content: 'You classify recruiter bot messages. Answer with a single word: YES or NO.',
-        },
-        {
-          role: 'user',
-          content: `Does this message ask to publish, generate, create, or rebuild the vacancy landing page (страница вакансии / лендинг)?\n\nMessage: "${task}"\n\nYES or NO:`,
-        },
+        { role: 'system', content: 'You classify recruiter bot messages. Answer with a single word: YES or NO.' },
+        { role: 'user', content: `Does this message ask to publish, generate, create, or rebuild the vacancy landing page (страница вакансии / лендинг)?\n\nMessage: "${task}"\n\nYES or NO:` },
       ],
-      max_tokens: 5,
-      temperature: 0,
-    });
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-      body,
-      signal: AbortSignal.timeout(2500),
-    });
-    const data = await res.json();
-    const answer = data.choices?.[0]?.message?.content?.trim().toUpperCase() || '';
+    })).trim().toUpperCase();
     return answer.startsWith('YES');
   } catch (e) {
     console.warn('[classifyVacancyPublishIntent] error:', e.message);
@@ -1039,30 +1023,14 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
   const orKey = openrouterKey || process.env.OPENROUTER_API_KEY;
   if (!orKey || !answerPreview) return true;
   try {
-    const body = JSON.stringify({
-      model: 'google/gemini-2.0-flash-exp:free',
+    const answer = await openrouterClassify({
+      orKey, maxTokens: 5, timeoutMs: 2500,
       messages: [
-        {
-          role: 'system',
-          content: 'You verify chatbot auto-replies before they are sent. Answer with a single word: YES or NO.',
-        },
-        {
-          role: 'user',
-          content: `A user sent this message to a chatbot:\n"${task}"\n\nThe bot is about to auto-reply with something like this:\n"${String(answerPreview).slice(0, 300)}"\n\nDoes the user's message actually request this kind of reply? If unsure, answer YES.\n\nYES or NO:`,
-        },
+        { role: 'system', content: 'You verify chatbot auto-replies before they are sent. Answer with a single word: YES or NO.' },
+        { role: 'user', content: `A user sent this message to a chatbot:\n"${task}"\n\nThe bot is about to auto-reply with something like this:\n"${String(answerPreview).slice(0, 300)}"\n\nDoes the user's message actually request this kind of reply? If unsure, answer YES.\n\nYES or NO:` },
       ],
-      max_tokens: 5,
-      temperature: 0,
     });
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-      body,
-      signal: AbortSignal.timeout(2500),
-    });
-    const data = await res.json();
-    const answer = data.choices?.[0]?.message?.content?.trim().toUpperCase() || '';
-    return !answer.startsWith('NO');
+    return !answer.trim().toUpperCase().startsWith('NO');
   } catch (e) {
     console.warn('[verifyQuickAnswerIntent] error (fail-open):', e.message);
     return true;
@@ -2112,9 +2080,7 @@ function ensureSkillDir(workDir, domainPath, description) {
 // дальнейших действий («дальше предлагаю сделать так и так», перечень шагов к
 // реализации). Если да — под ответом покажем «▶️ Действуй дальше по плану». Строго
 // консервативно: сомнение / короткий ответ / нет ключа → false (кнопку не показываем).
-// Free model is sufficient for simple binary classification (plan / menu detection).
-// Override via BUTTON_DETECT_MODEL env var if quality issues arise.
-const BUTTON_DETECT_MODEL = process.env.BUTTON_DETECT_MODEL || 'google/gemini-2.0-flash-exp:free';
+const { openrouterClassify } = require('./openrouter-classify');
 
 async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   const t = String(text || '').trim();
@@ -2125,7 +2091,6 @@ async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   if (t.length < 100) return false;
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return false;
-  const model = BUTTON_DETECT_MODEL;
   const system = [
     'Ты смотришь на ответ ассистента и решаешь: описан ли в нём ПЛАН дальнейших действий,',
     'который ассистент предлагает выполнить СЛЕДУЮЩИМ шагом («дальше предлагаю сделать…»,',
@@ -2136,23 +2101,15 @@ async function detectPlanInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
     'Ответь СТРОГО одним JSON: {"plan": true|false}. Сомневаешься → false.',
   ].join(' ');
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0, max_tokens: 20,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: system },
-          // Plans appear at the END of long responses — take tail, not head.
-          { role: 'user', content: t.length > 3000 ? t.slice(0, 1000) + '\n[...]\n' + t.slice(-2000) : t },
-        ],
-      }),
+    const raw = await openrouterClassify({
+      orKey, timeoutMs, maxTokens: 20,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: system },
+        // Plans appear at the END of long responses — take tail, not head.
+        { role: 'user', content: t.length > 3000 ? t.slice(0, 1000) + '\n[...]\n' + t.slice(-2000) : t },
+      ],
     });
-    if (!res.ok) return false;
-    const data = await res.json();
-    const raw = data?.choices?.[0]?.message?.content || '';
     const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
     return obj?.plan === true;
   } catch (e) {
@@ -2175,7 +2132,6 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   if (t.length < 100) return null;
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return null;
-  const model = BUTTON_DETECT_MODEL;
   const system = [
     'Ты смотришь на ответ ассистента и решаешь: предлагает ли он пользователю ЯВНЫЙ ВЫБОР',
     'из 2-4 конкретных самостоятельных альтернатив (напр. "Вариант А: ... Вариант Б: ...",',
@@ -2189,23 +2145,15 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
     'Сомневаешься → menu:false.',
   ].join(' ');
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0, max_tokens: 150,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: system },
-          // Choices appear at the END of long responses — take tail, not head.
-          { role: 'user', content: t.length > 3000 ? t.slice(0, 1000) + '\n[...]\n' + t.slice(-2000) : t },
-        ],
-      }),
+    const raw = await openrouterClassify({
+      orKey, timeoutMs, maxTokens: 150,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: system },
+        // Choices appear at the END of long responses — take tail, not head.
+        { role: 'user', content: t.length > 3000 ? t.slice(0, 1000) + '\n[...]\n' + t.slice(-2000) : t },
+      ],
     });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const raw = data?.choices?.[0]?.message?.content || '';
     const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
     if (obj?.menu !== true || !Array.isArray(obj.labels)) return null;
     const labels = obj.labels.map(s => String(s || '').trim()).filter(Boolean).slice(0, 4);
@@ -2221,24 +2169,15 @@ async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {})
   if (t.length < 80) return { incomplete: false };
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return { incomplete: false };
-  const model = BUTTON_DETECT_MODEL;
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0, max_tokens: 40,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: 'Classify AI assistant responses. Reply only with compact JSON.' },
-          { role: 'user', content: `Last ~2000 chars of agent response:\n${t.slice(-2000)}\n\nIs this response semantically INCOMPLETE — the agent is still working, watching logs, waiting for a background process, said "checking", "tail", "watching", "started X", "waiting for CI/PR"?\n\nJSON: {"incomplete":bool,"auto_continue":bool,"reason":"still_working|pr_pending|ci_pending|waiting_user|done"}\nauto_continue=false if waiting for an external event requiring human action (PR review, CI fix, OAuth). Something running in background but no human action needed → auto_continue=true.` },
-        ],
-      }),
+    const raw = await openrouterClassify({
+      orKey, timeoutMs, maxTokens: 40,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'Classify AI assistant responses. Reply only with compact JSON.' },
+        { role: 'user', content: `Last ~2000 chars of agent response:\n${t.slice(-2000)}\n\nIs this response semantically INCOMPLETE — the agent is still working, watching logs, waiting for a background process, said "checking", "tail", "watching", "started X", "waiting for CI/PR"?\n\nJSON: {"incomplete":bool,"auto_continue":bool,"reason":"still_working|pr_pending|ci_pending|waiting_user|done"}\nauto_continue=false if waiting for an external event requiring human action (PR review, CI fix, OAuth). Something running in background but no human action needed → auto_continue=true.` },
+      ],
     });
-    if (!res.ok) return { incomplete: false };
-    const data = await res.json();
-    const raw = data?.choices?.[0]?.message?.content || '';
     const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
     return { incomplete: !!obj.incomplete, auto_continue: !!obj.auto_continue, reason: obj.reason || 'unknown' };
   } catch (e) {
