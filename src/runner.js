@@ -1445,10 +1445,9 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 // Map<laneKey(string), Promise> — the tail of each transcript lane. laneKey is
 // `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
-// Outer per-chat serialization gate. Ensures only ONE task per Telegram chat runs at a time,
-// even when the tasks belong to different sessions. Keyed by String(chatId). Internal/system
-// calls with chatId=0 are excluded so they never block each other.
-const perChatQueue = new Map();
+// Per-chat serialization (layer 1) lives in runner-chat-queue.js so it is
+// unit-testable without pulling in the whole runner (same pattern as runner-lanes.js).
+const chatQueue = require('./runner-chat-queue');
 
 // Session serialization lane + per-profile cap primitives live in a pure module
 // (runner-lanes.js) so the REAL admission logic is vendorable/testable in staging
@@ -1837,15 +1836,6 @@ function runTask(opts) {
   if (currentExecution()) queueKey = _laneKey(opts.sessionId, opts.user.id);
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
-  const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
-  // Per-chat outer gate: if a different session is running in the same Telegram chat,
-  // wait for it to finish first. chatId=0 is excluded (internal/system callers).
-  const _chatLaneKey = opts.user.id ? String(opts.user.id) : null;
-  const chatOuterPrev = (_chatLaneKey && perChatQueue.has(_chatLaneKey)) ? perChatQueue.get(_chatLaneKey) : null;
-  const prev = chatOuterPrev
-    ? Promise.allSettled([sessionPrev, chatOuterPrev]).then(() => {})
-    : sessionPrev;
-
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
   savePendingTask(opts.taskId, {
     phase: 'queued', activitySessionId: opts.activitySessionId, taskId: opts.taskId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
@@ -1864,7 +1854,7 @@ function runTask(opts) {
     return status.finish(text).then(() => ({ deferred: true }));
   }
   if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
-  else if (chatLanes.has(queueKey) || chatOuterPrev) status.waiting(
+  else if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
@@ -1876,36 +1866,45 @@ function runTask(opts) {
 
   let releaseAdmission;
   let executionStarted = false;
-  const current = prev.catch(() => {}).then(async () => {
+
+  // chatQueue.enqueue serializes at the per-chat level (layer 1). Inside the fn,
+  // we handle the session-lane (layer 2) and then run the actual work.
+  const current = chatQueue.enqueue(opts.user.id, () => {
     if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
-    // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
-    // profile's 4-slot cap waits here without holding a scarce global slot.
-    // Only show "waiting for slot" when the slot isn't immediately available —
-    // resolving at once means there's no real queue, so stay silent.
-    let capAcquired = false;
-    const capP = _acquireKeySlot(capKey);
-    capP.then(() => { capAcquired = true; });
-    await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
-    if (!capAcquired && !maintenance.paused()) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
-    await capP;
-    try {
-      // Global admission control: wait for a free slot + enough RAM before we
-      // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
-      await _waitForRam();
-      releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.'));
+    // Session lane: serialize messages within the same session (transcript protection).
+    const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
+    const work = sessionPrev.catch(() => {}).then(async () => {
+      if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
+      // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
+      // profile's 4-slot cap waits here without holding a scarce global slot.
+      // Only show "waiting for slot" when the slot isn't immediately available —
+      // resolving at once means there's no real queue, so stay silent.
+      let capAcquired = false;
+      const capP = _acquireKeySlot(capKey);
+      capP.then(() => { capAcquired = true; });
+      await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
+      if (!capAcquired && !maintenance.paused()) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
+      await capP;
       try {
-        if (currentExecution() && !currentExecution().start(opts.taskId)) return { deferred: true };
-        executionStarted = true;
-        await status.finish('🧠 Начинаю работу…');
-        const result = await _runTask(opts);
-        currentExecution()?.complete(opts.taskId);
-        return result;
+        // Global admission control: wait for a free slot + enough RAM before we
+        // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
+        await _waitForRam();
+        releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.'));
+        try {
+          if (currentExecution() && !currentExecution().start(opts.taskId)) return { deferred: true };
+          executionStarted = true;
+          await status.finish('🧠 Начинаю работу…');
+          const result = await _runTask(opts);
+          currentExecution()?.complete(opts.taskId);
+          return result;
+        } finally {
+          _releaseSlot();
+        }
       } finally {
-        _releaseSlot();
+        _releaseKeySlot(capKey);
       }
-    } finally {
-      _releaseKeySlot(capKey);
-    }
+    });
+    return work;
   }).catch(async err => {
     currentExecution()?.interrupt(opts.taskId, true);
     const msg = err.message === 'capacity_wait_timeout'
@@ -1919,7 +1918,6 @@ function runTask(opts) {
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
   chatLanes.set(queueKey, current);
-  if (_chatLaneKey) perChatQueue.set(_chatLaneKey, current);
   if (currentExecution()) intentRuns.set(opts.taskId, current);
   current.finally(() => {
     try {
@@ -1932,7 +1930,6 @@ function runTask(opts) {
     } finally { clearPendingTask(opts.taskId); releaseAdmission?.(); intentRuns.delete(opts.taskId); }
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
-    if (_chatLaneKey && perChatQueue.get(_chatLaneKey) === current) perChatQueue.delete(_chatLaneKey);
   });
   // Await retries for callers, but never hold their predecessor lane/lease.
   return current.then(result => result?.queuedRetry || result);
