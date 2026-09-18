@@ -2795,7 +2795,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           } else if (event.type === 'error') {
             const errMsg = event.error?.data?.message || event.error?.message || JSON.stringify(event.error);
             console.warn(`[${taskId}] opencode error event:`, errMsg);
-            fullOutput.text += `\n❌ OpenCode ошибка: ${errMsg}`;
+            codexErrorMsg = errMsg;
+            const isRateLimit = /429|rate.?limit|too many requests/i.test(errMsg);
+            const userErrMsg = isRateLimit
+              ? `⚠️ OpenCode: превышен лимит запросов к модели. Переключись на Claude: /switch2klod`
+              : `❌ OpenCode ошибка: ${errMsg}`;
+            fullOutput.text += `\n${userErrMsg}`;
             lastAssistantMsg = fullOutput.text.trim();
             scheduleStream();
           }
@@ -2919,7 +2924,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         processSignal = signal;
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
-        if (code !== 0) {
+        if (code !== null && code !== 0) {
           console.error(`[${taskId}] claude exited with code ${code}`);
           exitCode = code;
         }
@@ -3081,8 +3086,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const incomplete = interrupted || !answer;
   let result = answer;
   if (incomplete) {
-    const reason = processSignal ? `сигнал ${processSignal}`
-      : exitCode !== 0 ? `код ${exitCode}` : 'нет подтверждённого финального ответа';
+    const reason = processSignal
+      ? (restartShutdown ? 'сервер перезапускается' : `сигнал ${processSignal}`)
+      : exitCode !== 0 ? `код ${exitCode}`
+      : processError ? `ошибка запуска`
+      : 'нет подтверждённого финального ответа';
     result = `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
     console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
   }
