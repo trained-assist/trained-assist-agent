@@ -1721,14 +1721,17 @@ function runTask(opts) {
   let releaseAdmission;
   let executionStarted = false;
   const current = prev.catch(() => {}).then(async () => {
-    // Only show waiting message if the server is actually paused. For normal
-    // per-profile cap / global slot waits, the lane message from above (line ~1711)
-    // is sufficient — emitting an extra "waiting for slot" on every task was
-    // confusing users who had no actual queue.
     if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
     // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
     // profile's 4-slot cap waits here without holding a scarce global slot.
-    await _acquireKeySlot(capKey);
+    // Only show "waiting for slot" when the slot isn't immediately available —
+    // resolving at once means there's no real queue, so stay silent.
+    let capAcquired = false;
+    const capP = _acquireKeySlot(capKey);
+    capP.then(() => { capAcquired = true; });
+    await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
+    if (!capAcquired && !maintenance.paused()) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
+    await capP;
     try {
       // Global admission control: wait for a free slot + enough RAM before we
       // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
