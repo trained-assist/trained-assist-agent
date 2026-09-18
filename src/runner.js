@@ -2574,6 +2574,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? [process.env.OPENCODE_BIN || 'opencode', [
         'run',
         '--format', 'json',
+        '--auto',
         '-m', opencodeModel,
         systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
       ]]
