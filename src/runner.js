@@ -1383,11 +1383,16 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   // both when a token is saved (revoke it) and when no token exists (idempotent
   // "HH не подключён"). Slash form bypasses verifyQuickAnswerIntent because
   // task starts with '/'.
+  // revokeService returns null when serviceName isn't in its ALIASES map,
+  // 'not_found' when the file doesn't exist, or the service key on success —
+  // treat null the same as not_found so a future ALIASES gap can't lie about
+  // a successful revoke.
   if (userId && HH_DISCONNECT_INTENT.test(task)) {
     const revoked = revokeService(userId, 'hh');
-    return revoked === 'not_found'
-      ? '⚠️ HeadHunter не подключён. Скажи /hh_connect чтобы добавить.'
-      : '✅ HeadHunter отключён — токен удалён. Чтобы подключить снова: /hh_connect';
+    if (revoked === null || revoked === 'not_found') {
+      return '⚠️ HeadHunter не подключён. Скажи /hh_connect чтобы добавить.';
+    }
+    return '✅ HeadHunter отключён — токен удалён. Чтобы подключить снова: /hh_connect';
   }
 
   return null;

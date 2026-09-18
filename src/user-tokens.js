@@ -265,6 +265,7 @@ function revokeService(userId, serviceName) {
     getcourse: 'getcourse', геткурс: 'getcourse',
     gdrive: 'gdrive', гугл: 'gdrive', google: 'gdrive',
     dadata: 'dadata',
+    hh: 'hh', хх: 'hh', headhunter: 'hh',
   };
   const key = ALIASES[serviceName.toLowerCase().replace(/[^a-zа-яё]/gi, '')];
   if (!key) return null;
