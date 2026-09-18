@@ -329,3 +329,37 @@ describe('hhStatus — HH token expiry awareness', () => {
     expect(result).toContain('нет метаданных');
   });
 });
+
+describe('HH_DISCONNECT_INTENT regex — /hh_disconnect + natural-language matches', () => {
+  // The regex lives in src/runner.js, not hh-quick.js, so we read the source
+  // and exec the const declaration. Keeps the test in sync with the regex
+  // without pulling in the whole runner module (heavy side-effects on require).
+  const runnerSrc = require('fs').readFileSync(
+    require('path').join(__dirname, '../../src/runner.js'),
+    'utf8'
+  );
+  const m = runnerSrc.match(/const HH_DISCONNECT_INTENT\s*=\s*(\/[^;]+\/[gimsuy]*);/);
+  if (!m) throw new Error('HH_DISCONNECT_INTENT not found in runner.js — update this test');
+  const HH_DISCONNECT_INTENT = new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), m[1].slice(m[1].lastIndexOf('/') + 1));
+
+  it('slash /hh_disconnect matches', () => {
+    expect(HH_DISCONNECT_INTENT.test('/hh_disconnect')).toBe(true);
+  });
+
+  it.each([
+    'отключи hh', 'отключить hh', 'отключи хх', 'отключи headhunter',
+    'удали hh', 'удали headhunter',
+    'hh отключи', 'hh удали',
+    'сброс hh авторизации', 'сброс headhunter',
+    'выключи hh', 'reset hh',
+  ])('natural language matches: %s', (msg) => {
+    expect(HH_DISCONNECT_INTENT.test(msg)).toBe(true);
+  });
+
+  it.each([
+    '/hh_status', '/hh_connect', '/hh_vacancies', '/hh_send',
+    'случайный текст', 'подключи hh', 'покажи вакансии',
+  ])('does NOT match: %s', (msg) => {
+    expect(HH_DISCONNECT_INTENT.test(msg)).toBe(false);
+  });
+});
