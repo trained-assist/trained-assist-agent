@@ -36,6 +36,31 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
 
+// Anthropic pricing per 1M tokens (USD), updated August 2025
+const MODEL_PRICING = {
+  opus:   { in: 15.00, out: 75.00, cacheRead: 1.50,  cacheWrite: 18.75 },
+  sonnet: { in: 3.00,  out: 15.00, cacheRead: 0.30,  cacheWrite: 3.75  },
+  haiku:  { in: 0.80,  out: 4.00,  cacheRead: 0.08,  cacheWrite: 1.00  },
+};
+
+function formatCostFooter(usage, model) {
+  if (!usage) return '';
+  const m = (model || '').toLowerCase();
+  const price = m.includes('opus') ? MODEL_PRICING.opus
+              : m.includes('haiku') ? MODEL_PRICING.haiku
+              : MODEL_PRICING.sonnet;
+  const inp = usage.input_tokens || 0;
+  const out = usage.output_tokens || 0;
+  const cr  = usage.cache_read_input_tokens || 0;
+  const cw  = usage.cache_creation_input_tokens || 0;
+  const cost = (inp * price.in + out * price.out + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000;
+  const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const modelShort = model ? model.replace(/^claude-/, '') : '?';
+  const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
+  const cacheStr = cr > 0 ? ` · кэш ${fmt(cr)}` : '';
+  return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ${modelShort} · ~${costStr}\``;
+}
+
 // Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
 // the last complete assistant turn; only as a last resort the whole accumulated stream
 // (the scratchpad). This stops "Let me confirm… Now writing…" narration leaking as final.
@@ -2653,6 +2678,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let processSignal = null;
   let processError = null;
   let claudeUsage = null;   // usage from result event
+  let claudeModel = null;   // model name from assistant event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
   let codexErrorMsg = null;  // last turn.failed / error message from codex/opencode
@@ -2797,6 +2823,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
           }
         } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+          if (event.message?.model && !claudeModel) claudeModel = event.message.model;
           let turnText = '';
           for (const block of event.message.content) {
             if (block.type === 'text') {
@@ -3068,7 +3095,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       cache_creation_input_tokens: claudeUsage.cache_creation_input_tokens || 0,
     });
   }
-  const final = result.slice(-MAX_MSG_LEN);
+  const costFooter = formatCostFooter(claudeUsage, claudeModel);
+  const final = (result + costFooter).slice(-MAX_MSG_LEN);
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
   // сессия уже deep (проработка только что и была). После clarify — показываем (чтобы
