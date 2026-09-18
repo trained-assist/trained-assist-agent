@@ -269,4 +269,205 @@ function hhStatus(userId) {
 // Export cache invalidation for tests
 function _clearCache() { _cache.clear(); }
 
-module.exports = { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, _clearCache, readActiveVacancy: _readActiveVacancy };
+// ── Action handlers (with confirm flow for safety) ───────────────────────────
+
+const PENDING_TTL_MS = 5 * 60 * 1000; // 5 min — anything older is dropped silently
+
+function _readPending(workDir, key) {
+  if (!workDir) return null;
+  const p = readHhContext(workDir, 'hh', key)?.value;
+  if (!p) return null;
+  if (p.expires_at && new Date(p.expires_at) < new Date()) {
+    // Expired — clear and return null
+    writeHhContext(workDir, 'hh', key, null).catch(() => {});
+    return null;
+  }
+  return p;
+}
+
+// /hh_send <neg_id> <text> — show preview, save pending_send, await /hh_send_yes
+async function hhSendPreview(userId, workDir, task) {
+  const token = readHhToken(userId);
+  if (!token?.access_token) return '⚠️ HH не подключён. Сначала /hh_status или /hh_vacancies.';
+  if (!workDir) return '⚠️ Нет рабочей директории.';
+
+  const m = task.match(/^\/hh_send\s+(\S+)\s+([\s\S]+?)\s*$/i);
+  if (!m) return '⚠️ Формат: /hh_send <id_кандидата> <текст сообщения>\nПример: /hh_send 12345678 Привет! Приглашаю на интервью завтра в 15:00.';
+
+  const [, negId, text] = m;
+  const vacancy = _readActiveVacancy(workDir);
+  if (!vacancy) return '⚠️ Вакансия не выбрана. Сначала /hh_vacancies.';
+
+  await writeHhContext(workDir, 'hh', 'pending_send', {
+    negotiation_id: negId,
+    message: text,
+    vacancy_id: vacancy.id,
+    vacancy_title: vacancy.title,
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + PENDING_TTL_MS).toISOString(),
+  });
+
+  return [
+    '📨 Preview сообщения:',
+    '',
+    `Кандидат (negotiation): ${negId}`,
+    `Вакансия: ${vacancy.title}`,
+    '',
+    '— Текст —',
+    text,
+    '— Конец —',
+    '',
+    '✅ Отправь /hh_send_yes чтобы отправить.',
+    '🚫 /hh_send_no — отменить.',
+    `(действует 5 мин)`,
+  ].join('\n');
+}
+
+// /hh_send_yes — execute pending send via HH API
+async function hhSendConfirm(userId, workDir) {
+  if (!workDir) return '⚠️ Нет рабочей директории.';
+  const pending = _readPending(workDir, 'pending_send');
+  if (!pending) return '⚠️ Нет отложенной отправки. Сначала /hh_send.';
+
+  const token = readHhToken(userId);
+  if (!token?.access_token) return '⚠️ HH не подключён.';
+
+  try {
+    await hhPost(`/negotiations/${pending.negotiation_id}/messages`, token, {
+      message: pending.message,
+    });
+    await writeHhContext(workDir, 'hh', 'pending_send', null).catch(() => {});
+    return `✅ Сообщение отправлено кандидату ${pending.negotiation_id} (вакансия «${pending.vacancy_title || '?'}»).`;
+  } catch (e) {
+    return `❌ Не удалось отправить: ${e.message}`;
+  }
+}
+
+async function hhSendCancel(userId, workDir) {
+  if (!workDir) return '⚠️ Нет рабочей директории.';
+  await writeHhContext(workDir, 'hh', 'pending_send', null).catch(() => {});
+  return '🚫 Отправка отменена.';
+}
+
+// /hh_reject [neg_id ...] — dry-run listing of candidates to reject, save pending_reject
+async function hhRejectDryRun(userId, workDir, task) {
+  const token = readHhToken(userId);
+  if (!token?.access_token) return '⚠️ HH не подключён. Сначала /hh_status или /hh_vacancies.';
+  if (!workDir) return '⚠️ Нет рабочей директории.';
+
+  const vacancy = _readActiveVacancy(workDir);
+  if (!vacancy) return '⚠️ Вакансия не выбрана. Сначала /hh_vacancies.';
+
+  // Parse optional IDs from command: /hh_reject id1 id2 id3 (whitespace-separated)
+  const m = task.match(/^\/hh_reject(?:\s+(.+))?$/i);
+  const explicitIds = m?.[1]?.trim().split(/\s+/).filter(Boolean) || [];
+
+  let candidates = [];
+  try {
+    if (explicitIds.length) {
+      // Resolve each id → fetch single negotiation to get name + current state
+      candidates = await Promise.all(explicitIds.map(async (id) => {
+        try {
+          const neg = await hhFetch(`/negotiations/${id}`, token);
+          return {
+            id,
+            name: [neg.resume?.last_name, neg.resume?.first_name].filter(Boolean).join(' ') || '?',
+            state: neg.state?.name || neg.state?.id || '?',
+          };
+        } catch {
+          return { id, name: '?', state: 'NOT_FOUND' };
+        }
+      }));
+    } else {
+      // No IDs → list candidates in "response" stage (newest first) — these are the usual reject targets
+      const data = await _cached(`reject-targets:${userId}:${vacancy.id}`, () =>
+        hhFetch(`/negotiations/response?vacancy_id=${vacancy.id}&per_page=20&page=0`, token),
+      );
+      candidates = (data.items || []).map(neg => ({
+        id: neg.id,
+        name: [neg.resume?.last_name, neg.resume?.first_name].filter(Boolean).join(' ') || '?',
+        state: 'Новый отклик',
+      }));
+    }
+  } catch (e) {
+    return `⚠️ Не удалось получить кандидатов: ${e.message}`;
+  }
+
+  if (!candidates.length) {
+    return explicitIds.length
+      ? '⚠️ Ни один из указанных id не найден.'
+      : `💼 ${vacancy.title}\n\nНовых откликов нет — нечего отклонять.`;
+  }
+
+  await writeHhContext(workDir, 'hh', 'pending_reject', {
+    vacancy_id: vacancy.id,
+    vacancy_title: vacancy.title,
+    candidates,
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + PENDING_TTL_MS).toISOString(),
+  });
+
+  const lines = candidates.map((c, i) => `  ${i + 1}. ${c.name} (id: ${c.id}, ${c.state})`);
+  return [
+    `🚫 Dry-run: будет отклонено ${candidates.length} кандидатов`,
+    `Вакансия: ${vacancy.title}`,
+    '',
+    ...lines,
+    '',
+    '⚠️ Это необратимо — кандидат получит стандартный шаблон отказа.',
+    '✅ Отправь /hh_reject_yes чтобы выполнить.',
+    '🚫 /hh_reject_no — отменить.',
+    `(действует 5 мин)`,
+  ].join('\n');
+}
+
+// /hh_reject_yes — execute mass reject via HH API
+async function hhRejectConfirm(userId, workDir) {
+  if (!workDir) return '⚠️ Нет рабочей директории.';
+  const pending = _readPending(workDir, 'pending_reject');
+  if (!pending) return '⚠️ Нет отложенного отклонения. Сначала /hh_reject.';
+
+  const token = readHhToken(userId);
+  if (!token?.access_token) return '⚠️ HH не подключён.';
+
+  const results = { ok: 0, fail: 0, errors: [] };
+  for (const c of pending.candidates) {
+    try {
+      await hhPost(`/negotiations/${c.id}/discard`, token, {});
+      results.ok++;
+    } catch (e) {
+      results.fail++;
+      if (results.errors.length < 3) results.errors.push(`${c.id}: ${e.message}`);
+    }
+  }
+  await writeHhContext(workDir, 'hh', 'pending_reject', null).catch(() => {});
+
+  const summary = [`📊 Отклонено: ${results.ok}/${pending.candidates.length}`];
+  if (results.fail) {
+    summary.push(`❌ Ошибок: ${results.fail}`);
+    if (results.errors.length) summary.push('  ' + results.errors.join('\n  '));
+  }
+  return summary.join('\n');
+}
+
+async function hhRejectCancel(userId, workDir) {
+  if (!workDir) return '⚠️ Нет рабочей директории.';
+  await writeHhContext(workDir, 'hh', 'pending_reject', null).catch(() => {});
+  return '🚫 Отклонение отменено.';
+}
+
+// /hh_evaluate — fall through to Claude (it has the hh_batch_evaluate tool with full retry/notify logic).
+// Returning null from getQuickAnswer lets Claude run with the slash command intact, so its tools fire.
+async function hhBatchEvaluate(userId, workDir) { return null; }
+
+// /hh_scan — same pattern: Claude has hh_proactive_search tool.
+async function hhManualScan(userId, workDir) { return null; }
+
+module.exports = {
+  hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage,
+  hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus,
+  hhSendPreview, hhSendConfirm, hhSendCancel,
+  hhRejectDryRun, hhRejectConfirm, hhRejectCancel,
+  hhBatchEvaluate, hhManualScan,
+  _clearCache, readActiveVacancy: _readActiveVacancy,
+};
