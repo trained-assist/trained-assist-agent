@@ -89,6 +89,7 @@ function isScratchpadFallback(claudeResult, lastAssistantMsg) {
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
+const MAX_SOFT_CONTINUATIONS = 3; // auto-continue after "still working" response, max 3 rounds
 const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth 1 retry
 const MAX_QUICK_RETRIES = 1; // cap so a repeatable crash doesn't loop forever
 
@@ -1466,6 +1467,22 @@ async function _waitForRam() {
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
 const activeTimers = new Map();
 
+// Soft-incomplete continuation state.
+// Map<username, { timer: NodeJS.Timeout, chatId, msgId, sessionId }>
+const pendingContinuations = new Map();
+
+function setPendingContinuation(username, data, timer) {
+  const existing = pendingContinuations.get(username);
+  if (existing?.timer) clearTimeout(existing.timer);
+  pendingContinuations.set(username, { ...data, timer });
+}
+
+function clearPendingContinuation(username) {
+  const entry = pendingContinuations.get(username);
+  if (entry?.timer) clearTimeout(entry.timer);
+  pendingContinuations.delete(username);
+}
+
 /**
  * Extend the timeout for a running task by another CLAUDE_TIMEOUT_MS.
  * Called from server.js POST /tasks/:taskId/extend-timeout which the
@@ -2194,6 +2211,37 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
+async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {}) {
+  const t = String(text || '').trim();
+  if (t.length < 80) return { incomplete: false };
+  const orKey = apiKey || process.env.OPENROUTER_API_KEY;
+  if (!orKey) return { incomplete: false };
+  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, temperature: 0, max_tokens: 40,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'Classify AI assistant responses. Reply only with compact JSON.' },
+          { role: 'user', content: `Last ~2000 chars of agent response:\n${t.slice(-2000)}\n\nIs this response semantically INCOMPLETE — the agent is still working, watching logs, waiting for a background process, said "checking", "tail", "watching", "started X", "waiting for CI/PR"?\n\nJSON: {"incomplete":bool,"auto_continue":bool,"reason":"still_working|pr_pending|ci_pending|waiting_user|done"}\nauto_continue=false if waiting for an external event requiring human action (PR review, CI fix, OAuth). Something running in background but no human action needed → auto_continue=true.` },
+        ],
+      }),
+    });
+    if (!res.ok) return { incomplete: false };
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content || '';
+    const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
+    return { incomplete: !!obj.incomplete, auto_continue: !!obj.auto_continue, reason: obj.reason || 'unknown' };
+  } catch (e) {
+    console.warn('[soft-incomplete]', e.message);
+    return { incomplete: false };
+  }
+}
+
 async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
@@ -2217,6 +2265,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   });
 
   fs.mkdirSync(user.workDir, { recursive: true });
+  clearPendingContinuation(user.username); // cancel any pending soft-continuation from previous response
   initLog(user.workDir);
   ensureProfileLayoutSkill(user.workDir, user.username);
   ensureSkillDir(user.workDir, 'prompts', 'Промпты и критерии, специфичные для этого профиля. Перезаписывают общие настройки из flexi-consult/.');
@@ -2795,7 +2844,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           } else if (event.type === 'error') {
             const errMsg = event.error?.data?.message || event.error?.message || JSON.stringify(event.error);
             console.warn(`[${taskId}] opencode error event:`, errMsg);
-            fullOutput.text += `\n❌ OpenCode ошибка: ${errMsg}`;
+            codexErrorMsg = errMsg;
+            const isRateLimit = /429|rate.?limit|too many requests/i.test(errMsg);
+            const userErrMsg = isRateLimit
+              ? `⚠️ OpenCode: превышен лимит запросов к модели. Переключись на Claude: /switch2klod`
+              : `❌ OpenCode ошибка: ${errMsg}`;
+            fullOutput.text += `\n${userErrMsg}`;
             lastAssistantMsg = fullOutput.text.trim();
             scheduleStream();
           }
@@ -2919,7 +2973,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         processSignal = signal;
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
-        if (code !== 0) {
+        if (code !== null && code !== 0) {
           console.error(`[${taskId}] claude exited with code ${code}`);
           exitCode = code;
         }
@@ -3081,8 +3135,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const incomplete = interrupted || !answer;
   let result = answer;
   if (incomplete) {
-    const reason = processSignal ? `сигнал ${processSignal}`
-      : exitCode !== 0 ? `код ${exitCode}` : 'нет подтверждённого финального ответа';
+    const reason = processSignal
+      ? (restartShutdown ? 'сервер перезапускается' : `сигнал ${processSignal}`)
+      : exitCode !== 0 ? `код ${exitCode}`
+      : processError ? `ошибка запуска`
+      : 'нет подтверждённого финального ответа';
     result = `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
     console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
   }
@@ -3176,6 +3233,38 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     );
   } else {
     await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra);
+  }
+
+  // Soft-incomplete: if task looks unfinished, schedule auto-continuation after 3 min.
+  // Fires async after delivery — does not block the response.
+  if (!incomplete && !internalGtd && chatId && msgId && result && continuationCount < MAX_SOFT_CONTINUATIONS) {
+    classifyTaskCompleteness(result, secrets.OPENROUTER_API_KEY).then(async (cls) => {
+      if (!cls.incomplete || !cls.auto_continue) return;
+      const delayMs = 3 * 60 * 1000;
+      const footer = `\n\n⏱ Выглядит незавершённым. Продолжу через ~3 мин — напишите что-нибудь, чтобы отменить.`;
+      await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}${footer}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      console.log(`[soft-incomplete] username=${user.username} reason=${cls.reason} round=${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
+      const timer = setTimeout(async () => {
+        if (!pendingContinuations.has(user.username)) return; // cancelled by new message
+        pendingContinuations.delete(user.username);
+        await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        runTask({
+          taskId: `${user.username}-${Date.now()}`,
+          user,
+          task: `[АВТОПРОДОЛЖЕНИЕ ${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}] Предыдущий ответ выглядел незавершённым (${cls.reason}). Посмотри историю сессии — там видно что сделано. Продолжи работу. Оригинальная задача:\n${task}`,
+          context: '',
+          sessionId: activeSessionId,
+          forceClaude: true,
+          initialMsgId: null,
+          pinnedMsgId,
+          secrets,
+          continuationCount: continuationCount + 1,
+          internalGtd,
+          engine,
+        });
+      }, delayMs);
+      setPendingContinuation(user.username, { chatId, msgId, sessionId: activeSessionId }, timer);
+    }).catch(() => {});
   }
 
   }
@@ -3325,6 +3414,7 @@ module.exports = {
   interruptForRestart,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  clearPendingContinuation,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
   // Exported for pin-state tests only
