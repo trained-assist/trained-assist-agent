@@ -2736,6 +2736,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
   let streamTimer = null;
   let heartbeatTimer = null;
+  let typingTimer = null;   // periodic sendChatAction: typing during active streaming
   let outputStarted = false;
   let lastSent = '';
   let lineBuffer = '';
@@ -2764,6 +2765,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     progressStopped = true;
     clearInterval(streamTimer);
     clearInterval(heartbeatTimer);
+    clearInterval(typingTimer); typingTimer = null;
     await Promise.allSettled([...progressEdits]);
   }
 
@@ -2785,6 +2787,17 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (streamTimer || progressStopped) return;
     outputStarted = true;
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    // sendChatAction: typing every 4s — keeps "typing..." indicator alive in Telegram
+    // (indicator expires after ~5s, so refresh before it disappears)
+    if (msgId && !typingTimer) {
+      const sendTyping = () => fetch(`${TG_API}/bot${BOT_TOKEN}/sendChatAction`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
+        signal: AbortSignal.timeout(5_000),
+      }).catch(() => {});
+      sendTyping();
+      typingTimer = setInterval(sendTyping, 4_000);
+    }
     let streamEditInProgress = false;
     streamTimer = setInterval(async () => {
       if (streamEditInProgress) return;
@@ -2796,8 +2809,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
           : {};
         if (snippet) {
-          // Show text + current tool activity (always updating so user sees seconds ticking)
-          const activitySuffix = lastActivity ? `\n\n${lastActivity} (${secs}с)` : ` (${secs}с)`;
+          // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
+          const activitySuffix = lastActivity ? `\n\n⚡ ${lastActivity} (${secs}с)` : `\n\n⚡ Пишу… (${secs}с)`;
           const newText = `🧠 ${snippet}${activitySuffix}`;
           if (newText === lastSent && !stopExtra.reply_markup) return;
           lastSent = newText;
@@ -2867,7 +2880,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             lastActivity = formatToolActivity('Bash', { command: event.item.command });
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
             }
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
@@ -2906,7 +2919,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
               lastActivity = formatToolActivity(block.name, block.input);
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
-                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${lastActivity} (${secs}с)`).catch(() => {});
+                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
               }
             }
           }
