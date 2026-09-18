@@ -3253,12 +3253,16 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (!incomplete && !internalGtd && chatId && msgId && result && continuationCount < MAX_SOFT_CONTINUATIONS) {
     classifyTaskCompleteness(result, secrets.OPENROUTER_API_KEY).then(async (cls) => {
       if (!cls.incomplete || !cls.auto_continue) return;
+      // Race guard: user may have sent a new message while classifier was running (~1s).
+      // If a task is already active, skip — the new task cancels the need for continuation.
+      if (isTaskRunning(user.username)) return;
       const delayMs = 3 * 60 * 1000;
       const footer = `\n\n⏱ Выглядит незавершённым. Продолжу через ~3 мин — напишите что-нибудь, чтобы отменить.`;
       await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}${footer}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       console.log(`[soft-incomplete] username=${user.username} reason=${cls.reason} round=${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
       const timer = setTimeout(async () => {
         if (!pendingContinuations.has(user.username)) return; // cancelled by new message
+        if (isTaskRunning(user.username)) { pendingContinuations.delete(user.username); return; } // task started between check and fire
         pendingContinuations.delete(user.username);
         await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
         runTask({
