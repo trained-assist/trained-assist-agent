@@ -501,7 +501,9 @@ async function runHhScoringForUser(username) {
     const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3, vacancyId: vacancy.id });
     if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
 
-    const proactiveScored = await scoreUnscoredProactiveCandidates(username);
+    const proactiveScored = await scoreUnscoredProactiveCandidates(username, {
+      refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
+    });
     if (proactiveScored > 0) console.log(`[hh-bg] enriched ${proactiveScored} cold-search candidates for ${username}`);
   } catch (e) {
     console.error(`[hh-bg] error for ${username}:`, e.message);
@@ -2486,7 +2488,9 @@ ${expLines || '—'}
       if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
       const workDir = path.join(BASE_USERS_DIR, username);
       try {
-        const result = await runProactiveSearch(username, workDir);
+        const result = await runProactiveSearch(username, workDir, {
+          refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
+        });
         return json(res, 200, result);
       } catch (e) {
         return json(res, 500, { error: e.message });
