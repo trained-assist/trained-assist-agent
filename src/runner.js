@@ -2624,6 +2624,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let claudeUsage = null;   // usage from result event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
+  let codexErrorMsg = null;  // last turn.failed / error message from codex/opencode
 
   // Drain in-flight progress edits before posting a terminal message.
   const progressEdits = new Set();
@@ -2749,6 +2750,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             }
           } else if (event.type === 'turn.failed' || event.type === 'error') {
             console.warn(`[${taskId}] codex ${event.type}:`, JSON.stringify(event).slice(0, 500));
+            codexErrorMsg = event.error?.message || event.message || codexErrorMsg;
           }
           continue;
         }
@@ -2955,7 +2957,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // surfaced immediately (a slow failure is much more likely to be about the task itself).
   if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
     const crashDurationMs = Date.now() - thinkingStart;
-    if (!currentExecution() && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
+    const isUsageLimit = codexErrorMsg && /usage limit|purchase more credits/i.test(codexErrorMsg);
+    if (!isUsageLimit && !currentExecution() && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
@@ -2975,7 +2978,13 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       });
       return { queuedRetry };
     }
-    const crashMsg = retryCount > 0
+    // Surface the underlying engine error when available (e.g. Codex usage limit).
+    const usageLimitHit = codexErrorMsg && /usage limit|purchase more credits/i.test(codexErrorMsg);
+    const crashMsg = usageLimitHit
+      ? `⛔ ${engine === 'codex' ? 'Codex' : 'OpenCode'}: ${codexErrorMsg}\n\nПереключись на другой движок: /switch2klod (Claude) или /switch2opencode (OpenCode)`
+      : codexErrorMsg && (engine === 'codex' || engine === 'opencode')
+      ? `⚠️ ${engine === 'codex' ? 'Codex' : 'OpenCode'} завершился с ошибкой: ${codexErrorMsg}`
+      : retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`
       : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
