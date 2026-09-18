@@ -221,10 +221,72 @@ function hhStylePage(userId) {
   return `✍️ Страница обновления стиля общения:\n${hhBase()}/hh/style?username=${encodeURIComponent(userId)}${tokenParam}\n\nОткрой ссылку и вставь примеры своих сообщений кандидатам — извлеку правила стиля и сохраню.`;
 }
 
-// "/hh статус" — visible state dashboard: vacancy + ATS config + background scoring
+// HH OAuth policy: access_token TTL is 14 days. refresh_token rotates and lasts longer.
+// We don't persist expires_at from the HH /oauth/token response today — compute expiry
+// from saved_at + 14d as a safe lower bound. If anyone starts writing expires_at later,
+// we'll pick it up automatically (priority over saved_at).
+const HH_TOKEN_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
+const HH_TOKEN_EXPIRING_SOON_DAYS = 3;
+
+// Inspect a token blob and return { state, daysLeft, expiresAt }.
+// state ∈ {valid, expiring, expired, unknown}. Caller renders a line per state.
+function _tokenExpiry(token) {
+  if (token.expires_at) {
+    const exp = new Date(token.expires_at);
+    if (!Number.isNaN(exp.getTime())) return _evaluateExpiry(exp);
+  }
+  if (token.saved_at) {
+    const saved = new Date(token.saved_at);
+    if (!Number.isNaN(saved.getTime())) {
+      const exp = new Date(saved.getTime() + HH_TOKEN_LIFETIME_MS);
+      return _evaluateExpiry(exp);
+    }
+  }
+  return { state: 'unknown' };
+}
+
+function _evaluateExpiry(expiresAt) {
+  const ms = expiresAt.getTime() - Date.now();
+  const daysLeft = Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
+  if (ms <= 0) return { state: 'expired', daysLeft: 0, expiresAt };
+  if (daysLeft <= HH_TOKEN_EXPIRING_SOON_DAYS) return { state: 'expiring', daysLeft, expiresAt };
+  return { state: 'valid', daysLeft, expiresAt };
+}
+
+function _hhTokenStatusLine(token) {
+  if (!token?.access_token) {
+    return '❌ HH токен: не подключён — выполни /hh_connect';
+  }
+  const prefix = String(token.access_token).slice(0, 8);
+  const employer = token.employer_id ? `, employer ${token.employer_id}` : '';
+  const expiry = _tokenExpiry(token);
+
+  if (expiry.state === 'expired') {
+    return `❌ HH токен: протух (с ${expiry.expiresAt.toISOString().split('T')[0]}) — выполни /hh_connect`;
+  }
+  if (expiry.state === 'expiring') {
+    return `⚠️ HH токен: истекает через ${expiry.daysLeft} дн. — переавторизуйся через /hh_connect`;
+  }
+  if (expiry.state === 'valid') {
+    return `✅ HH токен: подключён [${prefix}...]${employer}, действует ещё ${expiry.daysLeft} дн.`;
+  }
+  // unknown — token has access_token but no saved_at / expires_at (legacy import / manual paste).
+  const savedAt = token.saved_at ? token.saved_at.split('T')[0] : '';
+  return savedAt
+    ? `⚠️ HH токен: подключён [${prefix}...]${employer} (с ${savedAt}) — нет даты expiry, переавторизуйся через /hh_connect`
+    : `⚠️ HH токен: подключён [${prefix}...]${employer} — нет метаданных, переавторизуйся через /hh_connect`;
+}
+
+// "/hh статус" — visible state dashboard: vacancy + ATS config + background scoring + HH token
 function hhStatus(userId) {
   const workDir = _hhWorkDir(userId);
   const { readHhContext: _rhc } = require('./hh-utils');
+
+  // HH token — most important: tells user if they need /hh_connect
+  let hhLine;
+  try {
+    hhLine = _hhTokenStatusLine(readHhToken(userId));
+  } catch { hhLine = '❌ HH токен: ошибка чтения'; }
 
   // Active vacancy
   let vacLine;
@@ -258,6 +320,7 @@ function hhStatus(userId) {
   return [
     '📊 HH статус:',
     '',
+    hhLine,
     vacLine,
     atsLine,
     scoringLine,
