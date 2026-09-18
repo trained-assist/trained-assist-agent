@@ -1418,22 +1418,31 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   return null;
 }
 
-// ── Concurrency model (see issues #488 / #489) ──────────────────────────────
-// Unit of parallelism is the SESSION. We serialise per SESSION lane — two
-// messages for the same session never run at once (can't have two `claude`
-// processes appending one transcript), but DIFFERENT sessions run in parallel
-// even when they share a workDir (chat + web, or two chats in one project).
-// A brand-new session with no id yet falls back to a per-CHAT lane so two
-// concurrent first-messages in one chat collapse into one session ("one active
-// session per chat"). Session-level context attachment is enforced separately by
-// liveChatId (see _runTask).
+// ── Concurrency model ────────────────────────────────────────────────────────
 //
-// The real OOM backstop is no longer the per-username lock (that was a 2019-era
-// blunt instrument that serialised an entire profile). It moved to a GLOBAL
-// counting semaphore MAX_CONCURRENT_TASKS + a free-RAM watchdog, both of which
-// gate the actual `claude` spawn across every chat/profile at once.
+// Three layers, each with a different scope:
 //
-// Map<laneKey(string), Promise> — the tail of each lane. laneKey is
+//  1. perChatQueue (Map<chatId, Promise>) — ONE TASK AT A TIME PER CHAT.
+//     The top-level invariant: tasks from the same Telegram chat/group always
+//     queue behind each other, regardless of which session they belong to.
+//     Different chats (even sharing the same workDir/profile) run in parallel.
+//     chatId=0 (internal/web calls) is excluded.
+//
+//  2. chatLanes (Map<laneKey, Promise>) — TRANSCRIPT PROTECTION PER SESSION.
+//     Prevents two `claude` processes from appending to the same session
+//     transcript simultaneously. Lane key = session id; a brand-new session
+//     (no id yet) falls back to chat key so first-messages collapse into one
+//     session instead of spawning two claudes.
+//
+//  3. Per-profile cap + global semaphore — FAIRNESS / OOM GUARD.
+//     Bounds how many live `claude` processes one profile can hold at once
+//     (runner-lanes.js) and globally (MAX_CONCURRENT_TASKS + RAM watchdog).
+//
+// Confusingly-named historical note: "one active session per chat" was always
+// the invariant, NOT "one session per workDir". Multiple chats can share a
+// workDir and their tasks run in parallel — that is correct and expected.
+//
+// Map<laneKey(string), Promise> — the tail of each transcript lane. laneKey is
 // `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
 // Outer per-chat serialization gate. Ensures only ONE task per Telegram chat runs at a time,
@@ -1661,20 +1670,12 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Lane key = the SESSION. The lane's ONLY job is to stop two `claude`
-  // processes appending the SAME transcript at once — that boundary is the
-  // session, not the workDir. Two sessions that share a workDir (chat + web, or
-  // different chats hitting the same project) DO NOT race in practice and MUST
-  // run in parallel — this is the owner-required "several parallel sessions per
-  // profile/workDir" invariant. Serializing on workDir (the old #546 behaviour)
-  // wrongly collapsed those into one lane; keying on the session restores the
-  // model this file already stated: "Unit of parallelism is the SESSION".
-  //   • sessionId present → serialize only same-session messages.
-  //   • no sessionId (brand-new session) → fall back to the chat lane so two
-  //     concurrent first-messages in one chat collapse into one session instead
-  //     of spawning two claudes (the "one active session per chat" invariant).
-  // Cross-session parallelism is bounded only by the per-profile cap (capKey)
-  // and the global slot semaphore below — never by this lane.
+  // Transcript lane key — session-scoped to prevent two `claude` processes from
+  // writing to the same transcript at once. Sharing a workDir across chats is
+  // fine and expected; those tasks are serialized by perChatQueue, not here.
+  //   • sessionId present → serialize messages within the same session.
+  //   • no sessionId (brand-new) → fall back to chat key so concurrent
+  //     first-messages from the same chat collapse into one session.
   let queueKey = _laneKey(opts.sessionId, opts.user.id);
 
   // Stop commands bypass the queue — kill the running task immediately.
