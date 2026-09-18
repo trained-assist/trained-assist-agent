@@ -205,7 +205,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // its engine; the switch takes effect on the next task started in this chat.
 // \b doesn't fire after a Cyrillic letter in JS, so both alternatives end on
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
-const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
+const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -2121,7 +2121,9 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
-async function _runTask({ taskId, user, task, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+  // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
+  let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
   // (❓ уточнить, транзиентно этот ход). Нормализуем; неизвестное → null (дефолт one-shot).
   const explicitMode = answerRouter.normalizeMode(mode);
@@ -2567,6 +2569,7 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
     : engine === 'opencode'
     ? [process.env.OPENCODE_BIN || 'opencode', [
         'run',
+        '--format', 'json',
         '-m', opencodeModel,
         systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
       ]]
@@ -2602,8 +2605,11 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
     },
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
-    ...(engine === 'codex' || engine === 'opencode' ? { stdio: ['ignore', 'pipe', 'pipe'] } : {}),
+    // opencode waits 3s for stdin data before proceeding — use 'pipe' + immediate .end()
+    // so it sees EOF instantly rather than waiting the full 3-second timeout.
+    ...(engine === 'codex' || engine === 'opencode' ? { stdio: ['pipe', 'pipe', 'pipe'] } : {}),
   });
+  if (engine === 'codex' || engine === 'opencode') proc.stdin.end();
 
   let streamTimer = null;
   let heartbeatTimer = null;
@@ -2696,16 +2702,29 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
 
     for (const line of lines) {
       if (!line.trim()) continue;
-      // OpenCode outputs plain text, not JSON events
-      if (engine === 'opencode') {
-        fullOutput.text += line + '\n';
-        lastAssistantMsg = fullOutput.text.trim();
-        scheduleStream();
-        continue;
-      }
       try {
         const event = JSON.parse(line);
         firstJsonEventSeen = true;
+        if (engine === 'opencode') {
+          if (event.type === 'text' && typeof event.part?.text === 'string') {
+            fullOutput.text += event.part.text;
+            lastAssistantMsg = fullOutput.text;
+            scheduleStream();
+          } else if (event.type === 'step_finish') {
+            terminalSuccess = true;
+            claudeResult = fullOutput.text.trim() || null;
+            if (!restartShutdown && claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
+            const usage = event.part?.tokens;
+            if (usage) console.log(`[${taskId}] opencode usage: in=${usage.input} out=${usage.output} cost=${event.part.cost || 0}`);
+          } else if (event.type === 'error') {
+            const errMsg = event.error?.data?.message || event.error?.message || JSON.stringify(event.error);
+            console.warn(`[${taskId}] opencode error event:`, errMsg);
+            fullOutput.text += `\n❌ OpenCode ошибка: ${errMsg}`;
+            lastAssistantMsg = fullOutput.text.trim();
+            scheduleStream();
+          }
+          continue;
+        }
         if (engine === 'codex') {
           if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
             fullOutput.text += event.item.text;
@@ -2964,10 +2983,11 @@ async function _runTask({ taskId, user, task, context, engine: acceptedEngine = 
     return crashMsg;
   }
 
-  // OpenCode outputs plain text — no terminal event, success = clean exit.
-  if (engine === 'opencode' && exitCode === 0 && !processSignal && !processError) {
+  // OpenCode clean exit with accumulated text but no step_finish (e.g. error event surfaced text) —
+  // show what was accumulated rather than the generic "no confirmed final answer" message.
+  if (engine === 'opencode' && !terminalSuccess && exitCode === 0 && !processSignal && !processError && fullOutput.text.trim()) {
     terminalSuccess = true;
-    claudeResult = fullOutput.text.trim() || null;
+    claudeResult = fullOutput.text.trim();
   }
 
   // A successful process exit is insufficient: require the engine's terminal event.
