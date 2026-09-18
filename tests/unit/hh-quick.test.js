@@ -222,3 +222,110 @@ describe('hhAtsEditor', () => {
     } finally { vi.unstubAllEnvs(); }
   });
 });
+
+// ── hhStatus — token expiry awareness ──────────────────────────────────────────
+// hh-quick.js now distinguishes between a token that's merely on disk and one that's
+// still alive. We rewrite the token file per scenario and verify the rendered line.
+
+function writeHhToken(token) {
+  const dir = join(tokensDir, TEST_UID);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'hh'), JSON.stringify(token), { mode: 0o600 });
+}
+
+function daysAgoIso(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+describe('hhStatus — HH token expiry awareness', () => {
+  it('no token file → "не подключён"', () => {
+    // Remove token (beforeAll created one). freshModule re-reads on next call.
+    const { unlinkSync, existsSync } = require('fs');
+    const tokenFile = join(tokensDir, TEST_UID, 'hh');
+    if (existsSync(tokenFile)) unlinkSync(tokenFile);
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toContain('HH токен: не подключён');
+    expect(result).toContain('/hh_connect');
+    expect(result).not.toContain('✅ HH токен');
+  });
+
+  it('token saved today → "✅ действует ещё 14 дн."', () => {
+    writeHhToken({ access_token: 'fresh-token-1234', employer_id: 'emp-001', saved_at: new Date().toISOString() });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toContain('[fresh-to...]');           // 8-char prefix + ellipsis
+    expect(result).toMatch(/действует ещё 14 дн/);
+  });
+
+  it('token saved 12 days ago → "⚠️ истекает через 2 дн."', () => {
+    writeHhToken({ access_token: 'stale-token-12', employer_id: 'emp-001', saved_at: daysAgoIso(12) });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toMatch(/⚠️ HH токен: истекает через 2 дн/);
+    expect(result).toContain('/hh_connect');
+    expect(result).not.toMatch(/✅ HH токен/);
+  });
+
+  it('token saved 13 days ago → "⚠️ истекает через 1 дн."', () => {
+    writeHhToken({ access_token: 'edge-token-13', employer_id: 'emp-001', saved_at: daysAgoIso(13) });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toMatch(/⚠️ HH токен: истекает через 1 дн/);
+  });
+
+  it('token saved 15 days ago → "❌ протух"', () => {
+    writeHhToken({ access_token: 'expired-token-15', employer_id: 'emp-001', saved_at: daysAgoIso(15) });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toMatch(/❌ HH токен: протух/);
+    expect(result).toContain('/hh_connect');
+    expect(result).not.toMatch(/✅ HH токен/);
+  });
+
+  it('token without saved_at → "⚠️ нет метаданных"', () => {
+    writeHhToken({ access_token: 'legacy-no-date', employer_id: 'emp-001' });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toMatch(/⚠️ HH токен: подключён/);
+    expect(result).toContain('нет метаданных');
+    expect(result).toContain('/hh_connect');
+  });
+
+  it('token with explicit expires_at in the future → valid', () => {
+    const future = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+    writeHhToken({ access_token: 'explicit-exp-future', employer_id: 'emp-001', expires_at: future });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toMatch(/✅ HH токен: подключён/);
+    expect(result).toMatch(/действует ещё 5 дн/);
+  });
+
+  it('token with explicit expires_at in the past → expired', () => {
+    const past = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    writeHhToken({ access_token: 'explicit-exp-past', employer_id: 'emp-001', expires_at: past });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toMatch(/❌ HH токен: протух/);
+  });
+
+  it('plain string token (legacy) → no saved_at → "⚠️ нет метаданных"', () => {
+    const dir = join(tokensDir, TEST_UID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'hh'), 'plain-legacy-token-string', { mode: 0o600 });
+
+    const { hhStatus } = freshModule();
+    const result = hhStatus(TEST_UID);
+    expect(result).toMatch(/⚠️ HH токен: подключён/);
+    expect(result).toContain('plain'); // prefix of legacy token
+    expect(result).toContain('нет метаданных');
+  });
+});
