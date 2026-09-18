@@ -2,6 +2,7 @@ const { maintenance, atomicJson } = require('./maintenance');
 const currentExecution = () => null;
 const intentRuns = new Map();
 let restartShutdown = false;
+let autoRestartPending = false;
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -1670,12 +1671,29 @@ function runTask(opts) {
     }
     const state = restart[1] === 'cancel' ? maintenance.cancel()
       : restart[1] === 'status' ? maintenance.status() : maintenance.request();
+
+    // Cancel clears the auto-exit flag so the pending background exit is stopped.
+    if (restart[1] === 'cancel') autoRestartPending = false;
+
+    // Plain /restart: drain active tasks then exit — systemd (Restart=always) restarts after RestartSec.
+    if (!restart[1] && state.paused && !autoRestartPending) {
+      autoRestartPending = true;
+      (async () => {
+        if (getActiveTaskCount() > 0) await waitForIdle(85_000);
+        if (!autoRestartPending) return;
+        await new Promise(r => setTimeout(r, 500)); // let the reply send before we exit
+        if (!autoRestartPending) return;
+        console.log('[restart] draining complete, exiting for systemd restart');
+        process.exit(0);
+      })().catch(() => { if (autoRestartPending) process.exit(0); });
+    }
+
     const msg = state.phase === 'failed'
       ? '⚠️ Восстановление не завершено; очередь сохранена. Требуется проверка сервера.'
       : state.phase === 'restarting'
       ? '🔄 Сервер перезапускается. Об итогах сообщу в исходную сессию.'
       : state.paused
-      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохранены и ждут.`
+      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Перезапущусь автоматически.`
       : '✅ Плановый рестарт не ожидается.';
     opts.outputCallback?.(msg);
     const token = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
