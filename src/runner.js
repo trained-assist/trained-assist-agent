@@ -184,6 +184,19 @@ function getPendingTasks() {
     .map(f => JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')));
 }
 
+// Called once on startup: removes pending-task files left by a previous (now-dead) process.
+// Without this, stale files block GTD and new user queues until they time out (~5-15 min).
+function clearStalePendingTasks() {
+  if (currentExecution()) return;
+  if (!fs.existsSync(PENDING_DIR)) return;
+  const files = fs.readdirSync(PENDING_DIR).filter(f => f.endsWith('.json'));
+  for (const f of files) {
+    try { fs.unlinkSync(path.join(PENDING_DIR, f)); }
+    catch (e) { if (e.code !== 'ENOENT') console.warn('[runner] clearStalePendingTasks:', e.message); }
+  }
+  if (files.length) console.log(`[runner] cleared ${files.length} stale pending task(s) from previous process`);
+}
+
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
 
@@ -3709,7 +3722,7 @@ module.exports = {
   interruptForRestart,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
-  clearPendingContinuation,
+  clearPendingContinuation, clearStalePendingTasks,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
   // Exported for pin-state tests only

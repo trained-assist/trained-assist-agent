@@ -548,6 +548,8 @@ function scheduleGtdController(secrets) {
 async function resumePendingTasks() {
   maintenance.recovered();
   maintenance.resume(); // clear any leftover drain flag from a previous /restart or deploy
+  const { clearStalePendingTasks } = require('./runner');
+  clearStalePendingTasks(); // drop pending-task files from the now-dead previous process
 }
 
 async function main() {
