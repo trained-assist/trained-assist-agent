@@ -62,6 +62,15 @@ function formatCostFooter(usage, model) {
   return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ${modelShort} · ~${costStr}\``;
 }
 
+function formatOcFooter(usage, modelId) {
+  if (!usage) return '';
+  const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const cost = usage.cost || 0;
+  const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
+  const modelShort = (modelId || '').replace(/^openrouter\//, '').replace(/^gigachat\//, '');
+  return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых · ${modelShort} · ~${costStr}\``;
+}
+
 // Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
 // the last complete assistant turn; only as a last resort the whole accumulated stream
 // (the scratchpad). This stops "Let me confirm… Now writing…" narration leaking as final.
@@ -2824,7 +2833,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let terminalSuccess = false; // explicit engine completion, never inferred from narration
   let processSignal = null;
   let processError = null;
-  let claudeUsage = null;   // usage from result event
+  let claudeUsage = null;   // usage from result event (Claude Code / Codex)
+  let opencodeUsage = null; // usage from step_finish event (OpenCode)
   let claudeModel = null;   // model name from assistant event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
@@ -2938,7 +2948,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             claudeResult = fullOutput.text.trim() || null;
             if (!restartShutdown && claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             const usage = event.part?.tokens;
-            if (usage) console.log(`[${taskId}] opencode usage: in=${usage.input} out=${usage.output} cost=${event.part.cost || 0}`);
+            if (usage) {
+              opencodeUsage = { input: usage.input || 0, output: usage.output || 0, cost: event.part.cost || 0 };
+              console.log(`[${taskId}] opencode usage: in=${usage.input} out=${usage.output} cost=${event.part.cost || 0}`);
+            }
           } else if (event.type === 'error') {
             const errMsg = event.error?.data?.message || event.error?.message || JSON.stringify(event.error);
             console.warn(`[${taskId}] opencode error event:`, errMsg);
@@ -3291,7 +3304,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       cache_creation_input_tokens: claudeUsage.cache_creation_input_tokens || 0,
     });
   }
-  const costFooter = formatCostFooter(claudeUsage, claudeModel);
+  const costFooter = engine === 'opencode'
+    ? formatOcFooter(opencodeUsage, opencodeModel)
+    : formatCostFooter(claudeUsage, claudeModel);
   const final = (result + costFooter).slice(-MAX_MSG_LEN);
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
