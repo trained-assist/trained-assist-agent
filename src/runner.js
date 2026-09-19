@@ -1990,7 +1990,7 @@ function runTask(opts) {
 }
 
 // Returns context card string, or null if no skills configured (no pin needed).
-function buildContextCard(username, workDir) {
+function buildContextCard(username, workDir, chatId) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
 
@@ -2052,6 +2052,22 @@ function buildContextCard(username, workDir) {
         }
       } catch (e) { console.warn('[runner] pinned context parse:', e.message); }
     }
+  }
+
+  // Engine / model line at the bottom of the pin
+  const eng = chatId ? profiles.getEngine(workDir, chatId) : 'claude';
+  if (eng === 'opencode') {
+    let ocProfile = null;
+    try {
+      const pf = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
+      if (fs.existsSync(pf)) ocProfile = fs.readFileSync(pf, 'utf8').trim();
+    } catch {}
+    lines.push(`⚙️ OpenCode${ocProfile ? ` · ${ocProfile}` : ''}`);
+  } else if (eng === 'codex') {
+    lines.push('⚙️ Codex CLI');
+  } else {
+    const m = (process.env.ANTHROPIC_MODEL || 'claude-sonnet').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+    lines.push(`⚙️ Claude · ${m}`);
   }
 
   const time = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
@@ -3464,7 +3480,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Update context pin after task (skipped when user ran /context_off)
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
-    const card = buildContextCard(user.username, user.workDir);
+    const card = buildContextCard(user.username, user.workDir, chatId);
     if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
   }
 
