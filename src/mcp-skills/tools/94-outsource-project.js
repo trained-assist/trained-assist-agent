@@ -196,6 +196,17 @@ function getOpenQuestions(signals) {
     .map(([key, cfg]) => ({ signal: key, ...cfg }));
 }
 
+// 0–100%: how many of the 8 key boolean signals are answered (non-null)
+function calcCompleteness(signals) {
+  const KEY_SIGNALS = [
+    'has_written_tz', 'client_answered_questions', 'value_proposition_clear',
+    'value_wording_exists', 'client_sees_result_clearly', 'prepayment_ready',
+    'timeline_agreed', 'has_success_criteria',
+  ];
+  const answered = KEY_SIGNALS.filter(k => signals[k] !== null && signals[k] !== undefined).length;
+  return Math.round((answered / KEY_SIGNALS.length) * 100);
+}
+
 // ── Project plan templates ────────────────────────────────────────────────────
 
 const PLAN_TEMPLATES = {
@@ -433,10 +444,139 @@ module.exports = {
 
   tools: {
 
+    outsource_project_intake: {
+      description: [
+        '⚠️ ВСЕГДА вызывай ПЕРВЫМ когда пользователь упомянул аутсорс-проект или задачу для клиента.',
+        'Принимает любой текст от пользователя (может быть пустым).',
+        'Анализирует что уже известно и возвращает список вопросов для сбора информации.',
+        'НЕ создаёт проект и НЕ делает оценку рисков — только определяет что нужно узнать.',
+        'Если ready_for_assessment=false — задай пользователю required_questions ПЕРЕД вызовом outsource_project_new.',
+        'Не придумывай ответы на вопросы сам — жди от пользователя.',
+      ].join(' '),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          raw_input: {
+            type: 'string',
+            description: 'Всё что написал пользователь о проекте. Может быть пустой строкой.',
+          },
+        },
+      },
+      handler: async ({ raw_input = '' } = {}) => {
+        const words = raw_input.trim().split(/\s+/).filter(Boolean).length;
+        const t = raw_input.toLowerCase();
+
+        const detected = {
+          has_description:    words > 20,
+          has_client_context: /клиент|заказчик|компания|магазин|сайт|платформ|стартап|бизнес/.test(t),
+          has_goal:           /цель|задача|нужно|хотим|хочет|планирует|делать|сделать|результат/.test(t),
+          has_budget:         /бюджет|стоим|руб|[$€]|\d+к|\d{4,}/.test(t),
+          has_timeline:       /срок|дедлайн|к \d|месяц|неделя|квартал/.test(t),
+          has_payment:        /предоплат|аванс|оплат|договор/.test(t),
+        };
+
+        const INTAKE = [
+          {
+            id: 'what',
+            priority: 'required',
+            question: 'Что именно нужно создать / сделать? Опишите в 2–3 предложениях.',
+            why: 'Без этого невозможна оценка',
+            skip_if: detected.has_description,
+          },
+          {
+            id: 'who',
+            priority: 'required',
+            question: 'Кто заказчик и что у них за бизнес? (интернет-магазин, SaaS, агентство — хотя бы кратко)',
+            why: 'Контекст клиента влияет на риски и план',
+            skip_if: detected.has_client_context,
+          },
+          {
+            id: 'why',
+            priority: 'required',
+            question: 'Какую проблему бизнеса это решает? Какой конкретный результат хотят получить?',
+            why: 'Без цели непонятно что считать успехом',
+            skip_if: detected.has_goal,
+          },
+          {
+            id: 'tz',
+            priority: 'important',
+            question: 'Есть ли письменное ТЗ, бриф или любой документ с требованиями?',
+            why: 'Отсутствие ТЗ — главный источник рисков',
+            skip_if: false,
+          },
+          {
+            id: 'payment',
+            priority: 'important',
+            question: 'Как планируется оплата? Готов ли клиент к предоплате?',
+            why: 'Без предоплаты выше финансовый риск',
+            skip_if: detected.has_payment,
+          },
+          {
+            id: 'budget',
+            priority: 'optional',
+            question: 'Какой бюджет? Хотя бы порядок (до 100к / 100–500к / 500к+)',
+            why: 'Бюджет влияет на scope и команду',
+            skip_if: detected.has_budget,
+          },
+          {
+            id: 'timeline',
+            priority: 'optional',
+            question: 'Есть ли жёсткий дедлайн? Когда нужно запустить?',
+            why: 'Срок влияет на стоимость и риски',
+            skip_if: detected.has_timeline,
+          },
+        ];
+
+        const required   = INTAKE.filter(q => !q.skip_if && q.priority === 'required');
+        const important  = INTAKE.filter(q => !q.skip_if && q.priority === 'important');
+        const optional   = INTAKE.filter(q => !q.skip_if && q.priority === 'optional');
+        const detectedCount = Object.values(detected).filter(Boolean).length;
+        const completeness_pct = Math.round((detectedCount / Object.keys(detected).length) * 100);
+
+        if (words === 0) {
+          return {
+            situation: 'Нет информации о проекте',
+            completeness_pct: 0,
+            ready_for_assessment: false,
+            instruction: 'Задай пользователю вопросы ниже. НЕ создавай проект и НЕ оценивай риски — нет ни одного факта. Не придумывай информацию.',
+            required_questions: required.map(q => ({ question: q.question, why: q.why })),
+            important_questions: important.map(q => ({ question: q.question, why: q.why })),
+            optional_questions: optional.map(q => ({ question: q.question })),
+          };
+        }
+
+        if (required.length > 0) {
+          return {
+            situation: 'Недостаточно информации для оценки',
+            completeness_pct,
+            ready_for_assessment: false,
+            words_received: words,
+            instruction: 'Задай required_questions пользователю перед созданием проекта. Не придумывай ответы.',
+            required_questions: required.map(q => ({ question: q.question, why: q.why })),
+            important_questions: important.map(q => ({ question: q.question, why: q.why })),
+            optional_questions: optional.map(q => ({ question: q.question })),
+            next_step: 'Задай required вопросы, дождись ответов, потом вызови outsource_project_new',
+          };
+        }
+
+        return {
+          situation: 'Базовая информация собрана',
+          completeness_pct,
+          ready_for_assessment: true,
+          words_received: words,
+          instruction: 'Достаточно для создания проекта. Вызови outsource_project_new с собранной информацией.',
+          important_questions: important.map(q => ({ question: q.question, why: q.why })),
+          optional_questions: optional.map(q => ({ question: q.question })),
+          next_step: 'Вызови outsource_project_new с name и description',
+        };
+      },
+    },
+
     outsource_project_new: {
       description: [
         'Create a new outsource project: risk assessment + Google Sheet with 4 tabs.',
-        'Call this FIRST when starting work on a new client project.',
+        'Call AFTER outsource_project_intake confirmed ready_for_assessment=true.',
+        'If description is under 15 words — call outsource_project_intake first to collect info from the user.',
         'Returns project_id (save it!) and sheet URL.',
         'Typical types: simple-integration (API/webhook), ai-project (ML training), ai-integration (LLM + existing system).',
       ].join(' '),
@@ -455,8 +595,20 @@ module.exports = {
         },
       },
       handler: async ({ name, description, type = 'ai-integration', folder_id }) => {
+        // Guard: refuse to invent a project with no real info
+        const wordCount = description.trim().split(/\s+/).filter(Boolean).length;
+        if (wordCount < 10) {
+          return {
+            error: 'Недостаточно информации',
+            description_words: wordCount,
+            instruction: 'Сначала вызови outsource_project_intake чтобы собрать базовую информацию у пользователя. НЕ придумывай описание.',
+            next_step: 'outsource_project_intake({ raw_input: "" })',
+          };
+        }
+
         const signals = extractSignals(description, defaultSignals());
         const risk = calcRisk(signals);
+        const completeness = calcCompleteness(signals);
         const sheet = await createSheet(name, folder_id);
 
         const project = {
@@ -485,12 +637,14 @@ module.exports = {
           name,
           type,
           risk: `${riskLabel} (${risk.score}/100)`,
+          completeness_pct: completeness,
           open_questions: openQs.length,
           sheet_url: sheet.url,
           next_step: openQs.length > 0
             ? `Задай клиенту вопросы: outsource_project_questions("${project.id}", format="message")`
             : 'Все ключевые вопросы закрыты — можно стартовать!',
           tip: `Сохрани project_id="${project.id}" — он нужен для outsource_project_add_info и outsource_project_assess`,
+          ...(completeness < 30 ? { warning: 'Мало информации — риск-скор ненадёжный. Добавь детали через outsource_project_add_info.' } : {}),
         };
       },
     },
@@ -594,12 +748,14 @@ module.exports = {
         const openQs = getOpenQuestions(project.signals);
         const answeredCount = Object.values(project.signals)
           .filter(v => v !== null && v !== undefined && typeof v === 'boolean').length;
+        const completeness = calcCompleteness(project.signals);
         const riskLabel = risk.level === 'green' ? '🟢 Низкий' : risk.level === 'yellow' ? '🟡 Умеренный' : '🔴 Высокий';
 
         return {
           project_id,
           name: project.name,
           risk: `${riskLabel} (${risk.score}/100)`,
+          completeness_pct: completeness,
           signals_answered: answeredCount,
           open_questions: openQs.length,
           info_chunks: project.info_chunks.length,
