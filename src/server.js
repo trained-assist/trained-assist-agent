@@ -3109,6 +3109,42 @@ ${recent || '(пока нет)'}
       return json(res, 200, { ok: true });
     }
 
+    // GET /analytics — aggregated token/cost usage across all users
+    if (req.method === 'GET' && url.pathname === '/analytics') {
+      const { getUsageLog } = require('./usage-store');
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const sessionsDir = path.join(dataDir, 'sessions');
+      const totals = { tasks: 0, input: 0, output: 0, cost_usd: 0 };
+      const byDate = {};   // date → { model → { input, output, cost, tasks } }
+      const byUser = {};   // username → { tasks, input, output, cost_usd }
+      try {
+        const users = fs.existsSync(sessionsDir) ? fs.readdirSync(sessionsDir) : [];
+        for (const username of users) {
+          const workDir = path.join(sessionsDir, username);
+          if (!fs.statSync(workDir).isDirectory()) continue;
+          const log = getUsageLog(workDir);
+          if (!log || !log.length) continue;
+          const u = byUser[username] = { tasks: 0, input: 0, output: 0, cost_usd: 0 };
+          for (const entry of log) {
+            const inp = entry.input_tokens || 0;
+            const out = entry.output_tokens || 0;
+            const cost = entry.cost_usd || 0;
+            const model = entry.model || (entry.engine === 'opencode' ? 'opencode' : 'claude');
+            const date = new Date(entry.at || 0).toISOString().slice(0, 10);
+            totals.tasks += 1; totals.input += inp; totals.output += out; totals.cost_usd += cost;
+            u.tasks += 1; u.input += inp; u.output += out; u.cost_usd += cost;
+            if (!byDate[date]) byDate[date] = {};
+            if (!byDate[date][model]) byDate[date][model] = { input: 0, output: 0, cost: 0, tasks: 0 };
+            byDate[date][model].input += inp;
+            byDate[date][model].output += out;
+            byDate[date][model].cost += cost;
+            byDate[date][model].tasks += 1;
+          }
+        }
+      } catch (e) { console.error('[analytics]', e.message); }
+      return json(res, 200, { totals, by_date: byDate, by_user: byUser });
+    }
+
     if (req.method === 'GET' && url.pathname === '/stats') {
       const totalMem = os.totalmem();
       const freeMem = os.freemem();
