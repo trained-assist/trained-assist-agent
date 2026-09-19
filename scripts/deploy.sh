@@ -180,9 +180,11 @@ echo "==> Service journal (last 20 lines)..."
 sudo journalctl -u "$SERVICE" --no-pager -n 20 || true
 
 # Fail hard if service never came up — triggers on_deploy_error → rollback.
+# Must use `false` (a failing command) not `exit 1` — bash's ERR trap fires only
+# on non-zero command exits, not on an explicit `exit` statement.
 if [ "$HEALTHY" = "0" ]; then
   echo "ERROR: service did not respond on /health after 60s — failing deploy to trigger rollback"
-  exit 1
+  false
 fi
 
 echo "==> Installing disk-hygiene crons..."
