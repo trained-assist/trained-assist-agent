@@ -496,7 +496,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const raw = (engineSwitchM[1] || engineSwitchM[2] || '').toLowerCase();
     const engine = /^(codex|кодекс)$/.test(raw) ? 'codex' : raw === 'opencode' ? 'opencode' : 'claude';
     profiles.setEngine(workDir, engine, chatId);
-    const label = engine === 'codex' ? 'Codex CLI' : engine === 'opencode' ? 'OpenCode (MiniMax M3)' : 'Claude Code';
+    const label = engine === 'codex' ? 'Codex CLI' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
     return `🔀 Для этого чата переключил движок на ${label}.\nСледующая задача в этом чате пойдёт через него (текущая, если выполняется, — доработает на старом).`;
   }
 
