@@ -232,6 +232,78 @@ function deriveFallbackQueries(cfg) {
   return out.slice(0, 6);
 }
 
+// Persistent seen-IDs store: prevents losing candidates between runs and lets us
+// tell the recruiter "X new since you last looked". Per-vacancy bucket so switching
+// vacancies doesn't reset the counter. Atomic writes (write-temp + rename) so a
+// crash mid-write never corrupts the file. Schema:
+//   { "<vacancy_id>": { "<hh_resume_id>": "ISO date when first seen", ... }, ... }
+function seenIdsPath(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', 'seen-ids.json');
+}
+
+function loadSeenIds(username) {
+  const file = seenIdsPath(username);
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-search] seen-ids read failed:', e.message);
+    return {};
+  }
+}
+
+function saveSeenIds(username, data) {
+  const file = seenIdsPath(username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+// Merge freshly-collected candidate IDs into the per-vacancy seen bucket.
+// Returns:
+//   { newIds: Set<string>, newCount, totalSeenAfter, firstRun }
+// firstRun=true means there was no prior seen file for this vacancy — every
+// collected ID is treated as "new" (the recruiter expects to see the full
+// backfill when they first turn the search on).
+function mergeSeenIds(username, vacancyId, collectedIds) {
+  const seen = loadSeenIds(username);
+  const firstRun = !seen[vacancyId] || Object.keys(seen[vacancyId] || {}).length === 0;
+  const bucket = seen[vacancyId] || {};
+  const today = new Date().toISOString().slice(0, 10);
+  const newIds = [];
+  for (const id of collectedIds) {
+    if (!bucket[id]) {
+      bucket[id] = today;
+      newIds.push(id);
+    }
+  }
+  if (newIds.length) {
+    seen[vacancyId] = bucket;
+    saveSeenIds(username, seen);
+  }
+  return { newIds: new Set(newIds), newCount: newIds.length, totalSeenAfter: Object.keys(bucket).length, firstRun };
+}
+
+// Build a short Telegram digest for a successful proactive run with new candidates.
+// Caller passes the already-enriched slice of `newCandidates` (typically ≤10 shown).
+function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, newCandidates, url }) {
+  const head = `🧊 Холодный поиск: ${newCount} новых кандидатов для «${vacancyTitle || 'вакансии'}»`;
+  const stats = `Всего в базе по этой вакансии: ${totalSeen}.`;
+  const top = (newCandidates || []).slice(0, 10).map((c, i) => {
+    const name = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
+    const yrs = c.total_exp_years ? `${c.total_exp_years} лет опыта` : '';
+    const city = c.area || '';
+    const tag = c.tag === 'PASS' ? '✅' : c.tag === 'REVIEW' ? '🟡' : '⚪️';
+    return `${i + 1}. ${tag} ${name} — ${yrs}${city ? ', ' + city : ''}`;
+  });
+  const tail = newCandidates && newCandidates.length > 10 ? `\n…и ещё ${newCandidates.length - 10}` : '';
+  const link = url ? `\nПолный список: ${url}` : '';
+  return [head, stats, ...top, tail, link].filter(Boolean).join('\n');
+}
+
 // Generate HH resume-search queries for this specific vacancy (title + context + criteria)
 // instead of a fixed list — makes cold-search work for any vacancy, not just one domain.
 // Layered: ask the LLM first, sanity-check the result, merge in a deterministic
@@ -490,8 +562,40 @@ async function runProactiveSearch(username, workDir, options = {}) {
   };
   fs.writeFileSync(outFile, JSON.stringify(output, null, 2), 'utf8');
 
+  // Merge into persistent seen-IDs so we can distinguish "new" from "already shown".
+  // Runs AFTER the file write — losing a crash here means a duplicate alert next time,
+  // not losing candidates (the on-disk JSON is the durable source).
+  const vacancyKey = atsConfig.vacancy_id || atsConfig.vacancy_title || 'unknown';
+  const collectedIds = (enriched || []).map(c => c.id).filter(Boolean);
+  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
+  try {
+    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
+  } catch (e) {
+    console.error('[proactive-search] seen-ids merge failed:', e.message);
+  }
+
   const pass_count = enriched.filter(c => c.tag === 'PASS').length;
   const review_count = enriched.filter(c => c.tag === 'REVIEW').length;
+
+  // Fire-and-forget notify: tell the recruiter about new candidates in their chat.
+  // notifyChat is injected by the caller (server.js / 92-hh-proactive.js) so this
+  // module stays Telegram-free — easier to test, and the same mergeSeenIds works
+  // for cron-driven and ad-hoc runs alike.
+  const notifyChat = typeof options.notifyChat === 'function' ? options.notifyChat : null;
+  if (notifyChat && seenInfo.newCount > 0) {
+    const newCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
+    Promise.resolve()
+      .then(() => notifyChat({
+        username,
+        vacancyTitle: output.vacancy_title,
+        newCount: seenInfo.newCount,
+        totalSeen: seenInfo.totalSeenAfter,
+        firstRun: seenInfo.firstRun,
+        newCandidates,
+        proactiveUrl: typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '',
+      }))
+      .catch(e => console.error('[proactive-search] notify failed:', e.message));
+  }
 
   return {
     file: outFile,
@@ -501,6 +605,10 @@ async function runProactiveSearch(username, workDir, options = {}) {
     searched_at: now.toISOString(),
     vacancy_title: output.vacancy_title,
     ai_enriched: output.ai_enriched,
+    new_count: seenInfo.newCount,
+    new_ids: Array.from(seenInfo.newIds),
+    total_seen: seenInfo.totalSeenAfter,
+    first_run: seenInfo.firstRun,
   };
 }
 
@@ -544,4 +652,15 @@ async function scoreUnscoredProactiveCandidates(username, options = {}) {
   return enriched.filter(c => c.plus_tags).length;
 }
 
-module.exports = { runProactiveSearch, buildScoringPromptText, scoreUnscoredProactiveCandidates, queriesLookSane, deriveFallbackQueries };
+module.exports = {
+  runProactiveSearch,
+  buildScoringPromptText,
+  scoreUnscoredProactiveCandidates,
+  queriesLookSane,
+  deriveFallbackQueries,
+  loadSeenIds,
+  saveSeenIds,
+  mergeSeenIds,
+  buildProactiveDigest,
+  seenIdsPath,
+};

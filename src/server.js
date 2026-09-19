@@ -2490,6 +2490,28 @@ ${expLines || '—'}
       try {
         const result = await runProactiveSearch(username, workDir, {
           refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
+          proactiveUrl: proactiveUrl(username),
+          notifyChat: async (info) => {
+            const chatId = readChatId(username);
+            if (!chatId) return; // chat not bound yet — silent skip
+            const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
+            if (!botToken) return;
+            const { buildProactiveDigest } = require('./hh-proactive-search');
+            const text = buildProactiveDigest({
+              vacancyTitle: info.vacancyTitle,
+              newCount: info.newCount,
+              totalSeen: info.totalSeen,
+              newCandidates: info.newCandidates,
+              url: info.proactiveUrl,
+            });
+            const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+            await fetch(`${tgBase}/bot${botToken}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+              signal: AbortSignal.timeout(10_000),
+            });
+          },
         });
         return json(res, 200, result);
       } catch (e) {
