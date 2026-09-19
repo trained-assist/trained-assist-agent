@@ -17,9 +17,9 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
-const STAGE1_MODEL = 'deepseek/deepseek-r1:free';
-const STAGE2_MODEL = 'google/gemini-2.5-flash-lite-preview-06-17:free';
-const STAGE3_MODEL = 'qwen/qwen3-235b-a22b:free';
+const STAGE1_MODEL = 'deepseek/deepseek-v4-flash-0731:free';
+const STAGE2_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
+const STAGE3_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
 const {
   OPENROUTER_API_KEY,
