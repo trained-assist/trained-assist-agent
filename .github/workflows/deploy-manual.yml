@@ -57,7 +57,7 @@ jobs:
           command_timeout: 90m
           script: |
             set -euo pipefail
-            exec 9>/tmp/assist-agent-deploy.lock
+            exec 9>"$HOME/.assist-deploy.lock"
             flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
             export ASSIST_DEPLOY_LOCKED=1
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
@@ -100,7 +100,7 @@ jobs:
           command_timeout: 90m
           script: |
             set -euo pipefail
-            exec 9>/tmp/assist-agent-deploy.lock
+            exec 9>"$HOME/.assist-deploy.lock"
             flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
             export ASSIST_DEPLOY_LOCKED=1
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
