@@ -1,0 +1,10 @@
+{
+  "model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+  "agent": {
+    "build":   { "model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free" },
+    "plan":    { "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free" },
+    "explore": { "model": "openrouter/nvidia/nemotron-3.5-lightning:free" },
+    "general": { "model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free" },
+    "review":  { "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free" }
+  }
+}
