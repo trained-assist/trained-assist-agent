@@ -158,6 +158,9 @@ sudo cp "$REPO_DIR/systemd/assist-agent-restart.timer" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now assist-agent-restart.timer
 
+echo "==> Applying OpenCode profile..."
+bash "$REPO_DIR/infra/opencode-switch-profile.sh" || echo "opencode-switch-profile: skipped (jq missing or no profile set)"
+
 echo "==> Restarting service..."
 sudo systemctl restart "$SERVICE"
 
