@@ -56,18 +56,54 @@ function formatCostFooter(usage, model) {
   const cw  = usage.cache_creation_input_tokens || 0;
   const cost = (inp * price.in + out * price.out + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000;
   const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
-  const modelShort = model ? model.replace(/^claude-/, '') : '?';
+  const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  const cacheStr = cr > 0 ? ` · кэш ${fmt(cr)}` : '';
-  return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ~${costStr}\``;
+  const parts = [`${fmt(inp)} вх`, `${fmt(out)} вых`];
+  if (cw > 0) parts.push(`💾+${fmtK(cw)}`);
+  if (cr > 0) parts.push(`💾/${fmtK(cr)}`);
+  parts.push(`~${costStr}`);
+  return `\n\n\`📊 ${parts.join(' · ')}\``;
 }
 
-function formatOcFooter(usage, modelId) {
+// breakdown: [{ agent, model, input, output, cacheRead, cacheWrite, cost }]
+function formatOcFooter(usage, breakdown) {
   if (!usage) return '';
-  const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+  const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
   const cost = usage.cost || 0;
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых · ~${costStr}\``;
+  const cacheStr = (usage.cacheRead > 0 || usage.cacheWrite > 0)
+    ? ` · 💾${usage.cacheWrite > 0 ? `+${fmtK(usage.cacheWrite)}` : ''}${usage.cacheRead > 0 ? `/${fmtK(usage.cacheRead)}` : ''}`
+    : '';
+  if (!breakdown || breakdown.length <= 1) {
+    return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых${cacheStr} · ~${costStr}\``;
+  }
+  const header = `📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых${cacheStr} · ~${costStr}`;
+  const rows = breakdown.map(s => {
+    const tag = s.model ? `${s.agent}(${s.model.split('/').pop().replace(/:free$/, '')})` : (s.agent || '?');
+    const sc = (s.cacheRead > 0 || s.cacheWrite > 0)
+      ? ` 💾${s.cacheWrite > 0 ? `+${fmtK(s.cacheWrite)}` : ''}${s.cacheRead > 0 ? `/${fmtK(s.cacheRead)}` : ''}`
+      : '';
+    const sc2 = s.cost > 0 ? ` ~$${s.cost.toFixed(4)}` : '';
+    return `  ${tag}: ${fmtK(s.input)}вх·${fmtK(s.output)}вых${sc}${sc2}`;
+  });
+  return `\n\n\`\`\`\n${header}\n${rows.join('\n')}\n\`\`\``;
+}
+
+// Reads opencode.json and returns agent-name -> shortened model-id map (for footer breakdown).
+function readOcAgentModels() {
+  try {
+    const cfgPath = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
+    if (!fs.existsSync(cfgPath)) return {};
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const shorten = m => (m || '').replace(/^openrouter\//, '').replace(/^gigachat\//, '');
+    const defaultModel = shorten(cfg.model);
+    const result = { _default: defaultModel };
+    for (const [name, agent] of Object.entries(cfg.agent || {})) {
+      result[name] = shorten(agent.model || cfg.model);
+    }
+    return result;
+  } catch { return {}; }
 }
 
 // Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
@@ -1990,7 +2026,7 @@ function runTask(opts) {
 }
 
 // Returns context card string, or null if no skills configured (no pin needed).
-function buildContextCard(username, workDir) {
+function buildContextCard(username, workDir, chatId) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
 
@@ -2052,6 +2088,22 @@ function buildContextCard(username, workDir) {
         }
       } catch (e) { console.warn('[runner] pinned context parse:', e.message); }
     }
+  }
+
+  // Engine / model line
+  const eng = chatId ? profiles.getEngine(workDir, chatId) : 'claude';
+  if (eng === 'opencode') {
+    let ocProfile = null;
+    try {
+      const pf = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
+      if (fs.existsSync(pf)) ocProfile = fs.readFileSync(pf, 'utf8').trim();
+    } catch {}
+    lines.push(`⚙️ OpenCode${ocProfile ? ` · ${ocProfile}` : ''}`);
+  } else if (eng === 'codex') {
+    lines.push('⚙️ Codex CLI');
+  } else {
+    const m = (process.env.ANTHROPIC_MODEL || 'claude-sonnet').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+    lines.push(`⚙️ Claude · ${m}`);
   }
 
   const time = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
@@ -2879,7 +2931,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let processSignal = null;
   let processError = null;
   let claudeUsage = null;   // usage from result event (Claude Code / Codex)
-  let opencodeUsage = null; // usage from step_finish event (OpenCode)
+  let opencodeUsage = null; // accumulated totals from step_finish events (OpenCode)
+  let opencodeBreakdown = []; // per-agent steps: [{agent, model, input, output, cacheRead, cacheWrite, cost}]
+  let currentOcAgent = null; // last 'agent' event name, to label the next step_finish
+  let ocAgentModels = {}; // lazily loaded from opencode.json
   let claudeModel = null;   // model name from assistant event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
@@ -2988,14 +3043,28 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             fullOutput.text += event.part.text;
             lastAssistantMsg = fullOutput.text;
             scheduleStream();
+          } else if (event.type === 'agent') {
+            // Track which agent is about to run so we can label its step_finish
+            currentOcAgent = event.part?.name || null;
           } else if (event.type === 'step_finish') {
             terminalSuccess = true;
             claudeResult = fullOutput.text.trim() || null;
             if (!restartShutdown && claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             const usage = event.part?.tokens;
             if (usage) {
-              opencodeUsage = { input: usage.input || 0, output: usage.output || 0, cost: event.part.cost || 0 };
-              console.log(`[${taskId}] opencode usage: in=${usage.input} out=${usage.output} cost=${event.part.cost || 0}`);
+              if (!ocAgentModels || !Object.keys(ocAgentModels).length) ocAgentModels = readOcAgentModels();
+              const agentModel = ocAgentModels[currentOcAgent] || ocAgentModels._default || null;
+              const stepIn = usage.input || 0;
+              const stepOut = usage.output || 0;
+              const stepCR = usage.cache?.read || 0;
+              const stepCW = usage.cache?.write || 0;
+              const stepCost = event.part.cost || 0;
+              opencodeBreakdown.push({ agent: currentOcAgent || 'run', model: agentModel, input: stepIn, output: stepOut, cacheRead: stepCR, cacheWrite: stepCW, cost: stepCost });
+              if (!opencodeUsage) opencodeUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+              opencodeUsage.input += stepIn; opencodeUsage.output += stepOut;
+              opencodeUsage.cacheRead += stepCR; opencodeUsage.cacheWrite += stepCW;
+              opencodeUsage.cost += stepCost;
+              console.log(`[${taskId}] opencode step[${currentOcAgent}/${agentModel}]: in=${stepIn} out=${stepOut} cR=${stepCR} cW=${stepCW} cost=${stepCost}`);
             }
           } else if (event.type === 'error') {
             const errMsg = event.error?.data?.message || event.error?.message || JSON.stringify(event.error);
@@ -3360,7 +3429,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     });
   }
   const costFooter = engine === 'opencode'
-    ? formatOcFooter(opencodeUsage, opencodeModel)
+    ? formatOcFooter(opencodeUsage, opencodeBreakdown)
     : formatCostFooter(claudeUsage, claudeModel);
   const final = (result + costFooter).slice(-MAX_MSG_LEN);
 
@@ -3464,7 +3533,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Update context pin after task (skipped when user ran /context_off)
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
-    const card = buildContextCard(user.username, user.workDir);
+    const card = buildContextCard(user.username, user.workDir, chatId);
     if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
   }
 
