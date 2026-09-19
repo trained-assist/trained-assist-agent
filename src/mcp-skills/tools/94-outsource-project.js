@@ -446,12 +446,13 @@ module.exports = {
 
     outsource_project_intake: {
       description: [
-        '⚠️ ВСЕГДА вызывай ПЕРВЫМ когда пользователь упомянул аутсорс-проект или задачу для клиента.',
-        'Принимает любой текст от пользователя (может быть пустым).',
-        'Анализирует что уже известно и возвращает список вопросов для сбора информации.',
-        'НЕ создаёт проект и НЕ делает оценку рисков — только определяет что нужно узнать.',
-        'Если ready_for_assessment=false — задай пользователю required_questions ПЕРЕД вызовом outsource_project_new.',
-        'Не придумывай ответы на вопросы сам — жди от пользователя.',
+        'Вызывай когда нужно собрать информацию о новом аутсорс-проекте перед оценкой.',
+        'Принимает любой текст (или пустую строку если пользователь ничего не написал).',
+        'Возвращает message_to_user — готовый текст с вопросами, покажи его пользователю ОДНИМ сообщением.',
+        'Если ready_for_assessment=true — можно сразу вызывать outsource_project_new.',
+        'Если ready_for_assessment=false — дождись ответа пользователя, потом вызови outsource_project_new с его ответом.',
+        'Создавать проект с частичной информацией — ОК: в таблице будут видны открытые вопросы.',
+        'НЕ придумывай ответы — только то что сказал пользователь.',
       ].join(' '),
       inputSchema: {
         type: 'object',
@@ -533,29 +534,32 @@ module.exports = {
         const detectedCount = Object.values(detected).filter(Boolean).length;
         const completeness_pct = Math.round((detectedCount / Object.keys(detected).length) * 100);
 
+        // All questions to ask at once (don't block on each answer separately)
+        const allMissing = [...required, ...important, ...optional].filter(q => !q.skip_if);
+        const questionsText = allMissing.length > 0
+          ? allMissing.map((q, i) => `${i + 1}. ${q.question}`).join('\n')
+          : '';
+
         if (words === 0) {
           return {
             situation: 'Нет информации о проекте',
             completeness_pct: 0,
             ready_for_assessment: false,
-            instruction: 'Задай пользователю вопросы ниже. НЕ создавай проект и НЕ оценивай риски — нет ни одного факта. Не придумывай информацию.',
-            required_questions: required.map(q => ({ question: q.question, why: q.why })),
-            important_questions: important.map(q => ({ question: q.question, why: q.why })),
-            optional_questions: optional.map(q => ({ question: q.question })),
+            instruction: 'Покажи пользователю message_to_user. Дождись его ответа. Потом вызови outsource_project_new с тем что он написал. НЕ придумывай информацию.',
+            message_to_user: `Расскажите о проекте — это займёт 1–2 минуты:\n\n${questionsText}\n\nОтвечайте на то, что знаете. Недостающее уточним позже.`,
           };
         }
 
         if (required.length > 0) {
           return {
-            situation: 'Недостаточно информации для оценки',
+            situation: 'Есть кое-что, но нужны ещё базовые факты',
             completeness_pct,
             ready_for_assessment: false,
             words_received: words,
-            instruction: 'Задай required_questions пользователю перед созданием проекта. Не придумывай ответы.',
-            required_questions: required.map(q => ({ question: q.question, why: q.why })),
-            important_questions: important.map(q => ({ question: q.question, why: q.why })),
-            optional_questions: optional.map(q => ({ question: q.question })),
-            next_step: 'Задай required вопросы, дождись ответов, потом вызови outsource_project_new',
+            instruction: 'Покажи пользователю message_to_user. Дождись ответа. Потом вызови outsource_project_new со всем что есть. Частичная информация — ОК.',
+            message_to_user: allMissing.length > 0
+              ? `Понял контекст, уточню ещё несколько моментов:\n\n${questionsText}\n\nОтвечайте что знаете — оценим с тем что есть, остальное добавим позже.`
+              : 'Достаточно информации — создаю проект.',
           };
         }
 
@@ -564,9 +568,10 @@ module.exports = {
           completeness_pct,
           ready_for_assessment: true,
           words_received: words,
-          instruction: 'Достаточно для создания проекта. Вызови outsource_project_new с собранной информацией.',
-          important_questions: important.map(q => ({ question: q.question, why: q.why })),
-          optional_questions: optional.map(q => ({ question: q.question })),
+          instruction: 'Достаточно информации. Вызови outsource_project_new — дополнительные вопросы будут видны в таблице.',
+          message_to_user: allMissing.length > 0
+            ? `Понял, создаю оценку. Ещё пара деталей если знаете:\n\n${questionsText}`
+            : null,
           next_step: 'Вызови outsource_project_new с name и description',
         };
       },
@@ -632,6 +637,14 @@ module.exports = {
         const openQs = getOpenQuestions(signals);
         const riskLabel = risk.level === 'green' ? '🟢 Низкий' : risk.level === 'yellow' ? '🟡 Умеренный' : '🔴 Высокий';
 
+        const firstQ = openQs[0];
+        const messageToUser = openQs.length > 0
+          ? `Проект создан ✅\n📊 Таблица с оценкой рисков: ${sheet.url}\n\n` +
+            `Риск: ${riskLabel} (${risk.score}/100) — ${completeness}% информации заполнено.\n\n` +
+            `Открыто вопросов: ${openQs.length}. По мере получения ответов от клиента — присылайте, обновим оценку.\n\n` +
+            (completeness < 50 ? `Главный вопрос сейчас: ${firstQ?.question}` : '')
+          : `Проект создан ✅\n📊 Таблица: ${sheet.url}\n\nРиск: ${riskLabel} (${risk.score}/100). Все ключевые вопросы закрыты — можно стартовать!`;
+
         return {
           project_id: project.id,
           name,
@@ -640,11 +653,12 @@ module.exports = {
           completeness_pct: completeness,
           open_questions: openQs.length,
           sheet_url: sheet.url,
+          message_to_user: messageToUser,
           next_step: openQs.length > 0
-            ? `Задай клиенту вопросы: outsource_project_questions("${project.id}", format="message")`
+            ? `Когда клиент ответит на вопросы — вызови outsource_project_add_info("${project.id}", info="<ответ клиента>")`
             : 'Все ключевые вопросы закрыты — можно стартовать!',
-          tip: `Сохрани project_id="${project.id}" — он нужен для outsource_project_add_info и outsource_project_assess`,
-          ...(completeness < 30 ? { warning: 'Мало информации — риск-скор ненадёжный. Добавь детали через outsource_project_add_info.' } : {}),
+          tip: `project_id="${project.id}" — для outsource_project_add_info когда придёт новая информация`,
+          ...(completeness < 30 ? { warning: 'Мало информации — риск-скор предварительный. Уточни через outsource_project_add_info.' } : {}),
         };
       },
     },
