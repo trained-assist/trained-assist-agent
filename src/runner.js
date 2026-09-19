@@ -59,7 +59,7 @@ function formatCostFooter(usage, model) {
   const modelShort = model ? model.replace(/^claude-/, '') : '?';
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
   const cacheStr = cr > 0 ? ` · кэш ${fmt(cr)}` : '';
-  return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ${modelShort} · ~${costStr}\``;
+  return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ~${costStr}\``;
 }
 
 function formatOcFooter(usage, modelId) {
@@ -67,8 +67,7 @@ function formatOcFooter(usage, modelId) {
   const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   const cost = usage.cost || 0;
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  const modelShort = (modelId || '').replace(/^openrouter\//, '').replace(/^gigachat\//, '');
-  return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых · ${modelShort} · ~${costStr}\``;
+  return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых · ~${costStr}\``;
 }
 
 // Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
@@ -264,6 +263,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
 const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?)\b/i;
+const AGENT_INFO_INTENT = /^\/(?:get_agent_info|agent_info|info)(?:@\S+)?(?=\s|$)/i;
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -497,8 +497,33 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const raw = (engineSwitchM[1] || engineSwitchM[2] || '').toLowerCase();
     const engine = /^(codex|кодекс)$/.test(raw) ? 'codex' : raw === 'opencode' ? 'opencode' : 'claude';
     profiles.setEngine(workDir, engine, chatId);
-    const label = engine === 'codex' ? 'Codex CLI' : engine === 'opencode' ? 'OpenCode (MiniMax M3)' : 'Claude Code';
+    const label = engine === 'codex' ? 'Codex CLI' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
     return `🔀 Для этого чата переключил движок на ${label}.\nСледующая задача в этом чате пойдёт через него (текущая, если выполняется, — доработает на старом).`;
+  }
+
+  // /get_agent_info — show current engine, model, profile, VM, version
+  if (AGENT_INFO_INTENT.test(task)) {
+    const { execSync } = require('child_process');
+    const eng = workDir ? profiles.getEngine(workDir, chatId) : 'claude';
+    const vmName = process.env.VM_NAME || 'unknown';
+    let commit = 'unknown';
+    try { commit = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
+    let ocModel = process.env.OPENCODE_MODEL || '(из opencode.json)';
+    let ocProfile = 'не задан';
+    try {
+      const ocCfgPath = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
+      if (fs.existsSync(ocCfgPath)) {
+        const ocCfg = JSON.parse(fs.readFileSync(ocCfgPath, 'utf8'));
+        if (ocCfg.model) ocModel = ocCfg.model;
+      }
+      const profileFile = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
+      if (fs.existsSync(profileFile)) ocProfile = fs.readFileSync(profileFile, 'utf8').trim();
+    } catch {}
+    const engineLabel = eng === 'opencode' ? 'OpenCode' : eng === 'codex' ? 'Codex CLI' : 'Claude Code';
+    const modelLine = eng === 'opencode'
+      ? `🧠 Модель: \`${ocModel}\`\n📦 Профиль OC: ${ocProfile}`
+      : `🧠 Модель: \`${process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
+    return `🤖 Агент: \`${user?.username || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
   }
 
   // /oc_value, /oc_quality, /oc_free, /oc_mimo, /oc_ru — switch OpenCode model profile globally
@@ -900,7 +925,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   }
 
   // Capability question about audio/voice transcription
-  if (AUDIO_CAPABILITY_INTENT.test(task) && !sessionExists) {
+  if (AUDIO_CAPABILITY_INTENT.test(task)) {
     return [
       'Да, умею транскрибировать аудио и голосовые сообщения.\n',
       '🎙️ Как это работает:',
@@ -2785,7 +2810,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
   const systemPromptText = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
-  const opencodeModel = process.env.OPENCODE_MODEL || 'openrouter/minimax/minimax-m3';
+  const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = engine === 'codex'
     ? [process.env.CODEX_BIN || 'codex', [
         'exec',
@@ -2800,7 +2825,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         'run',
         '--format', 'json',
         '--auto',
-        '-m', opencodeModel,
+        ...(opencodeModel ? ['-m', opencodeModel] : []),
         systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
       ]]
     : [process.env.CLAUDE_BIN || 'claude', [
@@ -3314,10 +3339,20 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   }
 
   // Record token usage for billing
-  if (claudeUsage) {
+  if (engine === 'opencode' && opencodeUsage) {
+    recordUsage(user.workDir, {
+      taskId, sessionId: activeSessionId,
+      engine: 'opencode', model: opencodeModel || 'opencode-config',
+      input_tokens: opencodeUsage.input || 0,
+      output_tokens: opencodeUsage.output || 0,
+      cost_usd: opencodeUsage.cost,
+    });
+  } else if (claudeUsage) {
     recordUsage(user.workDir, {
       taskId,
       sessionId: activeSessionId,
+      engine: engine || 'claude',
+      model: claudeModel || process.env.ANTHROPIC_MODEL || 'claude',
       input_tokens: claudeUsage.input_tokens || 0,
       output_tokens: claudeUsage.output_tokens || 0,
       cache_read_input_tokens: claudeUsage.cache_read_input_tokens || 0,
