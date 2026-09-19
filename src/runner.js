@@ -2369,7 +2369,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   });
 
   fs.mkdirSync(user.workDir, { recursive: true });
-  clearPendingContinuation(user.username); // cancel any pending soft-continuation from previous response
+  const isAutoFile = rawTask && rawTask.startsWith("[Файл сохранён:");
+  if (!isAutoFile && !internalGtd) {
+    clearPendingContinuation(user.username); // cancel any pending soft-continuation from previous response
+  }
   initLog(user.workDir);
   ensureProfileLayoutSkill(user.workDir, user.username);
   ensureSkillDir(user.workDir, 'prompts', 'Промпты и критерии, специфичные для этого профиля. Перезаписывают общие настройки из flexi-consult/.');
@@ -3393,7 +3396,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     classifyTaskCompleteness(result, secrets.OPENROUTER_API_KEY).then(async (cls) => {
       if (!cls.incomplete || !cls.auto_continue) return;
       const delayMs = 3 * 60 * 1000;
-      const footer = `\n\n⏱ Выглядит незавершённым. Продолжу через ~3 мин — напишите что-нибудь, чтобы отменить.`;
+      const timeStr = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" });
+      const footer = `\n\n⏱ Выглядит незавершённым. Продолжу через ~3 мин (в ${timeStr}) — напишите что-нибудь, чтобы отменить.`;
       await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}${footer}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       console.log(`[soft-incomplete] username=${user.username} reason=${cls.reason} round=${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
       const timer = setTimeout(async () => {
