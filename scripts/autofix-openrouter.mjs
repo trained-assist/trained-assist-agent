@@ -3,7 +3,10 @@
 //   Stage 1 (deepseek-r1:free)          — diagnose: root cause + files to examine
 //   Stage 2 (gemini-2.5-flash-lite:free) — contextualize: read real files, describe exact changes
 //   Stage 3 (qwen3-235b:free)            — patch: write the unified diff
-// Exits 0 on success (fix committed+pushed), 1 on failure.
+//
+// On success: creates a new fix/ci-* branch + PR (never pushes to original branch).
+// The new PR auto-merges when CI passes; ci-fix-cleanup.yml then closes the original PR.
+// Exits 0 on success (fix PR created), 1 on failure.
 
 import { execSync, execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
@@ -11,7 +14,7 @@ import path from 'node:path';
 
 const LOG_CHAR_LIMIT = 12000;
 const DIFF_CHAR_LIMIT = 10000;
-const FILE_CHAR_LIMIT = 8000; // per file in stage 2
+const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
 const STAGE1_MODEL = 'deepseek/deepseek-r1:free';
@@ -24,6 +27,7 @@ const {
   RUN_ID,
   REPO,
   PR_NUMBER,
+  ORIGINAL_BRANCH = '',
   BASE_BRANCH = 'main',
 } = process.env;
 
@@ -78,6 +82,25 @@ function readFileSafe(filePath) {
 if (!OPENROUTER_API_KEY) fail('OPENROUTER_API_KEY not set');
 if (!RUN_ID || !REPO || !PR_NUMBER) fail('missing RUN_ID/REPO/PR_NUMBER env');
 
+// ── Race condition guard ─────────────────────────────────────────────────────
+// If the old PR was closed/merged or its CI somehow passed while we were waiting,
+// there's nothing to fix.
+try {
+  const prViewRaw = sh(`gh pr view ${PR_NUMBER} -R ${REPO} --json state,statusCheckRollup`);
+  const prInfo = JSON.parse(prViewRaw);
+  if (prInfo.state !== 'OPEN') {
+    log('guard', `PR #${PR_NUMBER} is already ${prInfo.state} — aborting`);
+    process.exit(0);
+  }
+  const checks = prInfo.statusCheckRollup || [];
+  if (checks.length > 0 && !checks.some(c => c.conclusion === 'FAILURE' || c.conclusion === 'TIMED_OUT')) {
+    log('guard', `PR #${PR_NUMBER} CI no longer shows failures — aborting`);
+    process.exit(0);
+  }
+} catch (e) {
+  log('guard', `could not check PR state (${e.message}) — proceeding anyway`);
+}
+
 let failedLog;
 try {
   failedLog = sh(`gh run view ${RUN_ID} --log-failed -R ${REPO}`).slice(-LOG_CHAR_LIMIT);
@@ -104,13 +127,15 @@ Reply with valid JSON only:
 {
   "problem": "concise one-paragraph root cause description",
   "files_to_examine": ["path/to/file1.js", "path/to/file2.js"],
-  "fix_approach": "brief description of what to change and where"
+  "fix_approach": "brief description of what to change and where",
+  "confidence": "high|medium|low"
 }
 
 Rules:
 - files_to_examine: list up to ${MAX_FILES} specific source files (not node_modules, not lock files)
 - If the fix is obvious from the log alone and needs no extra file context, set files_to_examine to []
-- If you cannot determine the cause, set problem to "CANNOT_DIAGNOSE"`,
+- If you cannot determine the cause, set problem to "CANNOT_DIAGNOSE"
+- confidence: high = clear deterministic fix; medium = likely fix; low = uncertain`,
   },
   {
     role: 'user',
@@ -130,7 +155,13 @@ if (diagnosis.problem === 'CANNOT_DIAGNOSE') {
   fail('stage 1: model could not determine root cause');
 }
 
+// Don't attempt fixes the model is uncertain about — better to surface for human review
+if (diagnosis.confidence === 'low') {
+  fail(`stage 1: low confidence diagnosis — not safe to auto-fix. Root cause: ${diagnosis.problem}`);
+}
+
 log(1, `diagnosis: ${diagnosis.problem.slice(0, 120)}`);
+log(1, `confidence: ${diagnosis.confidence || 'unset'}`);
 log(1, `files to examine: ${(diagnosis.files_to_examine || []).join(', ') || '(none)'}`);
 
 // ── Stage 2: Gather context ──────────────────────────────────────────────────
@@ -229,26 +260,80 @@ try {
   fail('patch applied but tests still fail');
 }
 
-// ── Commit + push ────────────────────────────────────────────────────────────
+// ── Create new fix branch + PR (never push to original branch) ───────────────
+
+const ts = Math.floor(Date.now() / 1000);
+const safeBranch = (ORIGINAL_BRANCH || 'unknown').replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40);
+const fixBranch = `fix/ci-${safeBranch}-${ts}`;
 
 sh('git config user.name "trained-assist-autofix"');
 sh('git config user.email "autofix@trained-assist.bot"');
 sh('git add -A');
-sh(`git commit -m "fix: auto-fix CI failure [autofix]\\n\\nDiagnosis: ${diagnosis.problem.slice(0, 120).replace(/"/g, "'")}"`);
-sh('git push');
+sh(`git commit -m "fix: auto-fix CI failure [autofix]
 
-const commentBody = [
-  `🤖 **Auto-fixed** via 3-stage OpenRouter pipeline`,
+Diagnosis: ${diagnosis.problem.slice(0, 120).replace(/"/g, "'")}"
+`);
+sh(`git checkout -b ${fixBranch}`);
+sh(`git push origin ${fixBranch}`);
+
+log('publish', `pushed fix branch: ${fixBranch}`);
+
+// Create new PR targeting the same base branch
+const prTitle = `fix: auto-fix CI failure in ${ORIGINAL_BRANCH || safeBranch}`;
+const prBody = [
+  `🤖 Automatically generated fix for CI failure in #${PR_NUMBER}`,
   '',
   `**Root cause:** ${diagnosis.problem}`,
   '',
   `**Fix:** ${diagnosis.fix_approach}`,
   '',
+  `**Confidence:** ${diagnosis.confidence || 'medium'}`,
+  '',
+  `Models: \`${STAGE1_MODEL}\` → \`${STAGE2_MODEL}\` → \`${STAGE3_MODEL}\``,
+  '',
+  `---`,
+  `<!-- ci-fixer-original-pr: ${PR_NUMBER} -->`,
+].join('\n');
+
+writeFileSync('pr-body.txt', prBody);
+let newPRUrl;
+try {
+  newPRUrl = sh(
+    `gh pr create --repo "${REPO}" --base "${BASE_BRANCH}" --head "${fixBranch}" --title "${prTitle}" --body-file pr-body.txt`
+  ).trim();
+} finally {
+  unlinkSync('pr-body.txt');
+}
+
+const newPRNumber = newPRUrl.match(/\/pull\/(\d+)$/)?.[1] || '?';
+log('publish', `created new PR #${newPRNumber}: ${newPRUrl}`);
+
+// Enable auto-merge if supported (requires repo setting; fails gracefully if not)
+try {
+  sh(`gh pr merge --auto --squash "${newPRNumber}" -R "${REPO}"`);
+  log('publish', `auto-merge enabled on PR #${newPRNumber}`);
+} catch (e) {
+  log('publish', `auto-merge not available (${e.message.slice(0, 80)}) — PR will need manual merge`);
+}
+
+// Comment on old PR with link to fix PR
+const commentBody = [
+  `🤖 **Auto-fix PR created:** ${newPRUrl}`,
+  '',
+  `**Root cause:** ${diagnosis.problem}`,
+  '',
+  `**Fix:** ${diagnosis.fix_approach}`,
+  '',
+  `PR #${newPRNumber} will auto-merge when CI passes. This PR will be closed automatically after that.`,
+  '',
   `Models: \`${STAGE1_MODEL}\` → \`${STAGE2_MODEL}\` → \`${STAGE3_MODEL}\``,
 ].join('\n');
 
-writeFileSync('autofix-comment.txt', commentBody);
-sh(`gh pr comment ${PR_NUMBER} -R ${REPO} --body-file autofix-comment.txt`);
-unlinkSync('autofix-comment.txt');
+writeFileSync('comment.txt', commentBody);
+try {
+  sh(`gh pr comment ${PR_NUMBER} -R "${REPO}" --body-file comment.txt`);
+} finally {
+  unlinkSync('comment.txt');
+}
 
-console.log('[autofix] 3-stage fix committed and pushed successfully');
+console.log(`[autofix] fix PR #${newPRNumber} created and auto-merge enabled`);
