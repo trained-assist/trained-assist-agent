@@ -1590,7 +1590,7 @@ async function generateMessage(candidateContext, atsResult, name, apiKey, messag
   const historyLines = history.map(m => `${m.role === 'employer' ? 'Рекрутер' : 'Кандидат'}: ${m.text}`).join('\n');
   const userMsg = `Кандидат: ${firstName}\n\nКонтекст:\n${candidateContext}\n\nATS-оценка: ${atsResult.score ?? 'n/a'}/10, вердикт: ${atsResult.verdict || 'n/a'}. Совпадения: ${(atsResult.matched || []).slice(0, 3).join(', ') || 'нет'}. Уточнить: ${gaps}.\n\nИстория переписки:\n${historyLines || '(переписки ещё не было — это первое сообщение)'}${availabilityBlock}\n\nНапиши следующее сообщение кандидату.`;
 
-  return llmCall(apiKey, FAST_MODEL, [
+  return llmCall(apiKey, SMART_MODEL, [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMsg },
   ], 1000, 0.7);
