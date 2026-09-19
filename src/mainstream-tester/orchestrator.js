@@ -103,7 +103,7 @@ class Orchestrator {
       },
       body: JSON.stringify({
         userId: TEST_CHAT_ID,
-        username: 'mainstream-tester',
+        username: this.state.username,
         task,
         context: '',
         initialMsgId: 0,
@@ -116,10 +116,14 @@ class Orchestrator {
 
   async startRun() {
     const runId = `run-${Date.now()}`;
+    // Each run + each path gets a fresh username → fresh session in the agent.
+    // username must be alphanumeric, max ~20 chars.
+    const runTag = runId.slice(-8);
     this.state = {
       runId,
       startedAt: new Date().toISOString(),
       phase: 'happy_path',
+      username: `mt${runTag}h`,
       currentStep: 0,
       maxSteps: this.maxSteps,
       conversation: [],
@@ -136,6 +140,8 @@ class Orchestrator {
       this.state.phase = 'alternative_path';
       this.state.currentStep = 0;
       this.state.conversation = [];
+      // Fresh username → fresh agent session for alternative path
+      this.state.username = `mt${runId.slice(-8)}a`;
       this._saveState();
       console.log('[orchestrator] Starting alternative path');
       await this._runPath(true);
