@@ -2,7 +2,7 @@
 
 // Outsource Project Risk Assessment & Planning
 //
-// Tools: outsource_new | outsource_assess | outsource_add_info | outsource_questions | outsource_list
+// Tools: outsource_new | outsource_assess | outsource_add_info | outsource_questions | outsource_list | outsource_set_folder
 //
 // State on disk: <workDir>/outsource-projects/<id>.json
 // Output: Google Sheet with 4 tabs — Итог / Риски / План проекта / Q&A
@@ -16,6 +16,20 @@ const os     = require('os');
 const path   = require('path');
 
 const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+
+// ── Context store (mirrors 03-context-store.js) ───────────────────────────────
+
+function ctxPath(key) {
+  return path.join(process.cwd(), 'contexts', 'outsource', `${key}.json`);
+}
+function readCtx(key) {
+  try { const f = ctxPath(key); return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')).value : null; } catch { return null; }
+}
+function writeCtx(key, value) {
+  const f = ctxPath(key);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify({ value, updated_at: new Date().toISOString() }, null, 2));
+}
 
 // ── Project state ──────────────────────────────────────────────────────────────
 
@@ -279,7 +293,21 @@ async function sheetsReq(method, apiPath, body, sa) {
   return data;
 }
 
-async function createSpreadsheet(title, sa) {
+async function driveReq(method, apiPath, body, sa) {
+  const token = await getAccessToken(sa);
+  const res = await fetch(`https://www.googleapis.com/drive/v3${apiPath}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body != null ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(10000),
+  });
+  if (res.status === 204) return null;
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Drive ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
+  return data;
+}
+
+async function createSpreadsheet(title, sa, folderId) {
   const r = await sheetsReq('POST', '/spreadsheets', {
     properties: { title },
     sheets: [
@@ -289,7 +317,19 @@ async function createSpreadsheet(title, sa) {
       { properties: { title: 'Q&A',           sheetId: 3, index: 3 } },
     ],
   }, sa);
-  return { id: r.spreadsheetId, url: `https://docs.google.com/spreadsheets/d/${r.spreadsheetId}` };
+  const id = r.spreadsheetId;
+
+  // Move to user's folder if provided
+  if (folderId) {
+    const meta = await driveReq('GET', `/files/${id}?fields=parents`, null, sa);
+    const oldParents = (meta.parents || []).join(',');
+    await driveReq('PATCH', `/files/${id}?addParents=${folderId}&removeParents=${oldParents}&fields=id`, null, sa);
+  } else {
+    // Share with anyone who has the link (writer) so user can open/edit
+    await driveReq('POST', `/files/${id}/permissions`, { type: 'anyone', role: 'writer' }, sa);
+  }
+
+  return { id, url: `https://docs.google.com/spreadsheets/d/${id}` };
 }
 
 async function writeTab(spreadsheetId, tab, rows, sa) {
@@ -444,6 +484,8 @@ module.exports = {
           integrationCount:        { type: 'number',  description: 'Кол-во интегрируемых систем' },
           hasMVP:                  { type: 'boolean', description: 'MVP определён?' },
           createSheet:             { type: 'boolean', description: 'Создать Google Sheet (по умолчанию true, нужен gdrive)' },
+          folder_id:               { type: 'string',  description: 'ID папки в Google Drive куда помещать таблицу. Если не указан — берётся из контекста (сохранённая папка). Без папки таблица шарится по ссылке.' },
+          spreadsheet_id:          { type: 'string',  description: 'Использовать существующую таблицу (ID) вместо создания новой. Обновит содержимое вкладок.' },
         },
       },
       handler: async (args) => {
@@ -460,12 +502,21 @@ module.exports = {
         const doSheet = args.createSheet !== false;
 
         if (doSheet && sa) {
-          try {
-            const s = await createSpreadsheet(`Оценка проекта: ${proj.name}`, sa);
-            proj.spreadsheetId  = s.id;
-            proj.spreadsheetUrl = s.url;
-          } catch (e) {
-            proj._sheetError = e.message;
+          // Use existing spreadsheet if provided
+          if (args.spreadsheet_id) {
+            proj.spreadsheetId  = args.spreadsheet_id;
+            proj.spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${args.spreadsheet_id}`;
+          } else {
+            // Resolve folder: explicit arg → saved context → none (share by link)
+            const folderId = args.folder_id || readCtx('folder_id') || null;
+            if (args.folder_id) writeCtx('folder_id', args.folder_id); // remember for next time
+            try {
+              const s = await createSpreadsheet(`Оценка проекта: ${proj.name}`, sa, folderId);
+              proj.spreadsheetId  = s.id;
+              proj.spreadsheetUrl = s.url;
+            } catch (e) {
+              proj._sheetError = e.message;
+            }
           }
         }
 
@@ -639,6 +690,30 @@ module.exports = {
             spreadsheet_url: p.spreadsheetUrl || null,
             updated:         p.updatedAt,
           })),
+        };
+      },
+    },
+
+    outsource_set_folder: {
+      description: [
+        'Установить папку Google Drive для хранения таблиц аутсорс-проектов.',
+        'После вызова все новые проекты будут создаваться в этой папке — файлы появятся в Drive пользователя.',
+        'Без папки таблицы шарятся по ссылке (anyone with link, writer).',
+        'Узнать ID папки: открыть папку в Drive, взять ID из URL (…/drive/folders/<ID>).',
+      ].join(' '),
+      inputSchema: {
+        type: 'object',
+        required: ['folder_id'],
+        properties: {
+          folder_id: { type: 'string', description: 'ID папки из Google Drive URL' },
+        },
+      },
+      handler: async ({ folder_id }) => {
+        writeCtx('folder_id', folder_id);
+        return {
+          saved: true,
+          folder_id,
+          message: `✅ Папка сохранена. Все новые проекты будут создаваться в папке ${folder_id}.\nСсылка: https://drive.google.com/drive/folders/${folder_id}`,
         };
       },
     },
