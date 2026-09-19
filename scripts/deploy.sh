@@ -162,18 +162,28 @@ echo "==> Applying OpenCode profile..."
 bash "$REPO_DIR/infra/opencode-switch-profile.sh" || echo "opencode-switch-profile: skipped (jq missing or no profile set)"
 
 echo "==> Restarting service..."
+# Clear any failed state (e.g. StartLimitBurst exhausted from crash loops) so
+# systemd accepts the start request even if the previous run ended badly.
+sudo systemctl reset-failed "$SERVICE" 2>/dev/null || true
 sudo systemctl restart "$SERVICE"
 
 echo "==> Waiting for service to be healthy (up to 60s)..."
+HEALTHY=0
 for i in $(seq 1 12); do
   STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:8080/health 2>/dev/null || echo 000)
   echo "  attempt $i: HTTP $STATUS_CODE"
-  [ "$STATUS_CODE" = "200" ] && break
+  if [ "$STATUS_CODE" = "200" ]; then HEALTHY=1; break; fi
   sleep 5
 done
 sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
 echo "==> Service journal (last 20 lines)..."
 sudo journalctl -u "$SERVICE" --no-pager -n 20 || true
+
+# Fail hard if service never came up — triggers on_deploy_error → rollback.
+if [ "$HEALTHY" = "0" ]; then
+  echo "ERROR: service did not respond on /health after 60s — failing deploy to trigger rollback"
+  exit 1
+fi
 
 echo "==> Installing disk-hygiene crons..."
 if [ -x "$REPO_DIR/ops/cron/install.sh" ]; then

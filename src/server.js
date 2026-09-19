@@ -4155,20 +4155,28 @@ ${recent || '(пока нет)'}
   // resumePendingTasks() on the next startup. Keep this comfortably under
   // systemd's TimeoutStopSec (set to 120s in the unit files) so systemd
   // doesn't SIGKILL us mid-drain.
+  //
+  // If drain-for-deploy.py already closed the gate (drain flag on disk),
+  // it already waited for tasks before calling systemctl stop. Use a short
+  // flush window (10s) instead of the full 90s — the deployer already did
+  // the real drain; we just let any in-flight response bytes flush.
   const DRAIN_TIMEOUT_MS = 90_000;
+  const DEPLOY_FLUSH_MS  = 10_000;
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     server.close(); // stop accepting new HTTP connections; existing tasks keep running
     const forced = maintenance.status().forced === true;
+    const deployDrainDone = maintenance.status().paused; // drain flag set by drain-for-deploy.py
     maintenance.beginRecovery(); // block every ingress/retry during shutdown
     if (forced) require('./runner').interruptForRestart();
     const planned = maintenance.status().phase === 'restarting';
     const active = planned ? maintenance.status().active : getActiveTaskCount();
     if (active > 0) {
-      console.log(`[shutdown] draining ${active} active task(s), up to ${DRAIN_TIMEOUT_MS / 1000}s...`);
-      const drained = await waitForIdle(forced ? 5000 : DRAIN_TIMEOUT_MS);
+      const timeoutMs = forced ? 5000 : deployDrainDone ? DEPLOY_FLUSH_MS : DRAIN_TIMEOUT_MS;
+      console.log(`[shutdown] draining ${active} active task(s), up to ${timeoutMs / 1000}s${deployDrainDone ? ' (deploy flush)' : ''}...`);
+      const drained = await waitForIdle(timeoutMs);
       console.log(drained ? '[shutdown] all tasks drained' : '[shutdown] drain timeout — remaining tasks will resume on next startup');
     }
     // Close any open Playwright browsers so Node exits cleanly
