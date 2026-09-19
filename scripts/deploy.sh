@@ -11,7 +11,7 @@ esac
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
-  exec 9>"${ASSIST_DEPLOY_LOCK_FILE:-/tmp/assist-agent-deploy.lock}"
+  exec 9>"${ASSIST_DEPLOY_LOCK_FILE:-$HOME/.assist-deploy.lock}"
   flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
   export ASSIST_DEPLOY_LOCKED=1
 fi
