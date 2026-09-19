@@ -1,17 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "playwright": {
-      "type": "local",
-      "command": [
-        "compress-on-input",
-        "--wrap",
-        "npx",
-        "@playwright/mcp",
-        "--browser",
-        "chromium"
-      ]
-    },
     "Neon": {
       "type": "remote",
       "url": "https://mcp.neon.tech/mcp",

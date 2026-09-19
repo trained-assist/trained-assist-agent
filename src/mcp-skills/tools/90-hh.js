@@ -191,6 +191,54 @@ function parseLlmJson(content) {
   return JSON.parse(content);
 }
 
+// ── Telegram batch formatter ────────────────────────────────────────────────
+
+async function formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, apiKey) {
+  try {
+    const total = results.length;
+    const pass = results.filter(r => r.verdict === 'ПРОПУСТИТЬ').length;
+    const review = results.filter(r => r.verdict === 'УТОЧНИТЬ').length;
+    const reject = results.filter(r => r.verdict === 'ОТКЛОНИТЬ').length;
+
+    const topCandidates = results
+      .filter(r => r.verdict !== 'ОТКЛОНИТЬ' && r.score != null)
+      .sort((a, b) => (b.score || 0) - (a.score || 0))
+      .slice(0, 5);
+
+    const topLines = topCandidates.map(c => {
+      const skills = (c.matched || []).slice(0, 3).join(', ');
+      const scoreStr = c.score != null ? `${c.score}/10` : '—';
+      return `• *${c.name}* — ${scoreStr}${skills ? ` (${skills})` : ''}`;
+    }).join('\n');
+
+    const title = (vacancyTitle || 'Вакансия').replace(/[*_`[\]]/g, '');
+    let text = `📋 *Ревью: ${title}* (${total} кандидатов)\n\n`;
+    text += `✅ Пропустить: ${pass}\n`;
+    text += `⚠️ Уточнить: ${review}\n`;
+    text += `❌ Отклонить: ${reject}\n`;
+    if (topLines) {
+      text += `\nТоп кандидаты:\n${topLines}\n`;
+    }
+    if (reviewUrl) {
+      text += `\n[Открыть страницу ревью →](${reviewUrl})`;
+    }
+    return text;
+  } catch (e) {
+    if (!apiKey) return `Ревью: ${results.length} кандидатов`;
+    try {
+      return await llmCall(
+        apiKey,
+        FAST_MODEL,
+        [{ role: 'user', content: 'Форматируй для Telegram: ' + JSON.stringify(results.slice(0, 5)) }],
+        500,
+        0.1,
+      );
+    } catch {
+      return `Ревью: ${results.length} кандидатов`;
+    }
+  }
+}
+
 // ── ATS logic (ported from recruiter-assistant/platform/test_pipeline.py) ──
 
 const ATS_EXTRACT_SYSTEM = `Ты — senior технический рекрутер. По тексту вакансии сформируй ATS-конфиг.
@@ -1063,13 +1111,25 @@ module.exports = {
           results.sort((a, b) => (b.score || 0) - (a.score || 0));
 
           const vacCtx = readContext('hh', 'active_vacancy');
+          const vacancyTitle = vacCtx?.value?.title || vacancy_id;
+
+          const agentBase = (process.env.AGENT_PUBLIC_URL || 'http://localhost:3001').replace(/\/$/, '');
+          const agentSecret = process.env.AGENT_SECRET || '';
+          const reviewToken = agentSecret
+            ? require('crypto').createHmac('sha256', agentSecret).update(USER_ID).digest('hex').slice(0, 16)
+            : '';
+          const reviewUrl = `${agentBase}/hh/review?username=${encodeURIComponent(USER_ID)}&token=${reviewToken}`;
+
+          const telegram_summary = await formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, apiKey);
+
           return {
             vacancy_id,
-            vacancy_title: vacCtx?.value?.title || vacancy_id,
+            vacancy_title: vacancyTitle,
             evaluated: results.length,
             skipped: skipped.length,
             skipped_list: skipped,
             results,
+            telegram_summary,
             note: 'Передай results в hh_draft_review_page чтобы сгенерировать страницу ревью.',
           };
         } catch (e) {
