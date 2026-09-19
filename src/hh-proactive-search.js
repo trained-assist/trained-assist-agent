@@ -390,7 +390,13 @@ ${exclusionsBlock}
     }
   }
 
-  if (!aiQueries.length) throw new Error('empty query list from AI');
+  if (!aiQueries.length) {
+    // LLM returned empty / parse failed — use deterministic fallback instead of throwing,
+    // so a single bad LLM response doesn't kill the entire proactive run.
+    const fallback = deriveFallbackQueries(cfg);
+    if (fallback.length) return fallback;
+    throw new Error('empty query list from AI and no fallback derivable from vacancy title/criteria');
+  }
   if (queriesLookSane(aiQueries, cfg)) return aiQueries;
 
   // AI went off-topic — use ONLY the deterministic fallback. Including the off-topic
