@@ -25,7 +25,10 @@ const { FakeTelegram } = require('./fake-telegram');
 const { Orchestrator } = require('./orchestrator');
 
 const SPAWNED_AGENT_PORT = 3099;
-const TEST_DATA_DIR = path.join(os.homedir(), 'agent-data', 'mainstream-test');
+// Each tester invocation gets its own timestamped data dir → no GTD spillover
+// from previous runs. Bugs are written to a per-invocation file.
+const SESSION_TAG = Date.now();
+const TEST_DATA_DIR = path.join(os.homedir(), 'agent-data', `mainstream-test-${SESSION_TAG}`);
 
 function requiredEnv(name) {
   const v = process.env[name];
