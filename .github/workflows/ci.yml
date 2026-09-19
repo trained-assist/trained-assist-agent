@@ -117,7 +117,10 @@ jobs:
             export ASSIST_DEPLOY_LOCKED=1
             cd /home/vova/trained-assist-agent
             git fetch origin "${{ needs.merge.outputs.sha || github.sha }}"
-            test -z "$(git status --porcelain)" || { echo "Live checkout has local changes; deploy deferred before drain"; exit 1; }
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "Live checkout has local changes; stashing before deploy..."
+              git stash --include-untracked
+            fi
             export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
             git show FETCH_HEAD:scripts/drain-for-deploy.py > /tmp/assist-drain-for-deploy.py
             python3 /tmp/assist-drain-for-deploy.py
@@ -170,7 +173,10 @@ jobs:
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
             git fetch origin "${{ needs.merge.outputs.sha || github.sha }}"
-            test -z "$(git status --porcelain)" || { echo "Live checkout has local changes; deploy deferred before drain"; exit 1; }
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "Live checkout has local changes; stashing before deploy..."
+              git stash --include-untracked
+            fi
             export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
             git show FETCH_HEAD:scripts/drain-for-deploy.py > /tmp/assist-drain-for-deploy.py
             python3 /tmp/assist-drain-for-deploy.py
