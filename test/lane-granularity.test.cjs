@@ -2,18 +2,15 @@
 
 // Concurrency-lane granularity — the serialization lane is keyed by SESSION.
 //
-// History: the lane was briefly keyed by workDir (#546, "R6 fix"), which
-// wrongly serialized two sessions that merely share a project workDir. The
-// owner constraint is the opposite: «в 1 workDir могут работать несколько
-// сессий с разных чатов или с веба — нормально работает» → those MUST run in
-// parallel. The lane's only real job is "one `claude` per transcript", i.e. per
-// SESSION. Cross-session limits are the per-profile cap + global semaphore,
-// never this lane.
+// History: the lane was briefly keyed by workDir (#546, "R6 fix"), then by
+// session (#553). The per-chat "one active task" invariant is enforced by the
+// outer perChatQueue layer in runner.js, NOT by _laneKey.
 //
-// Contract encoded here (runner._laneKey(sessionId, chatId)):
+// _laneKey contract (tested here):
 //   L1 same session, reached via web (chat 0) AND chat → SAME key (serialize)
-//   L2 two DIFFERENT sessions in the same workDir/chat  → DISTINCT keys (parallel)
-//   L3 two web sessions (both chatId 0), different ids   → DISTINCT keys (parallel)
+//   L2 two DIFFERENT sessions in the same chat  → DISTINCT _laneKey values
+//      (outer perChatQueue in runner.js serializes them at the chat level)
+//   L3 two web sessions (both chatId 0), different ids   → DISTINCT keys
 //   L4 brand-new session (no id), same chat              → SAME chat key (collapse)
 //   L5 brand-new sessions in different chats             → DISTINCT chat keys
 
@@ -26,9 +23,10 @@ function ok(c, m) { c ? pass++ : (fail++, console.log('FAIL:', m)); }
 ok(_laneKey('s-42', '0') === _laneKey('s-42', '774411'),
    'L1 same session via web+chat → same lane');
 
-// L2 — two different sessions in the same chat/workDir → distinct → parallel.
+// L2 — two different sessions in the same chat → distinct _laneKey values.
+//      (outer perChatQueue in runner.js serializes them at the chat level)
 ok(_laneKey('s-1', '774411') !== _laneKey('s-2', '774411'),
-   'L2 two sessions same chat → distinct lanes (parallel)');
+   'L2 two sessions same chat → distinct _laneKey (perChatQueue serializes them)');
 
 // L3 — two web sessions, both chatId 0, distinct ids → distinct → parallel
 //      (the old chatId-only lane collapsed all web into one; must not).
