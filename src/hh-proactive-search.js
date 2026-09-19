@@ -32,6 +32,32 @@ function extractKeywords(name) {
     .filter(w => w.length >= 4);
 }
 
+// Normalize ATS config to the canonical shape that this module reads.
+// The ATS editor UI and the LLM `hh_extract_ats_config` tool historically produced
+// different field names for the same concept — without normalization the proactive
+// search ends up looking at an empty `required`/`preferred` list, generates queries
+// from the vacancy title alone, and returns 30 "Аналитик данных" for a "Финансовый
+// советник" vacancy. Mirrors the same logic used in src/hh-scoring.js.
+function normalizeAtsConfig(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const required = raw.required?.length
+    ? raw.required.map(c => ({ name: c.name || c.skill || c.criterion || '', weight: Number(c.weight) || 0 }))
+    : (raw.required_skills || []).map(c => ({ name: c.skill || c.name || c.criterion || '', weight: Number(c.weight) || 0 }));
+  const preferred = raw.preferred?.length
+    ? raw.preferred.map(c => ({ name: c.name || c.skill || c.criterion || '', weight: Number(c.weight) || 0 }))
+    : (raw.preferred_skills || []).map(c => ({ name: c.skill || c.name || c.criterion || '', weight: Number(c.weight) || 0 }));
+  const knockout = (raw.knockout || [])
+    .map(k => (typeof k === 'string' ? k : (k.criterion || k.name || k.skill || '')))
+    .filter(Boolean);
+  return {
+    ...raw,
+    vacancy_title: raw.vacancy_title || raw.title || 'Вакансия',
+    required,
+    preferred,
+    knockout,
+  };
+}
+
 // Generic pre-filter: driven entirely by this vacancy's ATS config (min experience +
 // required/preferred criteria with weights), no hardcoded domain keywords. This is only
 // a cheap sort to pick the top-30 for AI enrichment below — the AI step does the real,
@@ -73,15 +99,16 @@ function scoreCandidate(r, atsConfig) {
 
 // AI enrichment: plus/yellow/red tags + 2-para summary for one candidate
 async function enrichCandidate(candidate, atsConfig, orKey) {
-  const knockoutStr = (atsConfig.knockout || []).map(k => `- ${k}`).join('\n') || '—';
-  const requiredStr = (atsConfig.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
-  const preferredStr = (atsConfig.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
+  const cfg = normalizeAtsConfig(atsConfig);
+  const knockoutStr = (cfg.knockout || []).map(k => `- ${k}`).join('\n') || '—';
+  const requiredStr = (cfg.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
+  const preferredStr = (cfg.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
   const expStr = (candidate.experience || [])
     .map(e => `${e.position} — ${e.company} (${e.start || '?'} – ${e.end || 'н.в.'})`)
     .join('\n') || '—';
 
-  const prompt = `Оцени кандидата для вакансии "${atsConfig.vacancy_title || 'Вакансия'}".
-${atsConfig.vacancy_context ? `\nКонтекст вакансии: ${atsConfig.vacancy_context}` : ''}
+  const prompt = `Оцени кандидата для вакансии "${cfg.vacancy_title || 'Вакансия'}".
+${cfg.vacancy_context ? `\nКонтекст вакансии: ${cfg.vacancy_context}` : ''}
 
 СТОП-ФАКТОРЫ (knockout, критичны):
 ${knockoutStr}
@@ -159,13 +186,64 @@ async function enrichCandidates(candidates, atsConfig, orKey) {
   return enriched;
 }
 
+// Cheap overlap check: do the AI-generated queries actually relate to this vacancy?
+// Without this, generateSearchQueries sometimes returns off-topic terms (e.g. for a
+// "Финансовый советник" vacancy it has produced "Аналитик данных", "Data Scientist",
+// "ML Engineer" — none of which match the vacancy's title, context, or required
+// criteria). The downstream search then pulls 30 random "Аналитик данных" instead of
+// private bankers, and the recruiter sees a meaningless candidate list.
+function queriesLookSane(queries, cfg) {
+  if (!Array.isArray(queries) || queries.length === 0) return false;
+  const titleWords = extractKeywords(cfg.vacancy_title || '');
+  const ctxWords = extractKeywords(cfg.vacancy_context || '');
+  const reqWords = (cfg.required || []).flatMap(c => extractKeywords(c.name));
+  const prefWords = (cfg.preferred || []).flatMap(c => extractKeywords(c.name));
+  const domainWords = new Set([...titleWords, ...ctxWords, ...reqWords, ...prefWords]);
+  if (!domainWords.size) {
+    // No domain anchors at all (vacancy title/context/criteria all empty).
+    // Trust the LLM — we can't really check, accept what it said.
+    return queries.length > 0;
+  }
+  // At least one query must share a 4+ char word with the vacancy's domain.
+  const overlap = queries.some(q => {
+    const qWords = extractKeywords(q);
+    return qWords.some(w => domainWords.has(w));
+  });
+  return overlap;
+}
+
+// Generate a small fallback set of queries from the vacancy's own title + top-3
+// weighted criteria. Used when the LLM returns off-topic queries so we never
+// search for the wrong profession. Returns 4-6 short queries.
+function deriveFallbackQueries(cfg) {
+  const title = String(cfg.vacancy_title || '').trim();
+  const topCriteria = [...(cfg.required || []), ...(cfg.preferred || [])]
+    .filter(c => c.name)
+    .sort((a, b) => (b.weight || 0) - (a.weight || 0))
+    .slice(0, 3)
+    .map(c => c.name);
+  const out = [];
+  if (title) out.push(title);
+  for (const name of topCriteria) {
+    // Take only the leading noun phrase (first 3 significant words)
+    const short = name.split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+    if (short && !out.includes(short)) out.push(short);
+  }
+  return out.slice(0, 6);
+}
+
 // Generate HH resume-search queries for this specific vacancy (title + context + criteria)
 // instead of a fixed list — makes cold-search work for any vacancy, not just one domain.
+// Layered: ask the LLM first, sanity-check the result, merge in a deterministic
+// fallback derived from the vacancy's own fields when the LLM goes off-topic.
 async function generateSearchQueries(atsConfig, orKey) {
-  const criteriaStr = [...(atsConfig.required || []), ...(atsConfig.preferred || [])]
-    .map(c => c.name).join(', ') || '—';
+  const cfg = normalizeAtsConfig(atsConfig);
+  const criteriaStr = [...(cfg.required || []), ...(cfg.preferred || [])]
+    .map(c => c.name).filter(Boolean).join(', ') || '—';
 
-  const prompt = `Вакансия: "${atsConfig.vacancy_title || 'без названия'}"
+  let aiQueries = [];
+  if (orKey) {
+    const prompt = `Вакансия: "${cfg.vacancy_title || 'без названия'}"
 Контекст: ${atsConfig.vacancy_context || '—'}
 Ключевые критерии: ${criteriaStr}
 
@@ -176,26 +254,38 @@ async function generateSearchQueries(atsConfig, orKey) {
 Верни ТОЛЬКО JSON-массив строк, без markdown:
 ["запрос 1", "запрос 2", ...]`;
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'google/gemini-2.5-flash',
-      max_tokens: 300,
-      temperature: 0.3,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-    signal: AbortSignal.timeout(20_000),
-  });
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'google/gemini-2.5-flash',
+        max_tokens: 300,
+        temperature: 0.3,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
 
-  if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || '[]';
-  const match = text.match(/\[[\s\S]*\]/);
-  if (!match) throw new Error('no JSON array in AI response');
-  const queries = JSON.parse(match[0]).filter(q => typeof q === 'string' && q.trim()).slice(0, 8);
-  if (!queries.length) throw new Error('empty query list from AI');
-  return queries;
+    if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || '[]';
+    const match = text.match(/\[[\s\S]*\]/);
+    if (match) {
+      try {
+        aiQueries = JSON.parse(match[0]).filter(q => typeof q === 'string' && q.trim()).slice(0, 8);
+      } catch { /* fall through to fallback */ }
+    }
+  }
+
+  if (!aiQueries.length) throw new Error('empty query list from AI');
+  if (queriesLookSane(aiQueries, cfg)) return aiQueries;
+
+  // AI went off-topic — merge in a deterministic fallback derived from the vacancy
+  // itself so the cold-search at least targets the right profession.
+  console.warn(`[proactive-search] AI queries look off-topic for "${cfg.vacancy_title || 'вакансии'}": ${JSON.stringify(aiQueries)}. Merging fallback derived from vacancy title + criteria.`);
+  const fallback = deriveFallbackQueries(cfg);
+  const merged = [...new Set([...aiQueries, ...fallback])].slice(0, 7);
+  return merged.length ? merged : aiQueries;
 }
 
 // Scoring explanation shown to the recruiter on request — built from the latest actual
@@ -213,14 +303,14 @@ function buildScoringPromptText(username) {
     return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
   }
 
-  const cfg = latest.ats_config || {};
+  const cfg = normalizeAtsConfig(latest.ats_config || {});
   const queriesStr = (latest.search_queries || []).map(q => `• "${q}"`).join('\n') || '—';
   const knockoutStr = (cfg.knockout || []).map(k => `• ${k}`).join('\n') || '(не задано)';
   const minExp = cfg.filters?.min_experience_years ?? 2;
   const reqStr = (cfg.required || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
   const prefStr = (cfg.preferred || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
 
-  return `Как мы подбираем кандидатов для «${latest.vacancy_title || 'вакансии'}» (проактивный поиск):
+  return `Как мы подбираем кандидатов для «${cfg.vacancy_title || 'вакансии'}» (проактивный поиск):
 
 🔍 Поисковые запросы в базе резюме HH (сгенерированы под эту вакансию):
 ${queriesStr}
@@ -239,8 +329,34 @@ PASS/REVIEW считаются относительно суммы весов э
 Топ-30 по предварительному скорингу прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента.`;
 }
 
-async function runProactiveSearch(username, workDir) {
-  const token = readHhToken(username);
+// HH resume search with optional one-shot refresh on token-expired (401/403).
+// `refreshAccessToken` is an optional async fn (username) => newAccessToken|null.
+// server.js wires it to refreshHhToken() so the proactive-search path auto-survives
+// the same 14-day access_token expiry that /hh/review already handles (916a938).
+async function hhResumeSearchWithRefresh(query, token, username, refreshAccessToken) {
+  const tryFetch = (tok) => hhResumeSearch(query, tok);
+  try {
+    return await tryFetch(token);
+  } catch (e) {
+    if (refreshAccessToken && /HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
+      const fresh = await refreshAccessToken(username);
+      if (fresh) {
+        try {
+          return await tryFetch({ access_token: fresh });
+        } catch (e2) {
+          console.error(`[proactive-search] query "${query}" failed after refresh:`, e2.message);
+          return { items: [] };
+        }
+      }
+    }
+    console.error(`[proactive-search] query "${query}" failed:`, e.message);
+    return { items: [] };
+  }
+}
+
+async function runProactiveSearch(username, workDir, options = {}) {
+  const refreshAccessToken = typeof options.refreshAccessToken === 'function' ? options.refreshAccessToken : null;
+  let token = readHhToken(username);
   if (!token) throw new Error(`HH токен не найден для пользователя "${username}"`);
 
   const atsCtxFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
@@ -252,6 +368,12 @@ async function runProactiveSearch(username, workDir) {
     throw new Error('ATS конфиг не найден. Сначала настрой вакансию и критерии оценки.');
   }
   if (!atsConfig) throw new Error('ATS конфиг пуст. Настрой критерии оценки кандидатов.');
+
+  // Normalize legacy (UI: title/required_skills[].skill) and current (LLM:
+  // vacancy_title/required[].name) shapes into one canonical shape. Without this,
+  // scoreCandidate / generateSearchQueries silently read empty criteria and the
+  // search returns 30 random "Аналитик данных" for a "Финансовый советник" vacancy.
+  atsConfig = normalizeAtsConfig(atsConfig);
 
   // Guard: if the recruiter switched active vacancy (hh_set_active_vacancy) after this
   // config was extracted for a different one, don't silently search with the wrong criteria.
@@ -294,13 +416,9 @@ async function runProactiveSearch(username, workDir) {
   const allCandidates = new Map();
 
   for (const query of queries) {
-    try {
-      const data = await hhResumeSearch(query, token);
-      for (const r of (data.items || [])) {
-        if (r.id && !allCandidates.has(r.id)) allCandidates.set(r.id, r);
-      }
-    } catch (e) {
-      console.error(`[proactive-search] query "${query}" failed:`, e.message);
+    const data = await hhResumeSearchWithRefresh(query, token, username, refreshAccessToken);
+    for (const r of (data.items || [])) {
+      if (r.id && !allCandidates.has(r.id)) allCandidates.set(r.id, r);
     }
     await new Promise(r => setTimeout(r, 300));
   }
@@ -389,7 +507,8 @@ async function runProactiveSearch(username, workDir) {
 // Score any un-enriched candidates in the latest proactive results file.
 // Called by the 5-min background cron so enrichment happens automatically
 // without waiting for the user to open the web page.
-async function scoreUnscoredProactiveCandidates(username) {
+async function scoreUnscoredProactiveCandidates(username, options = {}) {
+  const refreshAccessToken = typeof options.refreshAccessToken === 'function' ? options.refreshAccessToken : null;
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
   const proactiveDir = path.join(dataDir, 'hh', String(username), 'proactive');
   if (!fs.existsSync(proactiveDir)) return 0;
@@ -425,4 +544,4 @@ async function scoreUnscoredProactiveCandidates(username) {
   return enriched.filter(c => c.plus_tags).length;
 }
 
-module.exports = { runProactiveSearch, buildScoringPromptText, scoreUnscoredProactiveCandidates };
+module.exports = { runProactiveSearch, buildScoringPromptText, scoreUnscoredProactiveCandidates, queriesLookSane, deriveFallbackQueries };

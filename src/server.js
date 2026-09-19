@@ -330,7 +330,18 @@ async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessTo
       return { negotiations: cached.negotiations, synced_at: cached.synced_at };
     }
   } catch {}
-  const negotiations = await fetchAllHhNegotiations(vacancyId, accessToken);
+  let negotiations;
+  try {
+    negotiations = await fetchAllHhNegotiations(vacancyId, accessToken);
+  } catch (e) {
+    // If HH rejected the token (401/403 oauth_error=token-expired), refresh once and retry.
+    // Without this, /hh/review silently goes empty 14 days after every re-auth.
+    if (username && /HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
+      const fresh = await refreshHhToken(username, _secretsCache);
+      if (fresh) negotiations = await fetchAllHhNegotiations(vacancyId, fresh);
+      else throw e;
+    } else { throw e; }
+  }
   const synced_at = Date.now();
   try {
     fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
@@ -435,6 +446,9 @@ async function syncHhMessagesToHistory(dataDir, username, negotiations, accessTo
 // with HH token + active vacancy + ATS config. Runs every 5 min so the review page
 // shows scores immediately without blocking on page open.
 const _hhBgRunning = new Set();
+// Cached secrets for background tasks (HH OAuth refresh needs HH_CLIENT_ID/SECRET).
+// Populated once in main() after loadSecrets().
+let _secretsCache = null;
 
 async function runHhScoringForUser(username) {
   if (_hhBgRunning.has(username)) return;
@@ -460,7 +474,19 @@ async function runHhScoringForUser(username) {
     if (!fs.existsSync(configFile)) return;
 
     const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-    const negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
+    let negotiations;
+    try {
+      negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
+    } catch (e) {
+      // Auto-refresh HH access_token if it expired since the last re-auth.
+      // Without this, the background loop fails silently for 14 days after
+      // every /hh_connect, leaving new candidates unscored.
+      if (/HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
+        const fresh = await refreshHhToken(username, _secretsCache);
+        if (!fresh) throw e;
+        negotiations = await fetchAllHhNegotiations(vacancy.id, fresh);
+      } else { throw e; }
+    }
 
     // Sync HH thread messages incrementally — only candidates changed since last sync
     const msgSync = await syncHhMessagesToHistory(dataDir, username, negotiations, tokenData.access_token, {
@@ -475,7 +501,9 @@ async function runHhScoringForUser(username) {
     const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3, vacancyId: vacancy.id });
     if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
 
-    const proactiveScored = await scoreUnscoredProactiveCandidates(username);
+    const proactiveScored = await scoreUnscoredProactiveCandidates(username, {
+      refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
+    });
     if (proactiveScored > 0) console.log(`[hh-bg] enriched ${proactiveScored} cold-search candidates for ${username}`);
   } catch (e) {
     console.error(`[hh-bg] error for ${username}:`, e.message);
@@ -525,6 +553,7 @@ async function resumePendingTasks() {
 async function main() {
   maintenance.beginRecovery();
   const secrets = await loadSecrets();
+  _secretsCache = secrets; // expose to background tasks for HH auto-refresh
   await resumePendingTasks();
   const intakeQuick = require('./intake-quick').createIntakeQuick({
     baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
@@ -2459,7 +2488,9 @@ ${expLines || '—'}
       if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
       const workDir = path.join(BASE_USERS_DIR, username);
       try {
-        const result = await runProactiveSearch(username, workDir);
+        const result = await runProactiveSearch(username, workDir, {
+          refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
+        });
         return json(res, 200, result);
       } catch (e) {
         return json(res, 500, { error: e.message });
@@ -5123,6 +5154,57 @@ onCheck();
 // ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────
 
 const HH_API_TIMEOUT_MS = 15_000;
+
+// HH token file lives in ~/agent-tokens/<username>/hh (a flat JSON file, not a directory).
+function hhTokenPath(username) {
+  return path.join(os.homedir(), 'agent-tokens', String(username), 'hh');
+}
+
+// Refresh an expired HH OAuth access_token using the stored refresh_token.
+// Returns the new access_token on success, or null on failure (caller is expected
+// to surface "HH re-auth required" to the recruiter).
+async function refreshHhToken(username, secrets) {
+  if (!secrets?.HH_CLIENT_ID || !secrets?.HH_CLIENT_SECRET) {
+    console.warn('[hh-refresh] no HH_CLIENT_ID/SECRET in env — cannot refresh');
+    return null;
+  }
+  const file = hhTokenPath(username);
+  if (!fs.existsSync(file)) return null;
+  let stored;
+  try { stored = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  if (!stored.refresh_token) return null;
+
+  try {
+    const res = await fetch('https://hh.ru/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: secrets.HH_CLIENT_ID,
+        client_secret: secrets.HH_CLIENT_SECRET,
+        refresh_token: stored.refresh_token,
+      }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await res.json();
+    if (!data.access_token) {
+      console.warn(`[hh-refresh] HH refused refresh for ${username}: ${data.error || 'no access_token'}`);
+      return null;
+    }
+    const updated = {
+      ...stored,
+      access_token: data.access_token,
+      refresh_token: data.refresh_token || stored.refresh_token,
+      saved_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(file, JSON.stringify(updated, null, 2), { mode: 0o600 });
+    console.log(`[hh-refresh] refreshed HH token for ${username}`);
+    return data.access_token;
+  } catch (e) {
+    console.error(`[hh-refresh] error for ${username}: ${e.message}`);
+    return null;
+  }
+}
 
 function hhApiRequest(method, apiPath, accessToken, body) {
   return new Promise((resolve, reject) => {
