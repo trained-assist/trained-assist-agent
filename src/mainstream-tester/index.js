@@ -1,0 +1,134 @@
+'use strict';
+// Entry point for the mainstream tester.
+//
+// Modes:
+//   1. External agent (AGENT_URL set): sends requests to an already-running agent.
+//      The agent must have TELEGRAM_API_URL pointing to THIS process's fake server.
+//      Use when running the tester on the same VM as the production agent in test mode.
+//
+//   2. Spawned agent (default): starts a fresh isolated agent subprocess with
+//      fake Telegram wired up automatically. Clean, no production interference.
+//
+// Env vars:
+//   AGENT_URL          — use external agent instead of spawning one
+//   AGENT_SECRET       — required
+//   ANTHROPIC_API_KEY  — required (for spawned agent)
+//   OPENROUTER_API_KEY — required (for mainstream-decider LLM calls)
+//   MAINSTREAM_STEPS   — steps per path (default 7)
+//   MAINSTREAM_RUNS    — number of full test runs (default 1)
+
+const { spawn } = require('child_process');
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+const { FakeTelegram } = require('./fake-telegram');
+const { Orchestrator } = require('./orchestrator');
+
+const SPAWNED_AGENT_PORT = 3099;
+const TEST_DATA_DIR = path.join(os.homedir(), 'agent-data', 'mainstream-test');
+
+function requiredEnv(name) {
+  const v = process.env[name];
+  if (!v) { console.error(`[mainstream] Required env var missing: ${name}`); process.exit(1); }
+  return v;
+}
+
+async function spawnTestAgent(fakeTgPort) {
+  fs.mkdirSync(TEST_DATA_DIR, { recursive: true });
+
+  const agentPath = path.join(__dirname, '..', 'server.js');
+  const env = {
+    ...process.env,
+    PORT: String(SPAWNED_AGENT_PORT),
+    TELEGRAM_API_URL: `http://127.0.0.1:${fakeTgPort}`,
+    TELEGRAM_BOT_TOKEN: 'fake-mainstream-token',
+    AGENT_DATA_DIR: TEST_DATA_DIR,
+    NODE_ENV: 'test',
+    // Force env-var secrets loading (skip GCP Secret Manager)
+    SECRETS_SOURCE: 'env',
+  };
+
+  const proc = spawn(process.execPath, [agentPath], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
+  });
+
+  proc.stdout.on('data', d => process.stdout.write(`[test-agent] ${d}`));
+  proc.stderr.on('data', d => process.stderr.write(`[test-agent] ${d}`));
+
+  // Wait for "listening" line
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Test agent startup timeout (30s)')), 30_000);
+    proc.stdout.on('data', (d) => {
+      if (d.toString().includes('listening')) { clearTimeout(timer); resolve(); }
+    });
+    proc.on('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`Test agent exited prematurely with code ${code}`));
+    });
+  });
+
+  console.log(`[mainstream] Test agent ready on :${SPAWNED_AGENT_PORT}`);
+  return proc;
+}
+
+async function main() {
+  const agentSecret = requiredEnv('AGENT_SECRET');
+  const openrouterKey = requiredEnv('OPENROUTER_API_KEY');
+  const maxSteps = parseInt(process.env.MAINSTREAM_STEPS || '7', 10);
+  const maxRuns = parseInt(process.env.MAINSTREAM_RUNS || '1', 10);
+  const externalAgentUrl = process.env.AGENT_URL;
+
+  // 1. Start fake Telegram server
+  const fakeTg = new FakeTelegram();
+  const fakeTgPort = await fakeTg.start();
+
+  // 2. Start (or connect to) the agent
+  let agentProc = null;
+  let agentUrl = externalAgentUrl;
+
+  if (!agentUrl) {
+    agentProc = await spawnTestAgent(fakeTgPort);
+    agentUrl = `http://127.0.0.1:${SPAWNED_AGENT_PORT}`;
+  } else {
+    console.log(`[mainstream] Using external agent at ${agentUrl}`);
+    console.log(`[mainstream] ⚠ Make sure the agent has TELEGRAM_API_URL=http://127.0.0.1:${fakeTgPort}`);
+  }
+
+  // 3. Create orchestrator
+  const orchestrator = new Orchestrator({
+    agentUrl,
+    agentSecret,
+    openrouterKey,
+    maxSteps,
+    stateDir: TEST_DATA_DIR,
+  });
+
+  // Wire fake Telegram → orchestrator
+  fakeTg.on('message_final', msg => orchestrator.onFinalMessage(msg));
+
+  // 4. Run test cycles
+  let totalBugs = 0;
+  for (let i = 0; i < maxRuns; i++) {
+    console.log(`\n[mainstream] ══════ Run ${i + 1}/${maxRuns} ══════`);
+    fakeTg.reset();
+    const result = await orchestrator.startRun();
+    totalBugs += result.bugs.length;
+
+    if (i < maxRuns - 1) await new Promise(r => setTimeout(r, 5_000));
+  }
+
+  // 5. Cleanup
+  agentProc?.kill();
+  await fakeTg.stop();
+
+  console.log(`\n[mainstream] All done. Total bugs: ${totalBugs}`);
+  console.log(`[mainstream] Bug log: ${orchestrator.bugsFile}`);
+  console.log(`[mainstream] State: ${orchestrator.stateFile}`);
+}
+
+main().catch(err => {
+  console.error('[mainstream] Fatal:', err.message);
+  process.exit(1);
+});

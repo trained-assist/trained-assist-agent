@@ -1,7 +1,7 @@
 {
   "name": "trained-assist-agent",
   "version": "0.1.0",
-  "description": "Trained Assist Agent \u2014 Claude Code session runner",
+  "description": "Trained Assist Agent — Claude Code session runner",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -10,7 +10,8 @@
     "test": "vitest run && npm run test:cjs",
     "test:cjs": "node --test test/execution-owner-lock.test.cjs test/r2-media.test.cjs && node test/answer-router.test.cjs && node test/gtd-controller.test.cjs && node test/session-context-batch.test.cjs && node test/final-text-select.test.cjs && node test/session-store-recency.test.cjs && node test/lane-granularity.test.cjs && node test/cap-per-profile.test.cjs && node test/per-chat-queue.test.cjs && node --test test/admission-status.test.cjs test/intake-quick.test.cjs test/intake-media-retention.test.cjs && node --test test/deploy-nginx.test.cjs test/maintenance.test.cjs test/run-ingress.test.cjs test/deploy-safety.test.cjs && python3 test/prepare-deploy-journal.test.py && python3 test/drain-for-deploy.test.py",
     "test:watch": "vitest",
-    "test:staging": "node scripts/staging/run.mjs && python3 test/prepare-deploy-journal.test.py && python3 test/drain-for-deploy.test.py"
+    "test:staging": "node scripts/staging/run.mjs && python3 test/prepare-deploy-journal.test.py && python3 test/drain-for-deploy.test.py",
+    "test:mainstream": "node src/mainstream-tester/index.js"
   },
   "devDependencies": {
     "nock": "^14.0.17",
