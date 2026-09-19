@@ -2423,6 +2423,32 @@ async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {})
   }
 }
 
+// Builds a runtime capabilities addendum for OpenCode system prompt.
+// OpenCode uses non-Claude models that don't auto-read CLAUDE.md, so we inject what's available.
+function buildOcCapabilitiesBlock(secrets) {
+  const lines = ['## Возможности системы (runtime)'];
+
+  if (secrets && secrets.DEEPGRAM_API_KEY) {
+    lines.push(
+      '',
+      '**Транскрибация аудио:** доступна (Deepgram nova-2)',
+      '• Поддерживает русский и другие языки',
+      '• Форматы: mp3, wav, ogg, m4a, голосовые сообщения Telegram',
+      '• Быстро, точнее Whisper, с пунктуацией и разбивкой по абзацам',
+      '• Пользователь присылает аудиофайл → бот транскрибирует → текст попадает к тебе',
+    );
+  }
+
+  lines.push(
+    '',
+    '**Инструменты (MCP):** доступны только compress-on-input и Neon (Postgres).',
+    'Кастомные скилы (HH, Weeek, nalog, gdrive и др.) для OpenCode НЕ подключены.',
+    'Для задач с кастомными скилами пользователь должен переключиться на Claude (/switch2klod).',
+  );
+
+  return lines.join('\n');
+}
+
 async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
@@ -2862,6 +2888,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
   const systemPromptText = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
+
+  // OpenCode uses non-Claude models (DeepSeek, GigaChat, etc.) that don't auto-read CLAUDE.md.
+  // Inject a runtime capabilities block so they know what's actually available.
+  const ocCapBlock = engine === 'opencode' ? buildOcCapabilitiesBlock(secrets) : '';
+  const ocSystemPrompt = ocCapBlock
+    ? (systemPromptText ? `${systemPromptText}\n\n${ocCapBlock}` : ocCapBlock)
+    : systemPromptText;
+
   const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = engine === 'codex'
     ? [process.env.CODEX_BIN || 'codex', [
@@ -2878,7 +2912,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         '--format', 'json',
         '--auto',
         ...(opencodeModel ? ['-m', opencodeModel] : []),
-        systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
+        ocSystemPrompt ? `${ocSystemPrompt}\n\n${prompt}` : prompt,
       ]]
     : [process.env.CLAUDE_BIN || 'claude', [
         '--dangerously-skip-permissions',
