@@ -180,6 +180,14 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
   if (!workDir || !sessionId) return null;
   const intent = await detectIntent(task, { apiKey });
   if (!intent.wanted) return null;
+  const chatIdStr = chatId != null ? String(chatId) : null;
+  if (chatIdStr) {
+    const conflict = listGtd(workDir).find(r => r.status === 'open' && r.chatId === chatIdStr);
+    if (conflict) {
+      console.warn(`[gtd] skip: open GTD for chatId=${chatIdStr} already exists (session=${conflict.sessionId})`);
+      return conflict;
+    }
+  }
   const now = Date.now();
   const checklist = readChecklist(projectDir);
   const maxIterations = computeMaxIterations(checklist);
@@ -213,6 +221,14 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
   if (!checklist || !checklist.items.length || !checklist.items.some(i => !i.done)) return null;
   const existing = readGtd(workDir, sessionId);
   if (existing && existing.status === 'open') return existing; // уже трекается — не сбрасываем прогресс/backoff
+  const chatIdStr = chatId != null ? String(chatId) : null;
+  if (chatIdStr) {
+    const conflict = listGtd(workDir).find(r => r.status === 'open' && r.chatId === chatIdStr && r.sessionId !== sessionId);
+    if (conflict) {
+      console.warn(`[gtd] skip(checklist): open GTD for chatId=${chatIdStr} already exists (session=${conflict.sessionId})`);
+      return conflict;
+    }
+  }
   const now = Date.now();
   const maxIterations = computeMaxIterations(checklist);
   const rec = {
