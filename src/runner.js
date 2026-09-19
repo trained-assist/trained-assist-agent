@@ -257,7 +257,8 @@ const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|созд
 const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|напиш[иь]).{0,40}(?:приложени|сервис(?!\s*аккаунт)|бот(?!\s*токен|\s*ключ)(?!\s*weeek|\s*hh|\s*tilda|\s*nalog)|сайт(?!\s*с\s+tilda)(?!\s+tilda)|систем|скрипт(?!\s+для\s+(?:выставки|expo))|библиотек|пакет|модул|апи-сервис)|implement\s+\S|build\s+(?:app|service|bot|api)|develop\s+(?:app|feature|bot)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
-const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
+const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|^\/checklist_turn_off$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
+const ACTIVE_CHECKLIST_INTENT   = /^\/active_checklist$/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
@@ -1812,6 +1813,35 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  // /active_checklist — list all open GTD records for this user.
+  if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
+    const workDir = opts.user.workDir;
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    let msg;
+    if (!workDir) {
+      msg = '📋 Нет активных чек-листов.';
+    } else {
+      const openRecs = (() => { try { return require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+      if (!openRecs.length) {
+        msg = '📋 Нет активных чек-листов.';
+      } else {
+        const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
+        for (const r of openRecs) {
+          const task = (r.originalTask || '').slice(0, 80);
+          lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+        }
+        msg = lines.join('\n');
+      }
+    }
+    if (botToken) {
+      const im = opts.initialMsgId;
+      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+      else     tgSend(botToken, chatId, msg).catch(() => {});
+    }
+    return Promise.resolve(msg);
+  }
+
   // Control commands bypass lanes and admission. Available to every authenticated profile.
   const restart = /^\/restart(?:@\w+)?(?:\s+(status|cancel))?$/i.exec((opts.task || '').trim());
   if (restart) {
@@ -2025,6 +2055,14 @@ function runTask(opts) {
   return current.then(result => result?.queuedRetry || result);
 }
 
+function _relativeTime(ts) {
+  const diffMs = ts - Date.now();
+  if (diffMs <= 0) return 'сейчас';
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 60) return `через ${mins} мин`;
+  return `через ${Math.round(mins / 60)} ч`;
+}
+
 // Returns context card string, or null if no skills configured (no pin needed).
 function buildContextCard(username, workDir, chatId) {
   const services = username ? listConnectedServices(username) : [];
@@ -2104,6 +2142,21 @@ function buildContextCard(username, workDir, chatId) {
   } else {
     const m = (process.env.ANTHROPIC_MODEL || 'claude-sonnet').replace(/^claude-/, '').replace(/-\d{8}$/, '');
     lines.push(`⚙️ Claude · ${m}`);
+  }
+
+  // GTD section: show when ≥1 open record exists
+  if (workDir) {
+    try {
+      const openRecs = require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
+      if (openRecs.length === 1) {
+        const r = openRecs[0];
+        const preview = (r.originalTask || '').slice(0, 40);
+        lines.push(`📋 Чеклист: «${preview}» · ${_relativeTime(r.dueAt)} · /active_checklist · /checklist_turn_off`);
+      } else if (openRecs.length > 1) {
+        const next = openRecs.reduce((a, b) => a.dueAt < b.dueAt ? a : b);
+        lines.push(`📋 ${openRecs.length} чек-листа · след. ${_relativeTime(next.dueAt)} · /active_checklist · /checklist_turn_off`);
+      }
+    } catch (e) { console.warn('[runner] gtd pin:', e.message); }
   }
 
   const time = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
@@ -3465,7 +3518,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const costFooter = engine === 'opencode'
     ? formatOcFooter(opencodeUsage, opencodeBreakdown)
     : formatCostFooter(claudeUsage, claudeModel);
-  const final = (result + costFooter).slice(-MAX_MSG_LEN);
+  const gtdFooter = (!internalGtd && !incomplete && user.workDir)
+    ? (() => { try { return require('./gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
+    : '';
+  const final = (result + costFooter).slice(-MAX_MSG_LEN) + gtdFooter;
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
   // сессия уже deep (проработка только что и была). После clarify — показываем (чтобы
