@@ -1853,11 +1853,14 @@ function runTask(opts) {
     }
   }).catch(async err => {
     currentExecution()?.interrupt(opts.taskId, true);
-    await status.finish(currentExecution()?.get(opts.taskId)?.state === 'delivering'
-      ? '⏸ Результат сохранён. Повторю доставку ответа без повторного выполнения задачи.'
-      : currentExecution()?.get(opts.taskId)?.state === 'waiting_confirmation'
-        ? '⏸ Работа прервана и сохранена. Перед продолжением нужно проверить результат уже выполненных действий; повторный запуск пока заблокирован.'
-        : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.');
+    const msg = err.message === 'capacity_wait_timeout'
+      ? '⏰ Сервер перегружен — задача слишком долго ждала свободного места. Попробуй ещё раз через минуту.'
+      : currentExecution()?.get(opts.taskId)?.state === 'delivering'
+        ? '⏸ Результат сохранён. Повторю доставку ответа без повторного выполнения задачи.'
+        : currentExecution()?.get(opts.taskId)?.state === 'waiting_confirmation'
+          ? '⏸ Работа прервана и сохранена. Перед продолжением нужно проверить результат уже выполненных действий; повторный запуск пока заблокирован.'
+          : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
+    await status.finish(msg);
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
   chatLanes.set(queueKey, current);

@@ -41,15 +41,34 @@ function setKeyCap(key, limit) {
   else _perKeyCap.set(k, Math.max(1, Number(limit)));
 }
 
-function _acquireKeySlot(key) {
-  return new Promise(resolve => {
+// Tasks queued beyond this deadline are rejected so users get a clear error
+// instead of silently waiting forever when the server is overloaded.
+const CAP_WAIT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
+
+function _acquireKeySlot(key, timeoutMs = CAP_WAIT_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let timer;
     const grab = () => {
       const n = _perKeyRunning.get(key) || 0;
-      if (n < _capForKey(key)) { _perKeyRunning.set(key, n + 1); resolve(); }
-      else {
+      if (n < _capForKey(key)) {
+        if (timer) clearTimeout(timer);
+        _perKeyRunning.set(key, n + 1);
+        resolve();
+      } else {
         const w = _perKeyWaiters.get(key) || [];
         w.push(grab);
         _perKeyWaiters.set(key, w);
+        if (timeoutMs > 0 && !timer) {
+          timer = setTimeout(() => {
+            const waiters = _perKeyWaiters.get(key);
+            if (waiters) {
+              const idx = waiters.indexOf(grab);
+              if (idx !== -1) waiters.splice(idx, 1);
+              if (!waiters.length) _perKeyWaiters.delete(key);
+            }
+            reject(new Error('capacity_wait_timeout'));
+          }, timeoutMs);
+        }
       }
     };
     grab();
