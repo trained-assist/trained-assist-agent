@@ -900,7 +900,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   }
 
   // Capability question about audio/voice transcription
-  if (AUDIO_CAPABILITY_INTENT.test(task) && !sessionExists) {
+  if (AUDIO_CAPABILITY_INTENT.test(task)) {
     return [
       'Да, умею транскрибировать аудио и голосовые сообщения.\n',
       '🎙️ Как это работает:',
