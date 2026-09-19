@@ -158,10 +158,16 @@ function computeRisk(signals, projectInfo) {
   const maxScore = MAX_BASE_WEIGHT + 20;
   const normalized = Math.min(10, Math.round(score / maxScore * 100) / 10);
   const level = normalized >= 7 ? 'ВЫСОКИЙ 🔴' : normalized >= 4 ? 'СРЕДНИЙ 🟡' : 'НИЗКИЙ 🟢';
+  const verdict = normalized >= 7
+    ? '🔴 НЕ БРАТЬ ПОКА — слишком много неизвестных'
+    : normalized >= 4
+      ? '🟡 УТОЧНИТЬ — нужны ответы на ключевые вопросы'
+      : '✅ БРАТЬ — риски под контролем';
 
   return {
     score: normalized,
     level,
+    verdict,
     risks: activeRisks.sort((a, b) => b.weight - a.weight),
   };
 }
@@ -301,6 +307,8 @@ function buildSummaryTab(proj, assessment) {
   const ts = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
   return [
     [`ОЦЕНКА АУТСОРС ПРОЕКТА: ${proj.name}`],
+    [],
+    ['ВЕРДИКТ', assessment.verdict],
     [],
     ['Дата обновления:', ts],
     ['Тип проекта:', proj.type || '—'],
@@ -466,13 +474,14 @@ module.exports = {
         const topQ = assessment.openQuestions.slice(0, 5).map((q, i) => `${i + 1}. ${q.question}`);
         return {
           project_id:      proj.id,
+          verdict:         assessment.verdict,
           risk_level:      assessment.level,
           risk_score:      assessment.score,
           spreadsheet_url: proj.spreadsheetUrl || null,
           open_questions:  topQ,
           message: proj.spreadsheetUrl
-            ? `✅ Проект создан.\nТаблица: ${proj.spreadsheetUrl}\nРиск: ${assessment.level} (${assessment.score}/10)\nОткрытых вопросов: ${assessment.openQuestions.length}`
-            : `✅ Проект создан (без таблицы${proj._sheetError ? ` — ${proj._sheetError}` : ''}).\nРиск: ${assessment.level} (${assessment.score}/10)`,
+            ? `✅ Проект создан.\nВердикт: ${assessment.verdict}\nТаблица: ${proj.spreadsheetUrl}\nОткрытых вопросов: ${assessment.openQuestions.length}`
+            : `✅ Проект создан (без таблицы${proj._sheetError ? ` — ${proj._sheetError}` : ''}).\nВердикт: ${assessment.verdict}`,
         };
       },
     },
@@ -498,13 +507,14 @@ module.exports = {
         return {
           project_id:      proj.id,
           name:            proj.name,
+          verdict:         assessment.verdict,
           risk_score:      assessment.score,
           risk_level:      assessment.level,
           top_risks:       assessment.risks.slice(0, 3).map(r => r.factor),
           open_questions:  assessment.openQuestions.slice(0, 5).map((q, i) => `${i + 1}. ${q.question}`),
           spreadsheet_url: proj.spreadsheetUrl,
           sheet_updated:   !!proj.spreadsheetId && !assessment._sheetWriteError,
-          message: `Оценка обновлена. Риск: ${assessment.level} (${assessment.score}/10). Открытых вопросов: ${assessment.openQuestions.length}.${proj.spreadsheetUrl ? `\nТаблица: ${proj.spreadsheetUrl}` : ''}`,
+          message: `Вердикт: ${assessment.verdict}\nРиск: ${assessment.level} (${assessment.score}/10). Открытых вопросов: ${assessment.openQuestions.length}.${proj.spreadsheetUrl ? `\nТаблица: ${proj.spreadsheetUrl}` : ''}`,
         };
       },
     },
