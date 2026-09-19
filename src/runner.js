@@ -1869,10 +1869,14 @@ function runTask(opts) {
 
   // chatQueue.enqueue serializes at the per-chat level (layer 1). Inside the fn,
   // we handle the session-lane (layer 2) and then run the actual work.
+  //
+  // IMPORTANT: capture sessionPrev HERE, before enqueue(), not inside the fn callback.
+  // The fn runs as a deferred microtask (.then(fn)), so chatLanes.set(queueKey, current)
+  // below executes first — reading chatLanes inside fn would return `current` itself,
+  // creating a circular dependency (work waits for current, current waits for work → deadlock).
+  const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
   const current = chatQueue.enqueue(opts.user.id, () => {
     if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
-    // Session lane: serialize messages within the same session (transcript protection).
-    const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
     const work = sessionPrev.catch(() => {}).then(async () => {
       if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
       // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
