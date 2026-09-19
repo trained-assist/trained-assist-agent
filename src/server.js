@@ -2386,8 +2386,10 @@ function show(id, type, msg) {
       let results;
       try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      const { loadCandidateComments } = require('./hh-proactive-search');
+      const pageComments = loadCandidateComments(username);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(generateProactivePageHtml(results, username, callbackBase, given));
+      return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments));
     }
 
     // GET /api/hh/proactive/candidates?username=X&token=Y&page=1&per_page=10
@@ -2514,6 +2516,60 @@ ${expLines || '—'}
           },
         });
         return json(res, 200, result);
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /api/hh/proactive/comment {username, token, candidate_id, text}
+    // Saves a recruiter comment on a candidate; these are fed into future search
+    // query generation as exclusion hints ("не из Новосибирска" → refine queries).
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/comment') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', token: givenToken = '', candidate_id = '', text = '' } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
+      try {
+        const { saveCandidateComment } = require('./hh-proactive-search');
+        saveCandidateComment(username, candidate_id, { text: String(text).slice(0, 1000) });
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /api/hh/proactive/import-seen {username, token, ids: string[]}
+    // Bulk-marks candidate IDs as already seen so they don't appear as "new" in future runs.
+    // Accepts HH resume IDs (bare or extracted from URLs by the client).
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/import-seen') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', token: givenToken = '', ids = [] } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      if (!Array.isArray(ids) || !ids.length) return json(res, 400, { error: 'ids array required' });
+      try {
+        const { loadSeenIds, saveSeenIds } = require('./hh-proactive-search');
+        // Resolve vacancy key from the latest results file (same logic as runProactiveSearch)
+        const latestFile = latestProactiveFile(username);
+        let vacancyKey = 'unknown';
+        if (latestFile) {
+          try {
+            const r = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+            vacancyKey = r.vacancy_id || r.vacancy_title || 'unknown';
+          } catch {}
+        }
+        const seen = loadSeenIds(username);
+        const today = new Date().toISOString().slice(0, 10);
+        const bucket = seen[vacancyKey] || {};
+        let imported = 0;
+        for (const id of ids) {
+          const cleanId = String(id).replace(/[^a-zA-Z0-9]/g, '');
+          if (cleanId && !bucket[cleanId]) { bucket[cleanId] = today; imported++; }
+        }
+        seen[vacancyKey] = bucket;
+        saveSeenIds(username, seen);
+        return json(res, 200, { ok: true, imported, total: Object.keys(bucket).length });
       } catch (e) {
         return json(res, 500, { error: e.message });
       }
