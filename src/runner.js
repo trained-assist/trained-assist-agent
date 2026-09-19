@@ -531,7 +531,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const vmName = process.env.VM_NAME || 'unknown';
     let commit = 'unknown';
     try { commit = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
-    let ocModel = process.env.OPENCODE_MODEL || 'openrouter/minimax/minimax-m3 (дефолт)';
+    let ocModel = process.env.OPENCODE_MODEL || '(из opencode.json)';
     let ocProfile = 'не задан';
     try {
       const ocCfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.config', 'opencode', 'opencode.json'), 'utf8'));
@@ -2787,7 +2787,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
   const systemPromptText = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
-  const opencodeModel = process.env.OPENCODE_MODEL || 'openrouter/minimax/minimax-m3';
+  // If OPENCODE_MODEL is unset, don't pass -m flag — let opencode.json control the model.
+  // Passing -m minimax-m3 as a hardcoded fallback would override opencode.json's per-role models.
+  const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = engine === 'codex'
     ? [process.env.CODEX_BIN || 'codex', [
         'exec',
@@ -2802,7 +2804,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         'run',
         '--format', 'json',
         '--auto',
-        '-m', opencodeModel,
+        ...(opencodeModel ? ['-m', opencodeModel] : []),
         systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
       ]]
     : [process.env.CLAUDE_BIN || 'claude', [
