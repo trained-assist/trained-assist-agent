@@ -4166,7 +4166,9 @@ ${recent || '(пока нет)'}
 
   server.listen(PORT, () => {
     console.log(`assist-agent listening on :${PORT}`);
-    notifyActiveChatsOnStartup(secrets).catch(e => console.error('[startup-notify] error:', e.message));
+    if (process.env.TEST_MODE !== '1') {
+      notifyActiveChatsOnStartup(secrets).catch(e => console.error('[startup-notify] error:', e.message));
+    }
   });
 
   // Drive watcher: poll every 2 min for new files shared with the SA
@@ -4180,7 +4182,7 @@ ${recent || '(пока нет)'}
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
-  scheduleGtdController(secrets);
+  if (process.env.TEST_MODE !== '1') scheduleGtdController(secrets);
 
 
   // Deploys restart this service frequently (every few minutes during an
