@@ -59,16 +59,15 @@ function formatCostFooter(usage, model) {
   const modelShort = model ? model.replace(/^claude-/, '') : '?';
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
   const cacheStr = cr > 0 ? ` · кэш ${fmt(cr)}` : '';
-  return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ${modelShort} · ~${costStr}\``;
+  return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ~${costStr}\``;
 }
 
-function formatOcFooter(usage, modelId) {
+function formatOcFooter(usage) {
   if (!usage) return '';
   const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   const cost = usage.cost || 0;
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  const modelShort = (modelId || '').replace(/^openrouter\//, '').replace(/^gigachat\//, '');
-  return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых · ${modelShort} · ~${costStr}\``;
+  return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых · ~${costStr}\``;
 }
 
 // Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
@@ -3316,11 +3315,21 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     return authMsg;
   }
 
-  // Record token usage for billing
-  if (claudeUsage) {
+  // Record token usage for analytics
+  if (engine === 'opencode' && opencodeUsage) {
     recordUsage(user.workDir, {
-      taskId,
-      sessionId: activeSessionId,
+      taskId, sessionId: activeSessionId,
+      engine: 'opencode',
+      model: opencodeModel || 'opencode-config',
+      input_tokens: opencodeUsage.input,
+      output_tokens: opencodeUsage.output,
+      cost_usd: opencodeUsage.cost,
+    });
+  } else if (claudeUsage) {
+    recordUsage(user.workDir, {
+      taskId, sessionId: activeSessionId,
+      engine: engine || 'claude',
+      model: claudeModel || process.env.ANTHROPIC_MODEL || 'claude',
       input_tokens: claudeUsage.input_tokens || 0,
       output_tokens: claudeUsage.output_tokens || 0,
       cache_read_input_tokens: claudeUsage.cache_read_input_tokens || 0,
@@ -3328,7 +3337,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     });
   }
   const costFooter = engine === 'opencode'
-    ? formatOcFooter(opencodeUsage, opencodeModel)
+    ? formatOcFooter(opencodeUsage)
     : formatCostFooter(claudeUsage, claudeModel);
   const final = (result + costFooter).slice(-MAX_MSG_LEN);
 

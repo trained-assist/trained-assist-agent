@@ -3108,6 +3108,51 @@ ${recent || '(пока нет)'}
       });
     }
 
+    // GET /analytics — aggregate token usage across all users, grouped by date + model
+    if (req.method === 'GET' && url.pathname === '/analytics') {
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const sessionsDir = path.join(dataDir, 'sessions');
+      const byDate = {};   // date → { model → { input, output, cost, tasks } }
+      const byUser = {};   // username → { input, output, cost, tasks }
+      let totalTasks = 0, totalInput = 0, totalOutput = 0, totalCost = 0;
+      try {
+        const users = fs.readdirSync(sessionsDir).filter(u => {
+          try { return fs.statSync(path.join(sessionsDir, u)).isDirectory(); } catch { return false; }
+        });
+        for (const username of users) {
+          const usageFile = path.join(sessionsDir, username, 'usage.json');
+          if (!fs.existsSync(usageFile)) continue;
+          let data;
+          try { data = JSON.parse(fs.readFileSync(usageFile, 'utf8')); } catch { continue; }
+          const log = data.log || [];
+          for (const entry of log) {
+            const date = new Date(entry.at).toISOString().slice(0, 10);
+            const model = entry.model || (entry.engine === 'opencode' ? 'opencode' : 'claude');
+            const inp = entry.input_tokens || 0;
+            const out = entry.output_tokens || 0;
+            const cost = entry.cost_usd || 0;
+            // by date+model
+            if (!byDate[date]) byDate[date] = {};
+            if (!byDate[date][model]) byDate[date][model] = { input: 0, output: 0, cost: 0, tasks: 0 };
+            byDate[date][model].input  += inp;
+            byDate[date][model].output += out;
+            byDate[date][model].cost   += cost;
+            byDate[date][model].tasks  += 1;
+            // by user
+            if (!byUser[username]) byUser[username] = { input: 0, output: 0, cost: 0, tasks: 0 };
+            byUser[username].input  += inp;
+            byUser[username].output += out;
+            byUser[username].cost   += cost;
+            byUser[username].tasks  += 1;
+            totalTasks++; totalInput += inp; totalOutput += out; totalCost += cost;
+          }
+        }
+      } catch (e) {
+        console.error('[analytics] error:', e.message);
+      }
+      return json(res, 200, { totals: { tasks: totalTasks, input: totalInput, output: totalOutput, cost_usd: totalCost }, by_date: byDate, by_user: byUser });
+    }
+
     // POST /tasks/:taskId/extend-timeout — called by session_extend_timeout MCP tool
     // Allows Claude to extend its own 15-min session (up to 8 × 15 min = 2h total)
     if (req.method === 'POST' && /^\/tasks\/[^/]+\/extend-timeout$/.test(url.pathname)) {
