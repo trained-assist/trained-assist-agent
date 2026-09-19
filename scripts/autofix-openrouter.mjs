@@ -15,6 +15,16 @@
 // The new PR auto-merges when CI passes; ci-fix-cleanup.yml then closes the original PR.
 // Exits 0 on success (fix PR created), 1 on failure.
 //
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+//
+// Every action is logged as a GitHub PR comment with the prefix "pr-fixer:".
+// GitHub IS the audit log — no external data model needed.
+//
+// Stage 0 (reasoning)   — understand WHY the PR exists before touching anything.
+//                          If unclear → comment + label + stop. Never patch blindly.
+// Pre-stage A/B/C       — deterministic fixes (no AI needed).
+// Stage 1/2/3 (AI)      — OpenRouter free models.
+//
 // ── Stats (category taxonomy) ──────────────────────────────────────────────────
 // Every run writes ci-fixer-stats.json + appends to $GITHUB_STEP_SUMMARY.
 // Categories (used to decide when to escalate to a paid-model second pass):
@@ -23,6 +33,7 @@
 //   success:pre_b_permissions   job lacked permissions → workflow YAML patched
 //   success:ai                  3-stage free-model pipeline fixed it
 //
+//   fail:stage0_ambiguous       PR purpose unclear — skipping to avoid blind fix
 //   fail:cloudflare_do          Cloudflare DO migration conflict (needs human)
 //   fail:merge_conflict         git merge had conflicts (needs human)
 //   fail:permissions_no_workflow permission error but no patchable workflow found
@@ -44,9 +55,12 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
+const STAGE0_MODEL = 'deepseek/deepseek-v4-flash-0731:free';
 const STAGE1_MODEL = 'deepseek/deepseek-v4-flash-0731:free';
 const STAGE2_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
 const STAGE3_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
+
+const PR_FIXER_PREFIX = 'pr-fixer:';
 
 const {
   OPENROUTER_API_KEY,
@@ -123,6 +137,18 @@ function failWithStats(category, reason, extra = {}) {
   writeStats(category, { reason, ...extra });
   console.error(`[autofix] giving up (${category}): ${reason}`);
   process.exit(1);
+}
+
+// Post a comment to the original PR — GitHub is our audit log.
+// All comments carry the PR_FIXER_PREFIX so humans can filter them.
+async function prComment(body) {
+  if (!PR_NUMBER || !REPO) return;
+  const text = `${PR_FIXER_PREFIX} ${body}`;
+  writeFileSync('__comment.txt', text);
+  try {
+    sh(`gh pr comment ${PR_NUMBER} -R "${REPO}" --body-file __comment.txt`);
+  } catch { /* best effort — never let a comment failure abort the fix */ }
+  try { unlinkSync('__comment.txt'); } catch {}
 }
 
 async function callModel(model, messages, json = false) {
@@ -327,10 +353,81 @@ try {
   prDiff = sh(`git diff origin/${BASE_BRANCH}...HEAD`).slice(0, DIFF_CHAR_LIMIT);
 } catch { /* best effort */ }
 
+// ── Stage 0: Reasoning — understand WHY this PR exists ───────────────────────
+// Before touching anything, ask: is the PR's purpose clear enough to auto-fix?
+// If not — comment and stop. Never patch blindly.
+{
+  log('stage0', 'fetching PR metadata for purpose reasoning...');
+
+  let prMeta = { title: '', body: '', commits: [] };
+  try {
+    const raw = sh(`gh pr view ${PR_NUMBER} -R ${REPO} --json title,body,commits`);
+    prMeta = JSON.parse(raw);
+  } catch { /* non-fatal — proceed with empty */ }
+
+  const commitMessages = (prMeta.commits || [])
+    .slice(-10)
+    .map(c => c.messageHeadline || '')
+    .filter(Boolean)
+    .join('\n');
+
+  const prContext = [
+    `PR title: ${prMeta.title || '(no title)'}`,
+    `PR body: ${(prMeta.body || '(empty)').slice(0, 800)}`,
+    `Recent commits:\n${commitMessages || '(none)'}`,
+    `Branch: ${ORIGINAL_BRANCH}`,
+  ].join('\n\n');
+
+  let reasoning;
+  try {
+    const raw = await callModel(STAGE0_MODEL, [
+      {
+        role: 'system',
+        content: `You are a PR reviewer. Given a PR's title, body, and commit messages, decide whether the PR's purpose is clear enough to safely attempt an automated CI fix.
+
+Reply with valid JSON only:
+{
+  "purpose": "one sentence describing what this PR is trying to do",
+  "is_clear": true,
+  "ambiguity_reason": ""
+}
+
+Set is_clear=false if:
+- The PR title/body is empty or gibberish
+- The change seems to be a significant business-logic redesign (not just a technical fix)
+- You cannot tell what the PR is trying to accomplish at all
+
+Set is_clear=true for ordinary feature PRs, bug fixes, refactors, dependency updates — even if you don't know the codebase details.`,
+      },
+      { role: 'user', content: prContext },
+    ], true);
+    const cleaned = raw.replace(/^```json\n?/, '').replace(/```$/, '');
+    reasoning = JSON.parse(cleaned);
+  } catch (e) {
+    log('stage0', `reasoning model error (${e.message.slice(0, 80)}) — assuming clear and proceeding`);
+    reasoning = { purpose: 'unknown (model error)', is_clear: true, ambiguity_reason: '' };
+  }
+
+  log('stage0', `purpose: ${reasoning.purpose}`);
+  log('stage0', `is_clear: ${reasoning.is_clear}`);
+
+  if (!reasoning.is_clear) {
+    const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
+    await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
+    writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
+    log('stage0', `ambiguous PR — stopping`);
+    process.exit(0); // not a failure — just not our job
+  }
+
+  // Announce we're starting — purpose confirmed
+  await prComment(`🔍 Starting automated fix\n\n**PR purpose:** ${reasoning.purpose}\n**CI failure:** fetching logs…`);
+}
+
 // ── Run pre-stage strategies (deterministic, no AI) ──────────────────────────
 
 // Pre-stage C: Cloudflare conflicts — bail with a precise message, never patch blindly
 if (checkCloudflareConflict(failedLog)) {
+  await prComment('❌ Cannot auto-fix: Cloudflare Durable Objects migration conflict (code 10074)\n\nThe migration tag in `wrangler.toml` is out of sync with what Cloudflare has deployed. Patching this blindly would corrupt live DO state. Needs human review of the migration history.');
   failWithStats(
     'fail:cloudflare_do',
     'Cloudflare DO migration conflict (code 10074 or similar) — migration tag out of sync with deployed state',
@@ -343,14 +440,20 @@ let preStageDiagnosis = null;
 
 const outOfDateResult = tryFixOutOfDate(failedLog);
 if (outOfDateResult) {
-  if (!outOfDateResult.ok) failWithStats(outOfDateResult.category, outOfDateResult.reason, { detail: outOfDateResult.detail });
+  if (!outOfDateResult.ok) {
+    await prComment(`❌ Could not fix: branch is behind \`${BASE_BRANCH}\` and merge had conflicts — needs human resolution\n\n\`\`\`\n${outOfDateResult.detail || ''}\n\`\`\``);
+    failWithStats(outOfDateResult.category, outOfDateResult.reason, { detail: outOfDateResult.detail });
+  }
   preStageDiagnosis = outOfDateResult;
 }
 
 if (!preStageDiagnosis) {
   const permResult = tryFixMissingPermissions(failedLog);
   if (permResult) {
-    if (!permResult.ok) failWithStats(permResult.category, permResult.reason);
+    if (!permResult.ok) {
+      await prComment(`❌ Could not fix: GitHub Actions permissions issue but no patchable workflow found\n\nReason: ${permResult.reason}`);
+      failWithStats(permResult.category, permResult.reason);
+    }
     preStageDiagnosis = permResult;
   }
 }
@@ -363,9 +466,11 @@ let patchToApply = null; // set by stage 3 if AI ran
 if (preStageDiagnosis) {
   diagnosis = preStageDiagnosis;
   log('pre', `pre-stage fix applied (${preStageDiagnosis.category}) — skipping AI pipeline`);
+  await prComment(`🔧 Deterministic fix applied (no AI needed)\n\n**Cause:** ${preStageDiagnosis.problem}\n**Fix:** ${preStageDiagnosis.fix_approach}`);
 } else {
   // ── Stage 1: Diagnose ──────────────────────────────────────────────────────
   log('stage1', `calling ${STAGE1_MODEL} for diagnosis...`);
+  await prComment('🔎 Stage 1/3: diagnosing CI failure with free LLM…');
 
   let stage1Content;
   try {
@@ -394,6 +499,7 @@ Rules:
       },
     ], true);
   } catch (e) {
+    await prComment(`❌ Stage 1 model error — could not diagnose CI failure\n\n\`${e.message.slice(0, 200)}\``);
     failWithStats('fail:ai_model_error', `Stage 1 model error: ${e.message.slice(0, 200)}`);
   }
 
@@ -401,19 +507,23 @@ Rules:
     const raw = stage1Content.replace(/^```json\n?/, '').replace(/```$/, '');
     diagnosis = JSON.parse(raw);
   } catch (e) {
+    await prComment(`❌ Stage 1 returned unparseable response — cannot proceed`);
     failWithStats('fail:ai_no_diagnose', `Stage 1 returned invalid JSON: ${e.message}`, { raw: stage1Content.slice(0, 300) });
   }
 
   if (diagnosis.problem === 'CANNOT_DIAGNOSE') {
+    await prComment('❌ Stage 1: could not identify root cause from CI logs\n\nThe failure may require context only a human has. Please check the CI run directly.');
     failWithStats('fail:ai_no_diagnose', 'Stage 1 could not identify root cause');
   }
   if (diagnosis.confidence === 'low') {
+    await prComment(`❌ Stage 1: diagnosis confidence too low — not safe to auto-fix\n\n**Suspected cause:** ${diagnosis.problem}\n\nPlease review manually.`);
     failWithStats('fail:ai_low_confidence', `Low confidence — not safe to auto-fix`, { problem: diagnosis.problem });
   }
 
   log('stage1', `diagnosis: ${diagnosis.problem.slice(0, 120)}`);
   log('stage1', `confidence: ${diagnosis.confidence || 'unset'}`);
   log('stage1', `files to examine: ${(diagnosis.files_to_examine || []).join(', ') || '(none)'}`);
+  await prComment(`✅ Stage 1/3: root cause identified (confidence: ${diagnosis.confidence || '?'})\n\n**Cause:** ${diagnosis.problem}\n**Plan:** ${diagnosis.fix_approach}`);;
 
   // ── Stage 2: Gather context ────────────────────────────────────────────────
   const fileList = (diagnosis.files_to_examine || []).slice(0, MAX_FILES);
@@ -464,6 +574,7 @@ If the diagnosis is wrong given what you see in the files, correct it.`,
 
   // ── Stage 3: Write patch ───────────────────────────────────────────────────
   log('stage3', `calling ${STAGE3_MODEL} to write patch...`);
+  await prComment('🔧 Stage 3/3: generating patch…');
 
   let stage3Content;
   try {
@@ -488,6 +599,7 @@ Rules:
   }
 
   if (!stage3Content || stage3Content.includes('CANNOT_FIX')) {
+    await prComment(`❌ Stage 3: model declined to generate a patch\n\n**Cause:** ${diagnosis.problem}\n\nThis likely requires a code change that needs human judgement.`);
     failWithStats('fail:ai_cannot_fix', 'Stage 3 declined to produce a patch', {
       problem: diagnosis.problem,
       fix_approach: diagnosis.fix_approach,
@@ -496,6 +608,7 @@ Rules:
 
   const patch = extractPatch(stage3Content);
   if (!patch.startsWith('diff --git') && !patch.startsWith('---')) {
+    await prComment(`❌ Stage 3: generated a malformed diff — cannot apply\n\n**Cause:** ${diagnosis.problem}`);
     failWithStats('fail:ai_corrupt_patch', 'Stage 3 produced malformed diff', {
       problem: diagnosis.problem,
       patch_head: patch.slice(0, 100),
@@ -516,6 +629,7 @@ if (patchToApply) {
     execFileSync('git', ['apply', '--whitespace=fix', patchFile], { stdio: 'inherit' });
   } catch (e) {
     unlinkSync(patchFile);
+    await prComment(`❌ Patch did not apply cleanly\n\n**Cause:** ${diagnosis.problem}\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
     failWithStats('fail:ai_corrupt_patch', 'Patch did not apply cleanly', {
       problem: diagnosis.problem,
       git_error: e.message.slice(0, 200),
@@ -526,12 +640,13 @@ if (patchToApply) {
 
 // ── Verify: run tests ─────────────────────────────────────────────────────────
 
+await prComment('🧪 Patch applied — running tests…');
 try {
   sh('npm test');
 } catch (e) {
-  log('verify', 'tests fail after fix — reverting');
   sh('git checkout -- .');
   sh('git clean -fd');
+  await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
   failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
     problem: diagnosis.problem,
     test_error: e.message.slice(0, 300),
@@ -594,24 +709,15 @@ try {
   log('publish', `auto-merge not available (${e.message.slice(0, 80)}) — PR will need manual merge`);
 }
 
-const commentBody = [
-  `🤖 **Auto-fix PR created:** ${newPRUrl}`,
+await prComment([
+  `✅ Fix PR created: ${newPRUrl}`,
   '',
   `**Root cause:** ${diagnosis.problem}`,
-  '',
   `**Fix:** ${diagnosis.fix_approach}`,
-  '',
   `**Strategy:** \`${fixStrategy}\``,
   '',
-  `PR #${newPRNumber} will auto-merge when CI passes. This PR will be closed automatically after that.`,
-].join('\n');
-
-writeFileSync('comment.txt', commentBody);
-try {
-  sh(`gh pr comment ${PR_NUMBER} -R "${REPO}" --body-file comment.txt`);
-} finally {
-  unlinkSync('comment.txt');
-}
+  `PR #${newPRNumber} will auto-merge when CI passes. This PR will be closed automatically after merge.`,
+].join('\n'));
 
 // ── Write success stats ───────────────────────────────────────────────────────
 writeStats(preStageDiagnosis ? preStageDiagnosis.category : 'success:ai', {
