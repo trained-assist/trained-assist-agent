@@ -1,9 +1,20 @@
-name: Auto-fix CI failure
+name: Auto-fix CI failure (manual)
 
+# Superseded by the `autofix` job in ci.yml which runs inline and is more reliable.
+# workflow_run trigger was never firing on this private repo (known GitHub Actions limitation).
+# Kept here for manual debugging runs only.
 on:
-  workflow_run:
-    workflows: ["CI + Deploy"]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to fix'
+        required: true
+      branch:
+        description: 'Branch name'
+        required: true
+      run_id:
+        description: 'Failed CI run ID'
+        required: true
 
 permissions:
   contents: write
