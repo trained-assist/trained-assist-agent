@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "compress-on-input": {
+      "type": "local",
+      "command": [
+        "compress-on-input-mcp"
+      ]
+    },
+    "Neon": {
+      "type": "remote",
+      "url": "https://mcp.neon.tech/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer napi_t14t1168e660sfliq0zk8xkrqu56y7w8jakqcbnxh7faxrshiniac41dtsd24uqi"
+      }
+    }
+  },
+  "provider": {
+    "gigachat": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "GigaChat",
+      "env": ["GIGACHAT_TOKEN"],
+      "options": {
+        "baseURL": "https://gigachat.devices.sberbank.ru/api/v1",
+        "apiKey": "${GIGACHAT_TOKEN}"
+      },
+      "models": {
+        "GigaChat-Ultra": { "name": "GigaChat Ultra" },
+        "GigaChat-Pro":   { "name": "GigaChat Pro"   },
+        "GigaChat-Max":   { "name": "GigaChat Max"   }
+      }
+    }
+  },
+  "agent": {
+    "review": {
+      "mode": "subagent",
+      "hidden": false,
+      "color": "#f59e0b",
+      "description": "Read-only reviewer. For coding: checks diff vs task, bugs, regressions. For Russian text: facts, language quality, no hallucinations. Call with @review after work is done.",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      },
+      "prompt": "You are a strict read-only reviewer. You CANNOT edit any files — read and comment only.\n\nFor coding tasks:\n- Does the implementation match the original task?\n- Obvious bugs, unhandled edge cases, silent regressions\n- Security issues or dangerous patterns\n- Keep it to 5-10 bullet points. Nothing found: \"LGTM\"\n\nFor Russian text / recruiter tasks:\n- All facts must come from source material — flag anything unconfirmed\n- Russian language: clarity, no formality bloat, no repetitions\n- Candidate roles/technologies/experience correctly extracted\n- Nothing important missing from the original interview\n\nOutput: numbered list of issues. End with severity: LGTM / MINOR / MAJOR."
+    }
+  }
+}

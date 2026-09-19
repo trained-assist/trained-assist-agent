@@ -48,7 +48,8 @@
       { "name": "IDEOGRAM_API_KEY",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Ideogram API key for text-in-image illustration" },
       { "name": "RECRAFT_API_KEY",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "Recraft v3 API key for vector-style illustration" },
       { "name": "OPENROUTER_API_KEY",      "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "OpenRouter API key for /classify (Gemini Flash Lite) and OpenCode engine" },
-      { "name": "OPENCODE_MODEL",           "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "OpenCode model override (default: openrouter/minimax/minimax-m3)" },
+      { "name": "OPENCODE_MODEL",    "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "OpenCode primary model (fallback when no per-role override; default: openrouter/deepseek/deepseek-v4-flash-0731:free)" },
+      { "name": "OPENCODE_PROFILE", "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Active OpenCode profile: value|quality|free|mimo|russian-recruiter (infra/opencode-switch-profile.sh applies it on deploy)" },
       { "name": "ZEROCREDS_ADMIN_TOKEN",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Shared admin token for zerocreds-server /api/session/create (read by user-tokens.js via process.env)" },
       { "name": "GITHUB_ISSUES_TOKEN",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "GitHub fine-grained PAT (issues:write on trained-assist/trained-assist-agent) — used by POST /report to create user-report issues" }
     ]
