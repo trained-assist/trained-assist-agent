@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
-const { runProactiveSearch, buildScoringPromptText } = require('../../hh-proactive-search');
+const { runProactiveSearch, buildScoringPromptText, buildProactiveDigest } = require('../../hh-proactive-search');
 
 function proactiveHmac(username) {
   const secret = process.env.AGENT_SECRET || '';
@@ -26,6 +26,33 @@ function latestProactiveFile(username) {
   return path.join(dir, files[files.length - 1]);
 }
 
+function readChatId(username) {
+  try { return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', String(username), '.chatid'), 'utf8').trim() || null; }
+  catch { return null; }
+}
+
+function buildNotifyChat(username) {
+  return async (info) => {
+    const chatId = readChatId(username);
+    const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+    if (!chatId || !botToken) return;
+    const text = buildProactiveDigest({
+      vacancyTitle: info.vacancyTitle,
+      newCount: info.newCount,
+      totalSeen: info.totalSeen,
+      newCandidates: info.newCandidates,
+      url: info.proactiveUrl,
+    });
+    const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+    await fetch(`${tgBase}/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  };
+}
+
 module.exports = {
   tools: {
     hh_proactive_search: {
@@ -36,8 +63,14 @@ module.exports = {
         if (!userId) return { error: 'USER_ID не задан' };
         const workDir = process.cwd();
         try {
-          const result = await runProactiveSearch(userId, workDir);
+          const result = await runProactiveSearch(userId, workDir, {
+            proactiveUrl: proactiveUrl(userId),
+            notifyChat: buildNotifyChat(userId),
+          });
           const url = proactiveUrl(userId);
+          const digest = (result.new_count > 0)
+            ? `\n🆕 Из них новых (не показывались ранее): ${result.new_count}.`
+            : (result.first_run ? `\n(первый прогон — все ${result.count} считаются новыми)` : `\nНовых с прошлого прогона: 0.`);
           return {
             ok: true,
             url,
@@ -46,7 +79,10 @@ module.exports = {
             review_count: result.review_count,
             vacancy_title: result.vacancy_title,
             searched_at: result.searched_at,
-            message: `Найдено ${result.count} кандидатов (PASS: ${result.pass_count}, REVIEW: ${result.review_count}).${result.ai_enriched ? ' AI-теги и резюме добавлены.' : ''}\nСтраница с результатами: ${url}\n\nХотите узнать, по каким критериям мы отбирали и оценивали? Скажите «покажи промпт оценки кандидатов».`,
+            new_count: result.new_count,
+            total_seen: result.total_seen,
+            first_run: result.first_run,
+            message: `Найдено ${result.count} кандидатов (PASS: ${result.pass_count}, REVIEW: ${result.review_count}).${result.ai_enriched ? ' AI-теги и резюме добавлены.' : ''}${digest}\nСтраница с результатами: ${url}\n\nХотите узнать, по каким критериям мы отбирали и оценивали? Скажите «покажи промпт оценки кандидатов».`,
           };
         } catch (e) {
           return { error: e.message };
