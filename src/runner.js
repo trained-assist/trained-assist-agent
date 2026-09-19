@@ -252,6 +252,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // \b doesn't fire after a Cyrillic letter in JS, so both alternatives end on
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
+const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?)\b/i;
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -487,6 +488,29 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     profiles.setEngine(workDir, engine, chatId);
     const label = engine === 'codex' ? 'Codex CLI' : engine === 'opencode' ? 'OpenCode (MiniMax M3)' : 'Claude Code';
     return `🔀 Для этого чата переключил движок на ${label}.\nСледующая задача в этом чате пойдёт через него (текущая, если выполняется, — доработает на старом).`;
+  }
+
+  // /oc_value, /oc_quality, /oc_free, /oc_mimo, /oc_ru — switch OpenCode model profile globally
+  const ocProfileM = task.trim().match(OC_PROFILE_INTENT);
+  if (ocProfileM) {
+    const raw = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase().replace(/^ru$/, 'russian-recruiter');
+    const scriptPath = path.join(__dirname, '..', 'infra', 'opencode-switch-profile.sh');
+    if (!fs.existsSync(scriptPath)) return '⚠️ infra/opencode-switch-profile.sh не найден';
+    try {
+      const { execFileSync } = require('child_process');
+      execFileSync('bash', [scriptPath, raw], { timeout: 10_000 });
+      const PROFILE_LABELS = {
+        value:               'VALUE — DeepSeek V4 Flash :free (дефолт)',
+        quality:             'QUALITY — DeepSeek paid + GigaChat Ultra plan',
+        free:                'FREE — только бесплатный inference (Nemotron)',
+        mimo:                'MIMO — A/B-тест MiMo V2.5',
+        'russian-recruiter': 'RUSSIAN RECRUITER — GigaChat Pro/Ultra/Max',
+      };
+      const label = PROFILE_LABELS[raw] || raw;
+      return `✅ OpenCode профиль → ${label}\n\nПрименён глобально на этом VM (все чаты). Следующий запуск OpenCode подхватит новые модели.`;
+    } catch (e) {
+      return `⚠️ Не удалось переключить профиль: ${e.message.slice(0, 200)}`;
+    }
   }
 
   // Developer intent — if GitHub not connected, ask to connect before doing anything
