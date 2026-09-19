@@ -46,7 +46,10 @@ async function spawnTestAgent(fakeTgPort) {
     TELEGRAM_API_URL: `http://127.0.0.1:${fakeTgPort}`,
     TELEGRAM_BOT_TOKEN: 'fake-mainstream-token',
     AGENT_DATA_DIR: TEST_DATA_DIR,
+    // Isolate agent tokens to the test dir so test users don't pollute ~/agent-tokens
+    AGENT_TOKENS_DIR: path.join(TEST_DATA_DIR, 'tokens'),
     NODE_ENV: 'test',
+    TEST_MODE: '1',
     // Force env-var secrets loading (skip GCP Secret Manager)
     SECRETS_SOURCE: 'env',
   };
@@ -125,6 +128,16 @@ async function main() {
   // 5. Cleanup
   agentProc?.kill();
   await fakeTg.stop();
+
+  // Remove stray test-user token dirs from ~/agent-tokens (mt* pattern)
+  const agentTokensDir = path.join(os.homedir(), 'agent-tokens');
+  try {
+    for (const entry of fs.readdirSync(agentTokensDir)) {
+      if (/^mt[0-9a-z]+[ha]$/.test(entry)) {
+        fs.rmSync(path.join(agentTokensDir, entry), { recursive: true, force: true });
+      }
+    }
+  } catch {}
 
   console.log(`\n[mainstream] All done. Total bugs: ${totalBugs}`);
   console.log(`[mainstream] Bug log: ${orchestrator.bugsFile}`);
