@@ -442,6 +442,8 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         }
       }
 
+      const chatId = rec.chatId || session.liveChatId || session.ownerChatId; // liveChatId (was ownerChatId); read-compat
+
       // Инкремент + persist ДО запуска — durable, переживает краш итерации.
       rec.iterations += 1;
       rec.lastFiredAt = now;
@@ -450,11 +452,13 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         rec.closedReason = 'max-iterations';
         writeGtd(workDir, rec);
         console.log(`[gtd] closed ${rec.sessionId}: max-iterations`);
+        _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+          `⚠️ GTD: авто-доведение остановлено — превышен лимит попыток. Задача: «${(rec.originalTask || '').slice(0, 100)}»`
+        ).catch(() => {});
         continue;
       }
       writeGtd(workDir, rec);
 
-      const chatId = rec.chatId || session.liveChatId || session.ownerChatId; // liveChatId (was ownerChatId); read-compat
       if (!chatId) { // некому отвечать — не будим сессию вслепую
         rec.status = 'closed'; rec.closedReason = 'no-owner-chat';
         writeGtd(workDir, rec);
@@ -465,6 +469,11 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       const taskId = `${username}-gtd-${now}`;
       fired += 1;
       console.log(`[gtd] fire session=${rec.sessionId} iter=${rec.iterations}/${rec.maxIterations}`);
+
+      // GTD fire label — visible marker so the user knows this reply is a scheduled check.
+      _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+        `🔄 GTD — авто-проверка · итерация ${rec.iterations}/${rec.maxIterations}`
+      ).catch(() => {});
 
       // Snapshot done-count before run, for progress-check after.
       const checklistBefore = rec.projectDir ? readChecklist(rec.projectDir) : null;
@@ -520,6 +529,9 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
               fresh.status = 'closed'; fresh.closedReason = 'no-progress';
               writeGtd(workDir, fresh);
               console.log(`[gtd] closed ${rec.sessionId}: no-progress (${fresh.consecutiveNoProgress} consecutive stalled iterations)`);
+              _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+                `⚠️ GTD: остановлен — нет прогресса за 2 итерации. Задача: «${(fresh.originalTask || '').slice(0, 100)}»`
+              ).catch(() => {});
               continue;
             }
           }
