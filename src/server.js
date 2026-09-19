@@ -547,7 +547,7 @@ function scheduleGtdController(secrets) {
 
 async function resumePendingTasks() {
   maintenance.recovered();
-  // Drain flag may still be set (deploy in progress); coordinator --ready will clear it.
+  maintenance.resume(); // clear any leftover drain flag from a previous /restart or deploy
 }
 
 async function main() {
