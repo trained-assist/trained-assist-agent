@@ -126,12 +126,14 @@ describe('mergeSeenIds — lossless contract (no candidate dropped between runs)
     r = mergeSeenIds('alice', 'vac-1', ids);
     expect(r.newCount).toBe(0);
 
-    // Run 3: add 3 more → exactly 3 new
-    const more = ['hh-0050' /* already seen */, 'hh-0051', 'hh-0052', 'hh-0053'];
+    // Run 3: 1 already-seen ID (hh-0049 from run 1) + 3 truly new IDs
+    // → exactly 3 new. Total distinct IDs ever collected = 53.
+    const more = ['hh-0049' /* already seen from run 1 */, 'hh-0050', 'hh-0051', 'hh-0052'];
     r = mergeSeenIds('alice', 'vac-1', more);
     expect(r.newCount).toBe(3);
     expect(r.totalSeenAfter).toBe(53);
     more.slice(1).forEach(id => unionOfNews.add(id));
+    // Set.add is idempotent — hh-0049 was added in run 1, so allSeen grows by 3.
     more.forEach(id => allSeen.add(id));
 
     // The big check: nothing dropped.
