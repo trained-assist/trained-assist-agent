@@ -263,6 +263,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
 const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?)\b/i;
+const AGENT_INFO_INTENT = /^\/(?:get_agent_info|agent_info|info)(?:@\S+)?(?=\s|$)/i;
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -521,6 +522,26 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     } catch (e) {
       return `⚠️ Не удалось переключить профиль: ${e.message.slice(0, 200)}`;
     }
+  }
+
+  // /get_agent_info — show current engine, model, profile, VM, version
+  if (AGENT_INFO_INTENT.test(task)) {
+    const { execSync } = require('child_process');
+    const engine = workDir ? profiles.getEngine(workDir, chatId) : 'claude';
+    const vmName = process.env.VM_NAME || 'unknown';
+    let commit = 'unknown';
+    try { commit = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
+    let ocModel = process.env.OPENCODE_MODEL || 'openrouter/minimax/minimax-m3 (дефолт)';
+    let ocProfile = 'не задан';
+    try {
+      const ocCfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.config', 'opencode', 'opencode.json'), 'utf8'));
+      if (ocCfg.model) ocModel = ocCfg.model;
+      const profileFile = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
+      if (fs.existsSync(profileFile)) ocProfile = fs.readFileSync(profileFile, 'utf8').trim();
+    } catch {}
+    const engineLabel = engine === 'opencode' ? 'OpenCode' : engine === 'codex' ? 'Codex CLI' : 'Claude Code';
+    const modelLine = engine === 'opencode' ? `🧠 Модель: \`${ocModel}\`\n📦 Профиль OC: ${ocProfile}` : `🧠 Модель: claude (${process.env.ANTHROPIC_MODEL || 'sonnet'})`;
+    return `🤖 Агент: \`${user?.username || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
   }
 
   // Developer intent — if GitHub not connected, ask to connect before doing anything
