@@ -224,7 +224,7 @@ async function callModel(model, messages, json = false) {
       return await tryModel(m);
     } catch (e) {
       lastErr = e;
-      if (![404, 429, 503].includes(e.status)) throw e; // hard error — don't retry
+      if (![400, 404, 429, 503].includes(e.status)) throw e; // hard error — don't retry
     }
   }
   throw lastErr;
