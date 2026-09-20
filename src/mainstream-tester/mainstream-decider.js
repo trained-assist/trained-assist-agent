@@ -40,7 +40,6 @@ async function decideNextAction({ conversation, latestText, buttons, stepNumber,
         a.type === 'text' ? `- написал текст: "${a.content}"` : `- нажал кнопку: "${a.buttonText}"`
       ).join('\n')}\n`
     : '';
-File: src/mainstream-tester/mainstream-decider.js
   const prompt = `Ты — среднестатистический новый пользователь Telegram-бота (AI-помощник для рекрутинга и задач). Ты не технарь, просто обычный человек, который первый раз пользуется ботом.
 
 ШАГ ${stepNumber}/7 тест-сессии.
@@ -87,8 +86,6 @@ temperature: 0.4,
   const data = await res.json();
   const raw = (data.choices?.[0]?.message?.content || '').trim();
 
-File: src/mainstream-tester/mainstream-decider.js
-
 // Parse JSON, stripping markdown fences if present
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   try {
@@ -98,7 +95,6 @@ File: src/mainstream-tester/mainstream-decider.js
     if (match) {
       try { return JSON.parse(match[0]); } catch {}
     }
-File: src/mainstream-tester/mainstream-decider.js
 
 // Fallback: send generic follow-up
     return { type: 'text', content: 'расскажи подробнее' };
