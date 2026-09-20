@@ -2,16 +2,17 @@
 
 // Developer skill — git clone → local edit → test → commit → PR workflow
 // Requires GitHub token (scope: repo) from 60-github.js / agent-tokens/{userId}/github.
+// Task formulation (clarifying requirements, writing a durable spec) is a separate
+// business/systems-analyst concern — see 62-business-analyst.js (ba_clarify_requirements,
+// ba_write_spec). This skill only covers execution: repo/workspace mechanics + PR tracking.
 //
-// Workflow (spec-driven, tiered by size — see dev_clarify_requirements for the tiers):
-//   1. dev_clarify_requirements — classify size, clarify User Story before touching code
-//   2. dev_write_spec — ONLY for feature-tier work: write a durable EARS-style spec.md
-//      into the repo (requirements + acceptance criteria + tasks), so intent survives
-//      the chat and drift is checkable against something concrete
-//   3. dev_workspace_setup — clone repo to agent-data/dev/<owner>_<repo>/
-//   4. Claude edits files with native Read/Edit/Write tools
-//   5. Claude runs tests via bash (npm test, pytest, etc.)
-//   6. Claude commits + pushes via bash; creates PR via github_create_pr
+// Workflow:
+//   1. ba_clarify_requirements / ba_write_spec (62-business-analyst.js) — before any of this
+//   2. dev_workspace_setup — clone repo to agent-data/dev/<owner>_<repo>/
+//   3. Claude edits files with native Read/Edit/Write tools
+//   4. Claude runs tests via bash (npm test, pytest, etc.)
+//   5. Claude commits + pushes via bash; creates PR via github_create_pr
+//   6. dev_pr_checklist_gtd — hand PR off to the durable GTD controller (CI → merge → deploy)
 
 const fs   = require('fs');
 const path = require('path');
@@ -81,99 +82,6 @@ module.exports = {
   setupTools: [],
 
   tools: {
-
-    dev_clarify_requirements: {
-      description: 'Classify a dev task by size and generate structured clarification questions BEFORE writing any code. Call for every dev task, even ones that look clear — the tier decision itself (trivial/small/feature) is the point: it tells you whether to skip ceremony or write a durable spec via dev_write_spec. Ask only the questions that are actually unclear for that tier.',
-      inputSchema: {
-        type: 'object',
-        required: ['description'],
-        properties: {
-          description: { type: 'string', description: 'User\'s raw task description' },
-          context: { type: 'string', description: 'Optional: what\'s already known about the project' },
-        },
-      },
-      handler: async ({ description, context }) => {
-        const known = context ? `\n\nИзвестно: ${context}` : '';
-        return {
-          instruction: `Задача: "${description.slice(0, 300)}"${known}\n\nШаг 1 — определи размер задачи (см. tiers). Шаг 2 — задай ТОЛЬКО неясные из описания вопросы для этого уровня. Не задавай все вопросы подряд — если задача маленькая, достаточно 1–2, а trivial вообще без вопросов.`,
-          tiers: {
-            trivial: 'Опечатка, переименование, однострочный багфикс, обновление версии зависимости. Не задавай вопросов, не пиши spec — просто делай и коммить.',
-            small: 'Один чётко очерченный баг/правка в известном месте кода, объём — единицы файлов. Максимум 1–2 точечных вопроса из "required" ниже, dev_write_spec НЕ нужен.',
-            feature: 'Новая функциональность, неоднозначный объём, несколько файлов/модулей, поведение, которое кто-то будет проверять на "готово/не готово". Пройди все три блока вопросов, затем ПЕРЕД правками кода вызови dev_write_spec — устный список вопрос-ответ забывается между сессиями, файл в репозитории — нет.',
-          },
-          questions: {
-            required: [
-              'Кто пользователь этой фичи? (конечный user, внутренняя команда, API-клиент)',
-              'Опиши сценарий: "Как [роль], я хочу [действие], чтобы [цель]"',
-              'Acceptance criteria в формате EARS: "КОГДА <триггер/событие>, <система> ДОЛЖНА <наблюдаемая реакция>" — если готового ответа нет, сформулируй сам и покажи на подтверждение, не жди пока сформулируют за тебя',
-            ],
-            scope: [
-              'Какой стек/платформа? (Web/iOS/Android/CLI/API/Telegram bot/другое)',
-              'Расширяем существующее или с нуля?',
-              'Что точно НЕ входит в эту итерацию? (out of scope — фиксируй явно, это тоже часть спеки)',
-            ],
-            technical: [
-              'Есть ли ограничения по технологиям/библиотекам?',
-              'Нужна ли интеграция с чем-то внешним (API, БД, очередь)?',
-              'Ожидаемый масштаб: сотни запросов в день или миллионы?',
-            ],
-          },
-          note: 'Спека — не бюрократия ради бюрократии: она нужна только пока задача достаточно большая, чтобы "что мы вообще строим" могло разъехаться между сессиями или файлами. Для trivial/small она — чистые накладные расходы, пропускай без сожаления.',
-        };
-      },
-    },
-
-    dev_write_spec: {
-      description: 'Write a durable spec.md into the workspace BEFORE editing code — only for feature-tier work per dev_clarify_requirements. Captures requirements, EARS-style acceptance criteria, explicit out-of-scope, and a task breakdown as a file committed alongside the code, so intent survives across sessions and can be checked against instead of re-litigated from chat memory. Skip this for trivial/small tasks — it is deliberate overhead that only pays off once a feature is big enough to drift.',
-      inputSchema: {
-        type: 'object',
-        required: ['workspace', 'feature', 'requirements', 'acceptance_criteria'],
-        properties: {
-          workspace: { type: 'string', description: 'Path returned by dev_workspace_setup / dev_new_repo' },
-          feature: { type: 'string', description: 'Short feature name, e.g. "CSV export for reports"' },
-          requirements: { type: 'string', description: 'What/why in a few sentences — the user story and its motivation' },
-          acceptance_criteria: {
-            type: 'array', items: { type: 'string' },
-            description: 'EARS-style statements, e.g. "КОГДА пользователь нажимает Export, система ДОЛЖНА скачать CSV с текущим фильтром"',
-          },
-          out_of_scope: { type: 'array', items: { type: 'string' }, description: 'Explicitly excluded from this iteration' },
-          tasks: { type: 'array', items: { type: 'string' }, description: 'Implementation steps, checked off as work progresses' },
-        },
-      },
-      handler: async ({ workspace, feature, requirements, acceptance_criteria, out_of_scope, tasks }) => {
-        if (!fs.existsSync(workspace)) throw new Error(`Workspace not found: ${workspace}. Call dev_workspace_setup first.`);
-
-        const slug = feature.toLowerCase().trim()
-          .replace(/[^a-z0-9а-яё\s-]/gi, '')
-          .replace(/\s+/g, '-')
-          .slice(0, 60) || 'feature';
-
-        const specDir = path.join(workspace, 'specs', slug);
-        fs.mkdirSync(specDir, { recursive: true });
-        const specPath = path.join(specDir, 'spec.md');
-
-        const criteriaBlock = (acceptance_criteria || []).map(c => `- ${c}`).join('\n') || '- (не заполнено)';
-        const outOfScopeBlock = (out_of_scope || []).map(c => `- ${c}`).join('\n') || '- (не заполнено)';
-        const tasksBlock = (tasks || []).map(t => `- [ ] ${t}`).join('\n') || '- [ ] (не заполнено)';
-
-        const content = `# ${feature}\n\n` +
-          `## Requirements\n${requirements}\n\n` +
-          `## Acceptance criteria (EARS)\n${criteriaBlock}\n\n` +
-          `## Out of scope\n${outOfScopeBlock}\n\n` +
-          `## Tasks\n${tasksBlock}\n`;
-
-        fs.writeFileSync(specPath, content);
-
-        return {
-          spec_path: specPath,
-          note: 'Файл в рабочей копии, не закоммичен. Добавь его в первый коммит фичи (git add specs/), чтобы спека жила рядом с кодом и её было видно в PR — ревьюер валидирует код против неё, а не против переписки в чате.',
-          next_steps: [
-            `git -C ${workspace} add ${path.relative(workspace, specPath)}`,
-            '# ... implement against tasks above, checking them off as you go ...',
-          ],
-        };
-      },
-    },
 
     dev_workspace_setup: {
       description: 'Clone a GitHub repo to the VM and prepare it for development: git clone, configure credentials for push, detect and install dependencies (npm/pip/cargo). Returns the workspace path. After this, Claude can edit files directly and run tests via bash.',

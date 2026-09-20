@@ -57,13 +57,21 @@ const SKILLS = [
     requires: 'Вызови connect({ service: "github" }) — получишь защищённую ссылку для ввода PAT. Scope: repo, read:org.',
   },
   {
+    id: 'business-analyst',
+    name: 'Business/Systems Analyst — постановка задач',
+    description: 'Постановка задачи ДО начала работы любого исполнительского скила (dev/ci-cd/qa/deploy) — это отдельная от кодинга роль. ' +
+      'ba_clarify_requirements классифицирует задачу по размеру (trivial/small/feature) и задаёт только те вопросы, ' +
+      'которые реально неясны для этого уровня. Для feature-уровня — ba_write_spec: durable EARS-спека (requirements, ' +
+      'acceptance criteria, out of scope, tasks) файлом в репозитории, ДО правок кода, чтобы намерение не терялось между сессиями. ' +
+      'Для trivial/small — без вопросов и без спеки, это чистые накладные расходы.',
+    requires: 'Ничего — работает сразу, для любой задачи.',
+  },
+  {
     id: 'dev',
     name: 'Developer — разработка ПО',
-    description: 'Полный цикл разработки: клонирует репозиторий на VM, редактирует файлы, запускает тесты, коммитит, пушит, создаёт PR. ' +
-      'Workflow (spec-driven, по размеру задачи): dev_clarify_requirements (классифицирует trivial/small/feature, уточняет User Story) → ' +
-      'для feature-уровня dev_write_spec (durable EARS-спека в репозитории, ДО правок кода) → dev_workspace_setup (clone + npm install) → ' +
-      'редактирование через Read/Edit/Write → тесты через bash → git commit/push (включая specs/) → github_create_pr. ' +
-      'Для trivial/small — без вопросов и без спеки, это чистые накладные расходы. ' +
+    description: 'Исполнение (не постановка задачи — см. business-analyst): клонирует репозиторий на VM, редактирует файлы, запускает тесты, коммитит, пушит, создаёт PR. ' +
+      'Workflow: ba_clarify_requirements/ba_write_spec (постановка) → dev_workspace_setup (clone + npm install) → ' +
+      'редактирование через Read/Edit/Write → тесты через bash → git commit/push (включая specs/) → github_create_pr → dev_pr_checklist_gtd. ' +
       'Если нет аккаунта GitHub — рекомендуй создать на github.com (бесплатно). ' +
       'Если нет репозитория — предложи dev_new_repo.',
     requires: 'GitHub токен (scope: repo). Подключи через connect({ service: "github" }).',
