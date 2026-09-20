@@ -203,6 +203,7 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
     projectDir: projectDir || null,
     lastFiredAt: null,
     closedReason: null,
+    consecutiveNoProgress: 0,
   };
   writeGtd(workDir, rec);
   console.log(`[gtd] scheduled session=${sessionId} user=${username} eta=${intent.etaMinutes}m maxIterations=${maxIterations}${checklist ? ' (checklist.md)' : ''} due=${new Date(rec.dueAt).toISOString()}`);
@@ -222,6 +223,14 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
   const existing = readGtd(workDir, sessionId);
   if (existing && existing.status === 'open') return existing; // уже трекается — не сбрасываем прогресс/backoff
   const chatIdStr = chatId != null ? String(chatId) : null;
+File: src/gtd-controller.js
+
+// Dedup by projectDir: same checklist.md already tracked by another session
+const projectConflict = listGtd(workDir).find(r => r.status === 'open' && r.projectDir === projectDir && r.sessionId !== sessionId);
+if (projectConflict) {
+  console.warn(`[gtd] skip(checklist): open GTD for projectDir=${projectDir} already exists (session=${projectConflict.sessionId})`);
+  return projectConflict;
+}
   if (chatIdStr) {
     const conflict = listGtd(workDir).find(r => r.status === 'open' && r.chatId === chatIdStr && r.sessionId !== sessionId);
     if (conflict) {
@@ -243,6 +252,7 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
     projectDir,
     lastFiredAt: null,
     closedReason: null,
+    consecutiveNoProgress: 0,
   };
   writeGtd(workDir, rec);
   console.log(`[gtd] scheduled(checklist) session=${sessionId} user=${username} eta=${ETA_MIN_CLAMP}m maxIterations=${maxIterations} due=${new Date(rec.dueAt).toISOString()}`);
@@ -434,6 +444,8 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         }
       }
 
+      const chatId = rec.chatId || session.liveChatId || session.ownerChatId; // liveChatId (was ownerChatId); read-compat
+
       // Инкремент + persist ДО запуска — durable, переживает краш итерации.
       rec.iterations += 1;
       rec.lastFiredAt = now;
@@ -442,11 +454,13 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         rec.closedReason = 'max-iterations';
         writeGtd(workDir, rec);
         console.log(`[gtd] closed ${rec.sessionId}: max-iterations`);
+        _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+          `⚠️ GTD: авто-доведение остановлено — превышен лимит попыток. Задача: «${(rec.originalTask || '').slice(0, 100)}»`
+        ).catch(() => {});
         continue;
       }
       writeGtd(workDir, rec);
 
-      const chatId = rec.chatId || session.liveChatId || session.ownerChatId; // liveChatId (was ownerChatId); read-compat
       if (!chatId) { // некому отвечать — не будим сессию вслепую
         rec.status = 'closed'; rec.closedReason = 'no-owner-chat';
         writeGtd(workDir, rec);
@@ -457,6 +471,15 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       const taskId = `${username}-gtd-${now}`;
       fired += 1;
       console.log(`[gtd] fire session=${rec.sessionId} iter=${rec.iterations}/${rec.maxIterations}`);
+
+      // GTD fire label — visible marker so the user knows this reply is a scheduled check.
+      _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+        `🔄 GTD — авто-проверка · итерация ${rec.iterations}/${rec.maxIterations}`
+      ).catch(() => {});
+
+      // Snapshot done-count before run, for progress-check after.
+      const checklistBefore = rec.projectDir ? readChecklist(rec.projectDir) : null;
+      const doneCountBefore = checklistBefore ? checklistBefore.items.filter(i => i.done).length : -1;
 
       let reply = '';
       try {
@@ -496,6 +519,25 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         writeGtd(workDir, fresh);
         console.log(`[gtd] closed ${rec.sessionId}: max-iterations (post-run)`);
       } else {
+        // Progress-check: if checklist exists and no new items were checked off, track stall.
+        if (rec.projectDir && doneCountBefore >= 0) {
+          const checklistAfter = readChecklist(rec.projectDir);
+          const doneCountAfter = checklistAfter ? checklistAfter.items.filter(i => i.done).length : doneCountBefore;
+          if (doneCountAfter > doneCountBefore) {
+            fresh.consecutiveNoProgress = 0;
+          } else {
+            fresh.consecutiveNoProgress = (fresh.consecutiveNoProgress || 0) + 1;
+            if (fresh.consecutiveNoProgress >= 2) {
+              fresh.status = 'closed'; fresh.closedReason = 'no-progress';
+              writeGtd(workDir, fresh);
+              console.log(`[gtd] closed ${rec.sessionId}: no-progress (${fresh.consecutiveNoProgress} consecutive stalled iterations)`);
+              _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+                `⚠️ GTD: остановлен — нет прогресса за 2 итерации. Задача: «${(fresh.originalTask || '').slice(0, 100)}»`
+              ).catch(() => {});
+              continue;
+            }
+          }
+        }
         fresh.dueAt = now + fresh.etaMinutes * 60 * 1000; // backoff до следующей проверки
         writeGtd(workDir, fresh);
       }

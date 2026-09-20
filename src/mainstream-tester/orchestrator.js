@@ -159,7 +159,7 @@ class Orchestrator {
   }
 
   async _runPath(alternativeMode) {
-    let action = await decideFirstAction(alternativeMode);
+let action = await decideFirstAction(alternativeMode);
     const previousActions = []; // track to prevent looping
 
     for (let step = 1; step <= this.maxSteps; step++) {
@@ -172,7 +172,7 @@ class Orchestrator {
 
       console.log(`[orchestrator] ${alternativeMode ? 'alt' : 'main'} step ${step}: "${taskText}"`);
       this.state.conversation.push({ role: 'user', text: taskText });
-      previousActions.push(action);
+previousActions.push(action);
 
       try {
         await this._sendTask(taskText);
@@ -208,7 +208,7 @@ class Orchestrator {
           stepNumber: step + 1,
           alternativeMode,
           openrouterKey: this.openrouterKey,
-          previousActions,
+previousActions,
         });
         console.log(`[orchestrator] Next action: ${JSON.stringify(action)}`);
       } catch (err) {
