@@ -212,35 +212,6 @@ function setCurrentSessionId(workDir, id, chatId) {
 }
 
 /**
- * Every chatId this profile currently has a recently-active session in.
- *
- * A profile can be live in several chats at once (a DM plus one or more groups,
- * each with its own `current-session-<chatId>.json` pointer) — there is no single
- * "the" chat for a profile. Callers that need to broadcast to every chat the user
- * is actually working in (e.g. "restart complete") must use this instead of a
- * single last-writer-wins chatId file, which silently drops every chat but the
- * most recent to touch it (see restart-notify-single-chat class bug).
- * Returns string chatIds (sign preserved for groups), most-recently-active first.
- */
-function getRecentChatIds(workDir, windowMs) {
-  const dir = path.join(workDir, SESSIONS_DIR);
-  const now = Date.now();
-  const found = [];
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      const m = f.match(/^current-session-(-?\d+)\.json$/);
-      if (!m) continue;
-      let ptr;
-      try { ptr = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { continue; }
-      if (ptr && Number.isFinite(ptr.lastAt) && now - ptr.lastAt <= windowMs) {
-        found.push({ chatId: m[1], lastAt: ptr.lastAt });
-      }
-    }
-  } catch { /* no sessions dir yet */ }
-  return found.sort((a, b) => b.lastAt - a.lastAt).map(f => f.chatId);
-}
-
-/**
  * First-touch attachment claim for legacy / unattached sessions (issue #489).
  * Persists liveChatId ONLY when it is currently unset — never overwrites an
  * existing attachment. Returns the effective chatId (existing or newly set),
@@ -348,7 +319,6 @@ function archiveSessions(workDir, sessionIds) {
 module.exports = {
   createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
   getCurrentSessionId, setCurrentSessionId, claimLiveChatId, resolveChatSession, archiveSessions, setSummary, needsSummary,
-  getRecentChatIds,
   // Back-compat alias for the pre-rename name (see PROFILE-RENAME-SPEC.md); remove once no caller uses it.
   claimOwnerChatId: claimLiveChatId,
 };

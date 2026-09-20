@@ -10,7 +10,6 @@ import {
   getSession,
   buildContext,
   resolveChatSession,
-  getRecentChatIds,
 } from '../src/session-store.js';
 
 let tmpDir;
@@ -150,29 +149,5 @@ describe('resolveChatSession — chatId sign-split heal', () => {
     createSession(tmpDir, { task: 'other chat', chatId: -42 });
     // CHAT has no session / pointer of its own → no accidental adoption of chat -42's session.
     expect(resolveChatSession(tmpDir, 's-1003814002203-9999', CHAT)).toBeNull();
-  });
-});
-
-describe('getRecentChatIds — restart-notify must reach every active chat, not just the last one', () => {
-  it('returns every chat with a recent pointer, not just one', () => {
-    // A single profile live in a DM and a group at once — both must come back.
-    createSession(tmpDir, { task: 'dm task', chatId: 555 });
-    createSession(tmpDir, { task: 'group task', chatId: -999 });
-    const ids = getRecentChatIds(tmpDir, 15 * 60 * 1000);
-    expect(new Set(ids)).toEqual(new Set(['555', '-999']));
-  });
-
-  it('excludes chats whose pointer is older than the window', () => {
-    const dir = path.join(tmpDir, 'sessions');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'current-session-111.json'), JSON.stringify({ id: 's-111-1', lastAt: Date.now() }));
-    fs.writeFileSync(path.join(dir, 'current-session-222.json'), JSON.stringify({ id: 's-222-1', lastAt: Date.now() - 60 * 60 * 1000 }));
-    expect(getRecentChatIds(tmpDir, 15 * 60 * 1000)).toEqual(['111']);
-  });
-
-  it('returns [] when there is no sessions dir yet', () => {
-    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sess-empty-'));
-    expect(getRecentChatIds(emptyDir, 15 * 60 * 1000)).toEqual([]);
-    fs.rmSync(emptyDir, { recursive: true, force: true });
   });
 });
