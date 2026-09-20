@@ -1,7 +1,4 @@
 const { maintenance, atomicJson } = require('./maintenance');
-const currentExecution = () => null;
-const intentRuns = new Map();
-let restartShutdown = false;
 let autoRestartPending = false;
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
@@ -145,7 +142,6 @@ const PENDING_DIR = path.join(
 );
 
 function savePendingTask(taskId, params) {
-  if (currentExecution()) return currentExecution().save(taskId, params);
   const file = path.join(PENDING_DIR, `${taskId}.json`);
   let previous = null;
   try { previous = JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -155,30 +151,17 @@ function savePendingTask(taskId, params) {
     initiatedAt: previous ? (Object.hasOwn(previous, 'initiatedAt') ? previous.initiatedAt : null) : (Object.hasOwn(params, 'initiatedAt') ? params.initiatedAt : null) });
 }
 
-function recordTaskActivity(_opts, _at = Date.now()) {
-  // no-op: restart-activity tracking removed
-}
-
 function bindTaskActivity(taskId, user, sessionId) {
-  if (currentExecution()) {
-    const session = sessions.getSession(user.workDir, sessionId);
-    const intent = currentExecution().bind(taskId, sessionId, session?.projectId);
-    if (Number.isFinite(intent.initiatedAt)) recordTaskActivity({ user, sessionId, threadId: intent.owner.threadId }, intent.initiatedAt);
-    return;
-  }
   const file = path.join(PENDING_DIR, `${taskId}.json`);
   const pending = JSON.parse(fs.readFileSync(file, 'utf8'));
   atomicJson(file, { ...pending, sessionId, activitySessionId: sessionId });
-  if (Number.isFinite(pending.initiatedAt)) recordTaskActivity({ user, sessionId, threadId: pending.threadId }, pending.initiatedAt);
 }
 
 function clearPendingTask(taskId) {
-  if (currentExecution()) return; // terminal transition belongs to the execution wrapper
   try { fs.unlinkSync(path.join(PENDING_DIR, `${taskId}.json`)); } catch (e) { console.warn('[runner] clearPendingTask:', e.message); }
 }
 
 function getPendingTasks() {
-  if (currentExecution()) return currentExecution().pending();
   if (!fs.existsSync(PENDING_DIR)) return [];
   return fs.readdirSync(PENDING_DIR).filter(f => f.endsWith('.json'))
     .map(f => JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')));
@@ -1314,9 +1297,16 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     }
   }
 
-  const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
+  // Skip regex-based intent matching for long free-form messages — the ~40
+  // INTENT patterns were calibrated for short, focused phrasing and misfire on
+  // multi-line tasks where a quick answer is almost never what the user wants.
+  // Slash commands (unambiguous) are always checked regardless of length.
+  const LONG_MSG_QUICK_SKIP = 200;
+  const isSlashCommand = /^\//.test(task.trim());
+  const sync = (isSlashCommand || task.trim().length <= LONG_MSG_QUICK_SKIP)
+    ? getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId)
+    : null;
   if (sync !== null) {
-    const isSlashCommand = /^\//.test(task.trim());
     const preview = (sync && typeof sync === 'object') ? sync.hint : sync;
     const confirmed = isSlashCommand || await verifyQuickAnswerIntent(task, preview, openrouterKey);
     if (confirmed) {
@@ -1932,38 +1922,8 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  if (currentExecution() && intentRuns.has(opts.taskId)) return intentRuns.get(opts.taskId);
   if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id) || null;
-  if (currentExecution()) {
-    const saved = currentExecution().get(opts.taskId);
-    if (saved) {
-      if (saved.owner.username !== opts.user.username) throw Error('Intent owner mismatch');
-      opts = { ...opts, ...saved.payload, user: { ...opts.user, id: saved.owner.chatId,
-        username: saved.owner.username, profileId: saved.owner.profileId, telegramUserId: saved.owner.telegramUserId },
-        sessionId: saved.owner.sessionId, projectId: saved.owner.projectId, initiatedAt: saved.initiatedAt };
-    } else {
-      opts.sessionId ||= (!opts.forceNew && opts.activitySessionId) || `s-${opts.user.id}-${Date.now()}-${require('crypto').randomUUID().slice(0, 8)}`;
-      opts.engine ||= profiles.getEngine(opts.user.workDir, opts.user.id);
-      opts.projectId ||= sessions.getSession(opts.user.workDir, opts.sessionId)?.projectId || projects.getActiveProjectId(opts.user.workDir, opts.user.id) || null;
-      if (!opts.projectId) {
-        const choice = projects.decideNewSessionProject(opts.user.workDir, opts.user.id);
-        opts.projectId = choice.project?.id || choice.active || choice.choices?.[0]?.id ||
-          projects.createProject(opts.user.workDir, opts.newProjectName || { type: 'generic', name: 'Основной' }).id;
-      }
-      // A brand-new deferred request needs a real immutable transcript target,
-      // including web requests with no Telegram chat. Create it before ACK.
-      if (!sessions.getSession(opts.user.workDir, opts.sessionId)) {
-        sessions.createSession(opts.user.workDir, { id: opts.sessionId, task: opts.task || '', chatId: opts.user.id, projectId: opts.projectId });
-        opts.userMessageRecorded = true;
-      }
-      opts.activitySessionId = opts.sessionId;
-    }
-  }
-  // Resolve the lane after immutable session binding. An implicit first request
-  // and an explicit reply must serialize on the same transcript.
-  if (currentExecution()) queueKey = _laneKey(opts.sessionId, opts.user.id);
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
-  if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
   savePendingTask(opts.taskId, {
     phase: 'queued', activitySessionId: opts.activitySessionId, taskId: opts.taskId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
@@ -1977,10 +1937,6 @@ function runTask(opts) {
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  if (currentExecution() && (restartShutdown || !currentExecution().eligible(opts.taskId) || maintenance.paused())) {
-    const text = '⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.';
-    return status.finish(text).then(() => ({ deferred: true }));
-  }
   if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
   else if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
@@ -2023,11 +1979,9 @@ function runTask(opts) {
         await _waitForRam();
         releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.'));
         try {
-          if (currentExecution() && !currentExecution().start(opts.taskId)) return { deferred: true };
           executionStarted = true;
           await status.finish('🧠 Начинаю работу…');
           const result = await _runTask(opts);
-          currentExecution()?.complete(opts.taskId);
           return result;
         } finally {
           _releaseSlot();
@@ -2038,28 +1992,16 @@ function runTask(opts) {
     });
     return work;
   }).catch(async err => {
-    currentExecution()?.interrupt(opts.taskId, true);
     const msg = err.message === 'capacity_wait_timeout'
       ? '⏰ Сервер перегружен — задача слишком долго ждала свободного места. Попробуй ещё раз через минуту.'
-      : currentExecution()?.get(opts.taskId)?.state === 'delivering'
-        ? '⏸ Результат сохранён. Повторю доставку ответа без повторного выполнения задачи.'
-        : currentExecution()?.get(opts.taskId)?.state === 'waiting_confirmation'
-          ? '⏸ Работа прервана и сохранена. Перед продолжением нужно проверить результат уже выполненных действий; повторный запуск пока заблокирован.'
-          : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
+      : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
     await status.finish(msg);
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
   chatLanes.set(queueKey, current);
-  if (currentExecution()) intentRuns.set(opts.taskId, current);
   current.finally(() => {
-    try {
-      const pendingFile = path.join(PENDING_DIR, `${opts.taskId}.json`);
-      const pending = currentExecution()?.get(opts.taskId)?.payload || (fs.existsSync(pendingFile) ? JSON.parse(fs.readFileSync(pendingFile, 'utf8')) : null);
-      if (!currentExecution() || executionStarted) recordTaskActivity({ ...opts, activitySessionId: pending && Object.hasOwn(pending, 'activitySessionId')
-        ? pending.activitySessionId : opts.activitySessionId });
-    } catch (error) {
-      console.error('[restart-activity] completion:', error.message);
-    } finally { clearPendingTask(opts.taskId); releaseAdmission?.(); intentRuns.delete(opts.taskId); }
+    clearPendingTask(opts.taskId);
+    releaseAdmission?.();
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
   });
@@ -2568,7 +2510,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // SUPPOSED to have no file on disk yet, so it must never heal back onto
     // the chat's old pointer, or "start new session" would silently reattach
     // to the stale one.
-    activeSessionId = (forceNew || currentExecution()) ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId) || sessionId);
+    activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId) || sessionId);
     const existing = sessions.getSession(user.workDir, activeSessionId);
     if (existing) {
       // Strict chat isolation: a live session is attached to exactly one chat.
@@ -2592,7 +2534,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
       if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
-  } else if (!currentExecution()) {
+  } else {
     // No explicit session — try to continue the most recent one (within 4h)
     const currentId = getCurrentSessionId(user.workDir, chatId);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
@@ -2701,9 +2643,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
   const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId);
-  const quickReply = forceClaude ? null : await (currentExecution()
-    ? currentExecution().runQuick(taskId, dispatchQuick)
-    : dispatchQuick());
+  const quickReply = forceClaude ? null : await dispatchQuick();
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
@@ -2715,11 +2655,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (!isUtility) {
       if (sessionExists) {
         if (!userMessageRecorded) sessions.appendUserMessage(user.workDir, activeSessionId, task);
-        if (!currentExecution()) sessions.appendReply(user.workDir, activeSessionId, quickReply);
+        sessions.appendReply(user.workDir, activeSessionId, quickReply);
       } else {
         // New conversation — create session with first exchange
         activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
-        if (!currentExecution()) sessions.appendReply(user.workDir, activeSessionId, quickReply);
+        sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
       bindTaskActivity(taskId, user, activeSessionId);
       setCurrentSessionId(user.workDir, activeSessionId, chatId);
@@ -2740,12 +2680,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       ? { inline_keyboard: [[{ text: '🔎 Разобраться подробнее', callback_data: `qa_more|${activeSessionId}` }]] }
       : null;
     const quickExtra = expandMarkup ? { reply_markup: expandMarkup } : {};
-    if (currentExecution()) {
-      currentExecution().stageResult(taskId, {text: `⚡ ${quickReply}`, messageId: initialMsgId, skipSession: isUtility});
-      currentExecution().presentResult(taskId, quickExtra);
-      await currentExecution().deliver(taskId);
-      return quickReply;
-    }
     if (initialMsgId) {
       await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra));
     } else {
@@ -2987,8 +2921,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         '--print', prompt,
       ]];
 
-  // Fail closed: no child may start if its durable uncertainty record fails.
-  currentExecution()?.beginEngine(taskId, engine);
   const proc = spawn(engineBin, engineArgs, {
     cwd: user.cwd || user.workDir,
     env: {
@@ -3147,7 +3079,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           } else if (event.type === 'step_finish') {
             terminalSuccess = true;
             claudeResult = fullOutput.text.trim() || null;
-            if (!restartShutdown && claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             const usage = event.part?.tokens;
             if (usage) {
               if (!ocAgentModels || !Object.keys(ocAgentModels).length) ocAgentModels = readOcAgentModels();
@@ -3195,7 +3126,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
             claudeResult = lastAssistantMsg;
-            if (!restartShutdown && claudeResult?.trim()) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             claudeUsage = event.usage || null;
             if (claudeUsage) {
               console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cached_input_tokens || 0} cache_write=${claudeUsage.cache_write_input_tokens || 0}`);
@@ -3209,10 +3139,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         if (event.type === 'result') {
           terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
-          if (terminalSuccess && !restartShutdown) {
-            const terminalText = pickFinalText(claudeResult, lastAssistantMsg, '');
-            if (terminalText) currentExecution()?.stageEngineResult(taskId, { text: terminalText, messageId: msgId });
-          }
           claudeUsage = event.usage || null;
           if (claudeUsage) {
             console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
@@ -3318,7 +3244,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           exitCode = code;
         }
         // If SIGTERM already fired (timedOut=true), reject so the catch block runs auto-continuation
-        if (timedOut && !restartShutdown) {
+        if (timedOut) {
           reject(new Error(`claude exited after SIGTERM (code ${code})`));
         } else {
           resolve(code);
@@ -3334,14 +3260,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     processError = err.message;
     await stopProgress();
     console.error(`[${taskId}] claude process error:`, err.message);
-    if (timedOut && currentExecution()) {
-      const partial = fullOutput.text.trim();
-      if (activeSessionId && partial) {
-        sessions.appendReply(user.workDir, activeSessionId, `[прервано таймаутом]\n${partial}`);
-        setCurrentSessionId(user.workDir, activeSessionId, chatId);
-      }
-      throw new Error('Engine interrupted; external effects require reconciliation before continuation');
-    }
     if (timedOut) {
       const nextCount = continuationCount + 1;
       const partialText = fullOutput.text.trim();
@@ -3432,7 +3350,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
     const crashDurationMs = Date.now() - thinkingStart;
     const isUsageLimit = codexErrorMsg && /usage limit|purchase more credits/i.test(codexErrorMsg);
-    if (!isUsageLimit && !currentExecution() && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
+    if (!isUsageLimit && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
@@ -3482,7 +3400,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let result = answer;
   if (incomplete) {
     const reason = processSignal
-      ? (restartShutdown ? 'сервер перезапускается' : `сигнал ${processSignal}`)
+      ? `сигнал ${processSignal}`
       : exitCode !== 0 ? `код ${exitCode}`
       : processError ? `ошибка запуска`
       : 'нет подтверждённого финального ответа';
@@ -3576,15 +3494,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (incomplete && activeSessionId && fullOutput.text.trim()) {
     sessions.appendReply(user.workDir, activeSessionId, `[Незавершённый ход; промежуточный текст, не итог]\n${fullOutput.text.trim()}`);
   }
-  if (currentExecution()?.get(taskId)?.result) {
-    currentExecution().presentResult(taskId, finalExtra);
-    await currentExecution().deliver(taskId);
-  } else {
   // Append assistant reply to session history
   if (activeSessionId) {
     sessions.appendReply(user.workDir, activeSessionId, result);
     setCurrentSessionId(user.workDir, activeSessionId, chatId);
-
   }
 
   // Send result (clear stop button; attach action buttons unless suppressed)
@@ -3627,8 +3540,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       }, delayMs);
       setPendingContinuation(user.username, { chatId, msgId, sessionId: activeSessionId }, timer);
     }).catch(() => {});
-  }
-
   }
 
   // Update context pin after task (skipped when user ran /context_off)
@@ -3763,8 +3674,6 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
 }
 
 function interruptForRestart() {
-  restartShutdown = true;
-  currentExecution()?.interruptAll();
   for (const state of activeTimers.values()) {
     state.restartInterrupted = true;
     clearTimeout(state.killTimer);

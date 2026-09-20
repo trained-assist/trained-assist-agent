@@ -23,13 +23,6 @@ def client():
     return api
 
 def main():
-    if '--rollback' in sys.argv:
-        # Called by deploy.sh at the start of rollback() while the service is still
-        # running with the bad new code. We must not restart or resume admission here —
-        # deploy.sh manages the full rollback sequence (stop → git reset → restart → --ready).
-        # Just return so the timer doesn't interfere.
-        return
-
     if '--ready' in sys.argv:
         # Called by deploy.sh after service restart. Retry until the new service is up.
         for _ in range(30):

@@ -14,5 +14,5 @@ ExecStart=/bin/bash -c '\
   TG_BASE="${TELEGRAM_API_URL:-https://api.telegram.org}"; \
   curl -sf -X POST "${TG_BASE}/bot${BOT_TOKEN}/sendMessage" \
     -H "Content-Type: application/json" \
-    -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"\\u26a0\\ufe0f assist-agent на ${VM} исчерпал лимит перезапусков и остановился.\\n\\nЧто делать:\\n1. SSH в VM\\n2. sudo journalctl -u trained-assist-agent -n 50\\n3. sudo fuser -k 8080/tcp\\n4. sudo systemctl reset-failed trained-assist-agent\\n5. sudo systemctl start trained-assist-agent\"}" \
+    -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"\\u26a0\\ufe0f assist-agent на ${VM} исчерпал лимит перезапусков и остановился.\\n\\nЧто делать:\\n1. SSH в VM\\n2. sudo journalctl -u assist-agent -n 50\\n3. sudo fuser -k 8080/tcp\\n4. sudo systemctl reset-failed assist-agent\\n5. sudo systemctl start assist-agent\"}" \
   || true'

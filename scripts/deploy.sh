@@ -18,13 +18,6 @@ fi
 
 # Save current commit so we can roll back if smoke tests fail
 PREV_COMMIT=${PREV_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")}
-# First installation needs a quiescent bootstrap; legacy code cannot maintain a
-# closed gate through rollback. Refuse before stopping or changing dependencies.
-git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/maintenance.js" || {
-  echo "Legacy runtime: install the drain-aware baseline in a quiet bootstrap window first"
-  exit 1
-}
-
 export PREV_COMMIT
 DEPS_STAGE=""
 OLD_DEPS=""
@@ -32,11 +25,6 @@ DEPS_SWAPPED=0
 rollback() {
   if [ -z "$PREV_COMMIT" ]; then
     echo "No previous commit recorded; queue remains paused"
-    return 1
-  fi
-  if [ -f "${AGENT_DATA_DIR:-$HOME/agent-data}/execution-authority.json" ] &&
-     ! git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/restart-execution.js"; then
-    echo "Rollback refused: legacy runtime cannot safely read v2 execution authority; admission stays closed"
     return 1
   fi
   echo "==> Rolling back to $PREV_COMMIT with the saved dependencies..."
@@ -81,7 +69,6 @@ npm ci --prefix "$DEPS_STAGE" --omit=dev
 
 echo "==> Stopping drained service and swapping dependencies..."
 sudo systemctl stop "$SERVICE"
-python3 "$REPO_DIR/scripts/prepare-deploy-journal.py"
 OLD_DEPS="$DEPS_STAGE/previous-node_modules"
 if [ -d "$REPO_DIR/node_modules" ]; then
   mv "$REPO_DIR/node_modules" "$OLD_DEPS"
@@ -125,28 +112,11 @@ if [ "$CHANGED" = "1" ]; then
   echo "  daemon reloaded"
 fi
 
-echo "==> Stopping legacy conflicting services (alesa-agent, trained-assist-agent)..."
-for OLD_SVC in alesa-agent trained-assist-agent; do
-  if systemctl list-unit-files | grep -q "^${OLD_SVC}.service"; then
-    sudo systemctl stop "$OLD_SVC" 2>/dev/null || true
-    sudo systemctl disable "$OLD_SVC" 2>/dev/null || true
-    echo "  Stopped and disabled $OLD_SVC"
-  fi
-done
-
 echo "==> Killing any orphan node processes on port 8080..."
 # systemctl restart only kills the tracked PID; orphan processes (started outside systemd)
 # stay alive on port 8080 and serve stale code — kill them before the restart.
 sudo fuser -k 8080/tcp 2>/dev/null || true
 sleep 1
-
-echo "==> Migrating data directory (alesa-data → agent-data) if needed..."
-if [ -d "/home/vova/alesa-data" ] && [ ! -d "/home/vova/agent-data" ]; then
-  mv /home/vova/alesa-data /home/vova/agent-data
-  echo "  Migrated: alesa-data → agent-data"
-else
-  echo "  No migration needed"
-fi
 
 echo "==> Ensuring data directories exist..."
 DATA_DIR="${AGENT_DATA_DIR:-/home/vova/agent-data}"
