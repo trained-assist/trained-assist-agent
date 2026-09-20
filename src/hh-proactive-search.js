@@ -304,21 +304,62 @@ function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, newCandidates
   return [head, stats, ...top, tail, link].filter(Boolean).join('\n');
 }
 
+// --- Candidate comments (for search refinement) ---
+
+function commentsPath(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', 'candidate-comments.json');
+}
+
+function loadCandidateComments(username) {
+  try {
+    const raw = fs.readFileSync(commentsPath(username), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-search] comments read failed:', e.message);
+    return {};
+  }
+}
+
+function saveCandidateComment(username, candidateId, commentData) {
+  const comments = loadCandidateComments(username);
+  comments[String(candidateId)] = { ...commentData, updatedAt: new Date().toISOString() };
+  const file = commentsPath(username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(comments, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+// Extract search exclusion hints from candidate comments.
+// These are comments that describe what we DON'T want (typically negative feedback).
+// Returns an array of strings like ["не из Новосибирска", "без опыта в рознице"].
+function getSearchExclusions(username) {
+  const comments = loadCandidateComments(username);
+  return Object.values(comments)
+    .map(c => (c.text || '').trim())
+    .filter(Boolean);
+}
+
 // Generate HH resume-search queries for this specific vacancy (title + context + criteria)
 // instead of a fixed list — makes cold-search work for any vacancy, not just one domain.
-// Layered: ask the LLM first, sanity-check the result, merge in a deterministic
+// Layered: ask the LLM first, sanity-check the result, use a deterministic
 // fallback derived from the vacancy's own fields when the LLM goes off-topic.
-async function generateSearchQueries(atsConfig, orKey) {
+async function generateSearchQueries(atsConfig, orKey, exclusions = []) {
   const cfg = normalizeAtsConfig(atsConfig);
   const criteriaStr = [...(cfg.required || []), ...(cfg.preferred || [])]
     .map(c => c.name).filter(Boolean).join(', ') || '—';
 
   let aiQueries = [];
   if (orKey) {
+    const exclusionsBlock = exclusions.length
+      ? `\nКомментарии рекрутера по уже просмотренным кандидатам (что НЕ подходит):\n${exclusions.map(e => `- ${e}`).join('\n')}\nУчти эти исключения в запросах — например, не ищи по городам которые отмечены как нежелательные.\n`
+      : '';
     const prompt = `Вакансия: "${cfg.vacancy_title || 'без названия'}"
 Контекст: ${atsConfig.vacancy_context || '—'}
 Ключевые критерии: ${criteriaStr}
-
+${exclusionsBlock}
 Составь 5-7 поисковых запросов для поиска резюме кандидатов в базе резюме HH.ru по этой вакансии.
 Запросы короткие (2-4 слова), по названиям должностей и ключевым навыкам (не по формулировкам вакансии).
 Пиши на русском; добавь 1-2 запроса на английском только если для этой сферы такие термины реально приняты в резюме.
@@ -349,15 +390,23 @@ async function generateSearchQueries(atsConfig, orKey) {
     }
   }
 
-  if (!aiQueries.length) throw new Error('empty query list from AI');
+  if (!aiQueries.length) {
+    // LLM returned empty / parse failed — use deterministic fallback instead of throwing,
+    // so a single bad LLM response doesn't kill the entire proactive run.
+    const fallback = deriveFallbackQueries(cfg);
+    if (fallback.length) return fallback;
+    throw new Error('empty query list from AI and no fallback derivable from vacancy title/criteria');
+  }
   if (queriesLookSane(aiQueries, cfg)) return aiQueries;
 
-  // AI went off-topic — merge in a deterministic fallback derived from the vacancy
-  // itself so the cold-search at least targets the right profession.
-  console.warn(`[proactive-search] AI queries look off-topic for "${cfg.vacancy_title || 'вакансии'}": ${JSON.stringify(aiQueries)}. Merging fallback derived from vacancy title + criteria.`);
+  // AI went off-topic — use ONLY the deterministic fallback. Including the off-topic
+  // AI queries (even merged with fallback) brings in unrelated candidates: e.g. for
+  // "Финансовый советник" the LLM once returned "Менеджер по продажам" which then
+  // pulled 26 logistics/export salespeople. The fallback is derived purely from the
+  // vacancy's own fields so it can't go off-topic.
+  console.warn(`[proactive-search] AI queries look off-topic for "${cfg.vacancy_title || 'вакансии'}": ${JSON.stringify(aiQueries)}. Using fallback derived from vacancy title + criteria only.`);
   const fallback = deriveFallbackQueries(cfg);
-  const merged = [...new Set([...aiQueries, ...fallback])].slice(0, 7);
-  return merged.length ? merged : aiQueries;
+  return fallback.length ? fallback : aiQueries;
 }
 
 // Scoring explanation shown to the recruiter on request — built from the latest actual
@@ -466,12 +515,16 @@ async function runProactiveSearch(username, workDir, options = {}) {
 
   // Search queries are generated per-vacancy and cached in the ATS config until the
   // vacancy title changes, so we don't re-call the LLM on every run.
-  let queries = Array.isArray(atsConfig.proactive_search_queries) && atsConfig.proactive_search_queries_for === atsConfig.vacancy_title
+  // Force regeneration (ignore cache) if caller explicitly requests it.
+  const forceRegen = Boolean(options.forceRegenQueries);
+  let queries = !forceRegen && Array.isArray(atsConfig.proactive_search_queries) && atsConfig.proactive_search_queries_for === atsConfig.vacancy_title
     ? atsConfig.proactive_search_queries
     : null;
   if (!queries) {
     if (!orKey) throw new Error('OpenRouter ключ не найден — нужен, чтобы сгенерировать поисковые запросы под эту вакансию.');
-    queries = await generateSearchQueries(atsConfig, orKey);
+    // Pass recruiter's exclusion comments so the LLM can refine queries accordingly
+    const exclusions = getSearchExclusions(username);
+    queries = await generateSearchQueries(atsConfig, orKey, exclusions);
     try {
       const raw = JSON.parse(fs.readFileSync(atsCtxFile, 'utf8'));
       raw.value = raw.value || {};
@@ -548,9 +601,38 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const outDir = path.join(dataDir, 'hh', username, 'proactive');
   fs.mkdirSync(outDir, { recursive: true });
 
+  // Normalize vacancyKey: prefer vacancy_id (stable), fall back to title (can change).
+  // Always use the same key across runs so seen-IDs accumulate correctly.
+  // If vacancy_id is missing, try to read it from active_vacancy.json as a fallback.
+  let vacancyKeyId = atsConfig.vacancy_id || '';
+  if (!vacancyKeyId) {
+    try {
+      const av = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
+      if (av?.id) vacancyKeyId = String(av.id);
+    } catch {}
+  }
+  const vacancyKey = vacancyKeyId || atsConfig.vacancy_title || 'unknown';
+
+  // Compute seen-IDs BEFORE writing the results file so we can mark is_new on candidates.
+  // Any crash after this point means a duplicate alert next time — acceptable trade-off
+  // (losing seen-IDs would cause candidates to be shown again forever).
+  const collectedIds = enriched.map(c => c.id).filter(Boolean);
+  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
+  try {
+    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
+  } catch (e) {
+    console.error('[proactive-search] seen-ids merge failed:', e.message);
+  }
+
+  // Mark is_new on candidates that appear for the first time
+  const markedCandidates = enriched.map(c => ({
+    ...c,
+    is_new: seenInfo.newIds.has(c.id),
+  }));
+
   const outFile = path.join(outDir, `search-results-${dateStr}.json`);
   const output = {
-    vacancy_id: atsConfig.vacancy_id || '',
+    vacancy_id: vacancyKey,
     vacancy_title: atsConfig.vacancy_title || 'Вакансия',
     search_queries: queries,
     searched_at: now.toISOString(),
@@ -558,21 +640,9 @@ async function runProactiveSearch(username, workDir, options = {}) {
     total_after_knockout: scored.length,
     ai_enriched: Boolean(orKey),
     ats_config: atsConfig,
-    candidates: enriched,
+    candidates: markedCandidates,
   };
   fs.writeFileSync(outFile, JSON.stringify(output, null, 2), 'utf8');
-
-  // Merge into persistent seen-IDs so we can distinguish "new" from "already shown".
-  // Runs AFTER the file write — losing a crash here means a duplicate alert next time,
-  // not losing candidates (the on-disk JSON is the durable source).
-  const vacancyKey = atsConfig.vacancy_id || atsConfig.vacancy_title || 'unknown';
-  const collectedIds = (enriched || []).map(c => c.id).filter(Boolean);
-  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
-  try {
-    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
-  } catch (e) {
-    console.error('[proactive-search] seen-ids merge failed:', e.message);
-  }
 
   const pass_count = enriched.filter(c => c.tag === 'PASS').length;
   const review_count = enriched.filter(c => c.tag === 'REVIEW').length;
@@ -663,4 +733,7 @@ module.exports = {
   mergeSeenIds,
   buildProactiveDigest,
   seenIdsPath,
+  loadCandidateComments,
+  saveCandidateComment,
+  getSearchExclusions,
 };
