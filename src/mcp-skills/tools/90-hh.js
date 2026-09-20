@@ -129,6 +129,9 @@ function hhRequest(method, apiPath, accessToken, body) {
       });
     });
     req.on('error', reject);
+    req.setTimeout(15_000, () => {
+      req.destroy(new Error(`HH API timeout after 15s: ${method} ${apiPath}`));
+    });
     if (bodyStr) req.write(bodyStr);
     req.end();
   });
@@ -1012,16 +1015,26 @@ module.exports = {
         }
 
         try {
-          const data = await hhGet(
-            `/negotiations/response?vacancy_id=${vacancy_id}&per_page=50&page=0`,
-            token,
-          );
+          // Collect all response negotiations across pages (each page capped at 50 by HH API).
+          // Without pagination, vacancies with > 50 responses silently drop all candidates past
+          // the first page — they never get scored and never appear in the review.
+          const allNegs = [];
+          for (let page = 0; ; page++) {
+            const data = await hhGet(
+              `/negotiations/response?vacancy_id=${vacancy_id}&per_page=50&page=${page}`,
+              token,
+            );
+            const items = data.items || [];
+            allNegs.push(...items);
+            if (page >= (data.pages || 1) - 1 || !items.length) break;
+            await new Promise(r => setTimeout(r, 300));
+          }
 
           const now = Date.now();
           const results = [];
           const skipped = [];
 
-          for (const neg of (data.items || [])) {
+          for (const neg of allNegs) {
             const updatedAt = neg.updated_at || neg.created_at;
             const daysSince = updatedAt
               ? Math.floor((now - new Date(updatedAt).getTime()) / (24 * 3600 * 1000))
@@ -1187,16 +1200,23 @@ module.exports = {
         }
 
         try {
-          const data = await hhGet(
-            `/negotiations/response?vacancy_id=${vacancy_id}&per_page=50&page=0`,
-            token,
-          );
+          const allNegsRegen = [];
+          for (let page = 0; ; page++) {
+            const data = await hhGet(
+              `/negotiations/response?vacancy_id=${vacancy_id}&per_page=50&page=${page}`,
+              token,
+            );
+            const items = data.items || [];
+            allNegsRegen.push(...items);
+            if (page >= (data.pages || 1) - 1 || !items.length) break;
+            await new Promise(r => setTimeout(r, 300));
+          }
 
           const configVersion = ats_config.updated_at || null;
           const regenerated = [];
           const skipped = [];
 
-          for (const neg of (data.items || [])) {
+          for (const neg of allNegsRegen) {
             const history = readCandidateHistory(USER_ID, neg.id);
             const atsResult = history.ats_result;
 
@@ -1281,27 +1301,37 @@ module.exports = {
           if (c.verdict !== 'ОТКЛОНИТЬ' && apiKey) {
             const history = readCandidateHistory(USER_ID, c.negotiation_id);
             alreadySent = (history.messages || []).some(m => m.role === 'employer');
-            const msgType = c.verdict === 'ПРОПУСТИТЬ' ? 'invite_call'
-              : alreadySent ? 'followup'
-              : 'initial';
-            try {
-              draft = await generateMessage(
-                vacancy_context ? `## О вакансии\n${vacancy_context}\n\nКандидат: ${c.name}` : `Кандидат: ${c.name}`,
-                c,
-                c.name,
-                apiKey,
-                msgType,
-                history.messages || [],
-                USER_ID,
-                atsConfigCtx?.value || null,
-              );
-              if (draft) {
-                if (!history.ats_result) history.ats_result = {};
-                history.ats_result.draft_message = draft;
-                saveCandidateHistory(USER_ID, c.negotiation_id, history);
+            const configVersion = atsConfigCtx?.value?.updated_at || null;
+
+            // Reuse existing draft if it was generated for the same ATS config version.
+            // Without this check, every call to hh_draft_review_page overwrites any text
+            // the recruiter manually edited in the textarea.
+            if (history.message_draft?.text && history.message_draft.config_version === configVersion) {
+              draft = history.message_draft.text;
+            } else {
+              const msgType = c.verdict === 'ПРОПУСТИТЬ' ? 'invite_call'
+                : alreadySent ? 'followup'
+                : 'initial';
+              try {
+                draft = await generateMessage(
+                  vacancy_context ? `## О вакансии\n${vacancy_context}\n\nКандидат: ${c.name}` : `Кандидат: ${c.name}`,
+                  c,
+                  c.name,
+                  apiKey,
+                  msgType,
+                  history.messages || [],
+                  USER_ID,
+                  atsConfigCtx?.value || null,
+                );
+                if (draft) {
+                  if (!history.ats_result) history.ats_result = {};
+                  history.ats_result.draft_message = draft;
+                  history.message_draft = { text: draft, generated_at: new Date().toISOString(), config_version: configVersion };
+                  saveCandidateHistory(USER_ID, c.negotiation_id, history);
+                }
+              } catch (e) {
+                console.error(`[hh_review] generateMessage failed for ${c.negotiation_id}:`, e.message);
               }
-            } catch (e) {
-              console.error(`[hh_review] generateMessage failed for ${c.negotiation_id}:`, e.message);
             }
           }
           enriched.push({ ...c, draft_message: draft, already_sent: alreadySent });
