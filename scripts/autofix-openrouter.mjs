@@ -346,7 +346,9 @@ Return ONLY the resolved code — no conflict markers, no explanations, no markd
       resolved = resolved.replace(blocks[i].full, resolvedCode[i]);
     }
 
-    if (/^<{7} /m.test(resolved) || /^>{7} /m.test(resolved)) {
+    // \w after the markers ensures regex patterns like /<<<<<<< [^\n]+/ in source code
+    // don't trigger a false positive — real markers are always followed by HEAD/branch-name
+    if (/^<{7} \w/m.test(resolved) || /^>{7} \w/m.test(resolved)) {
       return { ok: false, reason: `conflict markers remain in ${filePath} after AI resolution` };
     }
 
@@ -863,18 +865,22 @@ if (patchToApply) {
 }
 
 // ── Verify: run tests ─────────────────────────────────────────────────────────
+// Skip for conflict resolution — push fix PR and let CI report failures.
+// The loop: conflict resolved → fix PR → CI fails → fixer picks up next iteration.
 
-await prComment('🧪 Patch applied — running tests…');
-try {
-  sh('npm test');
-} catch (e) {
-  sh('git checkout -- .');
-  sh('git clean -fd');
-  await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
-  failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
-    problem: diagnosis.problem,
-    test_error: e.message.slice(0, 300),
-  });
+if (preStageDiagnosis?.category !== 'success:pre_a_conflict_resolved') {
+  await prComment('🧪 Patch applied — running tests…');
+  try {
+    sh('npm test');
+  } catch (e) {
+    sh('git checkout -- .');
+    sh('git clean -fd');
+    await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
+    failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
+      problem: diagnosis.problem,
+      test_error: e.message.slice(0, 300),
+    });
+  }
 }
 
 // ── Create new fix branch + PR (never push to original branch) ───────────────
