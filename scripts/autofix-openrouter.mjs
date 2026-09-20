@@ -363,25 +363,6 @@ Return ONLY the resolved code — no conflict markers, no explanations, no markd
 // Detection: CI auto-merge step fails with "not up to date with the base branch"
 //            OR batch mode (always try merge regardless of log content).
 // Fix: git merge origin/<BASE_BRANCH>; if conflicts → AI resolution using PR purpose.
-// Pin CI infra files to their BASE_BRANCH versions after every merge.
-// Prevents old feature branches from downgrading autofix script or workflows
-// via squash-merge when the fix PR lands on main.
-// Safe to call after both clean merges and AI-assisted conflict resolution.
-function pinCIInfraFiles() {
-  const CI_INFRA_FILES = [
-    'scripts/autofix-openrouter.mjs',
-    '.github/workflows/batch-fix-prs.yml',
-    '.github/workflows/auto-fix-ci.yml',
-    '.github/workflows/ci-fix-cleanup.yml',
-  ];
-  for (const f of CI_INFRA_FILES) {
-    try {
-      sh(`git checkout origin/${BASE_BRANCH} -- ${f}`);
-      log('pre-A', `pinned ${f} to ${BASE_BRANCH} version`);
-    } catch { /* file may not exist on main — ok */ }
-  }
-}
-
 async function tryFixOutOfDate(failedLog, prPurposeArg) {
   const logMatches = /not up to date with the base branch|head branch.*behind/i.test(failedLog);
   if (!BATCH_MODE && !logMatches) return null;
@@ -390,10 +371,7 @@ async function tryFixOutOfDate(failedLog, prPurposeArg) {
   try {
     sh(`git fetch origin ${BASE_BRANCH} --quiet`);
     sh(`git merge origin/${BASE_BRANCH} --no-edit -m "merge: sync with ${BASE_BRANCH} before merge"`);
-    log('pre-A', 'merge successful — pinning CI infra files');
-    pinCIInfraFiles();
-    // Commit pin only if something changed (feature branch had old CI files)
-    try { sh('git add -A && git diff --cached --quiet || git commit -m "chore: pin CI infra files to main version"'); } catch {}
+    log('pre-A', 'merge successful — no code changes needed');
     return {
       ok: true,
       category: 'success:pre_a_merge',
@@ -431,7 +409,6 @@ async function tryFixOutOfDate(failedLog, prPurposeArg) {
       };
     }
 
-    pinCIInfraFiles();
     sh('git add -A');
     sh(`git commit -m "merge: resolve conflicts with origin/${BASE_BRANCH} [ai-assisted]"`);
     log('pre-A', 'AI conflict resolution successful');
