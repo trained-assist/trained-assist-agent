@@ -63,11 +63,16 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
-// Free models that actually work on OpenRouter (checked 2026-09-20)
-// If primary returns 404/400, callModel retries with STAGE0_FALLBACK_MODEL
-const STAGE0_MODEL = 'google/gemma-3-27b-it:free';
-const STAGE0_FALLBACK_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
-const STAGE1_MODEL = 'google/gemma-3-27b-it:free';
+// Free-tier model chain — tried in order on 404/429/503 (first success wins)
+const STAGE0_MODEL_CHAIN = [
+  'deepseek/deepseek-v3-0324:free',
+  'google/gemma-3-12b-it:free',
+  'meta-llama/llama-3.1-8b-instruct:free',
+  'mistralai/mistral-7b-instruct:free',
+];
+const STAGE0_MODEL = STAGE0_MODEL_CHAIN[0];
+const STAGE0_FALLBACK_MODEL = STAGE0_MODEL_CHAIN[1]; // kept for compat, chain handles the rest
+const STAGE1_MODEL = 'deepseek/deepseek-v3-0324:free';
 const STAGE2_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
 const STAGE3_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
@@ -189,16 +194,19 @@ async function callModel(model, messages, json = false) {
     return data?.choices?.[0]?.message?.content?.trim() || '';
   };
 
-  try {
-    return await tryModel(model);
-  } catch (e) {
-    // 404/429/503 = model unavailable or rate-limited → try STAGE0_FALLBACK_MODEL if applicable
-    if ([404, 429, 503].includes(e.status) && model === STAGE0_MODEL && STAGE0_FALLBACK_MODEL) {
-      log('model', `${model} HTTP ${e.status} — falling back to ${STAGE0_FALLBACK_MODEL}`);
-      return await tryModel(STAGE0_FALLBACK_MODEL);
+  // For STAGE0 calls: try the full chain on transient errors (404/429/503)
+  const chain = model === STAGE0_MODEL ? STAGE0_MODEL_CHAIN : [model];
+  let lastErr;
+  for (const m of chain) {
+    try {
+      if (m !== model) log('model', `${model} HTTP ${lastErr?.status} — trying ${m}`);
+      return await tryModel(m);
+    } catch (e) {
+      lastErr = e;
+      if (![404, 429, 503].includes(e.status)) throw e; // hard error — don't retry
     }
-    throw e;
   }
+  throw lastErr;
 }
 
 function extractPatch(raw) {
