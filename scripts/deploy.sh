@@ -18,12 +18,6 @@ fi
 
 # Save current commit so we can roll back if smoke tests fail
 PREV_COMMIT=${PREV_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")}
-# First installation needs a quiescent bootstrap; legacy code cannot maintain a
-# closed gate through rollback. Refuse before stopping or changing dependencies.
-git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/maintenance.js" || {
-  echo "Legacy runtime: install the drain-aware baseline in a quiet bootstrap window first"
-  exit 1
-}
 
 export PREV_COMMIT
 DEPS_STAGE=""

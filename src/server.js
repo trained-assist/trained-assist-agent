@@ -1,7 +1,7 @@
 // Acquire before modules can recover tasks or write maintenance state.
 const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
 process.once('exit', () => executionOwner.close());
-const { maintenance, atomicJson } = require('./maintenance');
+const { atomicJson } = require('./atomic-json');
 const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, hydrateResumes, buildResumeText, resumeNotice } = require('./hh-resume');
 const http = require('http');
@@ -220,8 +220,7 @@ function scheduleNalogExpiryChecks(secrets) {
   }
 
   const guardedCheck = () => {
-    const release = maintenance.acquire();
-    if (release) check().catch(e => console.warn('[nalog-expiry]', e.message)).finally(release);
+    check().catch(e => console.warn('[nalog-expiry]', e.message));
   };
   setTimeout(guardedCheck, 60 * 1000); // first check 1 min after start (tokens may be fresh on restart)
   setInterval(guardedCheck, CHECK_INTERVAL_MS);
@@ -520,9 +519,7 @@ function scheduleHhBackgroundScoring() {
     const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
     if (!fs.existsSync(hhTokensBase)) return;
     for (const username of fs.readdirSync(hhTokensBase)) {
-      const release = maintenance.acquire();
-      if (!release) return;
-      runHhScoringForUser(username).catch(() => {}).finally(release);
+      runHhScoringForUser(username).catch(() => {});
       await new Promise(r => setTimeout(r, 1000)); // stagger users to avoid API burst
     }
   }
@@ -538,7 +535,6 @@ function scheduleGtdController(secrets) {
   const { isTaskRunning } = require('./runner');
   const { getSession } = require('./session-store');
   const run = () => {
-    if (maintenance.paused()) return Promise.resolve();
     return gtd.runDue({
     secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: username => isTaskRunning(username) || getPendingTasks().some(p => p.username === username), runTask, getSession,
     canRunSession: (_username, _sessionId) => true,
@@ -549,9 +545,6 @@ function scheduleGtdController(secrets) {
 }
 
 async function resumePendingTasks(secrets) {
-  maintenance.recovered();
-  maintenance.resume(); // clear any leftover drain flag from a previous /restart or deploy
-
   if (!secrets?.BOT_TOKEN) return;
 
   const pending = getPendingTasks();
@@ -610,7 +603,6 @@ async function resumePendingTasks(secrets) {
 }
 
 async function main() {
-  maintenance.beginRecovery();
   const secrets = await loadSecrets();
   _secretsCache = secrets; // expose to background tasks for HH auto-refresh
   await resumePendingTasks(secrets);
@@ -630,18 +622,8 @@ async function main() {
 
   require('./intake-media-retention').startIntakeMediaRetention(BASE_USERS_DIR);
   const server = http.createServer(async (req, res) => {
-    let releaseRequest;
     try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
-    // Keep durable ingress and control reachable. Other in-flight HTTP operations
-    // count towards draining; requests arriving after the gate closes retry later.
-    const maintenanceExempt = ['/maintenance', '/restart/decision', '/run', '/health', '/intake-files', '/intake-files/release', '/restart/activity'].includes(url.pathname) || url.pathname.startsWith('/web/');
-    if (!maintenanceExempt) {
-      const release = maintenance.acquire();
-      if (!release) return json(res, 503, { error: 'planned restart; retry after readiness' });
-      releaseRequest = release;
-    }
-
 
     // ── GET /connect/nalog/code?sessionId=XXX — 2FA code entry page ─────────
     if (req.method === 'GET' && url.pathname === '/connect/nalog/code') {
@@ -2956,34 +2938,11 @@ ${recent || '(пока нет)'}
       return;
     }
 
+    // Thin compat stub for deploy scripts (drain-for-deploy.py, restart-coordinator.py).
+    // The drain gate is gone — deploys rely on SIGTERM drain instead.
     if (url.pathname === '/maintenance') {
-      if (req.method === 'GET') return json(res, 200, { ...maintenance.status(), runtimeCommit: RUNTIME_REVISION });
-      if (req.method === 'POST') {
-        const body = JSON.parse(await readBody(req));
-        // pause / resume with compat aliases for old scripts
-        if (body.action === 'pause' || body.action === 'request') {
-          maintenance.pause();
-          return json(res, 200, maintenance.status());
-        }
-        if (body.action === 'resume' || body.action === 'ready' || body.action === 'cancel') {
-          maintenance.resume();
-          return json(res, 200, maintenance.status());
-        }
-        if (body.action === 'claim') return json(res, 200, { claimed: true });
-        if (body.action === 'fail') { console.error('[maintenance] fail:', body.error); return json(res, 200, maintenance.status()); }
-        return json(res, 400, { error: 'invalid action' });
-      }
-    }
-
-    if (req.method === 'POST' && url.pathname === '/restart/activity') {
-      const paused = maintenance.paused();
-      if (paused) {
-        try {
-          const body = JSON.parse(await readBody(req));
-          maintenance.addRecipient({ username: body.username, chatId: body.chatId, threadId: body.threadId });
-        } catch { /* best-effort — a missed recipient just means no completion ping for that chat */ }
-      }
-      return json(res, 200, { paused });
+      const status = { active: getActiveTaskCount(), paused: false, runtimeCommit: RUNTIME_REVISION };
+      return json(res, 200, status);
     }
     if (req.method === 'POST' && url.pathname === '/intake-files/release') {
       const p = JSON.parse(await readBody(req));
@@ -3536,7 +3495,7 @@ ${recent || '(пока нет)'}
       const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
       completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
       if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
-      json(res, 202, { taskId, requestId, durable: true, queued: maintenance.paused() });
+      json(res, 202, { taskId, requestId, durable: true });
       return;
     }
 
@@ -4020,10 +3979,7 @@ ${recent || '(пока нет)'}
         CF_API_TOKEN: secrets.CF_API_TOKEN || '',
         OPERATOR_CHAT_ID: secrets.OPERATOR_CHAT_ID || '1714048',
       };
-      const releaseRefresh = maintenance.acquire();
-      if (!releaseRefresh) return;
       const child = spawn('node', [refreshScript], { env, detached: true, stdio: 'inherit' });
-      child.once('exit', releaseRefresh); child.once('error', releaseRefresh);
       child.unref();
       console.log('[weeek-session] Refresh script started, pid:', child.pid);
       return;
@@ -4292,21 +4248,17 @@ ${recent || '(пока нет)'}
     } catch (err) {
       console.error('[request-handler] unhandled error:', err);
       if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: 'internal server error' }));
-    } finally { releaseRequest?.(); }
+    }
   });
 
   server.listen(PORT, () => {
     console.log(`assist-agent listening on :${PORT}`);
-    if (process.env.TEST_MODE !== '1') {
-      notifyActiveChatsOnStartup(secrets).catch(e => console.error('[startup-notify] error:', e.message));
-    }
   });
 
   // Drive watcher: poll every 2 min for new files shared with the SA
   const driveOpts = { botToken: secrets.BOT_TOKEN, tgBase: process.env.TELEGRAM_API_URL };
   const drivePoll = () => {
-    const release = maintenance.acquire();
-    if (release) pollDriveChanges(driveOpts).catch(() => {}).finally(release);
+    pollDriveChanges(driveOpts).catch(() => {});
   };
   drivePoll();
   setInterval(drivePoll, 2 * 60 * 1000);
@@ -4317,71 +4269,25 @@ scheduleProactiveSearchRuns(secrets);
   if (process.env.TEST_MODE !== '1') scheduleGtdController(secrets);
 
 
-  // Deploys restart this service frequently (every few minutes during an
-  // active PR streak) — without draining, each restart silently kills
-  // whatever Claude Code task is mid-flight for a real user. Give active
-  // tasks real time to finish and deliver their Telegram reply before
-  // exiting; only tasks still running past DRAIN_TIMEOUT_MS fall back to
-  // resumePendingTasks() on the next startup. Keep this comfortably under
-  // systemd's TimeoutStopSec (set to 120s in the unit files) so systemd
-  // doesn't SIGKILL us mid-drain.
-  //
-  // If drain-for-deploy.py already closed the gate (drain flag on disk),
-  // it already waited for tasks before calling systemctl stop. Use a short
-  // flush window (10s) instead of the full 90s — the deployer already did
-  // the real drain; we just let any in-flight response bytes flush.
-  const DRAIN_TIMEOUT_MS = 90_000;
-  const DEPLOY_FLUSH_MS  = 10_000;
+  // Give active tasks up to 30s to finish on SIGTERM before exiting.
+  // Tasks that don't complete in time are persisted and resumed on next startup.
+  const DRAIN_TIMEOUT_MS = 30_000;
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    server.close(); // stop accepting new HTTP connections; existing tasks keep running
-    const forced = maintenance.status().forced === true;
-    const deployDrainDone = maintenance.status().paused; // drain flag set by drain-for-deploy.py
-    maintenance.beginRecovery(); // block every ingress/retry during shutdown
-    if (forced) require('./runner').interruptForRestart();
-    const planned = maintenance.status().phase === 'restarting';
-    const active = planned ? maintenance.status().active : getActiveTaskCount();
+    server.close();
+    const active = getActiveTaskCount();
     if (active > 0) {
-      const timeoutMs = forced ? 5000 : deployDrainDone ? DEPLOY_FLUSH_MS : DRAIN_TIMEOUT_MS;
-      console.log(`[shutdown] draining ${active} active task(s), up to ${timeoutMs / 1000}s${deployDrainDone ? ' (deploy flush)' : ''}...`);
-      const drained = await waitForIdle(timeoutMs);
+      console.log(`[shutdown] draining ${active} active task(s), up to ${DRAIN_TIMEOUT_MS / 1000}s...`);
+      const drained = await waitForIdle(DRAIN_TIMEOUT_MS);
       console.log(drained ? '[shutdown] all tasks drained' : '[shutdown] drain timeout — remaining tasks will resume on next startup');
     }
-    // Close any open Playwright browsers so Node exits cleanly
     try { require('./nalog-login').closeAll(); } catch {}
     process.exit(0);
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT',  shutdown);
-}
-
-async function notifyActiveChatsOnStartup(secrets) {
-  // Notify exactly the chats that were told "restart planned" — recorded by
-  // /restart/activity via maintenance.addRecipient() while draining — not a
-  // guess based on recent session activity. Guessing either misses chats
-  // (session pointer already outside the activity window, or a group chat
-  // whose pointer was never attached) or, via a stale-.chatid fallback,
-  // spams chats that have been idle for weeks. The recipient list is the
-  // one thing that is exactly right: it is who actually asked.
-  const recipients = maintenance.pendingNotifications();
-  if (recipients.length === 0) return;
-  const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
-  if (!botToken) return;
-  const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const notified = new Set();
-  for (const { username, chatId } of recipients) {
-    if (notified.has(chatId)) continue;
-    notified.add(chatId);
-    console.log(`[startup-notify] sending to ${username} (chat ${chatId})`);
-    fetch(`${tgBase}/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: '✅ Рестарт завершён. Готов к работе.' }),
-    }).catch(e => console.error(`[startup-notify] ${username}:`, e.message));
-  }
-  maintenance.acknowledgeNotification();
 }
 
 function tgNotifyNalog(botToken, chatId, expires) {

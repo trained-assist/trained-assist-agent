@@ -32,7 +32,6 @@ PYCODE
 fi
 mkdir -p /home/vova/agent-releases
 chown vova:vova /home/vova/agent-releases
-sudo -u vova git -C "$REPO" cat-file -e "$TARGET:src/maintenance.js"
 sudo -u vova git -C "$REPO" worktree add --detach "$RELEASE" "$TARGET"
 sudo -u vova npm ci --prefix "$RELEASE" --omit=dev
 install -d /usr/local/libexec
