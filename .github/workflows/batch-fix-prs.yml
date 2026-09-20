@@ -65,10 +65,10 @@ jobs:
             exit 1
           fi
 
-      - name: Guard — skip if fix/ci-* PR already exists for this branch
+      - name: Guard — close stale fix/ci-* PRs for this branch before re-running
         id: guard
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
         run: |
           BRANCH="${{ steps.pr-info.outputs.branch }}"
           SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-' | sed 's/[^a-zA-Z0-9-]/-/g' | cut -c1-40)
@@ -77,11 +77,11 @@ jobs:
             | jq -r ".[] | select(.headRefName | startswith(\"fix/ci-${SAFE_BRANCH}-\")) | .number" \
             | head -1)
           if [ -n "$EXISTING" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Fix PR #$EXISTING already exists for $BRANCH — skipping" >&2
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Closing stale fix PR #$EXISTING for $BRANCH — new fix attempt incoming" >&2
+            gh pr close "$EXISTING" -R "${{ github.repository }}" \
+              --comment "♻️ Superseded — batch re-run will create a fresh fix PR for \`$BRANCH\`."
           fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         if: steps.guard.outputs.skip == 'false'
