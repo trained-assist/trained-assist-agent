@@ -637,11 +637,17 @@ Set is_clear=true for ordinary feature PRs, bug fixes, refactors, dependency upd
   log('stage0', `is_clear: ${reasoning.is_clear}`);
 
   if (!reasoning.is_clear) {
-    const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
-    await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
-    writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
-    log('stage0', `ambiguous PR — stopping`);
-    process.exit(0); // not a failure — just not our job
+    if (BATCH_MODE) {
+      // In batch mode we're here to merge — not to assess CI failures from scratch.
+      // Proceed with branch name as purpose context; conflict resolution will still work.
+      log('stage0', `ambiguous in batch mode — proceeding anyway (purpose: ${reasoning.purpose})`);
+    } else {
+      const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
+      await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
+      writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
+      log('stage0', `ambiguous PR — stopping`);
+      process.exit(0); // not a failure — just not our job
+    }
   }
 
   // Announce we're starting — purpose confirmed
