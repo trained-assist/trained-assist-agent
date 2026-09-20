@@ -181,59 +181,59 @@ async function prComment(body) {
 }
 
 async function callModel(model, messages, json = false) {
-  const tryModel = async (m) => {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: m,
-        messages,
-        temperature: 0,
-        ...(json ? { response_format: { type: 'json_object' } } : {}),
-      }),
-      signal: AbortSignal.timeout(CHEAP_PAID_FALLBACK.includes(m) ? 60_000 : 20_000),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw Object.assign(new Error(`OpenRouter HTTP ${res.status}: ${body}`), { status: res.status });
-    }
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content?.trim() || '';
-  };
-
-  // For STAGE0 calls: try full chain (hardcoded free → discovered free → cheap paid)
-  const chain = model === STAGE0_MODEL
-    ? [...STAGE0_MODEL_CHAIN, ...(await discoverFreeModels()), ...CHEAP_PAID_FALLBACK]
-    : [model];
-
-  let lastErr;
-  let reachedPaid = false;
-  for (const m of chain) {
-    const isPaid = CHEAP_PAID_FALLBACK.includes(m);
-    try {
-      if (m !== model) {
-        if (isPaid && !reachedPaid) {
-          reachedPaid = true;
-          log('model', 'all free models exhausted — falling back to cheap paid models');
-        }
-        log('model', `trying ${m}${isPaid ? ' (paid)' : ''}`);
-      }
-      const result = await tryModel(m);
-      if (result) return result; // non-empty → success
-      lastErr = new Error(`${m} returned empty response`);
-      log('model', `${m} empty — trying next`);
-    } catch (e) {
-      lastErr = e;
-      const isRetryable = [400, 403, 404, 429, 503].includes(e.status)
-        || e.name === 'AbortError' || e.name === 'TimeoutError';
-      if (!isRetryable) throw e;
-      if (e.name === 'AbortError' || e.name === 'TimeoutError') log('model', `${m} timed out — trying next`);
-    }
+const tryModel = async (m) => {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: m,
+      messages,
+      temperature: 0,
+      ...(json ? { response_format: { type: 'json_object' } } : {}),
+    }),
+    signal: AbortSignal.timeout(CHEAP_PAID_FALLBACK.includes(m) ? 60_000 : 20_000),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw Object.assign(new Error(`OpenRouter HTTP ${res.status}: ${body}`), { status: res.status });
   }
-  throw lastErr;
+  const data = await res.json();
+  return data?.choices?.[0]?.message?.content?.trim() || '';
+};
+
+// For STAGE0 calls: try full chain (hardcoded free → discovered free → cheap paid)
+const chain = model === STAGE0_MODEL
+  ? [...STAGE0_MODEL_CHAIN, ...(await discoverFreeModels()), ...CHEAP_PAID_FALLBACK]
+  : [model];
+
+let lastErr;
+let reachedPaid = false;
+for (const m of chain) {
+  const isPaid = CHEAP_PAID_FALLBACK.includes(m);
+  try {
+    if (m !== model) {
+      if (isPaid && !reachedPaid) {
+        reachedPaid = true;
+        log('model', 'all free models exhausted — falling back to cheap paid models');
+      }
+      log('model', `trying ${m}${isPaid ? ' (paid)' : ''}`);
+    }
+    const result = await tryModel(m);
+    if (result) return result; // non-empty → success
+    lastErr = new Error(`${m} returned empty response`);
+    log('model', `${m} empty — trying next`);
+  } catch (e) {
+    lastErr = e;
+    const isRetryable = [400, 403, 404, 429, 503].includes(e.status)
+      || e.name === 'AbortError' || e.name === 'TimeoutError';
+    if (!isRetryable) throw e;
+    if (e.name === 'AbortError' || e.name === 'TimeoutError') log('model', `${m} timed out — trying next`);
+  }
+}
+throw lastErr;
 }
 
 // Cached list of free models discovered from OpenRouter /models (fetched once per run)
@@ -258,6 +258,7 @@ async function discoverFreeModels() {
     _discoveredFreeModels = [];
   }
   return _discoveredFreeModels;
+}
 }
 
 function extractPatch(raw) {
@@ -346,7 +347,8 @@ Return ONLY the resolved code — no conflict markers, no explanations, no markd
       resolved = resolved.replace(blocks[i].full, resolvedCode[i]);
     }
 
-    // \w after the markers ensures regex patterns like /<<<<<<< [^\n]+/ in source code
+    // \w after the markers ensures regex patterns like /File: scripts/autofix-openrouter.mjs
+
     // don't trigger a false positive — real markers are always followed by HEAD/branch-name
     if (/^<{7} \w/m.test(resolved) || /^>{7} \w/m.test(resolved)) {
       return { ok: false, reason: `conflict markers remain in ${filePath} after AI resolution` };
@@ -419,6 +421,8 @@ async function tryFixOutOfDate(failedLog, prPurposeArg) {
       fix_approach: `Merged \`origin/${BASE_BRANCH}\`, AI resolved ${conflictedFiles.length} file(s): ${conflictedFiles.join(', ')} (context: "${effectivePurpose.slice(0, 60)}")`,
     };
   }
+    };
+  }
 }
 
 // ── Pre-stage B: Missing GitHub Actions permissions ──────────────────────────
@@ -477,7 +481,7 @@ function tryFixMissingPermissions(failedLog) {
 
   const workflowDir = path.join(process.cwd(), '.github', 'workflows');
   if (!existsSync(workflowDir)) {
-    return { ok: false, category: 'fail:permissions_no_workflow', reason: 'no .github/workflows directory found in this repo' };
+return { ok: false, category: 'fail:permissions_no_workflow', reason: 'no .github/workflows directory found in this repo' };
   }
 
   const files = readdirSync(workflowDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
@@ -496,15 +500,16 @@ function tryFixMissingPermissions(failedLog) {
 
   if (patched.length === 0) {
     return {
-      ok: false,
+ok: false,
       category: 'fail:permissions_no_workflow',
       reason: 'no workflow file found with a `gh pr merge` job missing a `permissions:` block',
     };
   }
 
   return {
-    ok: true,
+ok: true,
     category: 'success:pre_b_permissions',
+    fixed: true,
     problem: `GitHub Actions job lacked \`permissions: contents: write, pull-requests: write\` — GITHUB_TOKEN defaulted to read-only`,
     fix_approach: `Added permissions block to merge job in: ${patched.join(', ')}`,
   };
@@ -512,7 +517,7 @@ function tryFixMissingPermissions(failedLog) {
 
 // ── Pre-stage C: Cloudflare Durable Objects migration conflict ───────────────
 // Detection: wrangler error code 10074 or specific migration messages
-// Action: bail immediately (not safe to auto-fix — requires human review of DO state)
+// Action: bail immediately with a precise, actionable error message (not safe to auto-fix — requires human review of DO state)
 function checkCloudflareConflict(failedLog) {
   const patterns = [
     /code: 10074/,
@@ -531,6 +536,25 @@ if (!REPO || !PR_NUMBER) failWithStats('fail:other', 'missing REPO/PR_NUMBER env
 if (!BATCH_MODE && !RUN_ID) failWithStats('fail:other', 'missing RUN_ID env (set RUN_ID=0 for batch/manual mode)');
 
 // Configure git identity early — needed for merge commits (before tryFixOutOfDate)
+
+// ── Race condition guard ─────────────────────────────────────────────────────
+try {
+  const prViewRaw = sh(`gh pr view ${PR_NUMBER} -R ${REPO} --json state,statusCheckRollup`);
+  const prInfo = JSON.parse(prViewRaw);
+  if (prInfo.state !== 'OPEN') {
+    log('guard', `PR #${PR_NUMBER} is already ${prInfo.state} — aborting`);
+    process.exit(0);
+  }
+  const checks = prInfo.statusCheckRollup || [];
+  if (checks.length > 0 && !checks.some(c => c.conclusion === 'FAILURE' || c.conclusion === 'TIMED_OUT')) {
+    log('guard', `PR #${PR_NUMBER} CI no longer shows failures — aborting`);
+    process.exit(0);
+  }
+} catch (e) {
+  log('guard', `could not check PR state (${e.message}) — proceeding anyway`);
+}
+
+let failedLog;
 try {
   sh('git config user.name "trained-assist-autofix"');
   sh('git config user.email "autofix@trained-assist.bot"');
@@ -682,7 +706,7 @@ if (outOfDateResult) {
 if (!preStageDiagnosis) {
   const permResult = tryFixMissingPermissions(failedLog);
   if (permResult) {
-    if (!permResult.ok) {
+if (!permResult.ok) {
       await prComment(`❌ Could not fix: GitHub Actions permissions issue but no patchable workflow found\n\nReason: ${permResult.reason}`);
       failWithStats(permResult.category, permResult.reason);
     }
@@ -697,7 +721,7 @@ let patchToApply = null; // set by stage 3 if AI ran
 
 if (preStageDiagnosis) {
   diagnosis = preStageDiagnosis;
-  log('pre', `pre-stage fix applied (${preStageDiagnosis.category}) — skipping AI pipeline`);
+log('pre', `pre-stage fix applied (${preStageDiagnosis.category}) — skipping AI pipeline`);
   await prComment(`🔧 Deterministic fix applied (no AI needed)\n\n**Cause:** ${preStageDiagnosis.problem}\n**Fix:** ${preStageDiagnosis.fix_approach}`);
 } else {
   // ── Stage 1: Diagnose ──────────────────────────────────────────────────────
@@ -724,22 +748,22 @@ Rules:
 - If the fix is obvious from the log alone and needs no extra file context, set files_to_examine to []
 - If you cannot determine the cause, set problem to "CANNOT_DIAGNOSE"
 - confidence: high = clear deterministic fix; medium = likely fix; low = uncertain`,
-      },
-      {
-        role: 'user',
-        content: `Failed CI log (tail):\n\`\`\`\n${failedLog}\n\`\`\`\n\nPR diff vs ${BASE_BRANCH}:\n\`\`\`diff\n${prDiff}\n\`\`\``,
-      },
-    ], true);
-  } catch (e) {
-    await prComment(`❌ Stage 1 model error — could not diagnose CI failure\n\n\`${e.message.slice(0, 200)}\``);
-    failWithStats('fail:ai_model_error', `Stage 1 model error: ${e.message.slice(0, 200)}`);
-  }
+},
+    {
+      role: 'user',
+      content: `Failed CI log (tail):\n\`\`\`\n${failedLog}\n\`\`\`\n\nPR diff vs ${BASE_BRANCH}:\n\`\`\`diff\n${prDiff}\n\`\`\``,
+    },
+  ], true);
+} catch (e) {
+  await prComment(`❌ Stage 1 model error — could not diagnose CI failure\n\n\`${e.message.slice(0, 200)}\``);
+  failWithStats('fail:ai_model_error', `Stage 1 model error: ${e.message.slice(0, 200)}`);
+}
 
   try {
     const raw = stage1Content.replace(/^```json\n?/, '').replace(/```$/, '');
     diagnosis = JSON.parse(raw);
   } catch (e) {
-    await prComment(`❌ Stage 1 returned unparseable response — cannot proceed`);
+await prComment(`❌ Stage 1 returned unparseable response — cannot proceed`);
     failWithStats('fail:ai_no_diagnose', `Stage 1 returned invalid JSON: ${e.message}`, { raw: stage1Content.slice(0, 300) });
   }
 
@@ -755,7 +779,7 @@ Rules:
   log('stage1', `diagnosis: ${diagnosis.problem.slice(0, 120)}`);
   log('stage1', `confidence: ${diagnosis.confidence || 'unset'}`);
   log('stage1', `files to examine: ${(diagnosis.files_to_examine || []).join(', ') || '(none)'}`);
-  await prComment(`✅ Stage 1/3: root cause identified (confidence: ${diagnosis.confidence || '?'})\n\n**Cause:** ${diagnosis.problem}\n**Plan:** ${diagnosis.fix_approach}`);;
+await prComment(`✅ Stage 1/3: root cause identified (confidence: ${diagnosis.confidence || '?'})\n\n**Cause:** ${diagnosis.problem}\n**Plan:** ${diagnosis.fix_approach}`);
 
   // ── Stage 2: Gather context ────────────────────────────────────────────────
   const fileList = (diagnosis.files_to_examine || []).slice(0, MAX_FILES);
@@ -776,7 +800,7 @@ Rules:
   if (fileContents.length > 0) {
     log('stage2', `calling ${STAGE2_MODEL} for context analysis...`);
 
-    try {
+try {
       const stage2Content = await callModel(STAGE2_MODEL, [
         {
           role: 'system',
@@ -788,25 +812,25 @@ Rules:
 Your job: describe exactly what lines/functions need to change to fix the CI failure. Be specific (file, function name, what to add/remove/change). Do NOT write code — only describe the change in plain English.
 
 If the diagnosis is wrong given what you see in the files, correct it.`,
-        },
-        {
-          role: 'user',
-          content: `Root cause: ${diagnosis.problem}\n\nProposed fix approach: ${diagnosis.fix_approach}\n\nSource files:\n\n${fileContents.join('\n\n')}\n\nPR diff:\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nDescribe the exact changes needed.`,
-        },
-      ]);
+},
+      {
+        role: 'user',
+        content: `Root cause: ${diagnosis.problem}\n\nProposed fix approach: ${diagnosis.fix_approach}\n\nSource files:\n\n${fileContents.join('\n\n')}\n\nPR diff:\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nDescribe the exact changes needed.`,
+      },
+    ]);
 
-      changeSpec = stage2Content;
-      log('stage2', `change spec (first 200): ${changeSpec.slice(0, 200)}`);
-    } catch (e) {
-      log('stage2', `model error (${e.message.slice(0, 80)}) — falling back to stage 1 diagnosis`);
-    }
+    changeSpec = stage2Content;
+    log('stage2', `change spec (first 200): ${changeSpec.slice(0, 200)}`);
+  } catch (e) {
+    log('stage2', `model error (${e.message.slice(0, 80)}) — falling back to stage 1 diagnosis`);
+  }
   } else {
     log('stage2', 'no files to load, skipping stage 2 — using diagnosis directly');
   }
 
   // ── Stage 3: Write patch ───────────────────────────────────────────────────
   log('stage3', `calling ${STAGE3_MODEL} to write patch...`);
-  await prComment('🔧 Stage 3/3: generating patch…');
+await prComment('🔧 Stage 3/3: generating patch…');
 
   let stage3Content;
   try {
@@ -820,27 +844,29 @@ Rules:
 - Valid git diff format, applicable via "git apply"
 - Wrap in a single \`\`\`diff code block
 - If you cannot produce a correct patch, reply exactly: CANNOT_FIX`,
-      },
-      {
-        role: 'user',
-        content: `Root cause:\n${diagnosis.problem}\n\nWhat to change:\n${changeSpec}\n\nCurrent PR diff (for context on what already changed):\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nWrite the fix patch.`,
-      },
-    ]);
+},
+    {
+      role: 'user',
+      content: `Root cause:\n${diagnosis.problem}\n\nWhat to change:\n${changeSpec}\n\nCurrent PR diff (for context on what already changed):\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nWrite the fix patch.`,
+    },
+  ]);
+
+  try {
+    if (!stage3Content || stage3Content.includes('CANNOT_FIX')) {
+      await prComment(`❌ Stage 3: model declined to generate a patch\n\n**Cause:** ${diagnosis.problem}\n\nThis likely requires a code change that needs human judgement.`);
+      failWithStats('fail:ai_cannot_fix', 'Stage 3 declined to produce a patch', {
+        problem: diagnosis.problem,
+        fix_approach: diagnosis.fix_approach,
+      });
+    }
   } catch (e) {
     failWithStats('fail:ai_model_error', `Stage 3 model error: ${e.message.slice(0, 200)}`, { problem: diagnosis.problem });
   }
-
-  if (!stage3Content || stage3Content.includes('CANNOT_FIX')) {
-    await prComment(`❌ Stage 3: model declined to generate a patch\n\n**Cause:** ${diagnosis.problem}\n\nThis likely requires a code change that needs human judgement.`);
-    failWithStats('fail:ai_cannot_fix', 'Stage 3 declined to produce a patch', {
-      problem: diagnosis.problem,
-      fix_approach: diagnosis.fix_approach,
-    });
   }
 
   const patch = extractPatch(stage3Content);
   if (!patch.startsWith('diff --git') && !patch.startsWith('---')) {
-    await prComment(`❌ Stage 3: generated a malformed diff — cannot apply\n\n**Cause:** ${diagnosis.problem}`);
+await prComment(`❌ Stage 3: generated a malformed diff — cannot apply\n\n**Cause:** ${diagnosis.problem}`);
     failWithStats('fail:ai_corrupt_patch', 'Stage 3 produced malformed diff', {
       problem: diagnosis.problem,
       patch_head: patch.slice(0, 100),
@@ -861,7 +887,7 @@ if (patchToApply) {
     execFileSync('git', ['apply', '--whitespace=fix', patchFile], { stdio: 'inherit' });
   } catch (e) {
     unlinkSync(patchFile);
-    await prComment(`❌ Patch did not apply cleanly\n\n**Cause:** ${diagnosis.problem}\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
+await prComment(`❌ Patch did not apply cleanly\n\n**Cause:** ${diagnosis.problem}\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
     failWithStats('fail:ai_corrupt_patch', 'Patch did not apply cleanly', {
       problem: diagnosis.problem,
       git_error: e.message.slice(0, 200),
@@ -888,7 +914,6 @@ if (!preStageDiagnosis?.category.startsWith('success:pre_a')) {
     });
   }
 }
-
 // ── Create new fix branch + PR (never push to original branch) ───────────────
 
 const ts = Math.floor(Date.now() / 1000);
@@ -923,7 +948,7 @@ const prBody = [
   '',
   `**Fix:** ${diagnosis.fix_approach}`,
   '',
-  `**Strategy:** \`${fixStrategy}\``,
+`**Strategy:** \`${fixStrategy}\``,
   '',
   `---`,
   `<!-- ci-fixer-original-pr: ${PR_NUMBER} -->`,
@@ -958,7 +983,6 @@ try {
 } catch (e) {
   log('publish', `could not close stale fix PRs: ${e.message.slice(0, 80)}`);
 }
-
 try {
   sh(`gh pr merge --auto --squash "${newPRNumber}" -R "${REPO}"`);
   log('publish', `auto-merge enabled on PR #${newPRNumber}`);
@@ -993,5 +1017,4 @@ writeStats(preStageDiagnosis ? preStageDiagnosis.category : 'success:ai', {
   fix_pr: newPRNumber,
   strategy: fixStrategy,
 });
-
 console.log(`[autofix] fix PR #${newPRNumber} created (strategy: ${fixStrategy})`);
