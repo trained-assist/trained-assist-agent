@@ -95,13 +95,12 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
 
-      - name: Save latest fixer script from main to /tmp (via API — avoids git-show inconsistencies on old branches)
+      - name: Download autofix script from pr-autofix
         if: steps.guard.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          gh api repos/${{ github.repository }}/contents/scripts/autofix-openrouter.mjs \
-            --jq '.content' | base64 -d > /tmp/autofix-from-main.mjs
+          curl -fsSL \
+            https://raw.githubusercontent.com/trained-assist/pr-autofix/main/scripts/autofix.mjs \
+            -o /tmp/autofix-from-main.mjs
           echo "script lines: $(wc -l < /tmp/autofix-from-main.mjs)"
           node --check /tmp/autofix-from-main.mjs && echo "syntax OK"
 
