@@ -512,6 +512,78 @@ async function runHhScoringForUser(username) {
   }
 }
 
+// Compute the HMAC-signed proactive page URL for a user — same logic as inside the
+// request handler but needed at module level for the scheduler.
+function buildProactiveUrlForScheduler(username) {
+  const { createHmac } = require('crypto');
+  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+  const token = createHmac('sha256', process.env.AGENT_SECRET || '').update(username).digest('hex').slice(0, 16);
+  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
+}
+
+// Periodic proactive HH search scheduler.
+// Checks every 30 min which users have enabled auto-search; for each user whose
+// interval has elapsed, runs runProactiveSearch and sends a Telegram notification.
+// Enable per user via the hh_proactive_schedule MCP tool (action=enable).
+function scheduleProactiveSearchRuns(secretsArg) {
+  const { loadSchedule, saveSchedule, buildProactiveDigest } = require('./hh-proactive-search');
+  const CHECK_INTERVAL_MS = 30 * 60 * 1000;
+
+  async function run() {
+    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    if (!fs.existsSync(hhTokensBase)) return;
+    const secrets = secretsArg || {};
+
+    for (const username of fs.readdirSync(hhTokensBase)) {
+      const schedule = loadSchedule(username);
+      if (!schedule?.enabled) continue;
+
+      const intervalMs = (schedule.interval_hours || 24) * 60 * 60 * 1000;
+      const lastRun = schedule.last_run ? new Date(schedule.last_run).getTime() : 0;
+      if (Date.now() - lastRun < intervalMs) continue;
+
+      const workDir = path.join(BASE_USERS_DIR, username);
+      if (!fs.existsSync(workDir)) continue;
+
+      console.log(`[proactive-scheduler] starting run for user=${username}`);
+      try {
+        await runProactiveSearch(username, workDir, {
+          refreshAccessToken: (u) => refreshHhToken(u, secrets),
+          proactiveUrl: buildProactiveUrlForScheduler(username),
+          notifyChat: async (info) => {
+            const chatId = readChatId(username);
+            if (!chatId) return;
+            const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
+            if (!botToken) return;
+            const text = buildProactiveDigest({
+              vacancyTitle: info.vacancyTitle,
+              newCount: info.newCount,
+              totalSeen: info.totalSeen,
+              newCandidates: info.newCandidates,
+              url: info.proactiveUrl,
+            });
+            const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+            await fetch(`${tgBase}/bot${botToken}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+              signal: AbortSignal.timeout(10_000),
+            });
+          },
+        });
+        schedule.last_run = new Date().toISOString();
+        saveSchedule(username, schedule);
+        console.log(`[proactive-scheduler] done for user=${username}`);
+      } catch (e) {
+        console.error(`[proactive-scheduler] error for user=${username}:`, e.message);
+      }
+    }
+  }
+
+  setTimeout(() => run().catch(() => {}), 10 * 60 * 1000); // first check 10 min after start
+  setInterval(() => run().catch(() => {}), CHECK_INTERVAL_MS);
+}
+
 function scheduleHhBackgroundScoring() {
   async function run() {
     const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -4238,6 +4310,7 @@ ${recent || '(пока нет)'}
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
+  scheduleProactiveSearchRuns(secrets);
   if (process.env.TEST_MODE !== '1') scheduleGtdController(secrets);
 
 
