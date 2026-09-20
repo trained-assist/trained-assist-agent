@@ -349,7 +349,8 @@ No explanations, no code fences, no extra text.`,
       resolved = resolved.replace(blocks[i].full, parsedBlocks[i]);
     }
 
-    if (/^<{7} /m.test(resolved) || /^>{7} /m.test(resolved)) {
+    // Check for real conflict markers (must be followed by HEAD/ORIG/branch name, not code like regexes)
+    if (/^<{7} \w/m.test(resolved) || /^>{7} \w/m.test(resolved)) {
       return { ok: false, reason: `conflict markers remain in ${filePath} after AI resolution` };
     }
 
@@ -866,18 +867,22 @@ if (patchToApply) {
 }
 
 // ── Verify: run tests ─────────────────────────────────────────────────────────
+// Skip local test run for conflict resolution — let CI on the new PR report failures.
+// This keeps the loop alive: conflict resolved → PR created → CI runs → fixer picks up CI failure.
 
-await prComment('🧪 Patch applied — running tests…');
-try {
-  sh('npm test');
-} catch (e) {
-  sh('git checkout -- .');
-  sh('git clean -fd');
-  await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
-  failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
-    problem: diagnosis.problem,
-    test_error: e.message.slice(0, 300),
-  });
+if (preStageDiagnosis?.category !== 'success:pre_a_conflict_resolved') {
+  await prComment('🧪 Patch applied — running tests…');
+  try {
+    sh('npm test');
+  } catch (e) {
+    sh('git checkout -- .');
+    sh('git clean -fd');
+    await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
+    failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
+      problem: diagnosis.problem,
+      test_error: e.message.slice(0, 300),
+    });
+  }
 }
 
 // ── Create new fix branch + PR (never push to original branch) ───────────────

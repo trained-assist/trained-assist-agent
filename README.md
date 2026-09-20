@@ -928,19 +928,73 @@ GitHub branch protection is not available on this private repo (free plan), so t
 
 ## CI Failure Handling — автоматическое
 
-CI-падения обрабатываются автоматически через Session Manager — никаких дополнительных действий не нужно.
+CI-падения обрабатываются автоматически через `scripts/autofix-openrouter.mjs` — никаких ручных действий не нужно.
 
-Когда CI падает на любом PR, `ci-failure-reporter.yml` отправляет событие в Session Manager. Session Manager:
-1. Ищет локальный путь к репозиторию по имени
-2. Проверяет, нет ли уже активной сессии для этого проекта
-3. Если нет — запускает короткую одноразовую сессию-фиксер с контекстом падения
-4. Фиксер чинит проблему, коммитит, пушит — CI перезапускается автоматически
-5. Если не может починить — пишет `CI_FAILURE_SUMMARY.md` в корень проекта и уведомляет через Telegram
+### Как работает
 
-**Не нужно:**
-- Встраивать session ID в тело PR
-- Ставить алармы вручную
-- Следить за CI из той же сессии
+```
+CI упал на PR
+      │
+      ▼
+auto-fix-ci.yml — запускается через workflow_call из ci.yml
+      │
+      ▼
+autofix-openrouter.mjs
+      │
+      ├── Pre-stage A: ветка устарела?
+      │     git merge origin/main
+      │     если конфликты → AI resolves per-block (по одному блоку)
+      │     → push fix/ci-* + create PR → CI на новом PR
+      │
+      ├── Pre-stage B: нет permissions в workflow?
+      │     добавляет contents: write / pull-requests: write
+      │
+      └── AI pipeline (3 stages, только если pre-stage не сработал):
+            Stage 1: diagnose root cause (free model)
+            Stage 2: read files, contextualize (free model)
+            Stage 3: write unified diff patch (free model)
+            → apply patch → push fix/ci-* + create PR
+```
+
+### Модели (OpenRouter)
+
+Все вызовы идут через цепочку с автоматическим fallback:
+1. **Hardcoded free** — `deepseek/deepseek-v3-0324:free`, `google/gemma-3-12b-it:free`, `meta-llama/llama-3.1-8b-instruct:free`, `mistralai/mistral-7b-instruct:free`
+2. **Discovered free** — динамически из `/api/v1/models` OpenRouter (sorted by context_length)
+3. **Cheap paid** — `deepseek/deepseek-chat` (~$0.07/1M), `google/gemini-flash-1.5-8b` (~$0.04/1M), `openai/gpt-4o-mini` (~$0.15/1M)
+
+Retry: 403/404/429/503/400 + таймаут → следующая модель в цепочке.
+
+### Conflict resolution (per-block)
+
+Каждый конфликт-блок разрешается отдельным AI-вызовом:
+- Меньший промпт → более надёжный ответ
+- 3 попытки на блок с 5s задержкой при пустом ответе
+- Если блок не разрешился — оставляем маркер, продолжаем
+- После разрешения: push fix-ветки + PR → CI на новом PR сообщает об ошибках
+
+### Batch-режим (ручной запуск)
+
+Для пакетного фикса старых PR с конфликтами:
+```bash
+gh workflow run batch-fix-prs.yml --field pr_numbers="805,802,800"
+```
+
+Batch mode (RUN_ID=0) пропускает fetch CI-лога и всегда запускает pre-stage A.
+
+### Статистика (`ci-fixer-stats.json`)
+
+Каждый запуск пишет артефакт с категорией:
+
+| Категория | Что значит |
+|-----------|------------|
+| `success:pre_a_merge` | Ветка устарела, merge без конфликтов |
+| `success:pre_a_conflict_resolved` | Merge + AI разрешил конфликты |
+| `success:pre_b_permissions` | Добавлены permissions в workflow |
+| `success:ai` | AI pipeline (stages 1-3) починил |
+| `fail:ai_conflict_resolution` | AI не смог разрешить конфликты |
+| `fail:ai_tests_fail` | Патч применён, но тесты упали |
+| `fail:ai_cannot_fix` | Stage 3 вернул CANNOT_FIX |
 
 **PR создаётся просто:**
 ```bash
