@@ -5,3 +5,4 @@ __pycache__/
 
 staging-results/
 __pycache__/
+.DS_Store
