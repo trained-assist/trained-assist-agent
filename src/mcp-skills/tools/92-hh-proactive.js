@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
-const { runProactiveSearch, buildScoringPromptText, buildProactiveDigest } = require('../../hh-proactive-search');
+const { runProactiveSearch, buildScoringPromptText, buildProactiveDigest, loadSchedule, saveSchedule } = require('../../hh-proactive-search');
 
 const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
 
@@ -130,6 +130,69 @@ module.exports = {
           ...meta,
           message: `Страница с ${meta.count || '?'} кандидатами (PASS: ${meta.pass_count || 0}, REVIEW: ${meta.review_count || 0}): ${url}`,
         };
+      },
+    },
+
+    hh_proactive_schedule: {
+      description: 'Настройка автоматического (периодического) проактивного поиска с Telegram-уведомлениями. action=status — текущие настройки; action=enable — включить (можно задать interval_hours, по умолчанию 24); action=disable — выключить.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['status', 'enable', 'disable'], description: 'status | enable | disable' },
+          interval_hours: { type: 'number', description: 'Интервал запуска в часах (для action=enable, по умолчанию 24)' },
+        },
+        required: ['action'],
+      },
+      handler: async ({ action, interval_hours }) => {
+        const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+        if (!userId) return { error: 'USER_ID не задан' };
+
+        const schedule = loadSchedule(userId) || {};
+
+        if (action === 'status') {
+          if (!schedule.enabled) {
+            return {
+              enabled: false,
+              message: 'Автоматический проактивный поиск выключен. Запусти action=enable чтобы включить — агент будет сам искать новых кандидатов и присылать уведомления.',
+            };
+          }
+          const hours = schedule.interval_hours || 24;
+          const nextRunTs = schedule.last_run
+            ? new Date(new Date(schedule.last_run).getTime() + hours * 3600000).toISOString()
+            : '~10 мин после старта сервера';
+          return {
+            enabled: true,
+            interval_hours: hours,
+            last_run: schedule.last_run || null,
+            next_run: nextRunTs,
+            message: `Автопоиск включён. Интервал: каждые ${hours} ч.\nПоследний запуск: ${schedule.last_run || 'ещё не было'}.\nСледующий: ${nextRunTs}.`,
+          };
+        }
+
+        if (action === 'enable') {
+          const hours = interval_hours && interval_hours > 0 ? interval_hours : (schedule.interval_hours || 24);
+          schedule.enabled = true;
+          schedule.interval_hours = hours;
+          saveSchedule(userId, schedule);
+          return {
+            ok: true,
+            enabled: true,
+            interval_hours: hours,
+            message: `✅ Автопоиск включён — каждые ${hours} ч агент будет искать новых кандидатов и присылать уведомления в Telegram. Первый запуск в течение 30 мин (при следующей плановой проверке).`,
+          };
+        }
+
+        if (action === 'disable') {
+          schedule.enabled = false;
+          saveSchedule(userId, schedule);
+          return {
+            ok: true,
+            enabled: false,
+            message: 'Автопоиск выключен. Используй hh_proactive_search для ручного запуска.',
+          };
+        }
+
+        return { error: `Неизвестный action: ${action}` };
       },
     },
   },
