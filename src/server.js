@@ -3307,14 +3307,24 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // GET /project-decision?username=xxx&chatId=yyy — what the gateway should do when a
+    // GET /project-decision?username=xxx&chatId=yyy[&task=...] — what the gateway should do when a
     // NEW dialog starts (issue #517): {action:'auto'|'create'|'ask', choices:[{id,name,label}], active}.
     // 'ask' -> gateway renders the inline picker and defers the task until the user chooses.
+    // When `task` is provided and it's a project-agnostic quick command (engine switch, agent info,
+    // etc.), returns action:'auto' immediately — no picker shown, task goes straight to /run.
     if (req.method === 'GET' && url.pathname === '/project-decision') {
       const username = url.searchParams.get('username');
       const chatId = url.searchParams.get('chatId') || null;
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
+
+      // Quick commands don't belong to any project — skip picker entirely.
+      // Regex mirrors ENGINE_SWITCH_INTENT + other global slash commands from runner.js.
+      const taskParam = (url.searchParams.get('task') || '').trim();
+      const GLOBAL_QUICK_COMMAND = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)|^\/(?:get_agent_info|agent_info|oc_\S+|get_webpass|webpass|вебпароль|info)(?:@\S+)?(?=\s|$)/i;
+      if (taskParam && GLOBAL_QUICK_COMMAND.test(taskParam)) {
+        return json(res, 200, { action: 'quick', choices: [], active: null });
+      }
 
       const workDir = path.join(BASE_USERS_DIR, username);
       try {
