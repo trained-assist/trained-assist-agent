@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { activeExpoProject, expoDataDir, expoConfigDir } = require('../expo-paths.js');
+const { activeExpoProject, expoDataDir, expoConfigDir, isExpoEnabled } = require('../expo-paths.js');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -169,6 +169,8 @@ function formatCriteriaText(criteria) {
 // ── Module ───────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: isExpoEnabled,
+  setupTools: [],
   tools: {
 
     expo_pipeline_get_criteria: {
