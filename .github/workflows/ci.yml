@@ -120,7 +120,9 @@ jobs:
         continue-on-error: true
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # AUTOFIX_PAT is a fine-grained PAT with contents+pull_requests write on this repo.
+          # Needed because GITHUB_TOKEN can't create PRs when org disables workflow write permissions.
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
           # When merge failed (branch not up to date) but CI passed — use batch mode (RUN_ID=0).
           # Batch mode skips CI log fetch and goes straight to pre-stage A (merge + conflict resolve).
           RUN_ID: ${{ (needs.merge.result == 'failure' && needs.ci.result == 'success' && needs.staging-gate.result == 'success') && '0' || github.run_id }}
