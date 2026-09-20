@@ -11,6 +11,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { isExpoEnabled } = require('../expo-paths.js');
 
 const NOTES_API = process.env.FLEXI_NOTES_API_URL
   || 'https://flexi-telegram-deal-bot.skillset-apply.workers.dev/api/site-predeal-notes';
@@ -100,6 +101,8 @@ const EVENT_NAMES = {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 module.exports = {
+  isReady: isExpoEnabled,
+  setupTools: [],
   tools: {
 
     flexi_status: {

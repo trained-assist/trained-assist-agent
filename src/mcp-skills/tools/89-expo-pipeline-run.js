@@ -13,7 +13,7 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { expoDataDir } = require('../expo-paths.js');
+const { expoDataDir, isExpoEnabled } = require('../expo-paths.js');
 
 function slugify(url) {
   try {
@@ -34,7 +34,10 @@ function fmtProgress(done, total) {
   return `${bar} ${done}/${total} (${pct}%)`;
 }
 
-module.exports = { tools: {
+module.exports = {
+  isReady: isExpoEnabled,
+  setupTools: [],
+  tools: {
 
   expo_pipeline_run: {
     description: `Full expo pipeline orchestrator — runs all steps in sequence, reports progress.
