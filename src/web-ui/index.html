@@ -8,71 +8,62 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 </head>
 <body>
-  <div class="container" id="app">
 
-    <section id="restart-intents" class="card hidden" aria-label="Отложенные задачи" data-testid="restart-intents"></section>
-
-    <!-- Loading -->
-    <div id="view-loading" style="padding:48px 0;text-align:center">
-      <div class="loading" style="justify-content:center">
-        <div class="spinner"></div> Loading…
-      </div>
+  <!-- Loading -->
+  <div id="view-loading" style="padding:48px 0;text-align:center">
+    <div class="loading" style="justify-content:center">
+      <div class="spinner"></div> Loading…
     </div>
-
-    <!-- Sessions list -->
-    <div id="view-sessions" class="hidden">
-      <nav class="nav">
-        <span class="nav-title">Claude Assistant</span>
-        <button class="btn btn-primary" id="btn-new">+ New</button>
-        <button class="btn btn-ghost" id="btn-logout">Logout</button>
-      </nav>
-      <div class="card">
-        <div class="section-header">
-          <h2>Sessions</h2>
-        </div>
-        <div id="sessions-list"></div>
-      </div>
-    </div>
-
-    <!-- Session detail -->
-    <div id="view-session" class="hidden">
-      <nav class="nav">
-        <a class="nav-back" id="btn-back" href="#">← Sessions</a>
-        <span class="nav-title" id="session-title"></span>
-        <button class="btn btn-danger hidden" id="btn-stop">Stop</button>
-      </nav>
-      <div class="card" id="session-card">
-        <div id="messages-container" class="messages"></div>
-        <div id="stream-area" class="stream-area hidden"></div>
-        <div id="reconnect-notice" class="reconnect-notice hidden">Reconnecting…</div>
-        <div class="reply-form">
-          <textarea id="reply-input" placeholder="Reply (Ctrl+Enter to send)" rows="2"></textarea>
-          <button class="btn btn-primary" id="btn-send">Send</button>
-        </div>
-      </div>
-    </div>
-
   </div>
 
-  <!-- New session modal -->
-  <div id="modal-new" class="modal-overlay hidden" role="dialog" aria-modal="true">
-    <div class="modal">
-      <h2>New Session</h2>
-      <div class="field">
-        <label for="folder-select">Project folder</label>
-        <select id="folder-select">
-          <option value="">Loading folders…</option>
-        </select>
+  <div class="shell hidden" id="shell">
+
+    <!-- Sidebar: session list -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="nav-title">Claude Assistant</span>
+        <button class="btn btn-ghost" id="btn-logout" data-testid="btn-logout">Logout</button>
       </div>
-      <div class="field">
-        <label for="task-input">Task</label>
-        <textarea id="task-input" rows="4" placeholder="Describe what Claude should do…"></textarea>
+      <button class="btn btn-primary btn-block" id="btn-new" data-testid="btn-new">+ New</button>
+
+      <section id="restart-intents" class="hidden" aria-label="Отложенные задачи" data-testid="restart-intents"></section>
+
+      <div class="sidebar-section-title">Sessions</div>
+      <div id="sessions-list" class="sessions-list"></div>
+    </aside>
+
+    <!-- Main: active session (or the new-task welcome state) -->
+    <main class="main">
+      <div class="main-header">
+        <span class="nav-title" id="session-title">New session</span>
+        <button class="btn btn-danger hidden" id="btn-stop" data-testid="btn-stop">Stop</button>
       </div>
-      <div class="modal-footer">
-        <button class="btn btn-ghost" id="btn-cancel-new">Cancel</button>
-        <button class="btn btn-primary" id="btn-start-new">Start</button>
+
+      <div id="messages-container" class="messages hidden"></div>
+      <div id="empty-state" class="empty">
+        <h3>Start a new session</h3>
+        <p>Describe a task below, or pick a session from the list</p>
       </div>
-    </div>
+      <div id="stream-area" class="stream-area hidden"></div>
+      <div id="reconnect-notice" class="reconnect-notice hidden">Reconnecting…</div>
+
+      <!-- Unified composer: creates a session (state A) or replies in one (state B) -->
+      <div class="composer" id="composer" data-testid="composer">
+        <div class="composer-row" id="composer-project-row">
+          <select id="folder-select" data-testid="folder-select">
+            <option value="">Loading folders…</option>
+          </select>
+        </div>
+        <textarea id="composer-input" rows="2" data-testid="composer-input" placeholder="Опиши задачу…"></textarea>
+        <div class="composer-actions">
+          <input type="file" id="file-input" class="hidden" multiple data-testid="file-input">
+          <button type="button" class="btn btn-icon" id="btn-attach" title="Attach file" data-testid="btn-attach">📎</button>
+          <button type="button" class="btn btn-icon" id="btn-voice" title="Voice input" data-testid="btn-voice">🎙</button>
+          <button type="button" class="btn btn-primary" id="btn-composer-submit" data-testid="btn-composer-submit">Start</button>
+        </div>
+      </div>
+    </main>
+
   </div>
 
   <script src="app.js"></script>
