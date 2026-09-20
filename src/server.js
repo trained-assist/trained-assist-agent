@@ -30,13 +30,15 @@ const { connectFormHtml } = require('./connect-forms/generic');
 const { loginCredsFormHtml } = require('./connect-forms/login-creds');
 const { genericMultiFormHtml } = require('./connect-forms/generic-multi');
 const { weeekFormHtml } = require('./connect-forms/weeek');
-const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
+const { scoreUnscoredCandidates, generateDraftMessages, runHhScoringForUser, scheduleHhBackgroundScoring } = require('./hh-scoring');
 const { bullshitGuard } = require('./hh-bullshit-guard');
 const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride, BASE_PROMPT_FILENAME, DEFAULT_MESSAGE_BASE } = require('./hh-message-prompts');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { hhStylePageHtml } = require('./hh-style-html');
-const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
+const { runProactiveSearch, scoreUnscoredProactiveCandidates, scheduleProactiveSearchRuns } = require('./hh-proactive-search');
+const { fetchAllHhNegotiations, getHhNegotiationsWithCache, syncHhMessagesToHistory, hhCacheFile } = require('./hh-negotiations');
+const { hhApiRequest, refreshHhToken } = require('./hh-utils');
 const { receiveConnect } = require('./user-tokens');
 
 const PORT = process.env.PORT || 3001;
@@ -229,308 +231,9 @@ function scheduleNalogExpiryChecks(secrets) {
   setInterval(guardedCheck, CHECK_INTERVAL_MS);
 }
 
-// Fetch negotiations across all active stages for a vacancy (parallel per-state requests).
-// Excludes 'discard' (rejected) and 'hired' (done) — only actionable/in-progress candidates.
-const HH_REVIEW_STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer'];
-
-async function fetchAllHhNegotiations(vacancyId, accessToken) {
-  const results = await Promise.all(HH_REVIEW_STATES.map(async state => {
-    let items = [];
-    let page = 0, totalPages = 1;
-    do {
-      const data = await hhApiRequest('GET', `/negotiations/${state}?vacancy_id=${vacancyId}&per_page=50&page=${page}`, accessToken);
-      items = items.concat(data.items || []);
-      totalPages = data.pages ?? 1;
-      page++;
-      if (page >= 50) { console.warn(`[hh] fetchAllHhNegotiations: hit 50-page cap for state=${state}`); break; }
-    } while (page < totalPages);
-    return items.map(item => ({ ...item, _state: state }));
-  }));
-  return hydrateResumes(results.flat(), { access_token: accessToken });
-}
-
-function hhCacheFile(dataDir, username) {
-  return path.join(dataDir, 'hh', String(username), 'negotiations-cache.json');
-}
-
-async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessToken) {
-  const cacheFile = hhCacheFile(dataDir, username);
-  const CACHE_TTL_MS = 15 * 60 * 1000;
-  try {
-    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    const ageMs = Date.now() - (cached.synced_at || 0);
-    if (cached.resume_version === 1 && ageMs < CACHE_TTL_MS && String(cached.vacancy_id) === String(vacancyId)) {
-      return { negotiations: cached.negotiations, synced_at: cached.synced_at };
-    }
-  } catch {}
-  let negotiations;
-  try {
-    negotiations = await fetchAllHhNegotiations(vacancyId, accessToken);
-  } catch (e) {
-    // If HH rejected the token (401/403 oauth_error=token-expired), refresh once and retry.
-    // Without this, /hh/review silently goes empty 14 days after every re-auth.
-    if (username && /HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
-      const fresh = await refreshHhToken(username, _secretsCache);
-      if (fresh) negotiations = await fetchAllHhNegotiations(vacancyId, fresh);
-      else throw e;
-    } else { throw e; }
-  }
-  const synced_at = Date.now();
-  try {
-    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-    fs.writeFileSync(cacheFile, JSON.stringify({ resume_version: 1, synced_at, vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
-  } catch (e) { console.error('[hh-cache] write error:', e.message); }
-  return { negotiations, synced_at };
-}
-
-// Sync HH thread messages to local candidate history.
-// Fetches messages from HH API for negotiations where HH has more messages than we've stored,
-// merges them into local history (deduplicates by HH message ID), stores applicant replies.
-// Capped at 15 negotiations per call to avoid long page loads.
-// Sync HH thread messages to local candidate history.
-// options.incremental=true  → only sync candidates where neg.updated_at > last_hh_message_at
-//                              (used in background loop — avoids redundant API calls)
-// options.incremental=false → sync all candidates with messages, capped at options.cap (default 15)
-//                              (used on page load — ensures fresh data, bounded latency)
-// Returns { synced: N, newMessages: M } for sync-log stats.
-async function syncHhMessagesToHistory(dataDir, username, negotiations, accessToken, options = {}) {
-  const { incremental = false, cap = 15, maxConcurrent = 4 } = options;
-  const candDir = path.join(dataDir, 'hh', String(username), 'candidates');
-  try { fs.mkdirSync(candDir, { recursive: true }); } catch {}
-
-  let candidates = negotiations.filter(n => (n.counters?.messages || 0) > 0);
-
-  if (incremental) {
-    // Only sync candidates where HH updated_at is newer than our last sync timestamp
-    candidates = candidates.filter(neg => {
-      const file = path.join(candDir, `${neg.id}.json`);
-      try {
-        const h = JSON.parse(fs.readFileSync(file, 'utf8'));
-        const lastSynced = h.last_hh_message_at || 0;
-        const hhUpdated = neg.updated_at ? new Date(neg.updated_at).getTime() : 0;
-        return hhUpdated > lastSynced;
-      } catch {
-        return true; // no file yet → sync
-      }
-    });
-  } else {
-    candidates = candidates.slice(0, cap);
-  }
-
-  let synced = 0;
-  let newMessages = 0;
-
-  // Process in batches to avoid API burst
-  for (let i = 0; i < candidates.length; i += maxConcurrent) {
-    const batch = candidates.slice(i, i + maxConcurrent);
-    await Promise.allSettled(batch.map(async neg => {
-      const file = path.join(candDir, `${neg.id}.json`);
-      let history = { messages: [], ats_result: null };
-      try { history = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-      history.messages = history.messages || [];
-
-      try {
-        // Fetch full message thread (HH supports up to 50 per page; paginate if needed)
-        let allHhMsgs = [];
-        for (let page = 0; ; page++) {
-          const data = await hhApiRequest('GET', `/negotiations/${neg.id}/messages?per_page=50&page=${page}`, accessToken);
-          const items = (data.items || []).filter(m => m.text);
-          allHhMsgs = allHhMsgs.concat(items);
-          if (!data.pages || page >= data.pages - 1) break;
-        }
-        if (!allHhMsgs.length) {
-          // No messages yet — still update last_hh_message_at so we skip next time
-          history.last_hh_message_at = neg.updated_at ? new Date(neg.updated_at).getTime() : Date.now();
-          fs.writeFileSync(file, JSON.stringify(history, null, 2), { mode: 0o600 });
-          synced++;
-          return;
-        }
-
-        const storedIds = new Set(history.messages.map(m => m.hh_id).filter(Boolean));
-        let added = 0;
-        for (const m of allHhMsgs) {
-          if (storedIds.has(m.id)) continue;
-          history.messages.push({
-            hh_id: m.id,
-            role: m.author?.participant_type === 'applicant' ? 'applicant' : 'employer',
-            text: m.text,
-            timestamp: m.created_at,
-          });
-          storedIds.add(m.id);
-          added++;
-        }
-        if (added > 0) {
-          history.messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-          newMessages += added;
-        }
-        history.last_hh_message_at = neg.updated_at ? new Date(neg.updated_at).getTime() : Date.now();
-        fs.writeFileSync(file, JSON.stringify(history, null, 2), { mode: 0o600 });
-        synced++;
-      } catch (e) {
-        console.error(`[hh-msg-sync] neg ${neg.id}: ${e.message}`);
-      }
-    }));
-  }
-
-  return { synced, newMessages };
-}
-
-// Background HH scoring: fetch negotiations + score unscored candidates for all users
-// with HH token + active vacancy + ATS config. Runs every 5 min so the review page
-// shows scores immediately without blocking on page open.
-const _hhBgRunning = new Set();
 // Cached secrets for background tasks (HH OAuth refresh needs HH_CLIENT_ID/SECRET).
 // Populated once in main() after loadSecrets().
 let _secretsCache = null;
-
-async function runHhScoringForUser(username) {
-  if (_hhBgRunning.has(username)) return;
-  _hhBgRunning.add(username);
-  try {
-    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-    const tokenFile = path.join(hhTokensBase, String(username), 'hh');
-    if (!fs.existsSync(tokenFile)) return;
-    let tokenData;
-    try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return; }
-    if (!tokenData?.access_token) return;
-
-    // workDir must match where Claude writes context (/run handler uses BASE_USERS_DIR)
-    const workDir = path.join(BASE_USERS_DIR, String(username));
-    const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
-    if (!fs.existsSync(vacancyCtxFile)) return;
-    let vacancy;
-    try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch { return; }
-    if (!vacancy?.id) return;
-
-    // Only score if ATS config exists (otherwise no criteria to score against)
-    const configFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
-    if (!fs.existsSync(configFile)) return;
-
-    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-    let negotiations;
-    try {
-      negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
-    } catch (e) {
-      // Auto-refresh HH access_token if it expired since the last re-auth.
-      // Without this, the background loop fails silently for 14 days after
-      // every /hh_connect, leaving new candidates unscored.
-      if (/HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
-        const fresh = await refreshHhToken(username, _secretsCache);
-        if (!fresh) throw e;
-        negotiations = await fetchAllHhNegotiations(vacancy.id, fresh);
-      } else { throw e; }
-    }
-
-    // Sync HH thread messages incrementally — only candidates changed since last sync
-    const msgSync = await syncHhMessagesToHistory(dataDir, username, negotiations, tokenData.access_token, {
-      incremental: true,
-      maxConcurrent: 4,
-    }).catch(e => { console.error(`[hh-bg] msg-sync error for ${username}:`, e.message); return { synced: 0, newMessages: 0 }; });
-    if (msgSync.newMessages > 0) console.log(`[hh-bg] msg-sync ${username}: +${msgSync.newMessages} new messages across ${msgSync.synced} candidates`);
-
-    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4, msgSyncStats: msgSync, vacancyId: vacancy.id });
-    if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
-
-    const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3, vacancyId: vacancy.id });
-    if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
-
-    const proactiveScored = await scoreUnscoredProactiveCandidates(username, {
-      refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
-    });
-    if (proactiveScored > 0) console.log(`[hh-bg] enriched ${proactiveScored} cold-search candidates for ${username}`);
-  } catch (e) {
-    console.error(`[hh-bg] error for ${username}:`, e.message);
-  } finally {
-    _hhBgRunning.delete(username);
-  }
-}
-
-// Compute the HMAC-signed proactive page URL for a user — same logic as inside the
-// request handler but needed at module level for the scheduler.
-function buildProactiveUrlForScheduler(username) {
-  const { createHmac } = require('crypto');
-  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-  const token = createHmac('sha256', process.env.AGENT_SECRET || '').update(username).digest('hex').slice(0, 16);
-  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
-}
-
-// Periodic proactive HH search scheduler.
-// Checks every 30 min which users have enabled auto-search; for each user whose
-// interval has elapsed, runs runProactiveSearch and sends a Telegram notification.
-// Enable per user via the hh_proactive_schedule MCP tool (action=enable).
-function scheduleProactiveSearchRuns(secretsArg) {
-  const { loadSchedule, saveSchedule, buildProactiveDigest } = require('./hh-proactive-search');
-  const CHECK_INTERVAL_MS = 30 * 60 * 1000;
-
-  async function run() {
-    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-    if (!fs.existsSync(hhTokensBase)) return;
-    const secrets = secretsArg || {};
-
-    for (const username of fs.readdirSync(hhTokensBase)) {
-      const schedule = loadSchedule(username);
-      if (!schedule?.enabled) continue;
-
-      const intervalMs = (schedule.interval_hours || 24) * 60 * 60 * 1000;
-      const lastRun = schedule.last_run ? new Date(schedule.last_run).getTime() : 0;
-      if (Date.now() - lastRun < intervalMs) continue;
-
-      const workDir = path.join(BASE_USERS_DIR, username);
-      if (!fs.existsSync(workDir)) continue;
-
-      console.log(`[proactive-scheduler] starting run for user=${username}`);
-      try {
-        await runProactiveSearch(username, workDir, {
-          refreshAccessToken: (u) => refreshHhToken(u, secrets),
-          proactiveUrl: buildProactiveUrlForScheduler(username),
-          notifyChat: async (info) => {
-            const chatId = readChatId(username);
-            if (!chatId) return;
-            const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
-            if (!botToken) return;
-            const text = buildProactiveDigest({
-              vacancyTitle: info.vacancyTitle,
-              newCount: info.newCount,
-              totalSeen: info.totalSeen,
-              newCandidates: info.newCandidates,
-              url: info.proactiveUrl,
-            });
-            const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-            await fetch(`${tgBase}/bot${botToken}/sendMessage`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
-              signal: AbortSignal.timeout(10_000),
-            });
-          },
-        });
-        schedule.last_run = new Date().toISOString();
-        saveSchedule(username, schedule);
-        console.log(`[proactive-scheduler] done for user=${username}`);
-      } catch (e) {
-        console.error(`[proactive-scheduler] error for user=${username}:`, e.message);
-      }
-    }
-  }
-
-  setTimeout(() => run().catch(() => {}), 10 * 60 * 1000); // first check 10 min after start
-  setInterval(() => run().catch(() => {}), CHECK_INTERVAL_MS);
-}
-
-function scheduleHhBackgroundScoring() {
-  async function run() {
-    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-    if (!fs.existsSync(hhTokensBase)) return;
-    for (const username of fs.readdirSync(hhTokensBase)) {
-      const release = maintenance.acquire();
-      if (!release) return;
-      runHhScoringForUser(username).catch(() => {}).finally(release);
-      await new Promise(r => setTimeout(r, 1000)); // stagger users to avoid API burst
-    }
-  }
-  setTimeout(() => run().catch(() => {}), 3 * 60 * 1000); // first run 3 min after start
-  setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
-}
 
 // GTD controller tick: fire due check-backs for workrun tasks the user asked us
 // to see through to done. Re-entrancy + hard-cap live in the module; here we just
@@ -1520,7 +1223,7 @@ async function main() {
 
       let negotiations = [], syncedAt = null;
       try {
-        const result = await getHhNegotiationsWithCache(dataDir, username, vacancy.id, tokenData.access_token);
+        const result = await getHhNegotiationsWithCache(dataDir, username, vacancy.id, tokenData.access_token, _secretsCache);
         negotiations = result.negotiations;
         syncedAt = result.synced_at;
       } catch (e) { console.error('[hh/review] fetch error:', e.message); }
@@ -4162,8 +3865,8 @@ ${recent || '(пока нет)'}
   setInterval(drivePoll, 2 * 60 * 1000);
 
   scheduleNalogExpiryChecks(secrets);
-  scheduleHhBackgroundScoring();
-scheduleProactiveSearchRuns(secrets);
+  scheduleHhBackgroundScoring(secrets);
+  scheduleProactiveSearchRuns(secrets, { readChatId });
   if (process.env.TEST_MODE !== '1') scheduleGtdController(secrets);
 
 
@@ -5232,96 +4935,7 @@ onCheck();
 }
 
 // ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────
-
-const HH_API_TIMEOUT_MS = 15_000;
-
-// HH token file lives in ~/agent-tokens/<username>/hh (a flat JSON file, not a directory).
-function hhTokenPath(username) {
-  return path.join(os.homedir(), 'agent-tokens', String(username), 'hh');
-}
-
-// Refresh an expired HH OAuth access_token using the stored refresh_token.
-// Returns the new access_token on success, or null on failure (caller is expected
-// to surface "HH re-auth required" to the recruiter).
-async function refreshHhToken(username, secrets) {
-  if (!secrets?.HH_CLIENT_ID || !secrets?.HH_CLIENT_SECRET) {
-    console.warn('[hh-refresh] no HH_CLIENT_ID/SECRET in env — cannot refresh');
-    return null;
-  }
-  const file = hhTokenPath(username);
-  if (!fs.existsSync(file)) return null;
-  let stored;
-  try { stored = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
-  if (!stored.refresh_token) return null;
-
-  try {
-    const res = await fetch('https://hh.ru/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: secrets.HH_CLIENT_ID,
-        client_secret: secrets.HH_CLIENT_SECRET,
-        refresh_token: stored.refresh_token,
-      }).toString(),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const data = await res.json();
-    if (!data.access_token) {
-      console.warn(`[hh-refresh] HH refused refresh for ${username}: ${data.error || 'no access_token'}`);
-      return null;
-    }
-    const updated = {
-      ...stored,
-      access_token: data.access_token,
-      refresh_token: data.refresh_token || stored.refresh_token,
-      saved_at: new Date().toISOString(),
-    };
-    fs.writeFileSync(file, JSON.stringify(updated, null, 2), { mode: 0o600 });
-    console.log(`[hh-refresh] refreshed HH token for ${username}`);
-    return data.access_token;
-  } catch (e) {
-    console.error(`[hh-refresh] error for ${username}: ${e.message}`);
-    return null;
-  }
-}
-
-function hhApiRequest(method, apiPath, accessToken, body) {
-  return new Promise((resolve, reject) => {
-    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
-    const u = new URL(base);
-    const lib = u.protocol === 'https:' ? https : http;
-    const bodyStr = body ? JSON.stringify(body) : '';
-    const reqOpts = {
-      hostname: u.hostname,
-      path: apiPath,
-      method,
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        ...(body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
-      },
-    };
-    if (u.port) reqOpts.port = parseInt(u.port, 10);
-    const req = lib.request(reqOpts, (r) => {
-      const chunks = [];
-      r.on('data', c => chunks.push(c));
-      r.on('end', () => {
-        const data = Buffer.concat(chunks).toString('utf8');
-        if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
-        if (r.statusCode === 204 || !data) return resolve({});
-        try { resolve(JSON.parse(data)); } catch { resolve({}); }
-      });
-    });
-    req.setTimeout(HH_API_TIMEOUT_MS, () => {
-      req.destroy(new Error(`HH API timeout after ${HH_API_TIMEOUT_MS / 1000}s: ${method} ${apiPath}`));
-    });
-    req.on('error', reject);
-    if (body) req.write(bodyStr);
-    req.end();
-  });
-}
+// hhApiRequest and refreshHhToken are imported from ./hh-utils at the top of this file.
 
 function hhApiPost(apiPath, token, body) { return hhApiRequest('POST', apiPath, token, body); }
 function hhApiPut(apiPath, token, body) { return hhApiRequest('PUT', apiPath, token, body || undefined); }

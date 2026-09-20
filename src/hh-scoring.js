@@ -3,6 +3,7 @@ const { buildResumeText, resumeHash, RESUME_VERSION } = require('./hh-resume');
 
 // Pure scoring utilities — no global state, no USER_ID dependency.
 // Used by both 90-hh.js MCP tool and server.js /hh/review endpoint.
+// Also exports background-scoring runner and scheduler (moved from server.js).
 
 const https = require('https');
 const crypto = require('crypto');
@@ -485,6 +486,101 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
   return generated;
 }
 
+// ─── Background scoring runner and scheduler (moved from server.js) ──────────────────────────
+
+// De-dup guard: one concurrent run per user.
+const _hhBgRunning = new Set();
+
+// Background HH scoring: fetch negotiations + score unscored candidates for all users
+// with HH token + active vacancy + ATS config. Runs every 5 min so the review page
+// shows scores immediately without blocking on page open.
+//
+// secrets must be passed by the caller (populated after loadSecrets() in main()).
+async function runHhScoringForUser(username, secrets) {
+  if (_hhBgRunning.has(username)) return;
+  _hhBgRunning.add(username);
+  try {
+    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    const tokenFile = path.join(hhTokensBase, String(username), 'hh');
+    if (!fs.existsSync(tokenFile)) return;
+    let tokenData;
+    try { tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { return; }
+    if (!tokenData?.access_token) return;
+
+    // workDir must match where Claude writes context (/run handler uses USERS_DIR)
+    const baseUsersDir = process.env.USERS_DIR || path.join(process.env.HOME || '/home/vova', 'users');
+    const workDir = path.join(baseUsersDir, String(username));
+    const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+    if (!fs.existsSync(vacancyCtxFile)) return;
+    let vacancy;
+    try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch { return; }
+    if (!vacancy?.id) return;
+
+    // Only score if ATS config exists (otherwise no criteria to score against)
+    const configFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+    if (!fs.existsSync(configFile)) return;
+
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const { fetchAllHhNegotiations, syncHhMessagesToHistory } = require('./hh-negotiations');
+    const { refreshHhToken } = require('./hh-utils');
+    const { scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
+
+    let negotiations;
+    try {
+      negotiations = await fetchAllHhNegotiations(vacancy.id, tokenData.access_token);
+    } catch (e) {
+      // Auto-refresh HH access_token if it expired since the last re-auth.
+      // Without this, the background loop fails silently for 14 days after
+      // every /hh_connect, leaving new candidates unscored.
+      if (/HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
+        const fresh = await refreshHhToken(username, secrets);
+        if (!fresh) throw e;
+        negotiations = await fetchAllHhNegotiations(vacancy.id, fresh);
+      } else { throw e; }
+    }
+
+    // Sync HH thread messages incrementally — only candidates changed since last sync
+    const msgSync = await syncHhMessagesToHistory(dataDir, username, negotiations, tokenData.access_token, {
+      incremental: true,
+      maxConcurrent: 4,
+    }).catch(e => { console.error(`[hh-bg] msg-sync error for ${username}:`, e.message); return { synced: 0, newMessages: 0 }; });
+    if (msgSync.newMessages > 0) console.log(`[hh-bg] msg-sync ${username}: +${msgSync.newMessages} new messages across ${msgSync.synced} candidates`);
+
+    const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4, msgSyncStats: msgSync, vacancyId: vacancy.id });
+    if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
+
+    const drafted = await generateDraftMessages(negotiations, username, workDir, { maxConcurrent: 3, vacancyId: vacancy.id });
+    if (drafted > 0) console.log(`[hh-bg] generated ${drafted} draft messages for ${username}/${vacancy.id}`);
+
+    const proactiveScored = await scoreUnscoredProactiveCandidates(username, {
+      refreshAccessToken: (u) => refreshHhToken(u, secrets),
+    });
+    if (proactiveScored > 0) console.log(`[hh-bg] enriched ${proactiveScored} cold-search candidates for ${username}`);
+  } catch (e) {
+    console.error(`[hh-bg] error for ${username}:`, e.message);
+  } finally {
+    _hhBgRunning.delete(username);
+  }
+}
+
+// Schedules the 5-min background scoring loop.
+// secrets must be passed (populated after loadSecrets() in main()).
+function scheduleHhBackgroundScoring(secrets) {
+  const { maintenance } = require('./maintenance');
+  async function run() {
+    const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    if (!fs.existsSync(hhTokensBase)) return;
+    for (const username of fs.readdirSync(hhTokensBase)) {
+      const release = maintenance.acquire();
+      if (!release) return;
+      runHhScoringForUser(username, secrets).catch(() => {}).finally(release);
+      await new Promise(r => setTimeout(r, 1000)); // stagger users to avoid API burst
+    }
+  }
+  setTimeout(() => run().catch(() => {}), 3 * 60 * 1000); // first run 3 min after start
+  setInterval(() => run().catch(() => {}), 5 * 60 * 1000);
+}
+
 module.exports = {
   llmCall,
   gcCall,
@@ -500,4 +596,6 @@ module.exports = {
   buildResumeText,
   scoreUnscoredCandidates,
   generateDraftMessages,
+  runHhScoringForUser,
+  scheduleHhBackgroundScoring,
 };

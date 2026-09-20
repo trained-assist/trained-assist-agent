@@ -1,8 +1,11 @@
 'use strict';
-// Shared HH utilities — used by 90-hh.js (MCP) and hh-quick.js (runner quick answers).
+// Shared HH utilities — used by 90-hh.js (MCP), hh-quick.js (runner quick answers),
+// hh-negotiations.js (cache + sync), and hh-scoring.js (background scoring).
 // Single source of truth for token reading, context I/O, and HH API HTTP.
 
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const path = require('path');
 const os = require('os');
 
@@ -79,4 +82,90 @@ async function hhPost(apiPath, token, body) {
   return data;
 }
 
-module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhTokenPath };
+// ─── Callback-based HH API client (used by hh-negotiations.js and server.js routes) ──────────
+
+const HH_API_TIMEOUT_MS = 15_000;
+
+function hhApiRequest(method, apiPath, accessToken, body) {
+  return new Promise((resolve, reject) => {
+    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
+    const u = new URL(base);
+    const lib = u.protocol === 'https:' ? https : http;
+    const bodyStr = body ? JSON.stringify(body) : '';
+    const reqOpts = {
+      hostname: u.hostname,
+      path: apiPath,
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+        'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+        ...(body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
+      },
+    };
+    if (u.port) reqOpts.port = parseInt(u.port, 10);
+    const req = lib.request(reqOpts, (r) => {
+      const chunks = [];
+      r.on('data', c => chunks.push(c));
+      r.on('end', () => {
+        const data = Buffer.concat(chunks).toString('utf8');
+        if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
+        if (r.statusCode === 204 || !data) return resolve({});
+        try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      });
+    });
+    req.setTimeout(HH_API_TIMEOUT_MS, () => {
+      req.destroy(new Error(`HH API timeout after ${HH_API_TIMEOUT_MS / 1000}s: ${method} ${apiPath}`));
+    });
+    req.on('error', reject);
+    if (body) req.write(bodyStr);
+    req.end();
+  });
+}
+
+// Refresh an expired HH OAuth access_token using the stored refresh_token.
+// Returns the new access_token on success, or null on failure.
+async function refreshHhToken(username, secrets) {
+  if (!secrets?.HH_CLIENT_ID || !secrets?.HH_CLIENT_SECRET) {
+    console.warn('[hh-refresh] no HH_CLIENT_ID/SECRET in env — cannot refresh');
+    return null;
+  }
+  const file = hhTokenPath(username);
+  if (!fs.existsSync(file)) return null;
+  let stored;
+  try { stored = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  if (!stored.refresh_token) return null;
+
+  try {
+    const res = await fetch('https://hh.ru/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: secrets.HH_CLIENT_ID,
+        client_secret: secrets.HH_CLIENT_SECRET,
+        refresh_token: stored.refresh_token,
+      }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await res.json();
+    if (!data.access_token) {
+      console.warn(`[hh-refresh] HH refused refresh for ${username}: ${data.error || 'no access_token'}`);
+      return null;
+    }
+    const updated = {
+      ...stored,
+      access_token: data.access_token,
+      refresh_token: data.refresh_token || stored.refresh_token,
+      saved_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(file, JSON.stringify(updated, null, 2), { mode: 0o600 });
+    console.log(`[hh-refresh] refreshed HH token for ${username}`);
+    return data.access_token;
+  } catch (e) {
+    console.error(`[hh-refresh] error for ${username}: ${e.message}`);
+    return null;
+  }
+}
+
+module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhTokenPath, hhApiRequest, refreshHhToken };
