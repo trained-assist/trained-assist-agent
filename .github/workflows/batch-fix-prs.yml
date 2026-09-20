@@ -88,6 +88,7 @@ jobs:
         with:
           ref: ${{ steps.pr-info.outputs.branch }}
           fetch-depth: 0
+          token: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Save latest fixer script from main to /tmp (via API — avoids git-show inconsistencies on old branches)
         if: steps.guard.outputs.skip == 'false'
