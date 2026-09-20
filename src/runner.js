@@ -1,8 +1,6 @@
-const { maintenance, atomicJson } = require('./maintenance');
+const { atomicJson } = require('./atomic-json');
 const currentExecution = () => null;
 const intentRuns = new Map();
-let restartShutdown = false;
-let autoRestartPending = false;
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -1314,9 +1312,16 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     }
   }
 
-  const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
+  // Skip regex-based intent matching for long free-form messages — the ~40
+  // INTENT patterns were calibrated for short, focused phrasing and misfire on
+  // multi-line tasks where a quick answer is almost never what the user wants.
+  // Slash commands (unambiguous) are always checked regardless of length.
+  const LONG_MSG_QUICK_SKIP = 200;
+  const isSlashCommand = /^\//.test(task.trim());
+  const sync = (isSlashCommand || task.trim().length <= LONG_MSG_QUICK_SKIP)
+    ? getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId)
+    : null;
   if (sync !== null) {
-    const isSlashCommand = /^\//.test(task.trim());
     const preview = (sync && typeof sync === 'object') ? sync.hint : sync;
     const confirmed = isSlashCommand || await verifyQuickAnswerIntent(task, preview, openrouterKey);
     if (confirmed) {
@@ -1562,16 +1567,15 @@ const RAM_WAIT_MAX_MS = 60000; // never deadlock — proceed after this even if 
 let _runningTasks = 0;
 const _slotWaiters = [];
 
-function _acquireSlot(onPaused = () => {}) {
+function _acquireSlot() {
   return new Promise(resolve => {
-    let reportedPause = false;
     const grab = () => {
-      if (maintenance.paused()) { if (!reportedPause) { onPaused(); reportedPause = true; } setTimeout(grab, 500); }
-      else if (_runningTasks < MAX_CONCURRENT_TASKS) {
-        const release = maintenance.acquire();
-        _runningTasks++; resolve(release);
+      if (_runningTasks < MAX_CONCURRENT_TASKS) {
+        _runningTasks++;
+        resolve(() => {});
+      } else {
+        _slotWaiters.push(grab);
       }
-      else _slotWaiters.push(grab);
     };
     grab();
   });
@@ -1854,44 +1858,6 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // Control commands bypass lanes and admission. Available to every authenticated profile.
-  const restart = /^\/restart(?:@\w+)?(?:\s+(status|cancel))?$/i.exec((opts.task || '').trim());
-  if (restart) {
-    let restartSessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id);
-    if (!restart[1] && !restartSessionId && opts.user.id === 0) {
-      restartSessionId = sessions.createSession(opts.user.workDir, { task: opts.task, chatId: 0 });
-    }
-    const state = restart[1] === 'cancel' ? maintenance.cancel()
-      : restart[1] === 'status' ? maintenance.status() : maintenance.request();
-
-    // Cancel clears the auto-exit flag so the pending background exit is stopped.
-    if (restart[1] === 'cancel') autoRestartPending = false;
-
-    // Plain /restart: drain active tasks then exit — systemd (Restart=always) restarts after RestartSec.
-    if (!restart[1] && state.paused && !autoRestartPending) {
-      autoRestartPending = true;
-      (async () => {
-        if (getActiveTaskCount() > 0) await waitForIdle(85_000);
-        if (!autoRestartPending) return;
-        await new Promise(r => setTimeout(r, 500)); // let the reply send before we exit
-        if (!autoRestartPending) return;
-        console.log('[restart] draining complete, exiting for systemd restart');
-        process.exit(0);
-      })().catch(() => { if (autoRestartPending) process.exit(0); });
-    }
-
-    const msg = state.phase === 'failed'
-      ? '⚠️ Восстановление не завершено; очередь сохранена. Требуется проверка сервера.'
-      : state.phase === 'restarting'
-      ? '🔄 Сервер перезапускается. Об итогах сообщу в исходную сессию.'
-      : state.paused
-      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Перезапущусь автоматически.`
-      : '✅ Плановый рестарт не ожидается.';
-    opts.outputCallback?.(msg);
-    const token = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
-    return token && opts.user.id !== 0 ? tgSend(token, opts.user.id, msg).then(() => msg) : Promise.resolve(msg);
-  }
-
   // Wakeup command — kill stuck task + clear the queue so new messages can flow through.
   if (WAKEUP_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -1977,12 +1943,11 @@ function runTask(opts) {
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  if (currentExecution() && (restartShutdown || !currentExecution().eligible(opts.taskId) || maintenance.paused())) {
+  if (currentExecution() && !currentExecution().eligible(opts.taskId)) {
     const text = '⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.';
     return status.finish(text).then(() => ({ deferred: true }));
   }
-  if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
-  else if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
+  if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
@@ -2004,9 +1969,7 @@ function runTask(opts) {
   // creating a circular dependency (work waits for current, current waits for work → deadlock).
   const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
   const current = chatQueue.enqueue(opts.user.id, () => {
-    if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
     const work = sessionPrev.catch(() => {}).then(async () => {
-      if (maintenance.paused()) status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.');
       // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
       // profile's 4-slot cap waits here without holding a scarce global slot.
       // Only show "waiting for slot" when the slot isn't immediately available —
@@ -2015,13 +1978,13 @@ function runTask(opts) {
       const capP = _acquireKeySlot(capKey);
       capP.then(() => { capAcquired = true; });
       await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
-      if (!capAcquired && !maintenance.paused()) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
+      if (!capAcquired) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
       await capP;
       try {
         // Global admission control: wait for a free slot + enough RAM before we
         // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
         await _waitForRam();
-        releaseAdmission = await _acquireSlot(() => status.waiting('⏸ Задача сохранена. После рестарта проверю актуальность; для старой задачи потребуется подтверждение.'));
+        releaseAdmission = await _acquireSlot();
         try {
           if (currentExecution() && !currentExecution().start(opts.taskId)) return { deferred: true };
           executionStarted = true;
@@ -2489,6 +2452,48 @@ async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {})
 
 // Builds a runtime capabilities addendum for OpenCode system prompt.
 // OpenCode uses non-Claude models that don't auto-read CLAUDE.md, so we inject what's available.
+function writeCodexMcpProfile(username, { workDir, sessionFilePath, userName, userHandle } = {}) {
+  const mcpSkillsPath = path.join(__dirname, 'mcp-skills', 'index.js');
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+
+  // Build the env section for trained-skills MCP server
+  const envEntries = [
+    ['HOME', os.homedir()],
+    ['PATH', process.env.PATH || ''],
+    ...(username ? [['USER_ID', String(username)]] : []),
+    ...(workDir ? [['WORK_DIR', workDir]] : []),
+    ['AGENT_DATA_DIR', dataDir],
+    ...(sessionFilePath ? [['AGENT_SESSION_FILE', sessionFilePath]] : []),
+    ...(userName ? [['AGENT_USER_NAME', userName]] : []),
+    ...(userHandle ? [['AGENT_USER_HANDLE', userHandle]] : []),
+    ...(process.env.AGENT_SECRET ? [['AGENT_SECRET', process.env.AGENT_SECRET]] : []),
+    ...(process.env.INN_DADATA_TOKEN ? [['INN_DADATA_TOKEN', process.env.INN_DADATA_TOKEN]] : []),
+    ...(process.env.INN_DADATA_SECRET ? [['INN_DADATA_SECRET', process.env.INN_DADATA_SECRET]] : []),
+    ...(process.env.INN_CHECKO_KEY ? [['INN_CHECKO_KEY', process.env.INN_CHECKO_KEY]] : []),
+  ];
+
+  const envLines = envEntries.map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join('\n');
+  const toml = `# Auto-generated by trained-assist-agent — do not edit manually
+[mcp_servers.trained_skills]
+command = "node"
+args = [${JSON.stringify(mcpSkillsPath)}]
+
+[mcp_servers.trained_skills.env]
+${envLines}
+`;
+
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const profileName = `trained-${username}`;
+  const profilePath = path.join(codexHome, `${profileName}.config.toml`);
+  try {
+    fs.writeFileSync(profilePath, toml, { mode: 0o600 });
+  } catch (err) {
+    console.warn('[runner] writeCodexMcpProfile failed:', err.message);
+    return null;
+  }
+  return profileName;
+}
+
 function buildOcCapabilitiesBlock(secrets) {
   const lines = ['## Возможности системы (runtime)'];
 
@@ -2881,9 +2886,16 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
   }
 
+  // Determine engine first — needed to decide whether to inject session context.
+  // Codex is stateless: injecting session history multiplies it across every internal API call.
+  // Instead, Codex uses MCP tools (load_full_context, last_messages) to pull history on demand.
+  const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
+
   let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, bugReportSection, artifactsSection].filter(Boolean).join('\n\n');
-  if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
-  const currentTask = sessionContext ? `Пользователь: ${task}` : task;
+  // Codex/OpenCode are stateless — skip session history injection; they pull via MCP instead.
+  const injectSessionCtx = !!sessionContext && engine !== 'codex' && engine !== 'opencode';
+  if (injectSessionCtx) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
+  const currentTask = injectSessionCtx ? `Пользователь: ${task}` : task;
   let prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
   // Guard against E2BIG: OS ARG_MAX is 2MB; cap at 1MB to leave room for env vars.
   const MAX_PROMPT_CHARS = 1_000_000;
@@ -2897,13 +2909,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? path.join(user.workDir, 'sessions', `${activeSessionId}.json`)
     : '';
 
-  // Per-chat engine switch (claude|codex) — see ENGINE_SWITCH_INTENT / profiles.getEngine.
-  // v1 codex path has no MCP tools (codex's MCP wiring is TOML-based, not wired up yet) and no
-  // separate system-prompt flag — the system prompt is folded into the prompt text instead.
-  const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
-
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
   const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username, sessionFilePath });
+
+  // For Codex: write a per-user TOML profile layering trained-skills MCP.
+  // Codex reads MCP config from ~/.codex/<profile>.config.toml via `-p <profile>` flag.
+  const codexMcpProfile = engine === 'codex'
+    ? writeCodexMcpProfile(user.username, { workDir: user.workDir, sessionFilePath, userName: user.name, userHandle: user.username })
+    : null;
 
   // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
@@ -2960,6 +2973,20 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? (systemPromptText ? `${systemPromptText}\n\n${ocCapBlock}` : ocCapBlock)
     : systemPromptText;
 
+  // Codex system prompt: append a note that history is NOT injected but available via MCP tools.
+  const codexMcpNote = engine === 'codex' ? [
+    '',
+    '# История разговора',
+    'История предыдущих сообщений НЕ инжектируется в этот промпт — это экономит токены.',
+    'Если пользователь ссылается на прошлое или нужен контекст — вызови MCP-инструмент:',
+    '- `last_messages(n: 8)` — последние N сообщений текущей сессии',
+    '- `load_full_context()` — полная история сессии',
+    '- `session_search(pattern: "ключевое слово")` — поиск по всем прошлым сессиям',
+  ].join('\n') : '';
+  const codexSystemPrompt = systemPromptText
+    ? (codexMcpNote ? `${systemPromptText}${codexMcpNote}` : systemPromptText)
+    : codexMcpNote;
+
   const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = engine === 'codex'
     ? [process.env.CODEX_BIN || 'codex', [
@@ -2968,7 +2995,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         '--skip-git-repo-check',
         '--dangerously-bypass-approvals-and-sandbox',
         '-C', user.cwd || user.workDir,
-        systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
+        ...(codexMcpProfile ? ['-p', codexMcpProfile] : []),
+        codexSystemPrompt ? `${codexSystemPrompt}\n\n${prompt}` : prompt,
       ]]
     : engine === 'opencode'
     ? [process.env.OPENCODE_BIN || 'opencode', [
@@ -3147,7 +3175,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           } else if (event.type === 'step_finish') {
             terminalSuccess = true;
             claudeResult = fullOutput.text.trim() || null;
-            if (!restartShutdown && claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
+            if (claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             const usage = event.part?.tokens;
             if (usage) {
               if (!ocAgentModels || !Object.keys(ocAgentModels).length) ocAgentModels = readOcAgentModels();
@@ -3195,7 +3223,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
             claudeResult = lastAssistantMsg;
-            if (!restartShutdown && claudeResult?.trim()) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
+            if (claudeResult?.trim()) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             claudeUsage = event.usage || null;
             if (claudeUsage) {
               console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cached_input_tokens || 0} cache_write=${claudeUsage.cache_write_input_tokens || 0}`);
@@ -3209,7 +3237,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         if (event.type === 'result') {
           terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
-          if (terminalSuccess && !restartShutdown) {
+          if (terminalSuccess) {
             const terminalText = pickFinalText(claudeResult, lastAssistantMsg, '');
             if (terminalText) currentExecution()?.stageEngineResult(taskId, { text: terminalText, messageId: msgId });
           }
@@ -3318,7 +3346,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           exitCode = code;
         }
         // If SIGTERM already fired (timedOut=true), reject so the catch block runs auto-continuation
-        if (timedOut && !restartShutdown) {
+        if (timedOut) {
           reject(new Error(`claude exited after SIGTERM (code ${code})`));
         } else {
           resolve(code);
@@ -3397,11 +3425,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   }
 
   if (outputPersistenceError) throw outputPersistenceError;
-  if (sessionState.restartInterrupted) {
-    const partial = fullOutput.text.trim();
-    if (activeSessionId && partial) sessions.appendReply(user.workDir, activeSessionId, `[прервано рестартом]\n${partial}`);
-    return { deferred: true };
-  }
 
   // User pressed Stop — show partial result and exit cleanly
   if (sessionState.userStopped) {
@@ -3432,7 +3455,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
     const crashDurationMs = Date.now() - thinkingStart;
     const isUsageLimit = codexErrorMsg && /usage limit|purchase more credits/i.test(codexErrorMsg);
-    if (!isUsageLimit && !currentExecution() && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
+    if (!isUsageLimit && !currentExecution() && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
@@ -3482,7 +3505,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let result = answer;
   if (incomplete) {
     const reason = processSignal
-      ? (restartShutdown ? 'сервер перезапускается' : `сигнал ${processSignal}`)
+      ? `сигнал ${processSignal}`
       : exitCode !== 0 ? `код ${exitCode}`
       : processError ? `ошибка запуска`
       : 'нет подтверждённого финального ответа';
@@ -3762,18 +3785,7 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, retries = 3) {
   throw new Error('Telegram editMessageText rate limit retries exhausted');
 }
 
-function interruptForRestart() {
-  restartShutdown = true;
-  currentExecution()?.interruptAll();
-  for (const state of activeTimers.values()) {
-    state.restartInterrupted = true;
-    clearTimeout(state.killTimer);
-    try { state.proc?.kill('SIGTERM'); } catch {}
-  }
-}
-
 module.exports = {
-  interruptForRestart,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   clearPendingContinuation,
