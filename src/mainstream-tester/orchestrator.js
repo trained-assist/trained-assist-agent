@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { decideFirstAction, decideNextAction } = require('./mainstream-decider');
+const { BugClassifier } = require('./bug-classifier');
 
 const STEP_TIMEOUT_MS = 180_000; // 3 min per step (Claude can be slow)
 const TEST_CHAT_ID = 999_000_001;
@@ -20,7 +21,7 @@ const BUG_PATTERNS = [
 ];
 
 class Orchestrator {
-  constructor({ agentUrl, agentSecret, openrouterKey, maxSteps = 7, stateDir }) {
+  constructor({ agentUrl, agentSecret, openrouterKey, githubToken, maxSteps = 7, stateDir }) {
     this.agentUrl = agentUrl;
     this.agentSecret = agentSecret;
     this.openrouterKey = openrouterKey;
@@ -30,6 +31,7 @@ class Orchestrator {
     this._responseResolve = null;
     this._responseReject = null;
     this._stepTimer = null;
+    this.classifier = new BugClassifier({ stateDir, openrouterKey, githubToken });
   }
 
   get stateFile() { return path.join(this.stateDir, 'current-run.json'); }
@@ -45,6 +47,8 @@ class Orchestrator {
     this.state.bugs.push(entry);
     this._saveState();
     console.warn(`[bug] type=${bug.type} step=${bug.step ?? '?'} detail=${(bug.detail || '').slice(0, 120)}`);
+    // Classify immediately — async, don't block the test run
+    this.classifier.process(entry).catch(e => console.warn('[bug-classifier] error:', e.message));
   }
 
   _detectBugs(text, step) {

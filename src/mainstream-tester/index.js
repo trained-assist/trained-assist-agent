@@ -82,6 +82,7 @@ async function spawnTestAgent(fakeTgPort) {
 async function main() {
   const agentSecret = requiredEnv('AGENT_SECRET');
   const openrouterKey = requiredEnv('OPENROUTER_API_KEY');
+  const githubToken = process.env.GITHUB_ISSUES_TOKEN || '';
   const maxSteps = parseInt(process.env.MAINSTREAM_STEPS || '7', 10);
   const maxRuns = parseInt(process.env.MAINSTREAM_RUNS || '1', 10);
   const externalAgentUrl = process.env.AGENT_URL;
@@ -107,6 +108,7 @@ async function main() {
     agentUrl,
     agentSecret,
     openrouterKey,
+    githubToken,
     maxSteps,
     stateDir: TEST_DATA_DIR,
   });

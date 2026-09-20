@@ -21,6 +21,12 @@ LOGFILE="$LOG_DIR/run-$(date +%Y%m%d-%H%M%S).log"
   ANTHROPIC_API_KEY=$(GOOGLE_APPLICATION_CREDENTIALS="" gcloud secrets versions access latest \
     --secret=ANTHROPIC_API_KEY --project=alesa-personal-assistent 2>/dev/null)
   export ANTHROPIC_API_KEY
+  # GITHUB_ISSUES_TOKEN for bug-classifier issue creation (optional — skip if not in secrets.env)
+  if [[ -z "${GITHUB_ISSUES_TOKEN:-}" ]]; then
+    GITHUB_ISSUES_TOKEN=$(GOOGLE_APPLICATION_CREDENTIALS="" gcloud secrets versions access latest \
+      --secret=GITHUB_ISSUES_TOKEN --project=alesa-personal-assistent 2>/dev/null || true)
+    export GITHUB_ISSUES_TOKEN
+  fi
   export SECRETS_SOURCE=env
 
   cd "$HOME/trained-assist-agent"
