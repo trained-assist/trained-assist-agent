@@ -6,8 +6,8 @@ set -euo pipefail
 LOG_DIR="$HOME/agent-data/mainstream-logs"
 mkdir -p "$LOG_DIR"
 
-# Keep only last 30 log files
-ls -t "$LOG_DIR"/run-*.log 2>/dev/null | tail -n +31 | xargs -r rm --
+# Keep only last 30 log files (|| true — glob may fail if no files yet)
+ls -t "$LOG_DIR"/run-*.log 2>/dev/null | tail -n +31 | xargs -r rm -- || true
 
 LOGFILE="$LOG_DIR/run-$(date +%Y%m%d-%H%M%S).log"
 
