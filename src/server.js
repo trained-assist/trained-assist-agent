@@ -3224,7 +3224,7 @@ ${recent || '(пока нет)'}
       const workDir = path.join(BASE_USERS_DIR, username);
       try {
         const projects = require('./projects');
-        const sessions = require('./sessions');
+        const sessions = require('./session-store');
         const d = projects.decideNewSessionProject(workDir, chatId);
         const out = { action: d.action, active: d.active || null };
 
