@@ -986,6 +986,15 @@ try {
   log('publish', `auto-merge not available (${e.message.slice(0, 80)}) — PR will need manual merge`);
 }
 
+// Close the original PR immediately — don't rely on webhook events from ci-fix-cleanup.yml
+// which can be dropped by GitHub. The fix PR is now the source of truth.
+try {
+  sh(`gh pr close ${PR_NUMBER} -R "${REPO}" --comment "🤖 Superseded by #${newPRNumber}: ${newPRUrl} (pending CI + auto-merge)."`);
+  log('publish', `closed original PR #${PR_NUMBER}`);
+} catch (e) {
+  log('publish', `could not close original PR: ${e.message.slice(0, 80)}`);
+}
+
 await prComment([
   `✅ Fix PR created: ${newPRUrl}`,
   '',
@@ -993,7 +1002,7 @@ await prComment([
   `**Fix:** ${diagnosis.fix_approach}`,
   `**Strategy:** \`${fixStrategy}\``,
   '',
-  `PR #${newPRNumber} will auto-merge when CI passes. This PR will be closed automatically after merge.`,
+  `PR #${newPRNumber} will auto-merge when CI passes.`,
 ].join('\n'));
 
 // ── Write success stats ───────────────────────────────────────────────────────
