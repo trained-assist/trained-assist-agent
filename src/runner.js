@@ -2144,7 +2144,7 @@ function buildContextCard(username, workDir, chatId) {
     lines.push(`⚙️ Claude · ${m}`);
   }
 
-  // GTD section: show when ≥1 open record exists
+// GTD section: show when ≥1 open record exists
   if (workDir) {
     try {
       const openRecs = require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
@@ -2158,7 +2158,6 @@ function buildContextCard(username, workDir, chatId) {
       }
     } catch (e) { console.warn('[runner] gtd pin:', e.message); }
   }
-
   const time = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
   lines.push('');
   lines.push(`⏱ ${time} МСК`);
