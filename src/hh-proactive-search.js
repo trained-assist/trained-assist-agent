@@ -204,12 +204,15 @@ function queriesLookSane(queries, cfg) {
     // Trust the LLM — we can't really check, accept what it said.
     return queries.length > 0;
   }
-  // At least one query must share a 4+ char word with the vacancy's domain.
-  const overlap = queries.some(q => {
+  // At least 40% of queries must share a 4+ char word with the vacancy's domain.
+  // The old "any one query" threshold was too loose: "Sales Manager" shared "sales"
+  // with "Private Banking Sales" and acted as a hall-pass for a fully generic set
+  // like ["Аналитик данных", "Data Scientist", "Sales Manager", ...].
+  const matchCount = queries.filter(q => {
     const qWords = extractKeywords(q);
     return qWords.some(w => domainWords.has(w));
-  });
-  return overlap;
+  }).length;
+  return matchCount >= Math.max(1, Math.ceil(queries.length * 0.4));
 }
 
 // Generate a small fallback set of queries from the vacancy's own title + top-3
@@ -411,12 +414,16 @@ async function generateSearchQueries(atsConfig, orKey, exclusions = []) {
       ? `\nКомментарии рекрутера по уже просмотренным кандидатам (что НЕ подходит):\n${exclusions.map(e => `- ${e}`).join('\n')}\nУчти эти исключения в запросах — например, не ищи по городам которые отмечены как нежелательные.\n`
       : '';
     const prompt = `Вакансия: "${cfg.vacancy_title || 'без названия'}"
-Контекст: ${atsConfig.vacancy_context || '—'}
+Контекст: ${cfg.vacancy_context || '—'}
 Ключевые критерии: ${criteriaStr}
 ${exclusionsBlock}
-Составь 5-7 поисковых запросов для поиска резюме кандидатов в базе резюме HH.ru по этой вакансии.
-Запросы короткие (2-4 слова), по названиям должностей и ключевым навыкам (не по формулировкам вакансии).
-Пиши на русском; добавь 1-2 запроса на английском только если для этой сферы такие термины реально приняты в резюме.
+Составь 5-7 СПЕЦИАЛИЗИРОВАННЫХ поисковых запросов для HH.ru под эту конкретную вакансию.
+
+ПРАВИЛА:
+- Каждый запрос 2-4 слова: название должности или специализированный навык этой сферы
+- НЕ используй общие формулировки («Менеджер по продажам», «Sales Manager», «Специалист по продажам») если у вакансии есть специфическая область — ищи именно эту специфику
+- Используй профессиональную терминологию сферы (например для private banking: «Private Banker», «Wealth Manager», «Управляющий активами»; для IT-рекрутинга: «Tech Recruiter», «IT Headhunter»; и т.д.)
+- Запросы на русском; 1-2 запроса на английском только если это реальные названия должностей в резюме этой сферы
 
 Верни ТОЛЬКО JSON-массив строк, без markdown:
 ["запрос 1", "запрос 2", ...]`;
@@ -478,7 +485,16 @@ function buildScoringPromptText(username) {
     return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
   }
 
-  const cfg = normalizeAtsConfig(latest.ats_config || {});
+  // Prefer the live context-store config if available — it's always current.
+  // Fall back to the results-file snapshot so the function still works without a running session.
+  let rawConfig = latest.ats_config || {};
+  try {
+    const ctxFile = path.join(dataDir, 'sessions', String(username), 'contexts', 'hh', 'ats_config.json');
+    const ctxRaw = JSON.parse(fs.readFileSync(ctxFile, 'utf8'));
+    if (ctxRaw?.value && typeof ctxRaw.value === 'object') rawConfig = ctxRaw.value;
+  } catch { /* no context store — use results file */ }
+
+  const cfg = normalizeAtsConfig(rawConfig);
   const queriesStr = (latest.search_queries || []).map(q => `• "${q}"`).join('\n') || '—';
   const knockoutStr = (cfg.knockout || []).map(k => `• ${k}`).join('\n') || '(не задано)';
   const minExp = cfg.filters?.min_experience_years ?? 2;

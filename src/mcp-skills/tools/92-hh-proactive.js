@@ -14,6 +14,7 @@ const {
   queriesStorePath,
   loadStoredQueries,
   saveStoredQueries,
+  getSearchExclusions,
 } = require('../../hh-proactive-search');
 
 const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
@@ -144,7 +145,10 @@ module.exports = {
         }
         if (!vacancyId) return { error: 'Не удалось определить ID вакансии. Вызови hh_set_active_vacancy или hh_extract_ats_config заново.' };
 
-        const configHash = atsConfig ? atsConfigHash(atsConfig) : null;
+        // Must include current exclusions — same as runProactiveSearch — so stale check
+        // doesn't false-positive when there are no config changes but comments exist.
+        const exclusionsForHash = getSearchExclusions(userId);
+        const configHash = atsConfig ? atsConfigHash(atsConfig, exclusionsForHash) : null;
         const storePath = queriesStorePath(userId, vacancyId);
 
         if (action === 'view') {
