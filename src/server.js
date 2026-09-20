@@ -69,76 +69,7 @@ let RUNTIME_REVISION = 'unknown';
 let GIT_COMMIT = 'unknown';
 try { RUNTIME_REVISION = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim(); GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
 
-const CLASSIFY_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
-// Matches assistant replies that signal task completion — session should not be reused
-// Active forms: убрал, удалил, сделал, etc.
-// Passive short forms: убран/убрана/убраны, удалён/удалена, очищен, заполнен, etc.
-const CLASSIFY_DONE_RE = /готово|сделан|убрал|убран|удалил|удалён|завершен|выполнен|очищен|заполнен|исправлен|опубликован|done|completed|всё\s+готово|всё\s+сделано/i;
-
-async function classifyMessage(message, sessions, openrouterKey) {
-  // Filter out sessions that are too old or ended with a completion reply
-  const now = Date.now();
-  const activeSessions = sessions.filter(s => {
-    if (s.lastAt && now - s.lastAt > CLASSIFY_MAX_AGE_MS) return false;
-    if (s.lastMessageRole === 'assistant' && s.lastAssistantSnippet && CLASSIFY_DONE_RE.test(s.lastAssistantSnippet)) return false;
-    return true;
-  });
-
-  if (activeSessions.length === 0) return { sessionId: null, confidence: 'low' };
-
-  // Build a compact description of each session
-  const sessionDescriptions = activeSessions.map((s, i) => {
-    const lastMsg = s.lastUserMessage ? `\n   Последнее: "${s.lastUserMessage.slice(0, 100)}"` : '';
-    return `${i + 1}. ID: ${s.id}\n   Тема: "${s.topic}"${lastMsg}`;
-  }).join('\n\n');
-
-  const prompt = `Пользователь написал новое сообщение. Определи, к какому из существующих диалогов оно относится.
-
-СУЩЕСТВУЮЩИЕ ДИАЛОГИ:
-${sessionDescriptions}
-
-НОВОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:
-"${message}"
-
-Ответь ТОЛЬКО одной строкой — ID диалога если уверен, или слово "ambiguous" если непонятно.
-Правила:
-- Если сообщение явно продолжает один из диалогов — напиши его ID
-- Если сообщение может относиться к нескольким диалогам или ни к одному — напиши "ambiguous"
-- Не пиши ничего лишнего, только ID или "ambiguous"`;
-
-  let answer;
-  if (openrouterKey) {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${openrouterKey}`,
-      },
-      body: JSON.stringify({
-        model: 'openai/gpt-4o-mini',
-        max_tokens: 64,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      throw new Error(`OpenRouter API ${res.status}: ${errBody.slice(0, 300)}`);
-    }
-    const data = await res.json();
-    answer = data.choices?.[0]?.message?.content?.trim() || 'ambiguous';
-  } else {
-    throw new Error('No API key configured for classify (OPENROUTER_API_KEY required)');
-  }
-
-  if (answer === 'ambiguous') return { sessionId: null, confidence: 'low' };
-
-  // Check that the returned ID actually exists in the active (non-filtered) list
-  const match = activeSessions.find(s => s.id === answer);
-  if (!match) return { sessionId: null, confidence: 'low' };
-
-  return { sessionId: match.id, confidence: 'high' };
-}
+const { classifyMessage, CLASSIFY_MAX_AGE_MS } = require('./classify-message');
 
 // ШАГ 1.2 — cheap completeness gate. Given a coalesced intake buffer, decide
 // whether it reads as a finished, actionable request or an obviously cut-off
