@@ -12,7 +12,12 @@ name: Batch fix PRs (manual)
 #
 # Or via GitHub UI: Actions → Batch fix PRs → Run workflow
 #
-# Max 6 PRs per run (parallel). Increase max-parallel if you need more.
+# PRs are processed SEQUENTIALLY (max-parallel: 1) — this is intentional:
+# parallel fix PRs merge into main at the same time, making each subsequent
+# one immediately stale ("branch not up to date") and triggering another
+# autofix loop. Sequential processing avoids cascading re-runs.
+#
+# Order your PR numbers from highest to lowest value/clarity.
 
 on:
   workflow_dispatch:
@@ -45,7 +50,7 @@ jobs:
     needs: matrix-setup
     strategy:
       matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
-      max-parallel: 3
+      max-parallel: 1
       fail-fast: false
     runs-on: ubuntu-latest
     steps:
