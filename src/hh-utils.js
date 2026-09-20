@@ -79,4 +79,22 @@ async function hhPost(apiPath, token, body) {
   return data;
 }
 
-module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhTokenPath };
+async function hhPut(apiPath, token, body) {
+  const res = await fetch(`${hhApiBase()}${apiPath}`, {
+    method: 'PUT',
+    signal: AbortSignal.timeout(HH_FETCH_TIMEOUT_MS),
+    headers: {
+      Authorization: `Bearer ${token.access_token}`,
+      'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+      'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  if (res.status === 204) return { status: 204 };
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`HH API PUT ${res.status}: ${JSON.stringify(data).slice(0, 200)}`);
+  return data;
+}
+
+module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhPut, hhTokenPath };
