@@ -547,7 +547,7 @@ function scheduleGtdController(secrets) {
 
 async function resumePendingTasks() {
   maintenance.recovered();
-  // Drain flag may still be set (deploy in progress); coordinator --ready will clear it.
+  maintenance.resume(); // clear any leftover drain flag from a previous /restart or deploy
 }
 
 async function main() {
@@ -2386,8 +2386,10 @@ function show(id, type, msg) {
       let results;
       try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+      const { loadCandidateComments } = require('./hh-proactive-search');
+      const pageComments = loadCandidateComments(username);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(generateProactivePageHtml(results, username, callbackBase, given));
+      return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments));
     }
 
     // GET /api/hh/proactive/candidates?username=X&token=Y&page=1&per_page=10
@@ -2514,6 +2516,60 @@ ${expLines || '—'}
           },
         });
         return json(res, 200, result);
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /api/hh/proactive/comment {username, token, candidate_id, text}
+    // Saves a recruiter comment on a candidate; these are fed into future search
+    // query generation as exclusion hints ("не из Новосибирска" → refine queries).
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/comment') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', token: givenToken = '', candidate_id = '', text = '' } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
+      try {
+        const { saveCandidateComment } = require('./hh-proactive-search');
+        saveCandidateComment(username, candidate_id, { text: String(text).slice(0, 1000) });
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /api/hh/proactive/import-seen {username, token, ids: string[]}
+    // Bulk-marks candidate IDs as already seen so they don't appear as "new" in future runs.
+    // Accepts HH resume IDs (bare or extracted from URLs by the client).
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/import-seen') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', token: givenToken = '', ids = [] } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      if (!Array.isArray(ids) || !ids.length) return json(res, 400, { error: 'ids array required' });
+      try {
+        const { loadSeenIds, saveSeenIds } = require('./hh-proactive-search');
+        // Resolve vacancy key from the latest results file (same logic as runProactiveSearch)
+        const latestFile = latestProactiveFile(username);
+        let vacancyKey = 'unknown';
+        if (latestFile) {
+          try {
+            const r = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+            vacancyKey = r.vacancy_id || r.vacancy_title || 'unknown';
+          } catch {}
+        }
+        const seen = loadSeenIds(username);
+        const today = new Date().toISOString().slice(0, 10);
+        const bucket = seen[vacancyKey] || {};
+        let imported = 0;
+        for (const id of ids) {
+          const cleanId = String(id).replace(/[^a-zA-Z0-9]/g, '');
+          if (cleanId && !bucket[cleanId]) { bucket[cleanId] = today; imported++; }
+        }
+        seen[vacancyKey] = bucket;
+        saveSeenIds(username, seen);
+        return json(res, 200, { ok: true, imported, total: Object.keys(bucket).length });
       } catch (e) {
         return json(res, 500, { error: e.message });
       }
@@ -3231,14 +3287,24 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // GET /project-decision?username=xxx&chatId=yyy — what the gateway should do when a
+    // GET /project-decision?username=xxx&chatId=yyy[&task=...] — what the gateway should do when a
     // NEW dialog starts (issue #517): {action:'auto'|'create'|'ask', choices:[{id,name,label}], active}.
     // 'ask' -> gateway renders the inline picker and defers the task until the user chooses.
+    // When `task` is provided and it's a project-agnostic quick command (engine switch, agent info,
+    // etc.), returns action:'auto' immediately — no picker shown, task goes straight to /run.
     if (req.method === 'GET' && url.pathname === '/project-decision') {
       const username = url.searchParams.get('username');
       const chatId = url.searchParams.get('chatId') || null;
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
+
+      // Quick commands don't belong to any project — skip picker entirely.
+      // Regex mirrors ENGINE_SWITCH_INTENT + other global slash commands from runner.js.
+      const taskParam = (url.searchParams.get('task') || '').trim();
+      const GLOBAL_QUICK_COMMAND = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)|^\/(?:get_agent_info|agent_info|oc_\S+|get_webpass|webpass|вебпароль|info)(?:@\S+)?(?=\s|$)/i;
+      if (taskParam && GLOBAL_QUICK_COMMAND.test(taskParam)) {
+        return json(res, 200, { action: 'quick', choices: [], active: null });
+      }
 
       const workDir = path.join(BASE_USERS_DIR, username);
       try {
@@ -4166,7 +4232,9 @@ ${recent || '(пока нет)'}
 
   server.listen(PORT, () => {
     console.log(`assist-agent listening on :${PORT}`);
-    notifyActiveChatsOnStartup(secrets).catch(e => console.error('[startup-notify] error:', e.message));
+    if (process.env.TEST_MODE !== '1') {
+      notifyActiveChatsOnStartup(secrets).catch(e => console.error('[startup-notify] error:', e.message));
+    }
   });
 
   // Drive watcher: poll every 2 min for new files shared with the SA
@@ -4180,7 +4248,7 @@ ${recent || '(пока нет)'}
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
-  scheduleGtdController(secrets);
+  if (process.env.TEST_MODE !== '1') scheduleGtdController(secrets);
 
 
   // Deploys restart this service frequently (every few minutes during an
