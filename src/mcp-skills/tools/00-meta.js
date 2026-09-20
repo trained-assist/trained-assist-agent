@@ -60,9 +60,10 @@ const SKILLS = [
     id: 'dev',
     name: 'Developer — разработка ПО',
     description: 'Полный цикл разработки: клонирует репозиторий на VM, редактирует файлы, запускает тесты, коммитит, пушит, создаёт PR. ' +
-      'Workflow: dev_clarify_requirements (уточнить User Story) → dev_workspace_setup (clone + npm install) → ' +
-      'редактирование через Read/Edit/Write → тесты через bash → git commit/push → github_create_pr. ' +
-      'ВСЕГДА уточняй User Story если задача неоднозначная: кто пользователь, что именно делает, acceptance criteria. ' +
+      'Workflow (spec-driven, по размеру задачи): dev_clarify_requirements (классифицирует trivial/small/feature, уточняет User Story) → ' +
+      'для feature-уровня dev_write_spec (durable EARS-спека в репозитории, ДО правок кода) → dev_workspace_setup (clone + npm install) → ' +
+      'редактирование через Read/Edit/Write → тесты через bash → git commit/push (включая specs/) → github_create_pr. ' +
+      'Для trivial/small — без вопросов и без спеки, это чистые накладные расходы. ' +
       'Если нет аккаунта GitHub — рекомендуй создать на github.com (бесплатно). ' +
       'Если нет репозитория — предложи dev_new_repo.',
     requires: 'GitHub токен (scope: repo). Подключи через connect({ service: "github" }).',
