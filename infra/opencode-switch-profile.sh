@@ -2,7 +2,7 @@
 # opencode-switch-profile.sh — merge base + profile → ~/.config/opencode/opencode.json
 #
 # Usage:
-#   ./infra/opencode-switch-profile.sh [value|quality|free|mimo|russian-recruiter]
+#   ./infra/opencode-switch-profile.sh [value|quality|free|mimo|russian-recruiter|lavish-luna]
 #
 # Reads OPENCODE_PROFILE from secrets.env if no arg given.
 # Writes result to ~/.config/opencode/opencode.json on this machine.
@@ -33,6 +33,7 @@ case "$PROFILE" in
   v)  PROFILE="value" ;;
   f)  PROFILE="free" ;;
   m)  PROFILE="mimo" ;;
+  ll) PROFILE="lavish-luna" ;;
 esac
 
 PROFILE_FILE="$PROFILES_DIR/$PROFILE.json"
