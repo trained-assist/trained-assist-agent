@@ -65,12 +65,16 @@ jobs:
           fi
 
   autofix:
-    needs: [ci, staging-gate]
+    needs: [ci, staging-gate, merge]
     if: |
       always() &&
       github.event_name == 'pull_request' &&
       !github.event.pull_request.draft &&
-      (needs.ci.result == 'failure' || needs.staging-gate.result == 'failure') &&
+      (
+        needs.ci.result == 'failure' ||
+        needs.staging-gate.result == 'failure' ||
+        needs.merge.result == 'failure'
+      ) &&
       !startsWith(github.head_ref, 'fix/ci-')
     runs-on: ubuntu-latest
     permissions:
@@ -117,7 +121,9 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_ID: ${{ github.run_id }}
+          # When merge failed (branch not up to date) but CI passed — use batch mode (RUN_ID=0).
+          # Batch mode skips CI log fetch and goes straight to pre-stage A (merge + conflict resolve).
+          RUN_ID: ${{ (needs.merge.result == 'failure' && needs.ci.result == 'success' && needs.staging-gate.result == 'success') && '0' || github.run_id }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           ORIGINAL_BRANCH: ${{ github.head_ref }}
