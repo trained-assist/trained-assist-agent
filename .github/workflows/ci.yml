@@ -211,7 +211,13 @@ jobs:
       - name: Squash-merge the PR
         id: merge
         run: |
-          gh pr merge --squash --match-head-commit "${{ github.event.pull_request.head.sha }}" "${{ github.event.pull_request.html_url }}"
+          # Retry loop: GitHub branch-protection status can lag a few seconds behind
+          # the Actions job completion, causing "2 of 2 required status checks are expected".
+          for i in 1 2 3 4 5; do
+            gh pr merge --squash --match-head-commit "${{ github.event.pull_request.head.sha }}" "${{ github.event.pull_request.html_url }}" && break
+            echo "Merge attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
           echo "sha=$(gh pr view '${{ github.event.pull_request.html_url }}' --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
