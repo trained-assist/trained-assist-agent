@@ -759,6 +759,31 @@ async function scoreUnscoredProactiveCandidates(username, options = {}) {
   return enriched.filter(c => c.plus_tags).length;
 }
 
+// Per-user proactive search schedule config.
+// Schema: { enabled: bool, interval_hours: number, last_run: ISO|null }
+function schedulePath(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', 'schedule.json');
+}
+
+function loadSchedule(username) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(schedulePath(username), 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-schedule] read failed:', e.message);
+    return null;
+  }
+}
+
+function saveSchedule(username, data) {
+  const file = schedulePath(username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
 module.exports = {
   runProactiveSearch,
   buildScoringPromptText,
@@ -773,9 +798,13 @@ module.exports = {
   loadCandidateComments,
   saveCandidateComment,
   getSearchExclusions,
-  // Per-vacancy query store
+// Per-vacancy query store
   atsConfigHash,
   queriesStorePath,
   loadStoredQueries,
   saveStoredQueries,
+  // Schedule config
+  schedulePath,
+  loadSchedule,
+  saveSchedule,
 };
