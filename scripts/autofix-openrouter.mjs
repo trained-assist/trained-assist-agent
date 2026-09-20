@@ -353,7 +353,19 @@ Return ONLY the resolved code — no conflict markers, no explanations, no markd
     }
 
     writeFileSync(fullPath, resolved);
-    log('conflict-resolve', `${filePath}: resolved OK`);
+
+    // Syntax check for JS files — AI sometimes introduces await outside async, etc.
+    if (filePath.endsWith('.js') || filePath.endsWith('.mjs') || filePath.endsWith('.cjs')) {
+      try {
+        execFileSync('node', ['--check', fullPath], { encoding: 'utf8' });
+        log('conflict-resolve', `${filePath}: resolved OK (syntax valid)`);
+      } catch (syntaxErr) {
+        writeFileSync(fullPath, content); // restore original conflicted content
+        return { ok: false, reason: `AI resolution of ${filePath} introduced syntax error: ${syntaxErr.message.slice(0, 120)}` };
+      }
+    } else {
+      log('conflict-resolve', `${filePath}: resolved OK`);
+    }
   }
 
   return { ok: true };
