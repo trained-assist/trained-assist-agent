@@ -1,9 +1,20 @@
-name: Auto-fix CI failure
+name: Auto-fix CI failure (manual)
 
+# Superseded by the `autofix` job in ci.yml which runs inline and is more reliable.
+# workflow_run trigger was never firing on this private repo (known GitHub Actions limitation).
+# Kept here for manual debugging runs only.
 on:
-  workflow_run:
-    workflows: ["CI + Deploy"]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to fix'
+        required: true
+      branch:
+        description: 'Branch name'
+        required: true
+      run_id:
+        description: 'Failed CI run ID'
+        required: true
 
 permissions:
   contents: write
@@ -89,10 +100,24 @@ jobs:
           ORIGINAL_BRANCH: ${{ steps.pr.outputs.branch }}
         run: node scripts/autofix-openrouter.mjs
 
-      - name: Report unfixed failure
+- name: Report unfixed failure
         if: steps.guard.outputs.skip == 'false' && steps.autofix.outcome != 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REASON=$(node -e "
+            try {
+              const s = JSON.parse(require('fs').readFileSync('ci-fixer-stats.json','utf8'));
+              process.stdout.write(s.reason || s.category || 'unknown');
+            } catch { process.stdout.write('unknown'); }
+          " 2>/dev/null || echo "unknown")
           gh pr comment ${{ steps.pr.outputs.number }} -R ${{ github.repository }} --body \
-            "🤖 3-stage auto-fix pipeline could not resolve the failure in run ${{ github.event.workflow_run.id }}. Needs a human look."
+            "🤖 Auto-fix pipeline could not resolve this CI failure (run ${{ github.event.workflow_run.id }}). Reason: \`${REASON}\`. Needs a human look."
+      - name: Upload stats artifact
+        if: steps.guard.outputs.skip == 'false' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-fixer-stats-pr${{ steps.pr.outputs.number }}-run${{ github.run_id }}
+          path: ci-fixer-stats.json
+          if-no-files-found: ignore
+          retention-days: 90

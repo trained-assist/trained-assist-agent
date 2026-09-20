@@ -287,6 +287,55 @@ function mergeSeenIds(username, vacancyId, collectedIds) {
   return { newIds: new Set(newIds), newCount: newIds.length, totalSeenAfter: Object.keys(bucket).length, firstRun };
 }
 
+// Per-vacancy search-query store. Queries live in the same proactive directory, keyed by
+// vacancy ID. This avoids the old anti-pattern of embedding them inside ats_config.json —
+// that file is overwritten on every ATS edit and is shared across all vacancies for a user,
+// causing stale / wrong queries to survive a vacancy switch.
+// Schema: { vacancy_id, queries: string[], config_hash: string, generated_at: ISO }
+function queriesStorePath(username, vacancyId) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', `queries-${vacancyId}.json`);
+}
+
+// Stable hash of the ATS fields that influence query generation.
+// If the recruiter edits required/preferred/knockout, the hash changes and queries regenerate.
+function atsConfigHash(cfg) {
+  const key = JSON.stringify({
+    title: cfg.vacancy_title,
+    context: cfg.vacancy_context,
+    required: (cfg.required || []).map(c => c.name),
+    preferred: (cfg.preferred || []).map(c => c.name),
+    knockout: cfg.knockout || [],
+  });
+  return require('crypto').createHash('md5').update(key).digest('hex').slice(0, 12);
+}
+
+function loadStoredQueries(username, vacancyId, configHash) {
+  try {
+    const data = JSON.parse(fs.readFileSync(queriesStorePath(username, vacancyId), 'utf8'));
+    if (data.config_hash === configHash && Array.isArray(data.queries) && data.queries.length > 0) {
+      return data.queries;
+    }
+    return null;
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-search] queries store read failed:', e.message);
+    return null;
+  }
+}
+
+function saveStoredQueries(username, vacancyId, queries, configHash) {
+  const file = queriesStorePath(username, vacancyId);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify({
+    vacancy_id: vacancyId,
+    queries,
+    config_hash: configHash,
+    generated_at: new Date().toISOString(),
+  }, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
 // Build a short Telegram digest for a successful proactive run with new candidates.
 // Caller passes the already-enriched slice of `newCandidates` (typically ≤10 shown).
 function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, newCandidates, url }) {
@@ -304,21 +353,62 @@ function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, newCandidates
   return [head, stats, ...top, tail, link].filter(Boolean).join('\n');
 }
 
+// --- Candidate comments (for search refinement) ---
+
+function commentsPath(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', 'candidate-comments.json');
+}
+
+function loadCandidateComments(username) {
+  try {
+    const raw = fs.readFileSync(commentsPath(username), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-search] comments read failed:', e.message);
+    return {};
+  }
+}
+
+function saveCandidateComment(username, candidateId, commentData) {
+  const comments = loadCandidateComments(username);
+  comments[String(candidateId)] = { ...commentData, updatedAt: new Date().toISOString() };
+  const file = commentsPath(username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(comments, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+// Extract search exclusion hints from candidate comments.
+// These are comments that describe what we DON'T want (typically negative feedback).
+// Returns an array of strings like ["не из Новосибирска", "без опыта в рознице"].
+function getSearchExclusions(username) {
+  const comments = loadCandidateComments(username);
+  return Object.values(comments)
+    .map(c => (c.text || '').trim())
+    .filter(Boolean);
+}
+
 // Generate HH resume-search queries for this specific vacancy (title + context + criteria)
 // instead of a fixed list — makes cold-search work for any vacancy, not just one domain.
-// Layered: ask the LLM first, sanity-check the result, merge in a deterministic
+// Layered: ask the LLM first, sanity-check the result, use a deterministic
 // fallback derived from the vacancy's own fields when the LLM goes off-topic.
-async function generateSearchQueries(atsConfig, orKey) {
+async function generateSearchQueries(atsConfig, orKey, exclusions = []) {
   const cfg = normalizeAtsConfig(atsConfig);
   const criteriaStr = [...(cfg.required || []), ...(cfg.preferred || [])]
     .map(c => c.name).filter(Boolean).join(', ') || '—';
 
   let aiQueries = [];
   if (orKey) {
+    const exclusionsBlock = exclusions.length
+      ? `\nКомментарии рекрутера по уже просмотренным кандидатам (что НЕ подходит):\n${exclusions.map(e => `- ${e}`).join('\n')}\nУчти эти исключения в запросах — например, не ищи по городам которые отмечены как нежелательные.\n`
+      : '';
     const prompt = `Вакансия: "${cfg.vacancy_title || 'без названия'}"
 Контекст: ${atsConfig.vacancy_context || '—'}
 Ключевые критерии: ${criteriaStr}
-
+${exclusionsBlock}
 Составь 5-7 поисковых запросов для поиска резюме кандидатов в базе резюме HH.ru по этой вакансии.
 Запросы короткие (2-4 слова), по названиям должностей и ключевым навыкам (не по формулировкам вакансии).
 Пиши на русском; добавь 1-2 запроса на английском только если для этой сферы такие термины реально приняты в резюме.
@@ -349,15 +439,23 @@ async function generateSearchQueries(atsConfig, orKey) {
     }
   }
 
-  if (!aiQueries.length) throw new Error('empty query list from AI');
+  if (!aiQueries.length) {
+    // LLM returned empty / parse failed — use deterministic fallback instead of throwing,
+    // so a single bad LLM response doesn't kill the entire proactive run.
+    const fallback = deriveFallbackQueries(cfg);
+    if (fallback.length) return fallback;
+    throw new Error('empty query list from AI and no fallback derivable from vacancy title/criteria');
+  }
   if (queriesLookSane(aiQueries, cfg)) return aiQueries;
 
-  // AI went off-topic — merge in a deterministic fallback derived from the vacancy
-  // itself so the cold-search at least targets the right profession.
-  console.warn(`[proactive-search] AI queries look off-topic for "${cfg.vacancy_title || 'вакансии'}": ${JSON.stringify(aiQueries)}. Merging fallback derived from vacancy title + criteria.`);
+  // AI went off-topic — use ONLY the deterministic fallback. Including the off-topic
+  // AI queries (even merged with fallback) brings in unrelated candidates: e.g. for
+  // "Финансовый советник" the LLM once returned "Менеджер по продажам" which then
+  // pulled 26 logistics/export salespeople. The fallback is derived purely from the
+  // vacancy's own fields so it can't go off-topic.
+  console.warn(`[proactive-search] AI queries look off-topic for "${cfg.vacancy_title || 'вакансии'}": ${JSON.stringify(aiQueries)}. Using fallback derived from vacancy title + criteria only.`);
   const fallback = deriveFallbackQueries(cfg);
-  const merged = [...new Set([...aiQueries, ...fallback])].slice(0, 7);
-  return merged.length ? merged : aiQueries;
+  return fallback.length ? fallback : aiQueries;
 }
 
 // Scoring explanation shown to the recruiter on request — built from the latest actual
@@ -447,16 +545,26 @@ async function runProactiveSearch(username, workDir, options = {}) {
   // search returns 30 random "Аналитик данных" for a "Финансовый советник" vacancy.
   atsConfig = normalizeAtsConfig(atsConfig);
 
-  // Guard: if the recruiter switched active vacancy (hh_set_active_vacancy) after this
-  // config was extracted for a different one, don't silently search with the wrong criteria.
+  // Resolve vacancy ID early — fail fast rather than silently using a shared "unknown"
+  // bucket that collides across vacancies. A real vacancy_id is required so that:
+  //   1. seen-ids for two different vacancies stay in separate buckets
+  //   2. cached search queries are keyed per-vacancy and don't leak between configs
+  let activeVacancy = null;
   try {
-    const activeVacancy = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
-    if (activeVacancy?.id && atsConfig.vacancy_id && atsConfig.vacancy_id !== activeVacancy.id) {
-      throw new Error(`ATS конфиг настроен для другой вакансии («${atsConfig.vacancy_title || atsConfig.vacancy_id}»), а активна «${activeVacancy.title || activeVacancy.id}». Вызови hh_extract_ats_config заново для текущей вакансии.`);
-    }
+    activeVacancy = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
   } catch (e) {
-    if (e instanceof SyntaxError || e.code === 'ENOENT') { /* no active_vacancy context yet — legacy config, allow */ }
-    else throw e;
+    if (!(e instanceof SyntaxError) && e.code !== 'ENOENT') throw e;
+  }
+
+  let vacancyKey = atsConfig.vacancy_id ? String(atsConfig.vacancy_id) : '';
+  if (!vacancyKey && activeVacancy?.id) vacancyKey = String(activeVacancy.id);
+  if (!vacancyKey) {
+    throw new Error('Не удалось определить ID вакансии. Вызови hh_set_active_vacancy или hh_extract_ats_config заново — vacancy_id должен быть задан перед запуском поиска.');
+  }
+
+  // Guard: active vacancy changed after this config was extracted for a different one.
+  if (activeVacancy?.id && atsConfig.vacancy_id && atsConfig.vacancy_id !== activeVacancy.id) {
+    throw new Error(`ATS конфиг настроен для другой вакансии («${atsConfig.vacancy_title || atsConfig.vacancy_id}»), а активна «${activeVacancy.title || activeVacancy.id}». Вызови hh_extract_ats_config заново для текущей вакансии.`);
   }
 
   // Read OpenRouter key for AI enrichment + query generation
@@ -464,25 +572,19 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
   const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
 
-  // Search queries are generated per-vacancy and cached in the ATS config until the
-  // vacancy title changes, so we don't re-call the LLM on every run.
-  let queries = Array.isArray(atsConfig.proactive_search_queries) && atsConfig.proactive_search_queries_for === atsConfig.vacancy_title
-    ? atsConfig.proactive_search_queries
-    : null;
+  // Search queries are generated per-vacancy and cached in a per-vacancy file keyed by
+  // vacancyKey. They are reused as long as the ATS config fields that influence query
+  // generation haven't changed (detected via configHash). Two vacancies never share the
+  // same query file, so switching between them doesn't corrupt each other's cache.
+  const forceRegen = Boolean(options.forceRegenQueries);
+  const configHash = atsConfigHash(atsConfig);
+  let queries = !forceRegen ? loadStoredQueries(username, vacancyKey, configHash) : null;
   if (!queries) {
     if (!orKey) throw new Error('OpenRouter ключ не найден — нужен, чтобы сгенерировать поисковые запросы под эту вакансию.');
-    queries = await generateSearchQueries(atsConfig, orKey);
-    try {
-      const raw = JSON.parse(fs.readFileSync(atsCtxFile, 'utf8'));
-      raw.value = raw.value || {};
-      raw.value.proactive_search_queries = queries;
-      raw.value.proactive_search_queries_for = atsConfig.vacancy_title;
-      fs.writeFileSync(atsCtxFile, JSON.stringify(raw, null, 2), 'utf8');
-      atsConfig.proactive_search_queries = queries;
-      atsConfig.proactive_search_queries_for = atsConfig.vacancy_title;
-    } catch (e) {
-      console.error('[proactive-search] failed to cache generated queries:', e.message);
-    }
+    // Pass recruiter's exclusion comments so the LLM can refine queries accordingly
+    const exclusions = getSearchExclusions(username);
+    queries = await generateSearchQueries(atsConfig, orKey, exclusions);
+    saveStoredQueries(username, vacancyKey, queries, configHash);
   }
 
   const allCandidates = new Map();
@@ -548,9 +650,26 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const outDir = path.join(dataDir, 'hh', username, 'proactive');
   fs.mkdirSync(outDir, { recursive: true });
 
+  // Compute seen-IDs BEFORE writing the results file so we can mark is_new on candidates.
+  // Any crash after this point means a duplicate alert next time — acceptable trade-off
+  // (losing seen-IDs would cause candidates to be shown again forever).
+  const collectedIds = enriched.map(c => c.id).filter(Boolean);
+  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
+  try {
+    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
+  } catch (e) {
+    console.error('[proactive-search] seen-ids merge failed:', e.message);
+  }
+
+  // Mark is_new on candidates that appear for the first time
+  const markedCandidates = enriched.map(c => ({
+    ...c,
+    is_new: seenInfo.newIds.has(c.id),
+  }));
+
   const outFile = path.join(outDir, `search-results-${dateStr}.json`);
   const output = {
-    vacancy_id: atsConfig.vacancy_id || '',
+    vacancy_id: vacancyKey,
     vacancy_title: atsConfig.vacancy_title || 'Вакансия',
     search_queries: queries,
     searched_at: now.toISOString(),
@@ -558,21 +677,9 @@ async function runProactiveSearch(username, workDir, options = {}) {
     total_after_knockout: scored.length,
     ai_enriched: Boolean(orKey),
     ats_config: atsConfig,
-    candidates: enriched,
+    candidates: markedCandidates,
   };
   fs.writeFileSync(outFile, JSON.stringify(output, null, 2), 'utf8');
-
-  // Merge into persistent seen-IDs so we can distinguish "new" from "already shown".
-  // Runs AFTER the file write — losing a crash here means a duplicate alert next time,
-  // not losing candidates (the on-disk JSON is the durable source).
-  const vacancyKey = atsConfig.vacancy_id || atsConfig.vacancy_title || 'unknown';
-  const collectedIds = (enriched || []).map(c => c.id).filter(Boolean);
-  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
-  try {
-    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
-  } catch (e) {
-    console.error('[proactive-search] seen-ids merge failed:', e.message);
-  }
 
   const pass_count = enriched.filter(c => c.tag === 'PASS').length;
   const review_count = enriched.filter(c => c.tag === 'REVIEW').length;
@@ -652,6 +759,31 @@ async function scoreUnscoredProactiveCandidates(username, options = {}) {
   return enriched.filter(c => c.plus_tags).length;
 }
 
+// Per-user proactive search schedule config.
+// Schema: { enabled: bool, interval_hours: number, last_run: ISO|null }
+function schedulePath(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', 'schedule.json');
+}
+
+function loadSchedule(username) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(schedulePath(username), 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-schedule] read failed:', e.message);
+    return null;
+  }
+}
+
+function saveSchedule(username, data) {
+  const file = schedulePath(username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
 module.exports = {
   runProactiveSearch,
   buildScoringPromptText,
@@ -663,4 +795,16 @@ module.exports = {
   mergeSeenIds,
   buildProactiveDigest,
   seenIdsPath,
+  loadCandidateComments,
+  saveCandidateComment,
+  getSearchExclusions,
+// Per-vacancy query store
+  atsConfigHash,
+  queriesStorePath,
+  loadStoredQueries,
+  saveStoredQueries,
+  // Schedule config
+  schedulePath,
+  loadSchedule,
+  saveSchedule,
 };

@@ -9,7 +9,7 @@ pid = subprocess.check_output(['systemctl', 'show', 'assist-agent', '-p', 'MainP
 if pid == '0':
     print('Service not running; nothing to drain.', flush=True)
     sys.exit(0)
-env = dict(item.split('=', 1) for item in Path('/proc/' + pid + '/environ').read_bytes().decode().split('\0') if '=' in item)
+env = dict(item.split('=', 1) for item in Path('/proc/' + pid + '/environ').read_bytes().decode('utf-8', errors='replace').split('\0') if '=' in item)
 
 def api(body=None):
     req = urllib.request.Request('http://127.0.0.1:' + env.get('PORT', '8080') + '/maintenance',
@@ -61,6 +61,7 @@ else:
             claimed = api({'action': 'claim', 'id': operation_id})
             if claimed.get('claimed'):
                 break
+            time.sleep(5)  # another deployer holds the claim — avoid tight loop
         else:
             print('Waiting for active work:', state.get('active'), flush=True)
             time.sleep(5)

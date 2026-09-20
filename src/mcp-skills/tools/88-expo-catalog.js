@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { expoDataDir, expoDeployDir } = require('../expo-paths.js');
+const { expoDataDir, expoDeployDir, isExpoEnabled } = require('../expo-paths.js');
 
 const TEMPLATE_PATH = path.join(__dirname, '../../catalog-template/index.html');
 
@@ -22,6 +22,8 @@ function slugify(url) {
 }
 
 module.exports = {
+  isReady: isExpoEnabled,
+  setupTools: [],
   tools: {
 
     expo_build_catalog: {
