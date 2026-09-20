@@ -637,11 +637,17 @@ Set is_clear=true for ordinary feature PRs, bug fixes, refactors, dependency upd
   log('stage0', `is_clear: ${reasoning.is_clear}`);
 
   if (!reasoning.is_clear) {
-    const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
-    await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
-    writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
-    log('stage0', `ambiguous PR — stopping`);
-    process.exit(0); // not a failure — just not our job
+    if (BATCH_MODE) {
+      // In batch mode we're here to merge a stale branch, not to diagnose CI failures.
+      // Proceed with branch name as purpose fallback for conflict resolution.
+      log('stage0', `ambiguous in batch mode — proceeding anyway (purpose: ${reasoning.purpose})`);
+    } else {
+      const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
+      await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
+      writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
+      log('stage0', `ambiguous PR — stopping`);
+      process.exit(0); // not a failure — just not our job
+    }
   }
 
   // Announce we're starting — purpose confirmed
@@ -895,11 +901,15 @@ const fixStrategy = preStageDiagnosis
 sh('git config user.name "trained-assist-autofix"');
 sh('git config user.email "autofix@trained-assist.bot"');
 sh('git add -A');
-sh(`git commit -m "fix: auto-fix CI failure [autofix]
+// Pre-stage A (conflict resolution or clean merge) may have already committed.
+// Skip the commit if nothing is staged — avoids "nothing to commit" crash.
+if (sh('git status --porcelain').trim()) {
+  sh(`git commit -m "fix: auto-fix CI failure [autofix]
 
 Diagnosis: ${diagnosis.problem.slice(0, 120).replace(/"/g, "'")}
 Strategy: ${fixStrategy}"
 `);
+}
 sh(`git checkout -b ${fixBranch}`);
 sh(`git push origin ${fixBranch}`);
 
