@@ -29,13 +29,15 @@
 // Every run writes ci-fixer-stats.json + appends to $GITHUB_STEP_SUMMARY.
 // Categories (used to decide when to escalate to a paid-model second pass):
 //
-//   success:pre_a_merge         branch was behind → git merge fixed it
-//   success:pre_b_permissions   job lacked permissions → workflow YAML patched
-//   success:ai                  3-stage free-model pipeline fixed it
+//   success:pre_a_merge              branch was behind → git merge fixed it
+//   success:pre_a_conflict_resolved  merge had conflicts → AI resolved them using PR purpose
+//   success:pre_b_permissions        job lacked permissions → workflow YAML patched
+//   success:ai                       3-stage free-model pipeline fixed it
 //
 //   fail:stage0_ambiguous       PR purpose unclear — skipping to avoid blind fix
 //   fail:cloudflare_do          Cloudflare DO migration conflict (needs human)
-//   fail:merge_conflict         git merge had conflicts (needs human)
+//   fail:merge_conflict         git merge had conflicts and AI could not resolve them
+//   fail:ai_conflict_resolution AI tried to resolve conflicts but failed/left markers
 //   fail:permissions_no_workflow permission error but no patchable workflow found
 //   fail:race_pr_closed         PR was already closed/merged before we started
 //   fail:ai_no_diagnose         Stage 1 could not identify root cause
@@ -45,6 +47,12 @@
 //   fail:ai_tests_fail          patch applied but tests still fail  ← paid-tier candidate
 //   fail:ai_model_error         OpenRouter API error (network/quota/model gone)
 //   fail:other                  unexpected error
+//
+// ── Batch mode ──────────────────────────────────────────────────────────────────
+// Set RUN_ID=0 (or BATCH_MODE=true) to run without a CI log reference.
+// In batch mode the script skips the CI log fetch and always tries pre-stage A
+// (merge + AI conflict resolution). Use batch-fix-prs.yml workflow to trigger
+// multiple PRs at once.
 
 import { execSync, execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync } from 'node:fs';
@@ -72,6 +80,9 @@ const {
   BASE_BRANCH = 'main',
   GITHUB_STEP_SUMMARY = '',
 } = process.env;
+
+// Batch mode: RUN_ID=0 means "no CI run to reference — just try merge + conflict resolution"
+const BATCH_MODE = RUN_ID === '0' || process.env.BATCH_MODE === 'true';
 
 function sh(cmd) {
   return execSync(cmd, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 20 });
@@ -185,13 +196,72 @@ function readFileSafe(filePath) {
   }
 }
 
+// ── Conflict resolution with AI ──────────────────────────────────────────────
+// Called by tryFixOutOfDate when git merge has conflicts.
+// Uses the PR's purpose (from Stage 0) to guide resolution — the "why" makes
+// per-block decisions more accurate than resolving with no context.
+async function resolveConflictsWithAI(conflictedFiles, prPurposeArg) {
+  // <<< ... === ... >>> regex — one conflict block at a time
+  const CONFLICT_RE = /<<<<<<< [^\n]+\n([\s\S]*?)\n?=======\n([\s\S]*?)\n?>>>>>>> [^\n]+/g;
+
+  for (const filePath of conflictedFiles) {
+    const fullPath = path.join(process.cwd(), filePath);
+    let content;
+    try { content = readFileSync(fullPath, 'utf8'); } catch { continue; }
+
+    const blocks = [];
+    let match;
+    CONFLICT_RE.lastIndex = 0;
+    while ((match = CONFLICT_RE.exec(content)) !== null) {
+      blocks.push({ full: match[0], ours: match[1], theirs: match[2] });
+    }
+    if (blocks.length === 0) continue;
+
+    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI...`);
+
+    let resolved = content;
+    for (const block of blocks) {
+      let resolvedBlock;
+      try {
+        resolvedBlock = await callModel(STAGE0_MODEL, [
+          {
+            role: 'system',
+            content: `You are resolving a git merge conflict. The PR's purpose is: "${prPurposeArg}".
+Resolve the conflict so the result serves that purpose while keeping unrelated code intact.
+Return ONLY the resolved code — no conflict markers, no explanation, no code fences.`,
+          },
+          {
+            role: 'user',
+            content: `File: ${filePath}\n\nConflict block:\n${block.full}\n\nResolved:`,
+          },
+        ]);
+      } catch (e) {
+        return { ok: false, reason: `AI call failed for ${filePath}: ${e.message.slice(0, 100)}` };
+      }
+
+      resolved = resolved.replace(block.full, resolvedBlock.trim());
+    }
+
+    if (/^<{7} /m.test(resolved) || /^>{7} /m.test(resolved)) {
+      return { ok: false, reason: `conflict markers remain in ${filePath} after AI resolution` };
+    }
+
+    writeFileSync(fullPath, resolved);
+    log('conflict-resolve', `${filePath}: resolved OK`);
+  }
+
+  return { ok: true };
+}
+
 // ── Pre-stage A: Out-of-date branch ─────────────────────────────────────────
 // Detection: CI auto-merge step fails with "not up to date with the base branch"
-// Fix: git merge origin/<BASE_BRANCH>
-function tryFixOutOfDate(failedLog) {
-  if (!/not up to date with the base branch|head branch.*behind/i.test(failedLog)) return null;
+//            OR batch mode (always try merge regardless of log content).
+// Fix: git merge origin/<BASE_BRANCH>; if conflicts → AI resolution using PR purpose.
+async function tryFixOutOfDate(failedLog, prPurposeArg) {
+  const logMatches = /not up to date with the base branch|head branch.*behind/i.test(failedLog);
+  if (!BATCH_MODE && !logMatches) return null;
 
-  log('pre-A', `detected "not up to date" — merging origin/${BASE_BRANCH}...`);
+  log('pre-A', `${BATCH_MODE ? 'batch mode' : 'detected "not up to date"'} — merging origin/${BASE_BRANCH}...`);
   try {
     sh(`git fetch origin ${BASE_BRANCH} --quiet`);
     sh(`git merge origin/${BASE_BRANCH} --no-edit -m "merge: sync with ${BASE_BRANCH} before merge"`);
@@ -202,13 +272,52 @@ function tryFixOutOfDate(failedLog) {
       problem: `Branch was behind \`${BASE_BRANCH}\` — merged to bring it up to date`,
       fix_approach: `Merged \`origin/${BASE_BRANCH}\` into the branch. No source code changes.`,
     };
-  } catch (e) {
-    try { sh('git merge --abort'); } catch {}
+  } catch (mergeErr) {
+    const conflictedFiles = sh('git diff --name-only --diff-filter=U').trim().split('\n').filter(Boolean);
+
+    if (conflictedFiles.length === 0) {
+      // Non-conflict merge failure (dirty worktree, etc.)
+      try { sh('git merge --abort'); } catch {}
+      return {
+        ok: false,
+        category: 'fail:merge_conflict',
+        reason: `merge with ${BASE_BRANCH} failed (not a conflict): ${mergeErr.message.slice(0, 100)}`,
+        detail: mergeErr.message.slice(0, 200),
+      };
+    }
+
+    if (!prPurposeArg) {
+      try { sh('git merge --abort'); } catch {}
+      return {
+        ok: false,
+        category: 'fail:merge_conflict',
+        reason: `merge with ${BASE_BRANCH} had ${conflictedFiles.length} conflict(s) but no PR purpose for AI resolution`,
+        detail: conflictedFiles.join(', '),
+      };
+    }
+
+    log('pre-A', `${conflictedFiles.length} conflict(s): ${conflictedFiles.join(', ')} — asking AI to resolve...`);
+    await prComment(`🔀 Merge conflicts in ${conflictedFiles.length} file(s): \`${conflictedFiles.join('`, `')}\`\n\nAsking AI to resolve using PR purpose: _"${prPurposeArg.slice(0, 100)}"_…`);
+
+    const resolveResult = await resolveConflictsWithAI(conflictedFiles, prPurposeArg);
+    if (!resolveResult.ok) {
+      try { sh('git merge --abort'); } catch {}
+      return {
+        ok: false,
+        category: 'fail:ai_conflict_resolution',
+        reason: resolveResult.reason,
+        detail: `conflicted files: ${conflictedFiles.join(', ')}`,
+      };
+    }
+
+    sh('git add -A');
+    sh(`git commit -m "merge: resolve conflicts with origin/${BASE_BRANCH} [ai-assisted]"`);
+    log('pre-A', 'AI conflict resolution successful');
     return {
-      ok: false,
-      category: 'fail:merge_conflict',
-      reason: `merge with ${BASE_BRANCH} had conflicts — needs human resolution`,
-      detail: e.message.slice(0, 200),
+      ok: true,
+      category: 'success:pre_a_conflict_resolved',
+      problem: `Branch had merge conflicts with \`${BASE_BRANCH}\` — AI resolved them using PR purpose`,
+      fix_approach: `Merged \`origin/${BASE_BRANCH}\`, AI resolved ${conflictedFiles.length} file(s): ${conflictedFiles.join(', ')}`,
     };
   }
 }
@@ -319,32 +428,39 @@ function checkCloudflareConflict(failedLog) {
 // ── Preflight ────────────────────────────────────────────────────────────────
 
 if (!OPENROUTER_API_KEY) failWithStats('fail:other', 'OPENROUTER_API_KEY not set');
-if (!RUN_ID || !REPO || !PR_NUMBER) failWithStats('fail:other', 'missing RUN_ID/REPO/PR_NUMBER env');
+if (!REPO || !PR_NUMBER) failWithStats('fail:other', 'missing REPO/PR_NUMBER env');
+if (!BATCH_MODE && !RUN_ID) failWithStats('fail:other', 'missing RUN_ID env (set RUN_ID=0 for batch/manual mode)');
 
-// ── Race condition guard ─────────────────────────────────────────────────────
-try {
-  const prViewRaw = sh(`gh pr view ${PR_NUMBER} -R ${REPO} --json state,statusCheckRollup`);
-  const prInfo = JSON.parse(prViewRaw);
-  if (prInfo.state !== 'OPEN') {
-    writeStats('fail:race_pr_closed', { reason: `PR is already ${prInfo.state}` });
-    log('guard', `PR #${PR_NUMBER} is already ${prInfo.state} — aborting`);
-    process.exit(0); // not a real failure — nothing to do
+// ── Race condition guard (skipped in batch mode) ─────────────────────────────
+if (!BATCH_MODE) {
+  try {
+    const prViewRaw = sh(`gh pr view ${PR_NUMBER} -R ${REPO} --json state,statusCheckRollup`);
+    const prInfo = JSON.parse(prViewRaw);
+    if (prInfo.state !== 'OPEN') {
+      writeStats('fail:race_pr_closed', { reason: `PR is already ${prInfo.state}` });
+      log('guard', `PR #${PR_NUMBER} is already ${prInfo.state} — aborting`);
+      process.exit(0); // not a real failure — nothing to do
+    }
+    const checks = prInfo.statusCheckRollup || [];
+    if (checks.length > 0 && !checks.some(c => c.conclusion === 'FAILURE' || c.conclusion === 'TIMED_OUT')) {
+      writeStats('fail:race_pr_closed', { reason: 'CI no longer shows failures' });
+      log('guard', `PR #${PR_NUMBER} CI no longer shows failures — aborting`);
+      process.exit(0);
+    }
+  } catch (e) {
+    log('guard', `could not check PR state (${e.message}) — proceeding anyway`);
   }
-  const checks = prInfo.statusCheckRollup || [];
-  if (checks.length > 0 && !checks.some(c => c.conclusion === 'FAILURE' || c.conclusion === 'TIMED_OUT')) {
-    writeStats('fail:race_pr_closed', { reason: 'CI no longer shows failures' });
-    log('guard', `PR #${PR_NUMBER} CI no longer shows failures — aborting`);
-    process.exit(0);
-  }
-} catch (e) {
-  log('guard', `could not check PR state (${e.message}) — proceeding anyway`);
 }
 
-let failedLog;
-try {
-  failedLog = sh(`gh run view ${RUN_ID} --log-failed -R ${REPO}`).slice(-LOG_CHAR_LIMIT);
-} catch (e) {
-  failWithStats('fail:other', `could not fetch CI log: ${e.message}`);
+let failedLog = '';
+if (BATCH_MODE) {
+  log('batch', `batch mode (RUN_ID=${RUN_ID || 'unset'}) — skipping CI log fetch, will always attempt merge`);
+} else {
+  try {
+    failedLog = sh(`gh run view ${RUN_ID} --log-failed -R ${REPO}`).slice(-LOG_CHAR_LIMIT);
+  } catch (e) {
+    failWithStats('fail:other', `could not fetch CI log: ${e.message}`);
+  }
 }
 
 let prDiff = '';
@@ -356,6 +472,9 @@ try {
 // ── Stage 0: Reasoning — understand WHY this PR exists ───────────────────────
 // Before touching anything, ask: is the PR's purpose clear enough to auto-fix?
 // If not — comment and stop. Never patch blindly.
+// prPurpose is module-scoped so tryFixOutOfDate (pre-stage A) can use it for
+// AI conflict resolution after Stage 0 runs.
+let prPurpose = '';
 {
   log('stage0', 'fetching PR metadata for purpose reasoning...');
 
@@ -408,7 +527,8 @@ Set is_clear=true for ordinary feature PRs, bug fixes, refactors, dependency upd
     reasoning = { purpose: 'unknown (model error)', is_clear: true, ambiguity_reason: '' };
   }
 
-  log('stage0', `purpose: ${reasoning.purpose}`);
+  prPurpose = reasoning.purpose;
+  log('stage0', `purpose: ${prPurpose}`);
   log('stage0', `is_clear: ${reasoning.is_clear}`);
 
   if (!reasoning.is_clear) {
@@ -438,10 +558,11 @@ if (checkCloudflareConflict(failedLog)) {
 // Pre-stage A + B: deterministic fixes
 let preStageDiagnosis = null;
 
-const outOfDateResult = tryFixOutOfDate(failedLog);
+const outOfDateResult = await tryFixOutOfDate(failedLog, prPurpose);
 if (outOfDateResult) {
   if (!outOfDateResult.ok) {
-    await prComment(`❌ Could not fix: branch is behind \`${BASE_BRANCH}\` and merge had conflicts — needs human resolution\n\n\`\`\`\n${outOfDateResult.detail || ''}\n\`\`\``);
+    const icon = outOfDateResult.category === 'fail:ai_conflict_resolution' ? '🤖' : '❌';
+    await prComment(`${icon} Could not fix: ${outOfDateResult.reason}\n\n\`\`\`\n${outOfDateResult.detail || ''}\n\`\`\``);
     failWithStats(outOfDateResult.category, outOfDateResult.reason, { detail: outOfDateResult.detail });
   }
   preStageDiagnosis = outOfDateResult;
