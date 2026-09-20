@@ -69,12 +69,21 @@ const SKILLS = [
   {
     id: 'dev',
     name: 'Developer — разработка ПО',
-    description: 'Исполнение (не постановка задачи — см. business-analyst): клонирует репозиторий на VM, редактирует файлы, запускает тесты, коммитит, пушит, создаёт PR. ' +
+    description: 'Исполнение (не постановка задачи — см. business-analyst; не CI/CD-трекинг — см. ci-cd): клонирует репозиторий на VM, редактирует файлы, запускает тесты, коммитит, пушит, создаёт PR. ' +
       'Workflow: ba_clarify_requirements/ba_write_spec (постановка) → dev_workspace_setup (clone + npm install) → ' +
-      'редактирование через Read/Edit/Write → тесты через bash → git commit/push (включая specs/) → github_create_pr → dev_pr_checklist_gtd. ' +
+      'редактирование через Read/Edit/Write → тесты через bash → git commit/push (включая specs/) → github_create_pr → cicd_track_pr. ' +
       'Если нет аккаунта GitHub — рекомендуй создать на github.com (бесплатно). ' +
       'Если нет репозитория — предложи dev_new_repo.',
     requires: 'GitHub токен (scope: repo). Подключи через connect({ service: "github" }).',
+  },
+  {
+    id: 'ci-cd',
+    name: 'CI/CD — трекинг PR до продакшена',
+    description: 'Доводит открытый PR до готовности своими силами: cicd_track_pr пишет checklist.md, и durable GTD-контроллер ' +
+      'сам следит за CI → merge → deploy, без напоминаний и переживая рестарты VM. QA и deploy как отдельные скилы ' +
+      'пока не существуют — тесты гоняются через bash (npm test/pytest/…) внутри dev, а деплой у каждого проекта свой ' +
+      '(wrangler/systemctl/gcloud/…), нет общей механики, которую стоило бы выносить в отдельный тул. Появится нужда — заведём.',
+    requires: 'Ничего — работает сразу после github_create_pr.',
   },
   {
     id: 'inn-enrichment',
