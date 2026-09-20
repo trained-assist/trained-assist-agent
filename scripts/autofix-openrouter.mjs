@@ -63,13 +63,23 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
-// Free-tier model chain — tried in order on 404/429/503 (first success wins)
+// Free-tier model chain — tried first on 404/429/503 (first success wins).
+// After this chain is exhausted, callModel auto-discovers remaining free models
+// from OpenRouter's /models API, then falls back to cheap paid models.
 const STAGE0_MODEL_CHAIN = [
   'deepseek/deepseek-v3-0324:free',
   'google/gemma-3-12b-it:free',
   'meta-llama/llama-3.1-8b-instruct:free',
   'mistralai/mistral-7b-instruct:free',
 ];
+// Cheap paid models — last resort after all free options exhausted.
+// Costs ~$0.04–0.15 per 1M input tokens (negligible for small conflict resolution prompts).
+const CHEAP_PAID_FALLBACK = [
+  'deepseek/deepseek-chat',        // ~$0.07/1M — DeepSeek V3 paid, very capable
+  'google/gemini-flash-1.5-8b',   // ~$0.04/1M — cheapest capable model
+  'openai/gpt-4o-mini',           // ~$0.15/1M — reliable fallback
+];
+
 const STAGE0_MODEL = STAGE0_MODEL_CHAIN[0];
 const STAGE0_FALLBACK_MODEL = STAGE0_MODEL_CHAIN[1]; // kept for compat, chain handles the rest
 const STAGE1_MODEL = 'deepseek/deepseek-v3-0324:free';
@@ -194,12 +204,23 @@ async function callModel(model, messages, json = false) {
     return data?.choices?.[0]?.message?.content?.trim() || '';
   };
 
-  // For STAGE0 calls: try the full chain on transient errors (404/429/503)
-  const chain = model === STAGE0_MODEL ? STAGE0_MODEL_CHAIN : [model];
+  // For STAGE0 calls: try full chain (hardcoded free → discovered free → cheap paid)
+  const chain = model === STAGE0_MODEL
+    ? [...STAGE0_MODEL_CHAIN, ...(await discoverFreeModels()), ...CHEAP_PAID_FALLBACK]
+    : [model];
+
   let lastErr;
+  let reachedPaid = false;
   for (const m of chain) {
+    const isPaid = CHEAP_PAID_FALLBACK.includes(m);
     try {
-      if (m !== model) log('model', `${model} HTTP ${lastErr?.status} — trying ${m}`);
+      if (m !== model) {
+        if (isPaid && !reachedPaid) {
+          reachedPaid = true;
+          log('model', 'all free models exhausted — falling back to cheap paid models');
+        }
+        log('model', `trying ${m}${isPaid ? ' (paid)' : ''}`);
+      }
       return await tryModel(m);
     } catch (e) {
       lastErr = e;
@@ -207,6 +228,30 @@ async function callModel(model, messages, json = false) {
     }
   }
   throw lastErr;
+}
+
+// Cached list of free models discovered from OpenRouter /models (fetched once per run)
+let _discoveredFreeModels = null;
+async function discoverFreeModels() {
+  if (_discoveredFreeModels !== null) return _discoveredFreeModels;
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) { _discoveredFreeModels = []; return []; }
+    const { data = [] } = await res.json();
+    const known = new Set(STAGE0_MODEL_CHAIN);
+    _discoveredFreeModels = data
+      .filter(m => m.id.endsWith(':free') && !known.has(m.id))
+      .sort((a, b) => (b.context_length || 0) - (a.context_length || 0))
+      .map(m => m.id);
+    log('model', `discovered ${_discoveredFreeModels.length} additional free models from OpenRouter`);
+  } catch (e) {
+    log('model', `free model discovery failed: ${e.message.slice(0, 60)} — skipping`);
+    _discoveredFreeModels = [];
+  }
+  return _discoveredFreeModels;
 }
 
 function extractPatch(raw) {
