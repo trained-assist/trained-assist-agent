@@ -7,6 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const { decideFirstAction, decideNextAction } = require('./mainstream-decider');
 const { BugClassifier } = require('./bug-classifier');
+const { IntegrationTester } = require('./integration-tester');
+const { CuratorAgent } = require('./curator-agent');
 
 const STEP_TIMEOUT_MS = 180_000; // 3 min per step (Claude can be slow)
 const TEST_CHAT_ID = 999_000_001;
@@ -31,7 +33,8 @@ class Orchestrator {
     this._responseResolve = null;
     this._responseReject = null;
     this._stepTimer = null;
-    this.classifier = new BugClassifier({ stateDir, openrouterKey });
+this.classifier = new BugClassifier({ stateDir, openrouterKey });
+    this.curator = new CuratorAgent({ stateDir, githubToken });
   }
 
   get stateFile() { return path.join(this.stateDir, 'current-run.json'); }
@@ -47,7 +50,7 @@ class Orchestrator {
     this.state.bugs.push(entry);
     this._saveState();
     console.warn(`[bug] type=${bug.type} step=${bug.step ?? '?'} detail=${(bug.detail || '').slice(0, 120)}`);
-    // Classify immediately — async, don't block the test run
+// Classify immediately — async, don't block the test run
     this.classifier.process(entry).catch(e => console.warn('[bug-classifier] error:', e.message));
   }
 
@@ -163,7 +166,7 @@ class Orchestrator {
   }
 
   async _runPath(alternativeMode) {
-    let action = await decideFirstAction(alternativeMode);
+let action = await decideFirstAction(alternativeMode);
     const previousActions = []; // track to prevent looping
 
     for (let step = 1; step <= this.maxSteps; step++) {
@@ -176,7 +179,7 @@ class Orchestrator {
 
       console.log(`[orchestrator] ${alternativeMode ? 'alt' : 'main'} step ${step}: "${taskText}"`);
       this.state.conversation.push({ role: 'user', text: taskText });
-      previousActions.push(action);
+previousActions.push(action);
 
       try {
         await this._sendTask(taskText);
@@ -212,7 +215,7 @@ class Orchestrator {
           stepNumber: step + 1,
           alternativeMode,
           openrouterKey: this.openrouterKey,
-          previousActions,
+previousActions,
         });
         console.log(`[orchestrator] Next action: ${JSON.stringify(action)}`);
       } catch (err) {

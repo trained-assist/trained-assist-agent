@@ -9,7 +9,7 @@ def credentials():
     pid = subprocess.check_output(['systemctl', 'show', 'assist-agent', '-p', 'MainPID', '--value'], text=True).strip()
     if pid == '0':
         raise RuntimeError('Agent is not running')
-    env = dict(item.split('=', 1) for item in Path('/proc/' + pid + '/environ').read_bytes().decode().split('\0') if '=' in item)
+    env = dict(item.split('=', 1) for item in Path('/proc/' + pid + '/environ').read_bytes().decode('utf-8', errors='replace').split('\0') if '=' in item)
     return env['AGENT_SECRET'], env.get('PORT', '8080')
 
 def client():
@@ -23,6 +23,13 @@ def client():
     return api
 
 def main():
+    if '--rollback' in sys.argv:
+        # Called by deploy.sh at the start of rollback() while the service is still
+        # running with the bad new code. We must not restart or resume admission here —
+        # deploy.sh manages the full rollback sequence (stop → git reset → restart → --ready).
+        # Just return so the timer doesn't interfere.
+        return
+
     if '--ready' in sys.argv:
         # Called by deploy.sh after service restart. Retry until the new service is up.
         for _ in range(30):

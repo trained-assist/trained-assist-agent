@@ -34,13 +34,102 @@ async function decideNextAction({ conversation, latestText, buttons, stepNumber,
     ? 'Ты должен выбрать ВТОРОЙ по вероятности вариант (не самый очевидный первый, но тоже распространённый).'
     : 'Выбери САМЫЙ банальный, самый ожидаемый вариант — то, что сделает большинство новых пользователей.';
 
-  // Build "don't repeat" hint from already-taken actions.
+// Build "don't repeat" hint from already-taken actions.
   const alreadyTaken = previousActions.length
     ? `\nУЖЕ СДЕЛАННЫЕ действия (не повторяй их):\n${previousActions.map(a =>
         a.type === 'text' ? `- написал текст: "${a.content}"` : `- нажал кнопку: "${a.buttonText}"`
       ).join('\n')}\n`
     : '';
+const { DeepSeek } = require('deepseek');
+const { GitHub } = require('github-api');
+const { Logger } = require('logger');
 
+class MainstreamDecider {
+  constructor(config) {
+    this.deepseek = new DeepSeek(config.deepseek);
+    this.github = new GitHub(config.github);
+    this.logger = new Logger(config.logger);
+    this.testPaths = config.testPaths || [];
+    this.bugThreshold = config.bugThreshold || 0.7;
+  }
+
+  async analyzeTestResults(results) {
+    try {
+      const analysis = await this.deepseek.analyze({
+        context: 'Evaluate these test results for potential bugs',
+        data: results
+      });
+
+      const bugScore = analysis.scores.bugProbability;
+      const isCritical = bugScore >= this.bugThreshold;
+
+      return {
+        isBug: isCritical,
+        score: bugScore,
+        analysis: analysis.summary
+      };
+    } catch (error) {
+      this.logger.error('Failed to analyze test results', error);
+      throw error;
+    }
+  }
+
+  async classifyAndCreateIssues(testResults) {
+    const bugReports = [];
+    
+    for (const result of testResults) {
+      const { isBug, score, analysis } = await this.analyzeTestResults(result);
+      
+      if (isBug) {
+        bugReports.push({
+          path: result.path,
+          score,
+          analysis,
+          logs: result.logs
+        });
+      }
+    }
+
+    if (bugReports.length > 0) {
+      await this.curateAndCreateIssues(bugReports);
+    }
+
+    return bugReports;
+  }
+
+  async curateAndCreateIssues(bugReports) {
+    try {
+      const groupedBugs = this.groupSimilarBugs(bugReports);
+      
+      for (const group of groupedBugs) {
+        const title = `[Autotest] ${group.commonIssue}`;
+        const body = this.formatIssueBody(group);
+        
+        await this.github.createIssue({
+          title,
+          body,
+          labels: ['bug', 'autotest']
+        });
+      }
+    } catch (error) {
+      this.logger.error('Failed to create GitHub issues', error);
+      throw error;
+    }
+  }
+
+  groupSimilarBugs(bugs) {
+    // Implementation for grouping similar bugs
+    // This would use DeepSeek to find semantic similarity between bug reports
+    return [];
+  }
+
+  formatIssueBody(bugGroup) {
+    // Format markdown issue body with all relevant bug information
+    return '';
+  }
+}
+
+module.exports = MainstreamDecider;
   const prompt = `Ты — среднестатистический новый пользователь Telegram-бота (AI-помощник для рекрутинга и задач). Ты не технарь, просто обычный человек, который первый раз пользуется ботом.
 
 ШАГ ${stepNumber}/7 тест-сессии.
@@ -77,7 +166,7 @@ ${modeNote}
       model: 'deepseek/deepseek-chat',
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 120,
-      temperature: 0.4,
+temperature: 0.4,
     }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -87,6 +176,7 @@ ${modeNote}
   const data = await res.json();
   const raw = (data.choices?.[0]?.message?.content || '').trim();
 
+// Parse JSON, stripping markdown fences if present
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   try {
     return JSON.parse(cleaned);
@@ -95,6 +185,7 @@ ${modeNote}
     if (match) {
       try { return JSON.parse(match[0]); } catch {}
     }
+// Fallback: send generic follow-up
     return { type: 'text', content: 'расскажи подробнее' };
   }
 }
