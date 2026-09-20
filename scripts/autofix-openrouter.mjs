@@ -295,58 +295,55 @@ async function resolveConflictsWithAI(conflictedFiles, prPurposeArg) {
     }
     if (blocks.length === 0) continue;
 
-    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI (single call)...`);
+    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI (one call per block)...`);
 
-    // Batch all blocks into ONE AI call to avoid per-block rate limits
-    const blocksText = blocks.map((b, i) => `BLOCK ${i + 1}:\n${b.full}`).join('\n\n---\n\n');
-    let aiResponse;
-    try {
-      aiResponse = await callModel(STAGE0_MODEL, [
-        {
-          role: 'system',
-          content: `You are resolving git merge conflicts. The PR's purpose is: "${prPurposeArg}".
-Resolve ALL conflict blocks so the result serves that purpose while keeping unrelated code intact.
-Return ONLY resolutions in this exact format — one per block, separated by "---":
-BLOCK 1:
-<resolved code with no conflict markers>
----
-BLOCK 2:
-<resolved code with no conflict markers>
-No explanations, no code fences, no extra text.`,
-        },
-        {
-          role: 'user',
-          content: `File: ${filePath}\n\n${blocksText}`,
-        },
-      ]);
-    } catch (e) {
-      return { ok: false, reason: `AI call failed for ${filePath}: ${e.message.slice(0, 100)}` };
+    // Resolve each block independently — smaller prompts, no brittle multi-block parsing.
+    // Retry up to 2 times per block on empty response before skipping.
+    const resolvedCode = [];
+    let failedBlocks = 0;
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const blockNum = `${bi + 1}/${blocks.length}`;
+      let blockResult = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          log('conflict-resolve', `${filePath}: block ${blockNum} empty — waiting 5s, retry ${attempt}...`);
+          await new Promise(r => setTimeout(r, 5000));
+        }
+        try {
+          blockResult = await callModel(STAGE0_MODEL, [
+            {
+              role: 'system',
+              content: `Resolve this single git merge conflict. PR purpose: "${prPurposeArg}".
+Return ONLY the resolved code — no conflict markers, no explanations, no markdown fences.`,
+            },
+            {
+              role: 'user',
+              content: `File: ${filePath}\n\n${blocks[bi].full}`,
+            },
+          ]);
+        } catch (e) {
+          log('conflict-resolve', `${filePath}: block ${blockNum} error (attempt ${attempt + 1}): ${e.message.slice(0, 80)}`);
+          blockResult = '';
+        }
+        if (blockResult) break;
+      }
+      if (!blockResult) {
+        log('conflict-resolve', `${filePath}: block ${blockNum} — could not resolve after retries, leaving as-is`);
+        resolvedCode.push(blocks[bi].full); // leave original conflict marker
+        failedBlocks++;
+      } else {
+        log('conflict-resolve', `${filePath}: block ${blockNum} OK`);
+        resolvedCode.push(blockResult.trim());
+      }
     }
 
-    // Parse "BLOCK N:\n<code>" sections from response
-    const parsedBlocks = [];
-    const blockSections = aiResponse.split(/^---$/m);
-    for (const section of blockSections) {
-      const m = section.match(/^BLOCK\s+\d+:\s*\n([\s\S]*)/m);
-      if (m) parsedBlocks.push(m[1].trim());
-    }
-
-    if (parsedBlocks.length !== blocks.length) {
-      // Fallback: if parsing fails, try line-by-line split
-      log('conflict-resolve', `${filePath}: parsed ${parsedBlocks.length}/${blocks.length} blocks — retrying parse`);
-      const altSections = aiResponse.split(/BLOCK\s+\d+:\s*\n/);
-      altSections.shift(); // remove text before first BLOCK
-      parsedBlocks.length = 0;
-      for (const s of altSections) parsedBlocks.push(s.replace(/\s*---\s*$/, '').trim());
-    }
-
-    if (parsedBlocks.length !== blocks.length) {
-      return { ok: false, reason: `AI returned ${parsedBlocks.length} resolutions for ${blocks.length} blocks in ${filePath}` };
+    if (failedBlocks === blocks.length) {
+      return { ok: false, reason: `AI could not resolve any of ${blocks.length} blocks in ${filePath}` };
     }
 
     let resolved = content;
     for (let i = 0; i < blocks.length; i++) {
-      resolved = resolved.replace(blocks[i].full, parsedBlocks[i]);
+      resolved = resolved.replace(blocks[i].full, resolvedCode[i]);
     }
 
     if (/^<{7} /m.test(resolved) || /^>{7} /m.test(resolved)) {
