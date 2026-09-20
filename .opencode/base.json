@@ -11,14 +11,6 @@
         "--browser",
         "chromium"
       ]
-    },
-    "Neon": {
-      "type": "remote",
-      "url": "https://mcp.neon.tech/mcp",
-      "enabled": true,
-      "headers": {
-        "Authorization": "Bearer napi_t14t1168e660sfliq0zk8xkrqu56y7w8jakqcbnxh7faxrshiniac41dtsd24uqi"
-      }
     }
   },
   "provider": {
