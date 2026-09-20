@@ -3303,7 +3303,7 @@ ${recent || '(пока нет)'}
       const taskParam = (url.searchParams.get('task') || '').trim();
       const GLOBAL_QUICK_COMMAND = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)|^\/(?:get_agent_info|agent_info|oc_\S+|get_webpass|webpass|вебпароль|info)(?:@\S+)?(?=\s|$)/i;
       if (taskParam && GLOBAL_QUICK_COMMAND.test(taskParam)) {
-        return json(res, 200, { action: 'auto', choices: [], active: null });
+        return json(res, 200, { action: 'quick', choices: [], active: null });
       }
 
       const workDir = path.join(BASE_USERS_DIR, username);
