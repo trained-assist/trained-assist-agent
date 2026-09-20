@@ -6,10 +6,7 @@
       "command": [
         "compress-on-input",
         "--wrap",
-        "npx",
-        "@playwright/mcp",
-        "--browser",
-        "chromium"
+        "npx @playwright/mcp --browser chromium"
       ]
     }
   },
