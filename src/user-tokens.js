@@ -347,6 +347,21 @@ function generateLegacyConnectLink(userId, service, schema) {
   return `${AGENT_PUBLIC_URL}/connect/${service}?t=${token}`;
 }
 
+/**
+ * Validates and consumes a connect-pending token.
+ * Returns the pending data on success, or null on failure (invalid, expired, or unreadable).
+ * Deletes the pending file on success (one-time use).
+ */
+function receiveConnect(t) {
+  if (!t || !/^[a-f0-9]{32}$/.test(t)) return null;
+  const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+  let pending;
+  try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { return null; }
+  if (!pending || Date.now() > pending.expires) return null;
+  try { fs.unlinkSync(pendingFile); } catch {}
+  return pending;
+}
+
 module.exports = {
   loadUserTokens,
   listConnectedServices,
@@ -355,6 +370,7 @@ module.exports = {
   generateConnectLink,
   generateLegacyConnectLink,
   readTokenValue,
+  receiveConnect,
   SERVICE_DISPLAY,
   SERVICE_FORM_SCHEMA,
 };

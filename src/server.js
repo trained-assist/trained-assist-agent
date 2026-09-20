@@ -36,6 +36,7 @@ const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, bui
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
+const { receiveConnect } = require('./user-tokens');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -1032,14 +1033,10 @@ async function main() {
           if (!t || !login || !password) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
           if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
 
-          const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
-          let pending;
-          try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          const pending = receiveConnect(t);
+          if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pending.service !== 'nalog') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
           if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
-
-          try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; } // one-time use
 
           // Browser login may take 30–60s; form sets fetch timeout to 90s
           const result = await startNalogLogin(pending.uid, login, password);
@@ -1125,14 +1122,10 @@ async function main() {
           if (!t || !domain) { res.writeHead(400).end(JSON.stringify({ error: 'missing t or domain' })); return; }
           if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
 
-          const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
-          let pending;
-          try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          const pending = receiveConnect(t);
+          if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pending.service !== 'getcourse') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
           if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
-
-          try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; } // one-time use
 
           const cleanDomain = domain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
           const patch = { accountDomain: cleanDomain };
@@ -1206,10 +1199,8 @@ async function main() {
           if (!t || !email || !password) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
           if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
 
-          const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
-          let pending;
-          try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          const pending = receiveConnect(t);
+          if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
           if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
 
@@ -1220,7 +1211,6 @@ async function main() {
             JSON.stringify({ email: email.trim(), password }),
             { mode: 0o600 }
           );
-          try { fs.unlinkSync(pendingFile); } catch {}
           console.log(`[connect] saved ${service} creds for uid=${pending.uid}`);
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
 
@@ -1276,10 +1266,8 @@ async function main() {
           if (!t || !apiToken) { res.writeHead(400).end(JSON.stringify({ error: 'missing t or token' })); return; }
           if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
 
-          const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
-          let pending;
-          try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-          if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          const pending = receiveConnect(t);
+          if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pending.service !== 'weeek') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
           if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
 
@@ -1297,7 +1285,6 @@ async function main() {
             level.push('L2');
           }
 
-          try { fs.unlinkSync(pendingFile); } catch {}
           console.log(`[connect] saved weeek token (level=${level.join('+')}) for uid=${pending.uid}`);
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, level }));
 
@@ -1336,13 +1323,10 @@ async function main() {
           if (!t || !siteUrl || !login || !password) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
           if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
 
-          const pendingFileSite = path.join(CONNECT_PENDING_DIR, `${t}.json`);
-          let pendingSite;
-          try { pendingSite = JSON.parse(fs.readFileSync(pendingFileSite, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-          if (pendingSite.expires < Date.now()) { try { fs.unlinkSync(pendingFileSite); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+          const pendingSite = receiveConnect(t);
+          if (!pendingSite) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
           if (pendingSite.service !== 'site') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
           if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pendingSite.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
-          try { fs.unlinkSync(pendingFileSite); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; }
 
           const siteResult = await connectSite(pendingSite.uid, { url: siteUrl, login, password });
           if (siteResult.error) {
@@ -1394,16 +1378,16 @@ async function main() {
           let payload;
           try { payload = JSON.parse(body); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
           const tokenVal = payload.t;
-          const pendingFile = path.join(CONNECT_PENDING_DIR, `${tokenVal}.json`);
-          const pending = readPending(tokenVal);
+          const pending = receiveConnect(tokenVal);
           if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
+          if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
+          if (!pending.schema) { res.writeHead(403).end(JSON.stringify({ error: 'missing schema' })); return; }
           if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
           const fieldsIn = payload.fields && typeof payload.fields === 'object' ? payload.fields : null;
           if (!fieldsIn) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
           for (const f of (pending.schema.fields || [])) {
             if (f.required && !fieldsIn[f.name]) { res.writeHead(400).end(JSON.stringify({ error: `missing field: ${f.name}` })); return; }
           }
-          try { fs.unlinkSync(pendingFile); } catch { res.writeHead(403).end(JSON.stringify({ error: 'link already used' })); return; }
 
           const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
           fs.mkdirSync(tokensDir, { recursive: true });
@@ -1459,17 +1443,14 @@ async function main() {
         if (!t || !value) { res.writeHead(400).end(JSON.stringify({ error: 'missing t or value' })); return; }
         if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
 
-        const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
-        let pending;
-        try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-        if (pending.expires < Date.now()) { try { fs.unlinkSync(pendingFile); } catch {} res.writeHead(403).end(JSON.stringify({ error: 'link expired' })); return; }
+        const pending = receiveConnect(t);
+        if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
         if (pending.service !== service) { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
 
         if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid in token' })); return; }
         const tokensDir = path.join(os.homedir(), 'agent-tokens', pending.uid);
         fs.mkdirSync(tokensDir, { recursive: true });
         fs.writeFileSync(path.join(tokensDir, service), String(value).trim(), { mode: 0o600 });
-        try { fs.unlinkSync(pendingFile); } catch {} // one-time use; ignore if already deleted
         console.log(`[connect] saved ${service} token for uid=${pending.uid}`);
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
 
