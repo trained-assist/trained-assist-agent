@@ -443,6 +443,12 @@ if (!OPENROUTER_API_KEY) failWithStats('fail:other', 'OPENROUTER_API_KEY not set
 if (!REPO || !PR_NUMBER) failWithStats('fail:other', 'missing REPO/PR_NUMBER env');
 if (!BATCH_MODE && !RUN_ID) failWithStats('fail:other', 'missing RUN_ID env (set RUN_ID=0 for batch/manual mode)');
 
+// Configure git identity early — needed for merge commits (before tryFixOutOfDate)
+try {
+  sh('git config user.name "trained-assist-autofix"');
+  sh('git config user.email "autofix@trained-assist.bot"');
+} catch { /* non-fatal — will fail later if identity really needed */ }
+
 // ── Race condition guard (skipped in batch mode) ─────────────────────────────
 if (!BATCH_MODE) {
   try {
