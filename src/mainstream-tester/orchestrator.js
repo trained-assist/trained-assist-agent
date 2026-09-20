@@ -21,7 +21,7 @@ const BUG_PATTERNS = [
 ];
 
 class Orchestrator {
-  constructor({ agentUrl, agentSecret, openrouterKey, githubToken, maxSteps = 7, stateDir }) {
+  constructor({ agentUrl, agentSecret, openrouterKey, maxSteps = 7, stateDir }) {
     this.agentUrl = agentUrl;
     this.agentSecret = agentSecret;
     this.openrouterKey = openrouterKey;
@@ -31,7 +31,7 @@ class Orchestrator {
     this._responseResolve = null;
     this._responseReject = null;
     this._stepTimer = null;
-    this.classifier = new BugClassifier({ stateDir, openrouterKey, githubToken });
+    this.classifier = new BugClassifier({ stateDir, openrouterKey });
   }
 
   get stateFile() { return path.join(this.stateDir, 'current-run.json'); }

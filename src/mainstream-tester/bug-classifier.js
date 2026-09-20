@@ -1,21 +1,19 @@
 'use strict';
 // Bug classifier — called immediately when a bug is logged.
-// Deduplicates by content hash. On 2nd+ occurrence creates a GitHub issue.
+// Deduplicates by content hash, classifies with LLM on first occurrence.
+// Does NOT create GitHub issues — that's the curator's job.
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const GITHUB_REPO = 'trained-assist/trained-assist-agent';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEDUP_FILE = 'bugs-dedup.json';
-const MIN_OCCURRENCES_FOR_ISSUE = 2;
 
 class BugClassifier {
-  constructor({ stateDir, openrouterKey, githubToken }) {
+  constructor({ stateDir, openrouterKey }) {
     this.stateDir = stateDir;
     this.openrouterKey = openrouterKey;
-    this.githubToken = githubToken;
     this.dedupPath = path.join(stateDir, DEDUP_FILE);
   }
 
@@ -34,7 +32,14 @@ class BugClassifier {
   }
 
   async _classify(bug) {
-    if (!this.openrouterKey) return { title: `[mainstream] ${bug.type}: ${(bug.detail || '').slice(0, 60)}`, category: bug.type, severity: 'medium' };
+    if (!this.openrouterKey) {
+      return {
+        title: `[mainstream] ${bug.type}: ${(bug.detail || '').slice(0, 60)}`,
+        category: bug.type,
+        severity: 'medium',
+        description: bug.detail || '',
+      };
+    }
 
     const prompt = `You are a QA engineer classifying a bug found by an automated tester.
 
@@ -45,7 +50,7 @@ ${(bug.detail || '').slice(0, 400)}
 
 Reply with JSON only:
 {
-  "title": "short bug title for GitHub issue (max 80 chars)",
+  "title": "short bug title (max 80 chars)",
   "category": "one of: crash, wrong_answer, timeout, empty_response, loop, ui_error, other",
   "severity": "one of: low, medium, high, critical",
   "description": "1-2 sentence description of what went wrong"
@@ -83,69 +88,6 @@ Reply with JSON only:
     };
   }
 
-  async _createGithubIssue(hash, entry) {
-    if (!this.githubToken) {
-      console.warn('[bug-classifier] GITHUB_ISSUES_TOKEN not set — skipping issue creation');
-      return null;
-    }
-
-    const { classification, occurrences, examples } = entry;
-    const body = [
-      `**Detected by:** mainstream tester (automated)`,
-      `**Occurrences:** ${occurrences}`,
-      `**Bug type:** ${examples[0]?.type || '?'}`,
-      `**Category:** ${classification.category}`,
-      `**Severity:** ${classification.severity}`,
-      '',
-      `## Description`,
-      '',
-      classification.description || '—',
-      '',
-      `## Examples`,
-      '',
-      ...examples.slice(0, 3).map((ex, i) => [
-        `### Example ${i + 1} (run ${ex.runId || '?'}, step ${ex.step || '?'})`,
-        `**Task:** ${ex.task || '—'}`,
-        '**Response excerpt:**',
-        '```',
-        (ex.detail || '').slice(0, 500),
-        '```',
-      ].join('\n')),
-      '',
-      `**Dedup hash:** \`${hash}\``,
-    ].join('\n');
-
-    try {
-      const resp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/issues`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `token ${this.githubToken}`,
-          'Content-Type': 'application/json',
-          'User-Agent': 'trained-assist-agent/mainstream-tester',
-          'Accept': 'application/vnd.github+json',
-        },
-        body: JSON.stringify({
-          title: classification.title,
-          body,
-          labels: ['mainstream-found'],
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      const data = await resp.json();
-      if (resp.status >= 400) {
-        console.warn('[bug-classifier] GitHub issue creation failed:', data.message);
-        return null;
-      }
-
-      console.log(`[bug-classifier] GitHub issue created: ${data.html_url}`);
-      return data.html_url;
-    } catch (e) {
-      console.warn('[bug-classifier] GitHub request failed:', e.message);
-      return null;
-    }
-  }
-
   async process(bug) {
     const hash = this._hash(bug);
     const index = this._loadDedup();
@@ -159,7 +101,8 @@ Reply with JSON only:
         firstSeenAt: new Date().toISOString(),
         classification,
         examples: [bug],
-        issueUrl: null,
+        issueUrl: null,   // curator will fill this
+        curatorSeen: false,
       };
       this._saveDedup(index);
       console.log(`[bug-classifier] New bug hash=${hash} category=${classification.category} severity=${classification.severity}`);
@@ -172,17 +115,7 @@ Reply with JSON only:
     entry.lastSeenAt = new Date().toISOString();
     if (entry.examples.length < 5) entry.examples.push(bug);
     this._saveDedup(index);
-
     console.log(`[bug-classifier] Repeated bug hash=${hash} occurrences=${entry.occurrences}`);
-
-    // Create GitHub issue on 2nd occurrence (if not already created)
-    if (entry.occurrences >= MIN_OCCURRENCES_FOR_ISSUE && !entry.issueUrl) {
-      const url = await this._createGithubIssue(hash, entry);
-      if (url) {
-        entry.issueUrl = url;
-        this._saveDedup(index);
-      }
-    }
   }
 }
 
