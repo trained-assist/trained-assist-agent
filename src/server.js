@@ -4320,7 +4320,7 @@ ${recent || '(пока нет)'}
 
   scheduleNalogExpiryChecks(secrets);
   scheduleHhBackgroundScoring();
-  scheduleProactiveSearchRuns(secrets);
+scheduleProactiveSearchRuns(secrets);
   if (process.env.TEST_MODE !== '1') scheduleGtdController(secrets);
 
 

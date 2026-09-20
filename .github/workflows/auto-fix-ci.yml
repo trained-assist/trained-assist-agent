@@ -100,6 +100,19 @@ jobs:
           ORIGINAL_BRANCH: ${{ steps.pr.outputs.branch }}
         run: node scripts/autofix-openrouter.mjs
 
+- name: Report unfixed failure
+        if: steps.guard.outputs.skip == 'false' && steps.autofix.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REASON=$(node -e "
+            try {
+              const s = JSON.parse(require('fs').readFileSync('ci-fixer-stats.json','utf8'));
+              process.stdout.write(s.reason || s.category || 'unknown');
+            } catch { process.stdout.write('unknown'); }
+          " 2>/dev/null || echo "unknown")
+          gh pr comment ${{ steps.pr.outputs.number }} -R ${{ github.repository }} --body \
+            "🤖 Auto-fix pipeline could not resolve this CI failure (run ${{ github.event.workflow_run.id }}). Reason: \`${REASON}\`. Needs a human look."
       - name: Upload stats artifact
         if: steps.guard.outputs.skip == 'false' && always()
         uses: actions/upload-artifact@v4
