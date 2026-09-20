@@ -89,6 +89,10 @@ jobs:
           ref: ${{ steps.pr-info.outputs.branch }}
           fetch-depth: 0
 
+      - name: Use latest fixer script from main (not from the PR branch)
+        if: steps.guard.outputs.skip == 'false'
+        run: git show origin/main:scripts/autofix-openrouter.mjs > scripts/autofix-openrouter.mjs
+
       - uses: actions/setup-node@v4
         if: steps.guard.outputs.skip == 'false'
         with:
