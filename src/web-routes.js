@@ -154,7 +154,13 @@ async function handleWebRoute(req, url, res, secrets) {
     if (!username) return json(res, 401, { error: 'unauthorized' }), true;
     if (!checkOrigin(req, secrets)) return json(res, 403, { error: 'forbidden' }), true;
 
-    stopUserTask(username);
+    // Scope the kill to the chat this session is actually attached to — the
+    // profile's workDir (and therefore activeTimers by username) is shared
+    // across chats, so an unscoped stopUserTask(username) would also kill a
+    // different chat's unrelated running task.
+    const stopSession = getSession(userWorkDir(username), sessionId);
+    const stopChatId = stopSession ? (stopSession.liveChatId ?? stopSession.ownerChatId) : null;
+    stopUserTask(username, stopChatId);
     return json(res, 200, { ok: true }), true;
   }
 

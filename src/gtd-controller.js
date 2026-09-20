@@ -381,8 +381,9 @@ function buildReopenMessage(rec) {
 const DONE_RE      = /GTD:\s*done/i;
 const ESCALATED_RE = /GTD:\s*escalated/i;
 
-// Cancel all open GTD records for a user (e.g. on /stop or /gtd_stop command).
-// Returns count of cancelled records.
+// Cancel all open GTD records for a profile (all its chats). Only meant for a
+// genuinely profile-wide caller — most /stop-style commands should use
+// clearGtdForChat below, since one profile's workDir is shared across chats.
 function clearAllGtd(workDir) {
   const recs = listGtd(workDir);
   let count = 0;
@@ -393,6 +394,30 @@ function clearAllGtd(workDir) {
       writeGtd(workDir, rec);
       count++;
     }
+  }
+  return count;
+}
+
+// Cancel open GTD records belonging to sessions attached to ONE chat (e.g. on
+// /stop typed in that chat). A profile's workDir — and therefore its gtd/
+// records — is shared across every chat of that profile, so naively closing
+// "all open records" from a single chat's /stop cancels проработка running in
+// other chats too. Resolve each record's owning session and only touch it if
+// that session is currently live in this chat. Returns count of cancelled records.
+function clearGtdForChat(workDir, chatId) {
+  if (!chatId) return 0;
+  const { getSession } = require('./session-store');
+  const recs = listGtd(workDir);
+  let count = 0;
+  for (const rec of recs) {
+    if (rec.status !== 'open') continue;
+    const sess = getSession(workDir, rec.sessionId);
+    const attachedChatId = sess ? (sess.liveChatId ?? sess.ownerChatId) : null;
+    if (attachedChatId == null || String(attachedChatId) !== String(chatId)) continue;
+    rec.status = 'closed';
+    rec.closedReason = 'user-stop';
+    writeGtd(workDir, rec);
+    count++;
   }
   return count;
 }
@@ -545,7 +570,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 
 module.exports = {
   detectIntent, maybeSchedule, scheduleFromChecklist, runDue, buildReopenMessage,
-  readGtd, writeGtd, clearGtd, clearAllGtd, listGtd,
+  readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd,
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
