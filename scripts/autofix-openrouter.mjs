@@ -942,6 +942,23 @@ try {
 const newPRNumber = newPRUrl.match(/\/pull\/(\d+)$/)?.[1] || '?';
 log('publish', `created new PR #${newPRNumber}: ${newPRUrl}`);
 
+// Close any stale fix/ci-* PRs for the same original branch (excluding the one just created)
+try {
+  const safeBranchForClose = (ORIGINAL_BRANCH || 'unknown').replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40);
+  const stalePRs = JSON.parse(
+    sh(`gh pr list -R "${REPO}" --json number,headRefName --state open`)
+  ).filter(pr =>
+    pr.headRefName.startsWith(`fix/ci-${safeBranchForClose}-`) &&
+    String(pr.number) !== String(newPRNumber)
+  );
+  for (const stale of stalePRs) {
+    sh(`gh pr close ${stale.number} -R "${REPO}" --comment "♻️ Superseded by #${newPRNumber}: ${newPRUrl}"`);
+    log('publish', `closed stale fix PR #${stale.number} (superseded by #${newPRNumber})`);
+  }
+} catch (e) {
+  log('publish', `could not close stale fix PRs: ${e.message.slice(0, 80)}`);
+}
+
 try {
   sh(`gh pr merge --auto --squash "${newPRNumber}" -R "${REPO}"`);
   log('publish', `auto-merge enabled on PR #${newPRNumber}`);
