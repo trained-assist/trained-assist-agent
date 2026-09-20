@@ -1,0 +1,136 @@
+name: Batch fix PRs (manual)
+
+# Runs the autofix pipeline on one or more existing PRs in batch mode.
+# Batch mode (RUN_ID=0) skips CI log fetch and always attempts:
+#   1. git merge origin/main
+#   2. If conflicts — AI resolution using each PR's purpose (Stage 0)
+#   3. Push fix/ci-* branch + create new PR
+#
+# Usage:
+#   gh workflow run batch-fix-prs.yml \
+#     --field pr_numbers="805,802,800,795,794,790"
+#
+# Or via GitHub UI: Actions → Batch fix PRs → Run workflow
+#
+# PRs are processed SEQUENTIALLY (max-parallel: 1) — this is intentional:
+# parallel fix PRs merge into main at the same time, making each subsequent
+# one immediately stale ("branch not up to date") and triggering another
+# autofix loop. Sequential processing avoids cascading re-runs.
+#
+# Order your PR numbers from highest to lowest value/clarity.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_numbers:
+        description: 'Comma-separated PR numbers to fix (e.g. 805,802,800)'
+        required: true
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  matrix-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+    steps:
+      - name: Parse PR numbers into matrix
+        id: parse
+        run: |
+          INPUT="${{ github.event.inputs.pr_numbers }}"
+          # Convert "805,802,800" → ["805","802","800"]
+          MATRIX=$(echo "$INPUT" | tr ',' '\n' | sed 's/[^0-9]//g' | grep -v '^$' | jq -R . | jq -sc '{pr: .}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $MATRIX"
+
+  fix:
+    needs: matrix-setup
+    strategy:
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+      max-parallel: 1
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR branch
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_JSON=$(gh pr view ${{ matrix.pr }} -R "${{ github.repository }}" --json headRefName,state)
+          BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName')
+          STATE=$(echo "$PR_JSON" | jq -r '.state')
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "PR #${{ matrix.pr }}: branch=$BRANCH state=$STATE"
+          if [ "$STATE" != "OPEN" ]; then
+            echo "PR is $STATE — skipping"
+            exit 1
+          fi
+
+      - name: Guard — close stale fix/ci-* PRs for this branch before re-running
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.pr-info.outputs.branch }}"
+          SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-' | sed 's/[^a-zA-Z0-9-]/-/g' | cut -c1-40)
+          EXISTING=$(gh pr list -R "${{ github.repository }}" \
+            --json number,headRefName --state open \
+            | jq -r ".[] | select(.headRefName | startswith(\"fix/ci-${SAFE_BRANCH}-\")) | .number" \
+            | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "Closing stale fix PR #$EXISTING for $BRANCH — new fix attempt incoming" >&2
+            gh pr close "$EXISTING" -R "${{ github.repository }}" \
+              --comment "♻️ Superseded — batch re-run will create a fresh fix PR for \`$BRANCH\`."
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.skip == 'false'
+        with:
+          ref: ${{ steps.pr-info.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Save latest fixer script from main to /tmp (via API — avoids git-show inconsistencies on old branches)
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/contents/scripts/autofix-openrouter.mjs \
+            --jq '.content' | base64 -d > /tmp/autofix-from-main.mjs
+          echo "script lines: $(wc -l < /tmp/autofix-from-main.mjs)"
+          node --check /tmp/autofix-from-main.mjs && echo "syntax OK"
+
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.skip == 'false'
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        if: steps.guard.outputs.skip == 'false'
+        run: npm ci --ignore-scripts
+
+      - name: Run autofix in batch mode (RUN_ID=0)
+        if: steps.guard.outputs.skip == 'false'
+        continue-on-error: true
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
+          RUN_ID: '0'
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ matrix.pr }}
+          ORIGINAL_BRANCH: ${{ steps.pr-info.outputs.branch }}
+        run: node /tmp/autofix-from-main.mjs
+
+      - name: Upload stats artifact
+        if: steps.guard.outputs.skip == 'false' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-fix-stats-pr${{ matrix.pr }}-run${{ github.run_id }}
+          path: ci-fixer-stats.json
+          if-no-files-found: ignore
+          retention-days: 90
