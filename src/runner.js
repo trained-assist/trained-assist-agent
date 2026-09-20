@@ -2892,10 +2892,27 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
 
   let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, bugReportSection, artifactsSection].filter(Boolean).join('\n\n');
-  // Codex/OpenCode are stateless — skip session history injection; they pull via MCP instead.
+  // Codex/OpenCode are stateless: full history inflates every internal API call (multiplied by N tool calls).
+  // Claude gets full sessionContext; Codex/OpenCode get a minimal header (topic + last message, ~150 tokens)
+  // and can pull more via MCP tools (last_messages, load_full_context, session_search) when needed.
   const injectSessionCtx = !!sessionContext && engine !== 'codex' && engine !== 'opencode';
+  let codexMiniCtx = '';
+  if (!injectSessionCtx && activeSessionId && (engine === 'codex' || engine === 'opencode')) {
+    const sess = sessions.getSession(user.workDir, activeSessionId);
+    if (sess) {
+      const lastUserMsg = [...(sess.messages || [])].reverse().find(m => m.role === 'user');
+      const parts = ['[Контекст сессии]'];
+      if (sess.topic) parts.push(`Тема: "${sess.topic}"`);
+      if (lastUserMsg) {
+        const preview = lastUserMsg.content.slice(0, 120);
+        parts.push(`Предыдущее сообщение: "${preview}${lastUserMsg.content.length > 120 ? '…' : ''}"`);
+      }
+      if (parts.length > 1) codexMiniCtx = parts.join('\n');
+    }
+  }
   if (injectSessionCtx) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
-  const currentTask = injectSessionCtx ? `Пользователь: ${task}` : task;
+  if (codexMiniCtx) baseContext = baseContext ? `${baseContext}\n\n${codexMiniCtx}` : codexMiniCtx;
+  const currentTask = (injectSessionCtx || codexMiniCtx) ? `Пользователь: ${task}` : task;
   let prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
   // Guard against E2BIG: OS ARG_MAX is 2MB; cap at 1MB to leave room for env vars.
   const MAX_PROMPT_CHARS = 1_000_000;
