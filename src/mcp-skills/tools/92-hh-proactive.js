@@ -4,7 +4,19 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
-const { runProactiveSearch, buildScoringPromptText, buildProactiveDigest } = require('../../hh-proactive-search');
+const {
+  runProactiveSearch,
+  buildScoringPromptText,
+  buildProactiveDigest,
+  loadSchedule,
+  saveSchedule,
+  atsConfigHash,
+  queriesStorePath,
+  loadStoredQueries,
+  saveStoredQueries,
+} = require('../../hh-proactive-search');
+
+const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
 
 function proactiveHmac(username) {
   const secret = process.env.AGENT_SECRET || '';
@@ -54,6 +66,8 @@ function buildNotifyChat(username) {
 }
 
 module.exports = {
+  isReady: () => USER_ID ? fs.existsSync(path.join(os.homedir(), 'agent-tokens', USER_ID, 'hh')) : false,
+  setupTools: [],
   tools: {
     hh_proactive_search: {
       description: 'Запускает проактивный поиск кандидатов в открытой базе HH по критериям ATS. Ищет людей которые не откликались сами. Занимает ~30 секунд.',
@@ -99,6 +113,80 @@ module.exports = {
       },
     },
 
+    hh_proactive_queries: {
+      description: 'Показывает и редактирует поисковые фразы проактивного поиска для активной вакансии. action=view — показать текущие фразы и когда сгенерированы; action=update — заменить список (передай queries:[...]); action=reset — удалить сохранённые фразы (регенерация при следующем запуске).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['view', 'update', 'reset'], description: 'Действие: view | update | reset' },
+          queries: { type: 'array', items: { type: 'string' }, description: 'Новый список фраз (только для action=update)' },
+        },
+        required: ['action'],
+      },
+      handler: async ({ action, queries: newQueries }) => {
+        const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+        if (!userId) return { error: 'USER_ID не задан' };
+
+        // Resolve vacancy_id from the current ATS config
+        const workDir = process.cwd();
+        let atsConfig = null;
+        let vacancyId = null;
+        try {
+          const raw = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'ats_config.json'), 'utf8'));
+          atsConfig = raw?.value;
+          vacancyId = atsConfig?.vacancy_id ? String(atsConfig.vacancy_id) : null;
+        } catch {}
+        if (!vacancyId) {
+          try {
+            const av = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
+            if (av?.id) vacancyId = String(av.id);
+          } catch {}
+        }
+        if (!vacancyId) return { error: 'Не удалось определить ID вакансии. Вызови hh_set_active_vacancy или hh_extract_ats_config заново.' };
+
+        const configHash = atsConfig ? atsConfigHash(atsConfig) : null;
+        const storePath = queriesStorePath(userId, vacancyId);
+
+        if (action === 'view') {
+          try {
+            const data = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+            const stale = configHash && data.config_hash !== configHash;
+            return {
+              vacancy_id: vacancyId,
+              queries: data.queries || [],
+              generated_at: data.generated_at,
+              stale,
+              stale_reason: stale ? 'ATS конфиг изменился после генерации — запусти поиск или action=reset для регенерации' : null,
+              message: `${(data.queries || []).length} фраз для вакансии ${vacancyId}${stale ? ' (устарели)' : ''}: ${(data.queries || []).map(q => `"${q}"`).join(', ')}`,
+            };
+          } catch (e) {
+            if (e.code === 'ENOENT') return { vacancy_id: vacancyId, queries: [], message: 'Фразы ещё не сгенерированы. Запусти hh_proactive_search.' };
+            return { error: e.message };
+          }
+        }
+
+        if (action === 'update') {
+          if (!Array.isArray(newQueries) || newQueries.length === 0) return { error: 'queries[] обязателен и не должен быть пустым для action=update' };
+          const validQueries = newQueries.map(q => String(q).trim()).filter(Boolean);
+          if (!validQueries.length) return { error: 'Все фразы пустые — ничего не сохранено' };
+          saveStoredQueries(userId, vacancyId, validQueries, configHash || 'manual');
+          return {
+            ok: true,
+            vacancy_id: vacancyId,
+            queries: validQueries,
+            message: `Сохранено ${validQueries.length} фраз для вакансии ${vacancyId}. Следующий запуск poactive поиска будет использовать этот список.`,
+          };
+        }
+
+        if (action === 'reset') {
+          try { fs.unlinkSync(storePath); } catch (e) { if (e.code !== 'ENOENT') return { error: e.message }; }
+          return { ok: true, vacancy_id: vacancyId, message: `Фразы сброшены. При следующем запуске hh_proactive_search они будут сгенерированы заново через LLM.` };
+        }
+
+        return { error: `Неизвестный action: ${action}` };
+      },
+    },
+
     hh_proactive_view: {
       description: 'Открыть страницу с результатами проактивного поиска кандидатов. Возвращает ссылку на веб-страницу с пагинацией, скорингом и AI-оценкой.',
       inputSchema: { type: 'object', properties: {} },
@@ -126,6 +214,69 @@ module.exports = {
           ...meta,
           message: `Страница с ${meta.count || '?'} кандидатами (PASS: ${meta.pass_count || 0}, REVIEW: ${meta.review_count || 0}): ${url}`,
         };
+      },
+    },
+
+    hh_proactive_schedule: {
+      description: 'Настройка автоматического (периодического) проактивного поиска с Telegram-уведомлениями. action=status — текущие настройки; action=enable — включить (можно задать interval_hours, по умолчанию 24); action=disable — выключить.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['status', 'enable', 'disable'], description: 'status | enable | disable' },
+          interval_hours: { type: 'number', description: 'Интервал запуска в часах (для action=enable, по умолчанию 24)' },
+        },
+        required: ['action'],
+      },
+      handler: async ({ action, interval_hours }) => {
+        const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+        if (!userId) return { error: 'USER_ID не задан' };
+
+        const schedule = loadSchedule(userId) || {};
+
+        if (action === 'status') {
+          if (!schedule.enabled) {
+            return {
+              enabled: false,
+              message: 'Автоматический проактивный поиск выключен. Запусти action=enable чтобы включить — агент будет сам искать новых кандидатов и присылать уведомления.',
+            };
+          }
+          const hours = schedule.interval_hours || 24;
+          const nextRunTs = schedule.last_run
+            ? new Date(new Date(schedule.last_run).getTime() + hours * 3600000).toISOString()
+            : '~10 мин после старта сервера';
+          return {
+            enabled: true,
+            interval_hours: hours,
+            last_run: schedule.last_run || null,
+            next_run: nextRunTs,
+            message: `Автопоиск включён. Интервал: каждые ${hours} ч.\nПоследний запуск: ${schedule.last_run || 'ещё не было'}.\nСледующий: ${nextRunTs}.`,
+          };
+        }
+
+        if (action === 'enable') {
+          const hours = interval_hours && interval_hours > 0 ? interval_hours : (schedule.interval_hours || 24);
+          schedule.enabled = true;
+          schedule.interval_hours = hours;
+          saveSchedule(userId, schedule);
+          return {
+            ok: true,
+            enabled: true,
+            interval_hours: hours,
+            message: `✅ Автопоиск включён — каждые ${hours} ч агент будет искать новых кандидатов и присылать уведомления в Telegram. Первый запуск в течение 30 мин (при следующей плановой проверке).`,
+          };
+        }
+
+        if (action === 'disable') {
+          schedule.enabled = false;
+          saveSchedule(userId, schedule);
+          return {
+            ok: true,
+            enabled: false,
+            message: 'Автопоиск выключен. Используй hh_proactive_search для ручного запуска.',
+          };
+        }
+
+        return { error: `Неизвестный action: ${action}` };
       },
     },
   },

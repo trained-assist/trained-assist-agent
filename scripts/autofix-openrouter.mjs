@@ -82,7 +82,7 @@ const CHEAP_PAID_FALLBACK = [
 
 const STAGE0_MODEL = STAGE0_MODEL_CHAIN[0];
 const STAGE0_FALLBACK_MODEL = STAGE0_MODEL_CHAIN[1]; // kept for compat, chain handles the rest
-const STAGE1_MODEL = 'deepseek/deepseek-v3-0324:free';
+const STAGE1_MODEL = 'deepseek/deepseek-v4-flash-0731:free';
 const STAGE2_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
 const STAGE3_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
@@ -181,59 +181,59 @@ async function prComment(body) {
 }
 
 async function callModel(model, messages, json = false) {
-  const tryModel = async (m) => {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: m,
-        messages,
-        temperature: 0,
-        ...(json ? { response_format: { type: 'json_object' } } : {}),
-      }),
-      signal: AbortSignal.timeout(CHEAP_PAID_FALLBACK.includes(m) ? 60_000 : 20_000),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw Object.assign(new Error(`OpenRouter HTTP ${res.status}: ${body}`), { status: res.status });
-    }
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content?.trim() || '';
-  };
-
-  // For STAGE0 calls: try full chain (hardcoded free → discovered free → cheap paid)
-  const chain = model === STAGE0_MODEL
-    ? [...STAGE0_MODEL_CHAIN, ...(await discoverFreeModels()), ...CHEAP_PAID_FALLBACK]
-    : [model];
-
-  let lastErr;
-  let reachedPaid = false;
-  for (const m of chain) {
-    const isPaid = CHEAP_PAID_FALLBACK.includes(m);
-    try {
-      if (m !== model) {
-        if (isPaid && !reachedPaid) {
-          reachedPaid = true;
-          log('model', 'all free models exhausted — falling back to cheap paid models');
-        }
-        log('model', `trying ${m}${isPaid ? ' (paid)' : ''}`);
-      }
-      const result = await tryModel(m);
-      if (result) return result; // non-empty → success
-      lastErr = new Error(`${m} returned empty response`);
-      log('model', `${m} empty — trying next`);
-    } catch (e) {
-      lastErr = e;
-      const isRetryable = [400, 404, 429, 503].includes(e.status)
-        || e.name === 'AbortError' || e.name === 'TimeoutError';
-      if (!isRetryable) throw e;
-      if (e.name === 'AbortError' || e.name === 'TimeoutError') log('model', `${m} timed out — trying next`);
-    }
+const tryModel = async (m) => {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: m,
+      messages,
+      temperature: 0,
+      ...(json ? { response_format: { type: 'json_object' } } : {}),
+    }),
+    signal: AbortSignal.timeout(CHEAP_PAID_FALLBACK.includes(m) ? 60_000 : 20_000),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw Object.assign(new Error(`OpenRouter HTTP ${res.status}: ${body}`), { status: res.status });
   }
-  throw lastErr;
+  const data = await res.json();
+  return data?.choices?.[0]?.message?.content?.trim() || '';
+};
+
+// For STAGE0 calls: try full chain (hardcoded free → discovered free → cheap paid)
+const chain = model === STAGE0_MODEL
+  ? [...STAGE0_MODEL_CHAIN, ...(await discoverFreeModels()), ...CHEAP_PAID_FALLBACK]
+  : [model];
+
+let lastErr;
+let reachedPaid = false;
+for (const m of chain) {
+  const isPaid = CHEAP_PAID_FALLBACK.includes(m);
+  try {
+    if (m !== model) {
+      if (isPaid && !reachedPaid) {
+        reachedPaid = true;
+        log('model', 'all free models exhausted — falling back to cheap paid models');
+      }
+      log('model', `trying ${m}${isPaid ? ' (paid)' : ''}`);
+    }
+    const result = await tryModel(m);
+    if (result) return result; // non-empty → success
+    lastErr = new Error(`${m} returned empty response`);
+    log('model', `${m} empty — trying next`);
+  } catch (e) {
+    lastErr = e;
+    const isRetryable = [400, 403, 404, 429, 503].includes(e.status)
+      || e.name === 'AbortError' || e.name === 'TimeoutError';
+    if (!isRetryable) throw e;
+    if (e.name === 'AbortError' || e.name === 'TimeoutError') log('model', `${m} timed out — trying next`);
+  }
+}
+throw lastErr;
 }
 
 // Cached list of free models discovered from OpenRouter /models (fetched once per run)
@@ -258,6 +258,7 @@ async function discoverFreeModels() {
     _discoveredFreeModels = [];
   }
   return _discoveredFreeModels;
+}
 }
 
 function extractPatch(raw) {
@@ -295,61 +296,61 @@ async function resolveConflictsWithAI(conflictedFiles, prPurposeArg) {
     }
     if (blocks.length === 0) continue;
 
-    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI (single call)...`);
+    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI (one call per block)...`);
 
-    // Batch all blocks into ONE AI call to avoid per-block rate limits
-    const blocksText = blocks.map((b, i) => `BLOCK ${i + 1}:\n${b.full}`).join('\n\n---\n\n');
-    let aiResponse;
-    try {
-      aiResponse = await callModel(STAGE0_MODEL, [
-        {
-          role: 'system',
-          content: `You are resolving git merge conflicts. The PR's purpose is: "${prPurposeArg}".
-Resolve ALL conflict blocks so the result serves that purpose while keeping unrelated code intact.
-Return ONLY resolutions in this exact format — one per block, separated by "---":
-BLOCK 1:
-<resolved code with no conflict markers>
----
-BLOCK 2:
-<resolved code with no conflict markers>
-No explanations, no code fences, no extra text.`,
-        },
-        {
-          role: 'user',
-          content: `File: ${filePath}\n\n${blocksText}`,
-        },
-      ]);
-    } catch (e) {
-      return { ok: false, reason: `AI call failed for ${filePath}: ${e.message.slice(0, 100)}` };
+    // Resolve each block independently — smaller prompts, no brittle multi-block parsing.
+    // Retry up to 2 times per block on empty response before skipping.
+    const resolvedCode = [];
+    let failedBlocks = 0;
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const blockNum = `${bi + 1}/${blocks.length}`;
+      let blockResult = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          log('conflict-resolve', `${filePath}: block ${blockNum} empty — waiting 5s, retry ${attempt}...`);
+          await new Promise(r => setTimeout(r, 5000));
+        }
+        try {
+          blockResult = await callModel(STAGE0_MODEL, [
+            {
+              role: 'system',
+              content: `Resolve this single git merge conflict. PR purpose: "${prPurposeArg}".
+Return ONLY the resolved code — no conflict markers, no explanations, no markdown fences.`,
+            },
+            {
+              role: 'user',
+              content: `File: ${filePath}\n\n${blocks[bi].full}`,
+            },
+          ]);
+        } catch (e) {
+          log('conflict-resolve', `${filePath}: block ${blockNum} error (attempt ${attempt + 1}): ${e.message.slice(0, 80)}`);
+          blockResult = '';
+        }
+        if (blockResult) break;
+      }
+      if (!blockResult) {
+        log('conflict-resolve', `${filePath}: block ${blockNum} — could not resolve after retries, leaving as-is`);
+        resolvedCode.push(blocks[bi].full); // leave original conflict marker
+        failedBlocks++;
+      } else {
+        log('conflict-resolve', `${filePath}: block ${blockNum} OK`);
+        resolvedCode.push(blockResult.trim());
+      }
     }
 
-    // Parse "BLOCK N:\n<code>" sections from response
-    const parsedBlocks = [];
-    const blockSections = aiResponse.split(/^---$/m);
-    for (const section of blockSections) {
-      const m = section.match(/^BLOCK\s+\d+:\s*\n([\s\S]*)/m);
-      if (m) parsedBlocks.push(m[1].trim());
-    }
-
-    if (parsedBlocks.length !== blocks.length) {
-      // Fallback: if parsing fails, try line-by-line split
-      log('conflict-resolve', `${filePath}: parsed ${parsedBlocks.length}/${blocks.length} blocks — retrying parse`);
-      const altSections = aiResponse.split(/BLOCK\s+\d+:\s*\n/);
-      altSections.shift(); // remove text before first BLOCK
-      parsedBlocks.length = 0;
-      for (const s of altSections) parsedBlocks.push(s.replace(/\s*---\s*$/, '').trim());
-    }
-
-    if (parsedBlocks.length !== blocks.length) {
-      return { ok: false, reason: `AI returned ${parsedBlocks.length} resolutions for ${blocks.length} blocks in ${filePath}` };
+    if (failedBlocks === blocks.length) {
+      return { ok: false, reason: `AI could not resolve any of ${blocks.length} blocks in ${filePath}` };
     }
 
     let resolved = content;
     for (let i = 0; i < blocks.length; i++) {
-      resolved = resolved.replace(blocks[i].full, parsedBlocks[i]);
+      resolved = resolved.replace(blocks[i].full, resolvedCode[i]);
     }
 
-    if (/^<{7} /m.test(resolved) || /^>{7} /m.test(resolved)) {
+    // \w after the markers ensures regex patterns like /File: scripts/autofix-openrouter.mjs
+
+    // don't trigger a false positive — real markers are always followed by HEAD/branch-name
+    if (/^<{7} \w/m.test(resolved) || /^>{7} \w/m.test(resolved)) {
       return { ok: false, reason: `conflict markers remain in ${filePath} after AI resolution` };
     }
 
@@ -420,6 +421,8 @@ async function tryFixOutOfDate(failedLog, prPurposeArg) {
       fix_approach: `Merged \`origin/${BASE_BRANCH}\`, AI resolved ${conflictedFiles.length} file(s): ${conflictedFiles.join(', ')} (context: "${effectivePurpose.slice(0, 60)}")`,
     };
   }
+    };
+  }
 }
 
 // ── Pre-stage B: Missing GitHub Actions permissions ──────────────────────────
@@ -478,7 +481,7 @@ function tryFixMissingPermissions(failedLog) {
 
   const workflowDir = path.join(process.cwd(), '.github', 'workflows');
   if (!existsSync(workflowDir)) {
-    return { ok: false, category: 'fail:permissions_no_workflow', reason: 'no .github/workflows directory found in this repo' };
+return { ok: false, category: 'fail:permissions_no_workflow', reason: 'no .github/workflows directory found in this repo' };
   }
 
   const files = readdirSync(workflowDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
@@ -497,15 +500,16 @@ function tryFixMissingPermissions(failedLog) {
 
   if (patched.length === 0) {
     return {
-      ok: false,
+ok: false,
       category: 'fail:permissions_no_workflow',
       reason: 'no workflow file found with a `gh pr merge` job missing a `permissions:` block',
     };
   }
 
   return {
-    ok: true,
+ok: true,
     category: 'success:pre_b_permissions',
+    fixed: true,
     problem: `GitHub Actions job lacked \`permissions: contents: write, pull-requests: write\` — GITHUB_TOKEN defaulted to read-only`,
     fix_approach: `Added permissions block to merge job in: ${patched.join(', ')}`,
   };
@@ -513,7 +517,7 @@ function tryFixMissingPermissions(failedLog) {
 
 // ── Pre-stage C: Cloudflare Durable Objects migration conflict ───────────────
 // Detection: wrangler error code 10074 or specific migration messages
-// Action: bail immediately (not safe to auto-fix — requires human review of DO state)
+// Action: bail immediately with a precise, actionable error message (not safe to auto-fix — requires human review of DO state)
 function checkCloudflareConflict(failedLog) {
   const patterns = [
     /code: 10074/,
@@ -532,6 +536,25 @@ if (!REPO || !PR_NUMBER) failWithStats('fail:other', 'missing REPO/PR_NUMBER env
 if (!BATCH_MODE && !RUN_ID) failWithStats('fail:other', 'missing RUN_ID env (set RUN_ID=0 for batch/manual mode)');
 
 // Configure git identity early — needed for merge commits (before tryFixOutOfDate)
+
+// ── Race condition guard ─────────────────────────────────────────────────────
+try {
+  const prViewRaw = sh(`gh pr view ${PR_NUMBER} -R ${REPO} --json state,statusCheckRollup`);
+  const prInfo = JSON.parse(prViewRaw);
+  if (prInfo.state !== 'OPEN') {
+    log('guard', `PR #${PR_NUMBER} is already ${prInfo.state} — aborting`);
+    process.exit(0);
+  }
+  const checks = prInfo.statusCheckRollup || [];
+  if (checks.length > 0 && !checks.some(c => c.conclusion === 'FAILURE' || c.conclusion === 'TIMED_OUT')) {
+    log('guard', `PR #${PR_NUMBER} CI no longer shows failures — aborting`);
+    process.exit(0);
+  }
+} catch (e) {
+  log('guard', `could not check PR state (${e.message}) — proceeding anyway`);
+}
+
+let failedLog;
 try {
   sh('git config user.name "trained-assist-autofix"');
   sh('git config user.email "autofix@trained-assist.bot"');
@@ -638,11 +661,17 @@ Set is_clear=true for ordinary feature PRs, bug fixes, refactors, dependency upd
   log('stage0', `is_clear: ${reasoning.is_clear}`);
 
   if (!reasoning.is_clear) {
-    const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
-    await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
-    writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
-    log('stage0', `ambiguous PR — stopping`);
-    process.exit(0); // not a failure — just not our job
+    if (BATCH_MODE) {
+      // In batch mode we're here to merge a stale branch, not to diagnose CI failures.
+      // Proceed with branch name as purpose fallback for conflict resolution.
+      log('stage0', `ambiguous in batch mode — proceeding anyway (purpose: ${reasoning.purpose})`);
+    } else {
+      const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
+      await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
+      writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
+      log('stage0', `ambiguous PR — stopping`);
+      process.exit(0); // not a failure — just not our job
+    }
   }
 
   // Announce we're starting — purpose confirmed
@@ -677,7 +706,7 @@ if (outOfDateResult) {
 if (!preStageDiagnosis) {
   const permResult = tryFixMissingPermissions(failedLog);
   if (permResult) {
-    if (!permResult.ok) {
+if (!permResult.ok) {
       await prComment(`❌ Could not fix: GitHub Actions permissions issue but no patchable workflow found\n\nReason: ${permResult.reason}`);
       failWithStats(permResult.category, permResult.reason);
     }
@@ -692,7 +721,7 @@ let patchToApply = null; // set by stage 3 if AI ran
 
 if (preStageDiagnosis) {
   diagnosis = preStageDiagnosis;
-  log('pre', `pre-stage fix applied (${preStageDiagnosis.category}) — skipping AI pipeline`);
+log('pre', `pre-stage fix applied (${preStageDiagnosis.category}) — skipping AI pipeline`);
   await prComment(`🔧 Deterministic fix applied (no AI needed)\n\n**Cause:** ${preStageDiagnosis.problem}\n**Fix:** ${preStageDiagnosis.fix_approach}`);
 } else {
   // ── Stage 1: Diagnose ──────────────────────────────────────────────────────
@@ -719,22 +748,22 @@ Rules:
 - If the fix is obvious from the log alone and needs no extra file context, set files_to_examine to []
 - If you cannot determine the cause, set problem to "CANNOT_DIAGNOSE"
 - confidence: high = clear deterministic fix; medium = likely fix; low = uncertain`,
-      },
-      {
-        role: 'user',
-        content: `Failed CI log (tail):\n\`\`\`\n${failedLog}\n\`\`\`\n\nPR diff vs ${BASE_BRANCH}:\n\`\`\`diff\n${prDiff}\n\`\`\``,
-      },
-    ], true);
-  } catch (e) {
-    await prComment(`❌ Stage 1 model error — could not diagnose CI failure\n\n\`${e.message.slice(0, 200)}\``);
-    failWithStats('fail:ai_model_error', `Stage 1 model error: ${e.message.slice(0, 200)}`);
-  }
+},
+    {
+      role: 'user',
+      content: `Failed CI log (tail):\n\`\`\`\n${failedLog}\n\`\`\`\n\nPR diff vs ${BASE_BRANCH}:\n\`\`\`diff\n${prDiff}\n\`\`\``,
+    },
+  ], true);
+} catch (e) {
+  await prComment(`❌ Stage 1 model error — could not diagnose CI failure\n\n\`${e.message.slice(0, 200)}\``);
+  failWithStats('fail:ai_model_error', `Stage 1 model error: ${e.message.slice(0, 200)}`);
+}
 
   try {
     const raw = stage1Content.replace(/^```json\n?/, '').replace(/```$/, '');
     diagnosis = JSON.parse(raw);
   } catch (e) {
-    await prComment(`❌ Stage 1 returned unparseable response — cannot proceed`);
+await prComment(`❌ Stage 1 returned unparseable response — cannot proceed`);
     failWithStats('fail:ai_no_diagnose', `Stage 1 returned invalid JSON: ${e.message}`, { raw: stage1Content.slice(0, 300) });
   }
 
@@ -750,7 +779,7 @@ Rules:
   log('stage1', `diagnosis: ${diagnosis.problem.slice(0, 120)}`);
   log('stage1', `confidence: ${diagnosis.confidence || 'unset'}`);
   log('stage1', `files to examine: ${(diagnosis.files_to_examine || []).join(', ') || '(none)'}`);
-  await prComment(`✅ Stage 1/3: root cause identified (confidence: ${diagnosis.confidence || '?'})\n\n**Cause:** ${diagnosis.problem}\n**Plan:** ${diagnosis.fix_approach}`);;
+await prComment(`✅ Stage 1/3: root cause identified (confidence: ${diagnosis.confidence || '?'})\n\n**Cause:** ${diagnosis.problem}\n**Plan:** ${diagnosis.fix_approach}`);
 
   // ── Stage 2: Gather context ────────────────────────────────────────────────
   const fileList = (diagnosis.files_to_examine || []).slice(0, MAX_FILES);
@@ -771,7 +800,7 @@ Rules:
   if (fileContents.length > 0) {
     log('stage2', `calling ${STAGE2_MODEL} for context analysis...`);
 
-    try {
+try {
       const stage2Content = await callModel(STAGE2_MODEL, [
         {
           role: 'system',
@@ -783,25 +812,25 @@ Rules:
 Your job: describe exactly what lines/functions need to change to fix the CI failure. Be specific (file, function name, what to add/remove/change). Do NOT write code — only describe the change in plain English.
 
 If the diagnosis is wrong given what you see in the files, correct it.`,
-        },
-        {
-          role: 'user',
-          content: `Root cause: ${diagnosis.problem}\n\nProposed fix approach: ${diagnosis.fix_approach}\n\nSource files:\n\n${fileContents.join('\n\n')}\n\nPR diff:\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nDescribe the exact changes needed.`,
-        },
-      ]);
+},
+      {
+        role: 'user',
+        content: `Root cause: ${diagnosis.problem}\n\nProposed fix approach: ${diagnosis.fix_approach}\n\nSource files:\n\n${fileContents.join('\n\n')}\n\nPR diff:\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nDescribe the exact changes needed.`,
+      },
+    ]);
 
-      changeSpec = stage2Content;
-      log('stage2', `change spec (first 200): ${changeSpec.slice(0, 200)}`);
-    } catch (e) {
-      log('stage2', `model error (${e.message.slice(0, 80)}) — falling back to stage 1 diagnosis`);
-    }
+    changeSpec = stage2Content;
+    log('stage2', `change spec (first 200): ${changeSpec.slice(0, 200)}`);
+  } catch (e) {
+    log('stage2', `model error (${e.message.slice(0, 80)}) — falling back to stage 1 diagnosis`);
+  }
   } else {
     log('stage2', 'no files to load, skipping stage 2 — using diagnosis directly');
   }
 
   // ── Stage 3: Write patch ───────────────────────────────────────────────────
   log('stage3', `calling ${STAGE3_MODEL} to write patch...`);
-  await prComment('🔧 Stage 3/3: generating patch…');
+await prComment('🔧 Stage 3/3: generating patch…');
 
   let stage3Content;
   try {
@@ -815,27 +844,29 @@ Rules:
 - Valid git diff format, applicable via "git apply"
 - Wrap in a single \`\`\`diff code block
 - If you cannot produce a correct patch, reply exactly: CANNOT_FIX`,
-      },
-      {
-        role: 'user',
-        content: `Root cause:\n${diagnosis.problem}\n\nWhat to change:\n${changeSpec}\n\nCurrent PR diff (for context on what already changed):\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nWrite the fix patch.`,
-      },
-    ]);
+},
+    {
+      role: 'user',
+      content: `Root cause:\n${diagnosis.problem}\n\nWhat to change:\n${changeSpec}\n\nCurrent PR diff (for context on what already changed):\n\`\`\`diff\n${prDiff}\n\`\`\`\n\nWrite the fix patch.`,
+    },
+  ]);
+
+  try {
+    if (!stage3Content || stage3Content.includes('CANNOT_FIX')) {
+      await prComment(`❌ Stage 3: model declined to generate a patch\n\n**Cause:** ${diagnosis.problem}\n\nThis likely requires a code change that needs human judgement.`);
+      failWithStats('fail:ai_cannot_fix', 'Stage 3 declined to produce a patch', {
+        problem: diagnosis.problem,
+        fix_approach: diagnosis.fix_approach,
+      });
+    }
   } catch (e) {
     failWithStats('fail:ai_model_error', `Stage 3 model error: ${e.message.slice(0, 200)}`, { problem: diagnosis.problem });
   }
-
-  if (!stage3Content || stage3Content.includes('CANNOT_FIX')) {
-    await prComment(`❌ Stage 3: model declined to generate a patch\n\n**Cause:** ${diagnosis.problem}\n\nThis likely requires a code change that needs human judgement.`);
-    failWithStats('fail:ai_cannot_fix', 'Stage 3 declined to produce a patch', {
-      problem: diagnosis.problem,
-      fix_approach: diagnosis.fix_approach,
-    });
   }
 
   const patch = extractPatch(stage3Content);
   if (!patch.startsWith('diff --git') && !patch.startsWith('---')) {
-    await prComment(`❌ Stage 3: generated a malformed diff — cannot apply\n\n**Cause:** ${diagnosis.problem}`);
+await prComment(`❌ Stage 3: generated a malformed diff — cannot apply\n\n**Cause:** ${diagnosis.problem}`);
     failWithStats('fail:ai_corrupt_patch', 'Stage 3 produced malformed diff', {
       problem: diagnosis.problem,
       patch_head: patch.slice(0, 100),
@@ -856,7 +887,7 @@ if (patchToApply) {
     execFileSync('git', ['apply', '--whitespace=fix', patchFile], { stdio: 'inherit' });
   } catch (e) {
     unlinkSync(patchFile);
-    await prComment(`❌ Patch did not apply cleanly\n\n**Cause:** ${diagnosis.problem}\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
+await prComment(`❌ Patch did not apply cleanly\n\n**Cause:** ${diagnosis.problem}\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
     failWithStats('fail:ai_corrupt_patch', 'Patch did not apply cleanly', {
       problem: diagnosis.problem,
       git_error: e.message.slice(0, 200),
@@ -866,20 +897,23 @@ if (patchToApply) {
 }
 
 // ── Verify: run tests ─────────────────────────────────────────────────────────
+// Skip for conflict resolution — push fix PR and let CI report failures.
+// The loop: conflict resolved → fix PR → CI fails → fixer picks up next iteration.
 
-await prComment('🧪 Patch applied — running tests…');
-try {
-  sh('npm test');
-} catch (e) {
-  sh('git checkout -- .');
-  sh('git clean -fd');
-  await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
-  failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
-    problem: diagnosis.problem,
-    test_error: e.message.slice(0, 300),
-  });
+if (!preStageDiagnosis?.category.startsWith('success:pre_a')) {
+  await prComment('🧪 Patch applied — running tests…');
+  try {
+    sh('npm test');
+  } catch (e) {
+    sh('git checkout -- .');
+    sh('git clean -fd');
+    await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
+    failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
+      problem: diagnosis.problem,
+      test_error: e.message.slice(0, 300),
+    });
+  }
 }
-
 // ── Create new fix branch + PR (never push to original branch) ───────────────
 
 const ts = Math.floor(Date.now() / 1000);
@@ -892,11 +926,15 @@ const fixStrategy = preStageDiagnosis
 sh('git config user.name "trained-assist-autofix"');
 sh('git config user.email "autofix@trained-assist.bot"');
 sh('git add -A');
-sh(`git commit -m "fix: auto-fix CI failure [autofix]
+// Pre-stage A (conflict resolution or clean merge) may have already committed.
+// Skip the commit if nothing is staged — avoids "nothing to commit" crash.
+if (sh('git status --porcelain').trim()) {
+  sh(`git commit -m "fix: auto-fix CI failure [autofix]
 
 Diagnosis: ${diagnosis.problem.slice(0, 120).replace(/"/g, "'")}
 Strategy: ${fixStrategy}"
 `);
+}
 sh(`git checkout -b ${fixBranch}`);
 sh(`git push origin ${fixBranch}`);
 
@@ -910,7 +948,7 @@ const prBody = [
   '',
   `**Fix:** ${diagnosis.fix_approach}`,
   '',
-  `**Strategy:** \`${fixStrategy}\``,
+`**Strategy:** \`${fixStrategy}\``,
   '',
   `---`,
   `<!-- ci-fixer-original-pr: ${PR_NUMBER} -->`,
@@ -929,11 +967,36 @@ try {
 const newPRNumber = newPRUrl.match(/\/pull\/(\d+)$/)?.[1] || '?';
 log('publish', `created new PR #${newPRNumber}: ${newPRUrl}`);
 
+// Close any stale fix/ci-* PRs for the same original branch (excluding the one just created)
+try {
+  const safeBranchForClose = (ORIGINAL_BRANCH || 'unknown').replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40);
+  const stalePRs = JSON.parse(
+    sh(`gh pr list -R "${REPO}" --json number,headRefName --state open`)
+  ).filter(pr =>
+    pr.headRefName.startsWith(`fix/ci-${safeBranchForClose}-`) &&
+    String(pr.number) !== String(newPRNumber)
+  );
+  for (const stale of stalePRs) {
+    sh(`gh pr close ${stale.number} -R "${REPO}" --comment "♻️ Superseded by #${newPRNumber}: ${newPRUrl}"`);
+    log('publish', `closed stale fix PR #${stale.number} (superseded by #${newPRNumber})`);
+  }
+} catch (e) {
+  log('publish', `could not close stale fix PRs: ${e.message.slice(0, 80)}`);
+}
 try {
   sh(`gh pr merge --auto --squash "${newPRNumber}" -R "${REPO}"`);
   log('publish', `auto-merge enabled on PR #${newPRNumber}`);
 } catch (e) {
   log('publish', `auto-merge not available (${e.message.slice(0, 80)}) — PR will need manual merge`);
+}
+
+// Close the original PR immediately — don't rely on webhook events from ci-fix-cleanup.yml
+// which can be dropped by GitHub. The fix PR is now the source of truth.
+try {
+  sh(`gh pr close ${PR_NUMBER} -R "${REPO}" --comment "🤖 Superseded by #${newPRNumber}: ${newPRUrl} (pending CI + auto-merge)."`);
+  log('publish', `closed original PR #${PR_NUMBER}`);
+} catch (e) {
+  log('publish', `could not close original PR: ${e.message.slice(0, 80)}`);
 }
 
 await prComment([
@@ -943,7 +1006,7 @@ await prComment([
   `**Fix:** ${diagnosis.fix_approach}`,
   `**Strategy:** \`${fixStrategy}\``,
   '',
-  `PR #${newPRNumber} will auto-merge when CI passes. This PR will be closed automatically after merge.`,
+  `PR #${newPRNumber} will auto-merge when CI passes.`,
 ].join('\n'));
 
 // ── Write success stats ───────────────────────────────────────────────────────
@@ -954,5 +1017,4 @@ writeStats(preStageDiagnosis ? preStageDiagnosis.category : 'success:ai', {
   fix_pr: newPRNumber,
   strategy: fixStrategy,
 });
-
 console.log(`[autofix] fix PR #${newPRNumber} created (strategy: ${fixStrategy})`);
