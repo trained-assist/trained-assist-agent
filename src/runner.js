@@ -1640,21 +1640,29 @@ function stopTask(taskId) {
   return { ok: true };
 }
 
-// Stop all running tasks for a given username (used by the /stop quick command).
-function stopUserTask(username) {
+// Stop running task(s) for a given username (used by the /stop quick command).
+// One profile's workDir is deliberately shared across multiple Telegram chats
+// (see runTask's queueKey comment), so a plain-text "стоп" typed in one chat
+// must NOT reach into another chat's running task or orphaned process — pass
+// chatId to scope the kill to the task that chat actually started. Omit chatId
+// only for genuinely profile-wide callers (e.g. /gtd_stop's explicit hard-stop).
+function stopUserTask(username, chatId = null) {
   let stopped = false;
   for (const [taskId, s] of activeTimers.entries()) {
-    if (taskId.startsWith(username + '-') && s.proc) {
-      s.userStopped = true;
-      try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
-      console.log(`[${taskId}] stopped by user command`);
-      stopped = true;
-    }
+    if (!taskId.startsWith(username + '-') || !s.proc) continue;
+    if (chatId != null && s.chatId != null && String(s.chatId) !== String(chatId)) continue;
+    s.userStopped = true;
+    try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
+    console.log(`[${taskId}] stopped by user command`);
+    stopped = true;
   }
 
   // Fallback: kill orphaned Claude processes (e.g. from before a service restart)
   // The mcp-config path contains the username, so we can grep the process list.
-  if (!stopped) {
+  // Orphans carry no chat attribution, so this fallback only runs for a genuinely
+  // profile-wide stop (chatId omitted) — otherwise it would kill another chat's
+  // orphan under a chat-scoped "стоп", recreating the cross-chat leak this guards.
+  if (!stopped && !chatId) {
     try {
       const { execSync } = require('child_process');
       // Find PIDs of claude processes for this user by mcp-config path
@@ -1769,10 +1777,13 @@ function runTask(opts) {
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
-    const stopped = stopUserTask(username);
+    const chatId = opts.user.id;
+    // Chat-scoped: a plain "стоп" typed in one chat must only touch this chat's
+    // task/GTD tracking, not a profile-mate's — workDir is shared across chats.
+    const stopped = stopUserTask(username, chatId);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('./gtd-controller').clearAllGtd(workDir); }
+      try { gtdCancelled = require('./gtd-controller').clearGtdForChat(workDir, chatId); }
       catch (e) { console.warn('[runner] stop gtd clear:', e.message); }
     }
     const parts = [];
@@ -1781,7 +1792,6 @@ function runTask(opts) {
     if (!parts.length) parts.push('Нет активной задачи для остановки.');
     const msg = parts.join(' ');
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
     if (botToken) {
       const markup = { reply_markup: { inline_keyboard: [] } };
       const im = opts.initialMsgId;
@@ -1791,21 +1801,22 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // GTD hard-stop: cancel all open GTD tracking + kill any running task.
+  // GTD hard-stop: cancel this chat's open GTD tracking + kill its running task.
+  // Chat-scoped for the same reason as STOP_TASK_INTENT above (#leak-between-chats).
   if (GTD_STOP_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
-    stopUserTask(username);
+    const chatId = opts.user.id;
+    stopUserTask(username, chatId);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('./gtd-controller').clearAllGtd(workDir); }
+      try { gtdCancelled = require('./gtd-controller').clearGtdForChat(workDir, chatId); }
       catch (e) { console.warn('[runner] gtd_stop clear:', e.message); }
     }
     const msg = gtdCancelled > 0
       ? `🛑 GTD остановлен — ${gtdCancelled} запланированных проверок отменено.`
       : '🛑 Нет активных GTD-проверок для отмены.';
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
     if (botToken) {
       const im = opts.initialMsgId;
       if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
@@ -1884,12 +1895,12 @@ function runTask(opts) {
   // Wakeup command — kill stuck task + clear the queue so new messages can flow through.
   if (WAKEUP_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
+    const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
-    const stopped = stopUserTask(username);
+    const stopped = stopUserTask(username, chatId);
     // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
     chatLanes.delete(queueKey);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
     const msg = stopped
       ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
       : hadActive
@@ -1907,12 +1918,12 @@ function runTask(opts) {
   // Unlike /stop (which is a dead-end), /skip advances the chat queue.
   if (SKIP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
-    const stopped = stopUserTask(username);
+    const chatId = opts.user.id;
+    const stopped = stopUserTask(username, chatId);
     const msg = stopped
       ? '⏭ Текущая задача пропущена. Следующая начнётся автоматически.'
       : '✅ Нет активной задачи для пропуска.';
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
     if (botToken) {
       const im = opts.initialMsgId;
       if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
@@ -3253,7 +3264,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
   let timedOut = false;
-  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false };
+  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId };
   activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {
