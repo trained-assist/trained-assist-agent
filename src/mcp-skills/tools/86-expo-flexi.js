@@ -1,5 +1,7 @@
 'use strict';
 
+const { isExpoEnabled } = require('../expo-paths.js');
+
 // Flexi-specific exhibition tools
 //
 // expo_classify_targets  — classify a list of companies as target/near-target/not-target
@@ -128,6 +130,8 @@ function toExEntry(c, idx, prefix, productionOkved = DEFAULT_PRODUCTION_OKVED) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 module.exports = {
+  isReady: isExpoEnabled,
+  setupTools: [],
   tools: {
 
     expo_classify_targets: {

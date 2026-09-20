@@ -27,8 +27,14 @@ def prepare(file, target, previous, main_pid, rollback=False):
         state.update(phase='restarting', rollbackCommit=state['previousCommit'], deploymentOutcome='rolled_back')
     fd, name = tempfile.mkstemp(dir=file.parent)
     try:
-        with os.fdopen(fd, 'w') as out:
-            json.dump(state, out); out.flush(); os.fsync(out.fileno())
+        try:
+            with os.fdopen(fd, 'w') as out:
+                fd = -1  # os.fdopen owns the fd now; don't double-close
+                json.dump(state, out); out.flush(); os.fsync(out.fileno())
+        finally:
+            if fd != -1:
+                try: os.close(fd)
+                except OSError: pass
         os.replace(name, file)
         directory = os.open(file.parent, os.O_RDONLY)
         try: os.fsync(directory)

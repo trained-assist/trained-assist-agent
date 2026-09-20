@@ -34,13 +34,21 @@ async function decideNextAction({ conversation, latestText, buttons, stepNumber,
     ? 'Ты должен выбрать ВТОРОЙ по вероятности вариант (не самый очевидный первый, но тоже распространённый).'
     : 'Выбери САМЫЙ банальный, самый ожидаемый вариант — то, что сделает большинство новых пользователей.';
 
-  // Build "don't repeat" hint from already-taken actions.
+// Build "don't repeat" hint from already-taken actions.
   const alreadyTaken = previousActions.length
     ? `\nУЖЕ СДЕЛАННЫЕ действия (не повторяй их):\n${previousActions.map(a =>
         a.type === 'text' ? `- написал текст: "${a.content}"` : `- нажал кнопку: "${a.buttonText}"`
       ).join('\n')}\n`
     : '';
+const { runIntegrationTests } = require('./integration-tester');
+const { classifyBugs } = require('./bug-curator');
 
+async function main() {
+    await runIntegrationTests();
+    await classifyBugs();
+}
+
+main();
   const prompt = `Ты — среднестатистический новый пользователь Telegram-бота (AI-помощник для рекрутинга и задач). Ты не технарь, просто обычный человек, который первый раз пользуется ботом.
 
 ШАГ ${stepNumber}/7 тест-сессии.
@@ -77,7 +85,7 @@ ${modeNote}
       model: 'deepseek/deepseek-chat',
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 120,
-      temperature: 0.4,
+temperature: 0.4,
     }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -87,6 +95,7 @@ ${modeNote}
   const data = await res.json();
   const raw = (data.choices?.[0]?.message?.content || '').trim();
 
+// Parse JSON, stripping markdown fences if present
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   try {
     return JSON.parse(cleaned);
@@ -95,6 +104,7 @@ ${modeNote}
     if (match) {
       try { return JSON.parse(match[0]); } catch {}
     }
+// Fallback: send generic follow-up
     return { type: 'text', content: 'расскажи подробнее' };
   }
 }
