@@ -136,3 +136,88 @@ test('real global admission blocks queued and new tasks; cancel releases them wi
   gate.cancel(); const release = await second;
   assert.equal(started, true); release(); sandbox._releaseSlot();
 });
+
+// Restart-notify recipients: the startup "restart complete" ping must reach
+// exactly the chats that were told "restart planned" while draining — not a
+// guess from session activity (see restart-notify-single-chat class bug and
+// its own over-broad follow-up fix, both superseded by this).
+test('addRecipient records a chat notified while paused; pendingNotifications returns it', t => {
+  const { gate } = fixture(t);
+  gate.pause();
+  gate.addRecipient({ username: 'alice', chatId: -555, threadId: null });
+  assert.deepEqual(gate.pendingNotifications(), [{ username: 'alice', chatId: -555, threadId: null }]);
+});
+
+test('addRecipient dedupes the same username+chatId', t => {
+  const { gate } = fixture(t);
+  gate.pause();
+  gate.addRecipient({ username: 'alice', chatId: -555 });
+  gate.addRecipient({ username: 'alice', chatId: -555 });
+  assert.equal(gate.pendingNotifications().length, 1);
+});
+
+test('addRecipient ignores calls missing username or chatId', t => {
+  const { gate } = fixture(t);
+  gate.pause();
+  gate.addRecipient({ chatId: -555 });
+  gate.addRecipient({ username: 'alice' });
+  assert.deepEqual(gate.pendingNotifications(), []);
+});
+
+test('recipients survive the notifying process restarting (persisted to disk)', t => {
+  const { file } = fixture(t);
+  const g1 = createMaintenance(file);
+  g1.pause();
+  g1.addRecipient({ username: 'alice', chatId: -555 });
+  const g2 = createMaintenance(file);
+  assert.deepEqual(g2.pendingNotifications(), [{ username: 'alice', chatId: -555, threadId: null }]);
+});
+
+test('acknowledgeNotification clears the recipient list', t => {
+  const { gate } = fixture(t);
+  gate.pause();
+  gate.addRecipient({ username: 'alice', chatId: -555 });
+  gate.acknowledgeNotification();
+  assert.deepEqual(gate.pendingNotifications(), []);
+});
+
+test('pause() drops recipients stranded by a previously cancelled drain cycle', t => {
+  const { gate } = fixture(t);
+  gate.pause();
+  gate.addRecipient({ username: 'alice', chatId: -555 });
+  gate.resume(); // cancelled — restart never happened, recipient never notified
+  gate.pause(); // a later, unrelated real restart cycle begins
+  assert.deepEqual(gate.pendingNotifications(), []);
+});
+
+// Exercise the production /restart/activity handler itself, not a re-implementation.
+async function postRestartActivity(gate, payload) {
+  const source = fs.readFileSync(require.resolve('../src/server'), 'utf8');
+  const start = source.indexOf("if (req.method === 'POST' && url.pathname === '/restart/activity')");
+  const end = source.indexOf("if (req.method === 'POST' && url.pathname === '/intake-files/release')", start);
+  assert.ok(start > 0 && end > start);
+  const res = {};
+  const sandbox = {
+    maintenance: gate, req: { method: 'POST' }, url: { pathname: '/restart/activity' }, res,
+    readBody: async () => JSON.stringify(payload),
+    json: (r, status, data) => Object.assign(r, { status, data }),
+  };
+  vm.createContext(sandbox);
+  await vm.runInContext(`(async () => { ${source.slice(start, end)} })()`, sandbox);
+  return res;
+}
+
+test('/restart/activity records the caller as a pending recipient while paused', async t => {
+  const { gate } = fixture(t);
+  gate.pause();
+  const res = await postRestartActivity(gate, { username: 'alice', chatId: -555, threadId: 7 });
+  assert.equal(res.data.paused, true);
+  assert.deepEqual(gate.pendingNotifications(), [{ username: 'alice', chatId: -555, threadId: 7 }]);
+});
+
+test('/restart/activity does not record a recipient while not paused', async t => {
+  const { gate } = fixture(t);
+  const res = await postRestartActivity(gate, { username: 'alice', chatId: -555 });
+  assert.equal(res.data.paused, false);
+  assert.deepEqual(gate.pendingNotifications(), []);
+});
