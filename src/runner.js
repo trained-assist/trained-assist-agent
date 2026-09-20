@@ -2145,9 +2145,7 @@ function buildContextCard(username, workDir, chatId) {
     lines.push(`⚙️ Claude · ${m}`);
   }
 
-File: src/runner.js
-
-// GTD section: show when ≥1 open record exists
+  // GTD section: show when ≥1 open record exists
   if (workDir) {
     try {
       const openRecs = require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
