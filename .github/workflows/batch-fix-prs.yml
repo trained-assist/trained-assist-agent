@@ -89,9 +89,15 @@ jobs:
           ref: ${{ steps.pr-info.outputs.branch }}
           fetch-depth: 0
 
-      - name: Save latest fixer script from main to /tmp (keep worktree clean)
+      - name: Save latest fixer script from main to /tmp (via API — avoids git-show inconsistencies on old branches)
         if: steps.guard.outputs.skip == 'false'
-        run: git show origin/main:scripts/autofix-openrouter.mjs > /tmp/autofix-from-main.mjs
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/contents/scripts/autofix-openrouter.mjs \
+            --jq '.content' | base64 -d > /tmp/autofix-from-main.mjs
+          echo "script lines: $(wc -l < /tmp/autofix-from-main.mjs)"
+          node --check /tmp/autofix-from-main.mjs && echo "syntax OK"
 
       - uses: actions/setup-node@v4
         if: steps.guard.outputs.skip == 'false'
