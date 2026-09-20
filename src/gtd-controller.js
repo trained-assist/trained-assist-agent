@@ -223,7 +223,7 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
   const existing = readGtd(workDir, sessionId);
   if (existing && existing.status === 'open') return existing; // уже трекается — не сбрасываем прогресс/backoff
   const chatIdStr = chatId != null ? String(chatId) : null;
-  // Dedup by projectDir: same checklist.md already tracked by another session
+// Dedup by projectDir: same checklist.md already tracked by another session
   const projectConflict = listGtd(workDir).find(r => r.status === 'open' && r.projectDir === projectDir && r.sessionId !== sessionId);
   if (projectConflict) {
     console.warn(`[gtd] skip(checklist): open GTD for projectDir=${projectDir} already exists (session=${projectConflict.sessionId})`);
