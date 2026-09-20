@@ -1,0 +1,10 @@
+{
+  "model": "opencode/gpt-5.6-luna",
+  "agent": {
+    "build":   { "model": "opencode/deepseek-v4.1-flash" },
+    "plan":    { "model": "opencode/kimi-k3" },
+    "explore": { "model": "opencode/glm-5.3-flash" },
+    "general": { "model": "opencode/glm-5.3-flash" },
+    "review":  { "model": "opencode/qwen3.8-flash" }
+  }
+}

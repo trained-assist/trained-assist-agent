@@ -1,9 +1,20 @@
-name: Auto-fix CI failure
+name: Auto-fix CI failure (manual)
 
+# Superseded by the `autofix` job in ci.yml which runs inline and is more reliable.
+# workflow_run trigger was never firing on this private repo (known GitHub Actions limitation).
+# Kept here for manual debugging runs only.
 on:
-  workflow_run:
-    workflows: ["CI + Deploy"]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to fix'
+        required: true
+      branch:
+        description: 'Branch name'
+        required: true
+      run_id:
+        description: 'Failed CI run ID'
+        required: true
 
 permissions:
   contents: write
@@ -23,28 +34,48 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+
+          # Never auto-fix a fix/ci-* branch — that would create an infinite loop
+          if [[ "$BRANCH" == fix/ci-* ]]; then
+            echo "Failing branch $BRANCH is itself a CI-fix branch — not creating another fix" >&2
+            exit 1
+          fi
+
           PR_NUMBER=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" --jq '.pull_requests[0].number // empty')
           if [ -z "$PR_NUMBER" ]; then
-            PR_NUMBER=$(gh pr list -R "${{ github.repository }}" --head "${{ github.event.workflow_run.head_branch }}" --json number -q '.[0].number')
+            PR_NUMBER=$(gh pr list -R "${{ github.repository }}" --head "$BRANCH" --json number -q '.[0].number')
           fi
           if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
-            echo "No open PR found for branch ${{ github.event.workflow_run.head_branch }}, skipping." >&2
+            echo "No open PR found for branch $BRANCH, skipping." >&2
             exit 1
           fi
           echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.pr.outputs.branch }}
           fetch-depth: 0
 
-      - name: Guard against retry loops
+      - name: Guard against duplicate fix PRs
         id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if git log -3 --pretty=%B | grep -qi '\[autofix\]'; then
+          BRANCH="${{ steps.pr.outputs.branch }}"
+          # Sanitize branch name the same way the script does
+          SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-' | sed 's/[^a-zA-Z0-9-]/-/g' | cut -c1-40)
+
+          # Check if there's already an open fix PR for this source branch
+          EXISTING=$(gh pr list -R "${{ github.repository }}" \
+            --json number,headRefName --state open \
+            | jq -r ".[] | select(.headRefName | startswith(\"fix/ci-${SAFE_BRANCH}-\")) | .number" \
+            | head -1)
+
+          if [ -n "$EXISTING" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Last commits already contain an [autofix] attempt on this branch — stopping to avoid a loop." >&2
+            echo "Already have an open fix PR #$EXISTING for branch $BRANCH — skipping to avoid duplicates." >&2
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -66,12 +97,14 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
+          ORIGINAL_BRANCH: ${{ steps.pr.outputs.branch }}
         run: node scripts/autofix-openrouter.mjs
 
-      - name: Report unfixed failure
-        if: steps.guard.outputs.skip == 'false' && steps.autofix.outcome != 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr comment ${{ steps.pr.outputs.number }} -R ${{ github.repository }} --body \
-            "🤖 3-stage auto-fix pipeline could not resolve the failure in run ${{ github.event.workflow_run.id }}. Needs a human look."
+      - name: Upload stats artifact
+        if: steps.guard.outputs.skip == 'false' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-fixer-stats-pr${{ steps.pr.outputs.number }}-run${{ github.run_id }}
+          path: ci-fixer-stats.json
+          if-no-files-found: ignore
+          retention-days: 90
