@@ -194,7 +194,7 @@ async function callModel(model, messages, json = false) {
         temperature: 0,
         ...(json ? { response_format: { type: 'json_object' } } : {}),
       }),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(CHEAP_PAID_FALLBACK.includes(m) ? 60_000 : 20_000),
     });
     if (!res.ok) {
       const body = await res.text();
@@ -221,10 +221,16 @@ async function callModel(model, messages, json = false) {
         }
         log('model', `trying ${m}${isPaid ? ' (paid)' : ''}`);
       }
-      return await tryModel(m);
+      const result = await tryModel(m);
+      if (result) return result; // non-empty → success
+      lastErr = new Error(`${m} returned empty response`);
+      log('model', `${m} empty — trying next`);
     } catch (e) {
       lastErr = e;
-      if (![400, 404, 429, 503].includes(e.status)) throw e; // hard error — don't retry
+      const isRetryable = [400, 404, 429, 503].includes(e.status)
+        || e.name === 'AbortError' || e.name === 'TimeoutError';
+      if (!isRetryable) throw e;
+      if (e.name === 'AbortError' || e.name === 'TimeoutError') log('model', `${m} timed out — trying next`);
     }
   }
   throw lastErr;
