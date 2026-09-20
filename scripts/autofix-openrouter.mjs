@@ -192,9 +192,9 @@ async function callModel(model, messages, json = false) {
   try {
     return await tryModel(model);
   } catch (e) {
-    // 404 = model unavailable on free tier → try STAGE0_FALLBACK_MODEL if applicable
-    if (e.status === 404 && model === STAGE0_MODEL && STAGE0_FALLBACK_MODEL) {
-      log('model', `${model} unavailable (404) — falling back to ${STAGE0_FALLBACK_MODEL}`);
+    // 404/429/503 = model unavailable or rate-limited → try STAGE0_FALLBACK_MODEL if applicable
+    if ([404, 429, 503].includes(e.status) && model === STAGE0_MODEL && STAGE0_FALLBACK_MODEL) {
+      log('model', `${model} HTTP ${e.status} — falling back to ${STAGE0_FALLBACK_MODEL}`);
       return await tryModel(STAGE0_FALLBACK_MODEL);
     }
     throw e;
@@ -236,29 +236,58 @@ async function resolveConflictsWithAI(conflictedFiles, prPurposeArg) {
     }
     if (blocks.length === 0) continue;
 
-    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI...`);
+    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI (single call)...`);
+
+    // Batch all blocks into ONE AI call to avoid per-block rate limits
+    const blocksText = blocks.map((b, i) => `BLOCK ${i + 1}:\n${b.full}`).join('\n\n---\n\n');
+    let aiResponse;
+    try {
+      aiResponse = await callModel(STAGE0_MODEL, [
+        {
+          role: 'system',
+          content: `You are resolving git merge conflicts. The PR's purpose is: "${prPurposeArg}".
+Resolve ALL conflict blocks so the result serves that purpose while keeping unrelated code intact.
+Return ONLY resolutions in this exact format — one per block, separated by "---":
+BLOCK 1:
+<resolved code with no conflict markers>
+---
+BLOCK 2:
+<resolved code with no conflict markers>
+No explanations, no code fences, no extra text.`,
+        },
+        {
+          role: 'user',
+          content: `File: ${filePath}\n\n${blocksText}`,
+        },
+      ]);
+    } catch (e) {
+      return { ok: false, reason: `AI call failed for ${filePath}: ${e.message.slice(0, 100)}` };
+    }
+
+    // Parse "BLOCK N:\n<code>" sections from response
+    const parsedBlocks = [];
+    const blockSections = aiResponse.split(/^---$/m);
+    for (const section of blockSections) {
+      const m = section.match(/^BLOCK\s+\d+:\s*\n([\s\S]*)/m);
+      if (m) parsedBlocks.push(m[1].trim());
+    }
+
+    if (parsedBlocks.length !== blocks.length) {
+      // Fallback: if parsing fails, try line-by-line split
+      log('conflict-resolve', `${filePath}: parsed ${parsedBlocks.length}/${blocks.length} blocks — retrying parse`);
+      const altSections = aiResponse.split(/BLOCK\s+\d+:\s*\n/);
+      altSections.shift(); // remove text before first BLOCK
+      parsedBlocks.length = 0;
+      for (const s of altSections) parsedBlocks.push(s.replace(/\s*---\s*$/, '').trim());
+    }
+
+    if (parsedBlocks.length !== blocks.length) {
+      return { ok: false, reason: `AI returned ${parsedBlocks.length} resolutions for ${blocks.length} blocks in ${filePath}` };
+    }
 
     let resolved = content;
-    for (const block of blocks) {
-      let resolvedBlock;
-      try {
-        resolvedBlock = await callModel(STAGE0_MODEL, [
-          {
-            role: 'system',
-            content: `You are resolving a git merge conflict. The PR's purpose is: "${prPurposeArg}".
-Resolve the conflict so the result serves that purpose while keeping unrelated code intact.
-Return ONLY the resolved code — no conflict markers, no explanation, no code fences.`,
-          },
-          {
-            role: 'user',
-            content: `File: ${filePath}\n\nConflict block:\n${block.full}\n\nResolved:`,
-          },
-        ]);
-      } catch (e) {
-        return { ok: false, reason: `AI call failed for ${filePath}: ${e.message.slice(0, 100)}` };
-      }
-
-      resolved = resolved.replace(block.full, resolvedBlock.trim());
+    for (let i = 0; i < blocks.length; i++) {
+      resolved = resolved.replace(blocks[i].full, parsedBlocks[i]);
     }
 
     if (/^<{7} /m.test(resolved) || /^>{7} /m.test(resolved)) {
