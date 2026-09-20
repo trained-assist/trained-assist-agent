@@ -12,8 +12,7 @@
     "test:watch": "vitest",
     "test:staging": "node scripts/staging/run.mjs && python3 test/prepare-deploy-journal.test.py && python3 test/drain-for-deploy.test.py",
     "test:mainstream": "node src/mainstream-tester/index.js",
-    "mainstream:curator": "node src/mainstream-tester/curator.js",
-    "mainstream:curator:dry": "node src/mainstream-tester/curator.js --dry-run"
+    "mainstream:qa-context": "node src/mainstream-tester/build-qa-context.js"
   },
   "devDependencies": {
     "nock": "^14.0.17",
