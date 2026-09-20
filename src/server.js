@@ -18,7 +18,7 @@ const { runMcpTool } = require('./mcp-action');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary, getRecentChatIds } = require('./session-store');
 const { generateSummary } = require('./session-summary');
 const { startNalogLogin, confirmNalogCode } = require('./nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('./getcourse-login');
@@ -4296,34 +4296,37 @@ scheduleProactiveSearchRuns(secrets);
 }
 
 async function notifyActiveChatsOnStartup(secrets) {
+  // A profile can be live in several chats at once (a DM plus one or more
+  // groups). This used to notify only the single chatId in `.chatid` — a
+  // last-writer-wins file that silently drops every chat but the most recent
+  // to touch it. Use getRecentChatIds() instead so EVERY recently-active chat
+  // for a profile hears that the restart finished, not just one of them.
   const ACTIVE_WINDOW_MS = 15 * 60 * 1000;
   const AGENT_TOKENS_DIR = path.join(os.homedir(), 'agent-tokens');
   if (!fs.existsSync(AGENT_TOKENS_DIR)) return;
   const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
   if (!botToken) return;
   const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const now = Date.now();
   const notified = new Set();
   for (const username of fs.readdirSync(AGENT_TOKENS_DIR)) {
-    const chatId = readChatId(username);
-    if (!chatId || notified.has(chatId)) continue;
     const workDir = path.join(BASE_USERS_DIR, username);
-    let lastAt = 0;
-    try {
-      const sessionsFile = path.join(workDir, 'sessions.json');
-      if (!fs.existsSync(sessionsFile)) continue;
-      const sessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
-      if (!sessions.length) continue;
-      lastAt = Math.max(...sessions.map(s => s.lastAt || s.createdAt || 0).filter(Number.isFinite));
-    } catch { continue; }
-    if (!Number.isFinite(lastAt) || now - lastAt > ACTIVE_WINDOW_MS) continue;
-    notified.add(chatId);
-    console.log(`[startup-notify] sending to ${username} (chat ${chatId}), lastAt ${new Date(lastAt).toISOString()}`);
-    fetch(`${tgBase}/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: '✅ Рестарт завершён. Готов к работе.' }),
-    }).catch(e => console.error(`[startup-notify] ${username}:`, e.message));
+    let chatIds = [];
+    try { chatIds = getRecentChatIds(workDir, ACTIVE_WINDOW_MS); } catch { chatIds = []; }
+    if (chatIds.length === 0) {
+      // Fallback for profiles with no per-chat pointer files yet (legacy / never roamed).
+      const chatId = readChatId(username);
+      if (chatId) chatIds = [chatId];
+    }
+    for (const chatId of chatIds) {
+      if (notified.has(chatId)) continue;
+      notified.add(chatId);
+      console.log(`[startup-notify] sending to ${username} (chat ${chatId})`);
+      fetch(`${tgBase}/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: '✅ Рестарт завершён. Готов к работе.' }),
+      }).catch(e => console.error(`[startup-notify] ${username}:`, e.message));
+    }
   }
 }
 
