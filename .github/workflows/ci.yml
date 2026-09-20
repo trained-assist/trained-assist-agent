@@ -64,6 +64,74 @@ jobs:
             exit 1
           fi
 
+  autofix:
+    needs: [ci, staging-gate]
+    if: |
+      always() &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      (needs.ci.result == 'failure' || needs.staging-gate.result == 'failure') &&
+      !startsWith(github.head_ref, 'fix/ci-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Guard against duplicate fix PRs
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-' | sed 's/[^a-zA-Z0-9-]/-/g' | cut -c1-40)
+          EXISTING=$(gh pr list -R "${{ github.repository }}" \
+            --json number,headRefName --state open \
+            | jq -r ".[] | select(.headRefName | startswith(\"fix/ci-${SAFE_BRANCH}-\")) | .number" \
+            | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already have open fix PR #$EXISTING for $BRANCH — skipping" >&2
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.skip == 'false'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.skip == 'false'
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        if: steps.guard.outputs.skip == 'false'
+        run: npm ci --ignore-scripts
+
+      - name: 3-stage auto-fix (OpenRouter free models)
+        id: autofix
+        if: steps.guard.outputs.skip == 'false'
+        continue-on-error: true
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ORIGINAL_BRANCH: ${{ github.head_ref }}
+        run: node scripts/autofix-openrouter.mjs
+
+      - name: Upload stats artifact
+        if: steps.guard.outputs.skip == 'false' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-fixer-stats-pr${{ github.event.pull_request.number }}-run${{ github.run_id }}
+          path: ci-fixer-stats.json
+          if-no-files-found: ignore
+          retention-days: 90
+
   merge:
     needs: [ci, staging-gate]
     if: |

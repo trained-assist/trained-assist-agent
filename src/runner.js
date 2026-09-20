@@ -56,18 +56,54 @@ function formatCostFooter(usage, model) {
   const cw  = usage.cache_creation_input_tokens || 0;
   const cost = (inp * price.in + out * price.out + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000;
   const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
-  const modelShort = model ? model.replace(/^claude-/, '') : '?';
+  const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  const cacheStr = cr > 0 ? ` · кэш ${fmt(cr)}` : '';
-  return `\n\n\`📊 ${fmt(inp)} вх · ${fmt(out)} вых${cacheStr} · ~${costStr}\``;
+  const parts = [`${fmt(inp)} вх`, `${fmt(out)} вых`];
+  if (cw > 0) parts.push(`💾+${fmtK(cw)}`);
+  if (cr > 0) parts.push(`💾/${fmtK(cr)}`);
+  parts.push(`~${costStr}`);
+  return `\n\n\`📊 ${parts.join(' · ')}\``;
 }
 
-function formatOcFooter(usage, modelId) {
+// breakdown: [{ agent, model, input, output, cacheRead, cacheWrite, cost }]
+function formatOcFooter(usage, breakdown) {
   if (!usage) return '';
-  const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+  const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
   const cost = usage.cost || 0;
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых · ~${costStr}\``;
+  const cacheStr = (usage.cacheRead > 0 || usage.cacheWrite > 0)
+    ? ` · 💾${usage.cacheWrite > 0 ? `+${fmtK(usage.cacheWrite)}` : ''}${usage.cacheRead > 0 ? `/${fmtK(usage.cacheRead)}` : ''}`
+    : '';
+  if (!breakdown || breakdown.length <= 1) {
+    return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых${cacheStr} · ~${costStr}\``;
+  }
+  const header = `📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых${cacheStr} · ~${costStr}`;
+  const rows = breakdown.map(s => {
+    const tag = s.model ? `${s.agent}(${s.model.split('/').pop().replace(/:free$/, '')})` : (s.agent || '?');
+    const sc = (s.cacheRead > 0 || s.cacheWrite > 0)
+      ? ` 💾${s.cacheWrite > 0 ? `+${fmtK(s.cacheWrite)}` : ''}${s.cacheRead > 0 ? `/${fmtK(s.cacheRead)}` : ''}`
+      : '';
+    const sc2 = s.cost > 0 ? ` ~$${s.cost.toFixed(4)}` : '';
+    return `  ${tag}: ${fmtK(s.input)}вх·${fmtK(s.output)}вых${sc}${sc2}`;
+  });
+  return `\n\n\`\`\`\n${header}\n${rows.join('\n')}\n\`\`\``;
+}
+
+// Reads opencode.json and returns agent-name -> shortened model-id map (for footer breakdown).
+function readOcAgentModels() {
+  try {
+    const cfgPath = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
+    if (!fs.existsSync(cfgPath)) return {};
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const shorten = m => (m || '').replace(/^openrouter\//, '').replace(/^gigachat\//, '');
+    const defaultModel = shorten(cfg.model);
+    const result = { _default: defaultModel };
+    for (const [name, agent] of Object.entries(cfg.agent || {})) {
+      result[name] = shorten(agent.model || cfg.model);
+    }
+    return result;
+  } catch { return {}; }
 }
 
 // Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
@@ -221,7 +257,8 @@ const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|созд
 const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|напиш[иь]).{0,40}(?:приложени|сервис(?!\s*аккаунт)|бот(?!\s*токен|\s*ключ)(?!\s*weeek|\s*hh|\s*tilda|\s*nalog)|сайт(?!\s*с\s+tilda)(?!\s+tilda)|систем|скрипт(?!\s+для\s+(?:выставки|expo))|библиотек|пакет|модул|апи-сервис)|implement\s+\S|build\s+(?:app|service|bot|api)|develop\s+(?:app|feature|bot)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
-const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
+const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|^\/checklist_turn_off$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
+const ACTIVE_CHECKLIST_INTENT   = /^\/active_checklist$/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
@@ -1776,6 +1813,35 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  // /active_checklist — list all open GTD records for this user.
+  if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
+    const workDir = opts.user.workDir;
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    let msg;
+    if (!workDir) {
+      msg = '📋 Нет активных чек-листов.';
+    } else {
+      const openRecs = (() => { try { return require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+      if (!openRecs.length) {
+        msg = '📋 Нет активных чек-листов.';
+      } else {
+        const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
+        for (const r of openRecs) {
+          const task = (r.originalTask || '').slice(0, 80);
+          lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+        }
+        msg = lines.join('\n');
+      }
+    }
+    if (botToken) {
+      const im = opts.initialMsgId;
+      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+      else     tgSend(botToken, chatId, msg).catch(() => {});
+    }
+    return Promise.resolve(msg);
+  }
+
   // Control commands bypass lanes and admission. Available to every authenticated profile.
   const restart = /^\/restart(?:@\w+)?(?:\s+(status|cancel))?$/i.exec((opts.task || '').trim());
   if (restart) {
@@ -1989,8 +2055,16 @@ function runTask(opts) {
   return current.then(result => result?.queuedRetry || result);
 }
 
+function _relativeTime(ts) {
+  const diffMs = ts - Date.now();
+  if (diffMs <= 0) return 'сейчас';
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 60) return `через ${mins} мин`;
+  return `через ${Math.round(mins / 60)} ч`;
+}
+
 // Returns context card string, or null if no skills configured (no pin needed).
-function buildContextCard(username, workDir) {
+function buildContextCard(username, workDir, chatId) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
 
@@ -2052,6 +2126,37 @@ function buildContextCard(username, workDir) {
         }
       } catch (e) { console.warn('[runner] pinned context parse:', e.message); }
     }
+  }
+
+  // Engine / model line
+  const eng = chatId ? profiles.getEngine(workDir, chatId) : 'claude';
+  if (eng === 'opencode') {
+    let ocProfile = null;
+    try {
+      const pf = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
+      if (fs.existsSync(pf)) ocProfile = fs.readFileSync(pf, 'utf8').trim();
+    } catch {}
+    lines.push(`⚙️ OpenCode${ocProfile ? ` · ${ocProfile}` : ''}`);
+  } else if (eng === 'codex') {
+    lines.push('⚙️ Codex CLI');
+  } else {
+    const m = (process.env.ANTHROPIC_MODEL || 'claude-sonnet').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+    lines.push(`⚙️ Claude · ${m}`);
+  }
+
+  // GTD section: show when ≥1 open record exists
+  if (workDir) {
+    try {
+      const openRecs = require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
+      if (openRecs.length === 1) {
+        const r = openRecs[0];
+        const preview = (r.originalTask || '').slice(0, 40);
+        lines.push(`📋 Чеклист: «${preview}» · ${_relativeTime(r.dueAt)} · /active_checklist · /checklist_turn_off`);
+      } else if (openRecs.length > 1) {
+        const next = openRecs.reduce((a, b) => a.dueAt < b.dueAt ? a : b);
+        lines.push(`📋 ${openRecs.length} чек-листа · след. ${_relativeTime(next.dueAt)} · /active_checklist · /checklist_turn_off`);
+      }
+    } catch (e) { console.warn('[runner] gtd pin:', e.message); }
   }
 
   const time = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
@@ -2369,6 +2474,32 @@ async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {})
     console.warn('[soft-incomplete]', e.message);
     return { incomplete: false };
   }
+}
+
+// Builds a runtime capabilities addendum for OpenCode system prompt.
+// OpenCode uses non-Claude models that don't auto-read CLAUDE.md, so we inject what's available.
+function buildOcCapabilitiesBlock(secrets) {
+  const lines = ['## Возможности системы (runtime)'];
+
+  if (secrets && secrets.DEEPGRAM_API_KEY) {
+    lines.push(
+      '',
+      '**Транскрибация аудио:** доступна (Deepgram nova-2)',
+      '• Поддерживает русский и другие языки',
+      '• Форматы: mp3, wav, ogg, m4a, голосовые сообщения Telegram',
+      '• Быстро, точнее Whisper, с пунктуацией и разбивкой по абзацам',
+      '• Пользователь присылает аудиофайл → бот транскрибирует → текст попадает к тебе',
+    );
+  }
+
+  lines.push(
+    '',
+    '**Инструменты (MCP):** доступны только compress-on-input и Neon (Postgres).',
+    'Кастомные скилы (HH, Weeek, nalog, gdrive и др.) для OpenCode НЕ подключены.',
+    'Для задач с кастомными скилами пользователь должен переключиться на Claude (/switch2klod).',
+  );
+
+  return lines.join('\n');
 }
 
 async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
@@ -2810,6 +2941,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
   const systemPromptText = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
+
+  // OpenCode uses non-Claude models (DeepSeek, GigaChat, etc.) that don't auto-read CLAUDE.md.
+  // Inject a runtime capabilities block so they know what's actually available.
+  const ocCapBlock = engine === 'opencode' ? buildOcCapabilitiesBlock(secrets) : '';
+  const ocSystemPrompt = ocCapBlock
+    ? (systemPromptText ? `${systemPromptText}\n\n${ocCapBlock}` : ocCapBlock)
+    : systemPromptText;
+
   const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = engine === 'codex'
     ? [process.env.CODEX_BIN || 'codex', [
@@ -2826,7 +2965,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         '--format', 'json',
         '--auto',
         ...(opencodeModel ? ['-m', opencodeModel] : []),
-        systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
+        ocSystemPrompt ? `${ocSystemPrompt}\n\n${prompt}` : prompt,
       ]]
     : [process.env.CLAUDE_BIN || 'claude', [
         '--dangerously-skip-permissions',
@@ -2879,7 +3018,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let processSignal = null;
   let processError = null;
   let claudeUsage = null;   // usage from result event (Claude Code / Codex)
-  let opencodeUsage = null; // usage from step_finish event (OpenCode)
+  let opencodeUsage = null; // accumulated totals from step_finish events (OpenCode)
+  let opencodeBreakdown = []; // per-agent steps: [{agent, model, input, output, cacheRead, cacheWrite, cost}]
+  let currentOcAgent = null; // last 'agent' event name, to label the next step_finish
+  let ocAgentModels = {}; // lazily loaded from opencode.json
   let claudeModel = null;   // model name from assistant event
   let lastActivity = '';     // last tool name/cmd for heartbeat
   let exitCode = 0;
@@ -2988,14 +3130,28 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             fullOutput.text += event.part.text;
             lastAssistantMsg = fullOutput.text;
             scheduleStream();
+          } else if (event.type === 'agent') {
+            // Track which agent is about to run so we can label its step_finish
+            currentOcAgent = event.part?.name || null;
           } else if (event.type === 'step_finish') {
             terminalSuccess = true;
             claudeResult = fullOutput.text.trim() || null;
             if (!restartShutdown && claudeResult) currentExecution()?.stageEngineResult(taskId, { text: claudeResult, messageId: msgId });
             const usage = event.part?.tokens;
             if (usage) {
-              opencodeUsage = { input: usage.input || 0, output: usage.output || 0, cost: event.part.cost || 0 };
-              console.log(`[${taskId}] opencode usage: in=${usage.input} out=${usage.output} cost=${event.part.cost || 0}`);
+              if (!ocAgentModels || !Object.keys(ocAgentModels).length) ocAgentModels = readOcAgentModels();
+              const agentModel = ocAgentModels[currentOcAgent] || ocAgentModels._default || null;
+              const stepIn = usage.input || 0;
+              const stepOut = usage.output || 0;
+              const stepCR = usage.cache?.read || 0;
+              const stepCW = usage.cache?.write || 0;
+              const stepCost = event.part.cost || 0;
+              opencodeBreakdown.push({ agent: currentOcAgent || 'run', model: agentModel, input: stepIn, output: stepOut, cacheRead: stepCR, cacheWrite: stepCW, cost: stepCost });
+              if (!opencodeUsage) opencodeUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+              opencodeUsage.input += stepIn; opencodeUsage.output += stepOut;
+              opencodeUsage.cacheRead += stepCR; opencodeUsage.cacheWrite += stepCW;
+              opencodeUsage.cost += stepCost;
+              console.log(`[${taskId}] opencode step[${currentOcAgent}/${agentModel}]: in=${stepIn} out=${stepOut} cR=${stepCR} cW=${stepCW} cost=${stepCost}`);
             }
           } else if (event.type === 'error') {
             const errMsg = event.error?.data?.message || event.error?.message || JSON.stringify(event.error);
@@ -3360,9 +3516,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     });
   }
   const costFooter = engine === 'opencode'
-    ? formatOcFooter(opencodeUsage, opencodeModel)
+    ? formatOcFooter(opencodeUsage, opencodeBreakdown)
     : formatCostFooter(claudeUsage, claudeModel);
-  const final = (result + costFooter).slice(-MAX_MSG_LEN);
+  const gtdFooter = (!internalGtd && !incomplete && user.workDir)
+    ? (() => { try { return require('./gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
+    : '';
+  const final = (result + costFooter).slice(-MAX_MSG_LEN) + gtdFooter;
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
   // сессия уже deep (проработка только что и была). После clarify — показываем (чтобы
@@ -3464,7 +3623,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Update context pin after task (skipped when user ran /context_off)
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
-    const card = buildContextCard(user.username, user.workDir);
+    const card = buildContextCard(user.username, user.workDir, chatId);
     if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
   }
 
