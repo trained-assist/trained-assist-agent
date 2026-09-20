@@ -13,7 +13,7 @@ const path = require('path');
 const { loadSecrets } = require('./secrets');
 const { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkPassword, generatePassword } = require('./web-auth');
 const { handleWebRoute } = require('./web-routes');
-const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, waitForIdle, getActiveTaskCount } = require('./runner');
+const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, waitForIdle, getActiveTaskCount } = require('./runner');
 const { runMcpTool } = require('./mcp-action');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
@@ -548,16 +548,72 @@ function scheduleGtdController(secrets) {
   setInterval(run, 5 * 60 * 1000);     // then every 5 min
 }
 
-async function resumePendingTasks() {
+async function resumePendingTasks(secrets) {
   maintenance.recovered();
   maintenance.resume(); // clear any leftover drain flag from a previous /restart or deploy
+
+  if (!secrets?.BOT_TOKEN) return;
+
+  const pending = getPendingTasks();
+  const cutoff = Date.now() - 20 * 60 * 1000; // ignore tasks older than 20 min
+  const toResume = pending.filter(p =>
+    p.startedAt && p.startedAt > cutoff && p.username && p.userId && p.task
+  );
+  if (toResume.length === 0) return;
+
+  console.log(`[resume] ${toResume.length} task(s) interrupted by restart`);
+  const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+
+  const tgEdit = (chatId, msgId, text) =>
+    fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/editMessageText`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: msgId, text }),
+    }).catch(() => {});
+  const tgSend = (chatId, text) =>
+    fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    }).catch(() => {});
+
+  for (const p of toResume) {
+    const engine = p.engine || (p.forceClaude ? 'claude' : 'claude');
+    console.log(`[resume] engine=${engine} user=${p.username} session=${p.sessionId} task="${String(p.task).slice(0, 60)}"`);
+
+    if (engine === 'codex' || engine === 'opencode') {
+      // These engines have no resume capability — notify user and clear
+      const label = engine === 'codex' ? 'Codex' : 'OpenCode';
+      const text = `⚠️ Задача прервана перезапуском сервера.\n${label} не поддерживает автоматическое продолжение — повтори запрос.`;
+      if (p.initialMsgId) await tgEdit(p.userId, p.initialMsgId, text);
+      else await tgSend(p.userId, text);
+      clearPendingTask(p.taskId);
+      continue;
+    }
+
+    // Claude: notify + re-run with original session context
+    if (p.initialMsgId) await tgEdit(p.userId, p.initialMsgId, '🔄 Продолжаю после перезапуска…');
+    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
+    const user = {
+      id: p.userId, name: p.username, username: p.username, workDir,
+      profileId: p.profileId, telegramUserId: p.telegramUserId,
+    };
+    runTask({
+      taskId: `${p.username}-resume-${Date.now()}`,
+      user, task: p.task, context: p.context || null,
+      engine: 'claude', sessionId: p.sessionId || null,
+      contextFromSession: p.contextFromSession || null,
+      forceClaude: true, projectId: p.projectId || null,
+      initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
+      secrets,
+    }).catch(err => console.error(`[resume] user=${p.username} error:`, err.message));
+    await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
+  }
 }
 
 async function main() {
   maintenance.beginRecovery();
   const secrets = await loadSecrets();
   _secretsCache = secrets; // expose to background tasks for HH auto-refresh
-  await resumePendingTasks();
+  await resumePendingTasks(secrets);
   const intakeQuick = require('./intake-quick').createIntakeQuick({
     baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
   });
