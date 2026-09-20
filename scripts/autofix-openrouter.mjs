@@ -227,7 +227,7 @@ async function callModel(model, messages, json = false) {
       log('model', `${m} empty — trying next`);
     } catch (e) {
       lastErr = e;
-      const isRetryable = [400, 404, 429, 503].includes(e.status)
+      const isRetryable = [400, 403, 404, 429, 503].includes(e.status)
         || e.name === 'AbortError' || e.name === 'TimeoutError';
       if (!isRetryable) throw e;
       if (e.name === 'AbortError' || e.name === 'TimeoutError') log('model', `${m} timed out — trying next`);
