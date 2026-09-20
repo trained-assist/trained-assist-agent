@@ -895,11 +895,15 @@ const fixStrategy = preStageDiagnosis
 sh('git config user.name "trained-assist-autofix"');
 sh('git config user.email "autofix@trained-assist.bot"');
 sh('git add -A');
-sh(`git commit -m "fix: auto-fix CI failure [autofix]
+// Pre-stage A (conflict resolution) already commits the merge — skip if nothing left to commit
+const pendingChanges = sh('git status --porcelain').trim();
+if (pendingChanges) {
+  sh(`git commit -m "fix: auto-fix CI failure [autofix]
 
 Diagnosis: ${diagnosis.problem.slice(0, 120).replace(/"/g, "'")}
 Strategy: ${fixStrategy}"
 `);
+}
 sh(`git checkout -b ${fixBranch}`);
 sh(`git push origin ${fixBranch}`);
 
