@@ -1314,9 +1314,16 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     }
   }
 
-  const sync = getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId);
+  // Skip regex-based intent matching for long free-form messages — the ~40
+  // INTENT patterns were calibrated for short, focused phrasing and misfire on
+  // multi-line tasks where a quick answer is almost never what the user wants.
+  // Slash commands (unambiguous) are always checked regardless of length.
+  const LONG_MSG_QUICK_SKIP = 200;
+  const isSlashCommand = /^\//.test(task.trim());
+  const sync = (isSlashCommand || task.trim().length <= LONG_MSG_QUICK_SKIP)
+    ? getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId)
+    : null;
   if (sync !== null) {
-    const isSlashCommand = /^\//.test(task.trim());
     const preview = (sync && typeof sync === 'object') ? sync.hint : sync;
     const confirmed = isSlashCommand || await verifyQuickAnswerIntent(task, preview, openrouterKey);
     if (confirmed) {
