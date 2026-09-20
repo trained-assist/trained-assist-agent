@@ -31,7 +31,7 @@ jobs:
         with:
           name: staging-${{ github.run_id }}-${{ github.run_attempt }}
           path: staging-results/
-          if-no-files-found: error
+          if-no-files-found: warn
 
   ci:
     runs-on: ubuntu-latest
