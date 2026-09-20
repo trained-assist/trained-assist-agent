@@ -868,7 +868,7 @@ if (patchToApply) {
 // Skip for conflict resolution — push fix PR and let CI report failures.
 // The loop: conflict resolved → fix PR → CI fails → fixer picks up next iteration.
 
-if (preStageDiagnosis?.category !== 'success:pre_a_conflict_resolved') {
+if (!preStageDiagnosis?.category.startsWith('success:pre_a')) {
   await prComment('🧪 Patch applied — running tests…');
   try {
     sh('npm test');
