@@ -36,6 +36,7 @@ const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, bui
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
+const { appendRejectionFeedback, loadRejectionFeedback, groupFeedbackByTheme } = require('./hh-rejection-feedback');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -1436,7 +1437,7 @@ async function main() {
     }
 
     // CORS preflight for browser-facing endpoints (no auth needed for OPTIONS)
-    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/candidate' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/update-base-prompt' || url.pathname === '/hh/sync-negotiations')) {
+    if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname === '/hh/reject' || url.pathname === '/hh/send-and-reject' || url.pathname === '/hh/ats-config' || url.pathname === '/hh/review' || url.pathname === '/hh/candidate' || url.pathname === '/hh/reset-ats-results' || url.pathname === '/hh/generate-message' || url.pathname === '/hh/update-style' || url.pathname === '/hh/update-base-prompt' || url.pathname === '/hh/sync-negotiations' || url.pathname === '/hh/rejection-feedback')) {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -1881,8 +1882,9 @@ async function main() {
     // POST /hh/reject — bulk reject candidates (called from review page)
     if (req.method === 'POST' && url.pathname === '/hh/reject') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      const body = JSON.parse(await readBody(req));
-      const { username, negotiation_ids } = body || {};
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, negotiation_ids, comment, vacancy_id: rejectVacancyId } = body || {};
       if (!username || !Array.isArray(negotiation_ids) || negotiation_ids.length === 0) {
         return json(res, 400, { error: 'missing fields' });
       }
@@ -1895,6 +1897,9 @@ async function main() {
         try {
           await hhApiPut(`/negotiations/discard_vacancy_closed/${negId}`, tokenData2.access_token);
           results.push({ negotiation_id: negId, ok: true });
+          if (comment && String(comment).trim()) {
+            appendRejectionFeedback(username, { vacancy_id: rejectVacancyId || '', candidate_id: negId, reason: comment, rejected_by: 'manual' });
+          }
         } catch (e) { results.push({ negotiation_id: negId, ok: false, error: e.message }); }
       }
       const failed = results.filter(r => !r.ok).length;
@@ -1905,8 +1910,9 @@ async function main() {
     // POST /hh/send-and-reject — send a rejection message then reject in HH
     if (req.method === 'POST' && url.pathname === '/hh/send-and-reject') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      const body = JSON.parse(await readBody(req));
-      const { username, negotiation_id, message, force } = body || {};
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, negotiation_id, message, force, comment, vacancy_id: sarVacancyId } = body || {};
       if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
 
       const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -1946,12 +1952,26 @@ async function main() {
           send: text => hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message: text }),
           discard: () => hhApiPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData.access_token),
         });
+        if (result.ok && comment && String(comment).trim()) {
+          appendRejectionFeedback(username, { vacancy_id: sarVacancyId || '', candidate_id: negotiation_id, reason: comment, rejected_by: 'manual' });
+        }
         console.log(`[hh/send-and-reject] user=${username} neg=${negotiation_id} ok=${result.ok}`);
         return json(res, 200, result);
       } catch (e) {
         console.error('[hh/send-and-reject] error:', e.message);
         return json(res, 500, { error: e.message });
       }
+    }
+
+    // GET /hh/rejection-feedback?username=X&vacancy_id=Y — accumulated rejection reasons
+    if (req.method === 'GET' && url.pathname === '/hh/rejection-feedback') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      const rfUser = url.searchParams.get('username') || '';
+      const rfVacancyId = url.searchParams.get('vacancy_id') || '';
+      if (!rfUser) return json(res, 400, { error: 'username required' });
+      const entries = loadRejectionFeedback(rfUser, rfVacancyId || undefined);
+      const themes = groupFeedbackByTheme(entries);
+      return json(res, 200, { username: rfUser, vacancy_id: rfVacancyId || null, total: entries.length, themes });
     }
 
     // GET /hh/style?username=X&token=Y — style update page
@@ -4781,6 +4801,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
              <button class="btn btn-gen" id="gen-${i}" onclick="generateRejection(${i},'${esc(c.negotiation_id)}','${esc(c.name)}')" title="Сгенерировать отказное сообщение">✦ Сгенерировать отказ</button>
            </div>
            <textarea class="msg-area" id="msg-${i}" rows="4">${hasDraft ? esc(c.draft_message) : ''}</textarea>
+           <input type="text" class="reject-comment" id="reject-comment-${i}" placeholder="Причина отказа (необязательно — для вашего лога)" style="width:100%;box-sizing:border-box;margin-top:6px;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;color:#475569">
            <div class="btns">
              <button class="btn btn-send-reject" onclick="rejectWithMessage(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
              <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
@@ -4795,6 +4816,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
              <button class="btn btn-gen" id="gen-${i}" data-idx="${i}" data-negid="${esc(c.negotiation_id)}" data-name="${esc(c.name)}" data-sent="${c.already_sent ? '1' : '0'}" onclick="generateOne(${i},'${esc(c.negotiation_id)}','${esc(c.name)}',${!!c.already_sent})" title="Сгенерировать черновик">✦ Сгенерировать</button>
            </div>
            <textarea class="msg-area" id="msg-${i}" rows="5">${hasDraft ? esc(c.draft_message) : ''}</textarea>
+           <input type="text" class="reject-comment" id="reject-comment-${i}" placeholder="Причина отказа (необязательно — для вашего лога)" style="display:none;width:100%;box-sizing:border-box;margin-top:6px;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;color:#475569">
            <div class="btns">
              <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
              <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
@@ -5176,11 +5198,14 @@ async function sendAndRejectOne(i, negId, force) {
   if (done.has(i) || rejecting.has(negId)) return;
   const msg = document.getElementById('msg-'+i)?.value?.trim() || '';
   if (!msg) return;
+  const comment = document.getElementById('reject-comment-'+i)?.value?.trim() || '';
   rejecting.add(negId);
   rejectionStatus(negId, '⏳ Отправляем отказ. Дождитесь результата…', true);
   onCheck();
   try {
-    const data = await hhAction('/hh/send-and-reject', { negotiation_id: negId, message: msg, force: !!force });
+    const payload = { negotiation_id: negId, message: msg, force: !!force };
+    if (comment) { payload.comment = comment; payload.vacancy_id = HH_VACANCY_ID; }
+    const data = await hhAction('/hh/send-and-reject', payload);
     if (data.blocked) {
       rejecting.delete(negId);
       rejectionStatus(negId, 'Отказ не отправлен: ' + (data.reason || 'сообщение заблокировано'), false);
@@ -5277,7 +5302,10 @@ async function rejectWithMessage(i, negId) {
   if (done.has(i) || rejecting.has(negId)) return;
   const ta = document.getElementById('msg-' + i);
   if (!ta) return;
-  ta.value = standardRejection(i);
+  if (!ta.value.trim()) ta.value = standardRejection(i);
+  // Show the comment input if it was hidden (non-reject cards)
+  const commentEl = document.getElementById('reject-comment-' + i);
+  if (commentEl && commentEl.style.display === 'none') commentEl.style.display = '';
   if (!confirm('Отправить отказ кандидату со следующим сообщением?\\n\\n' + ta.value)) return;
   return sendAndRejectOne(i, negId);
 }
@@ -5286,10 +5314,13 @@ async function rejectAll() {
   const cbs = [...document.querySelectorAll('.tab-panel.active .reject-cb:checked')];
   const negIds = cbs.map(cb => document.getElementById('card-'+parseInt(cb.dataset.idx))?.dataset.neg || '').filter(Boolean);
   if (!negIds.length || !confirm('Отказать на HH без сообщения: ' + negIds.length + ' кандидатов?')) return;
+  const comment = (prompt('Причина отказа для лога (необязательно, нажмите Отмена чтобы пропустить):') || '').trim();
   const rb = document.getElementById('rejectAllBtn');
   rb.disabled = true; rb.textContent = '⏳ Отклоняю...';
   try {
-    const res = await hhAction('/hh/reject', { negotiation_ids: negIds });
+    const payload = { negotiation_ids: negIds };
+    if (comment) { payload.comment = comment; payload.vacancy_id = HH_VACANCY_ID; }
+    const res = await hhAction('/hh/reject', payload);
     const succeeded = new Set((res.results || []).filter(r => r.ok).map(r => r.negotiation_id));
     cbs.forEach(cb => {
       const i = parseInt(cb.dataset.idx);

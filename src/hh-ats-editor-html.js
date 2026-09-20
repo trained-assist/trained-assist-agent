@@ -135,6 +135,7 @@ const TEMPLATES = {
 
 function atsEditorHtml(currentConfig, currentStages, opts = {}) {
   const { callbackBase = '', username = '', agentSecret = '' } = opts;
+  const vacancyId = String(currentConfig?.vacancy_id || '');
   const templatesJson = JSON.stringify(TEMPLATES);
   const initConfigJson = JSON.stringify(currentConfig || null);
   const initStagesJson = JSON.stringify(currentStages || null);
@@ -390,6 +391,12 @@ pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radi
     <pre class="json-preview" id="jsonPreview"></pre>
   </details>
 
+  <!-- Rejection feedback summary -->
+  ${isLive && vacancyId ? `<div class="config-card" id="rejectionFeedbackCard" style="margin-top:16px">
+    <div class="section-title" style="margin-bottom:8px">💡 Предложения по критериям (из истории отказов)</div>
+    <div id="rejectionFeedbackBody" style="font-size:13px;color:var(--muted)">Загружаю…</div>
+  </div>` : ''}
+
 </main>
 
 <div class="toast hidden" id="toast"></div>
@@ -399,6 +406,7 @@ const TEMPLATES = ${templatesJson};
 const CALLBACK_BASE = '${callbackBase}';
 const HH_USER = '${username}';
 const HH_SECRET = '${agentSecret}';
+const HH_VACANCY_ID = '${vacancyId}';
 
 let initConfig = ${initConfigJson};
 let initStages = ${initStagesJson};
@@ -786,7 +794,32 @@ function renderAll() {
   updateJsonPreview();
 }
 
+// ── Rejection feedback ────────────────────────────────────────────────────────
+
+async function loadRejectionFeedback() {
+  const card = document.getElementById('rejectionFeedbackCard');
+  if (!card || !CALLBACK_BASE || !HH_VACANCY_ID) return;
+  const body = document.getElementById('rejectionFeedbackBody');
+  try {
+    const r = await fetch(CALLBACK_BASE + '/hh/rejection-feedback?username=' + encodeURIComponent(HH_USER) + '&vacancy_id=' + encodeURIComponent(HH_VACANCY_ID));
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    if (!data.themes || data.themes.length === 0) {
+      body.textContent = 'Пока нет накопленных причин отказа по этой вакансии.';
+      return;
+    }
+    body.innerHTML = '<p style="margin-bottom:8px;color:var(--text)">Рекрутеры указывали следующие причины отказа (используйте как подсказку для уточнения критериев):</p>'
+      + '<ul style="padding-left:16px;line-height:1.8">'
+      + data.themes.map(t => \`<li><strong>\${escHtml(t.reason)}</strong> — \${t.count} раз</li>\`).join('')
+      + '</ul>'
+      + '<p style="margin-top:8px;font-size:12px;color:var(--muted)">Это предложения — они не изменяют конфиг автоматически. Скорректируйте критерии выше и нажмите «Save Funnel».</p>';
+  } catch(e) {
+    body.textContent = 'Не удалось загрузить историю отказов.';
+  }
+}
+
 init();
+if (document.getElementById('rejectionFeedbackCard')) loadRejectionFeedback();
 </script>
 </body>
 </html>`;
