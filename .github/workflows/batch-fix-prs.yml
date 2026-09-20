@@ -65,10 +65,10 @@ jobs:
             exit 1
           fi
 
-      - name: Guard — skip if fix/ci-* PR already exists for this branch
+      - name: Guard — close stale fix/ci-* PRs for this branch before re-running
         id: guard
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
         run: |
           BRANCH="${{ steps.pr-info.outputs.branch }}"
           SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-' | sed 's/[^a-zA-Z0-9-]/-/g' | cut -c1-40)
@@ -77,21 +77,28 @@ jobs:
             | jq -r ".[] | select(.headRefName | startswith(\"fix/ci-${SAFE_BRANCH}-\")) | .number" \
             | head -1)
           if [ -n "$EXISTING" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Fix PR #$EXISTING already exists for $BRANCH — skipping" >&2
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Closing stale fix PR #$EXISTING for $BRANCH — new fix attempt incoming" >&2
+            gh pr close "$EXISTING" -R "${{ github.repository }}" \
+              --comment "♻️ Superseded — batch re-run will create a fresh fix PR for \`$BRANCH\`."
           fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         if: steps.guard.outputs.skip == 'false'
         with:
           ref: ${{ steps.pr-info.outputs.branch }}
           fetch-depth: 0
+          token: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
 
-      - name: Save latest fixer script from main to /tmp (keep worktree clean)
+      - name: Save latest fixer script from main to /tmp (via API — avoids git-show inconsistencies on old branches)
         if: steps.guard.outputs.skip == 'false'
-        run: git show origin/main:scripts/autofix-openrouter.mjs > /tmp/autofix-from-main.mjs
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/contents/scripts/autofix-openrouter.mjs \
+            --jq '.content' | base64 -d > /tmp/autofix-from-main.mjs
+          echo "script lines: $(wc -l < /tmp/autofix-from-main.mjs)"
+          node --check /tmp/autofix-from-main.mjs && echo "syntax OK"
 
       - uses: actions/setup-node@v4
         if: steps.guard.outputs.skip == 'false'
@@ -107,7 +114,7 @@ jobs:
         continue-on-error: true
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
           RUN_ID: '0'
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ matrix.pr }}

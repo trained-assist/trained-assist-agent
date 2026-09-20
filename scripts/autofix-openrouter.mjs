@@ -63,11 +63,26 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
-// Free models that actually work on OpenRouter (checked 2026-09-20)
-// If primary returns 404/400, callModel retries with STAGE0_FALLBACK_MODEL
-const STAGE0_MODEL = 'google/gemma-3-27b-it:free';
-const STAGE0_FALLBACK_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
-const STAGE1_MODEL = 'google/gemma-3-27b-it:free';
+// Free-tier model chain — tried first on 404/429/503 (first success wins).
+// After this chain is exhausted, callModel auto-discovers remaining free models
+// from OpenRouter's /models API, then falls back to cheap paid models.
+const STAGE0_MODEL_CHAIN = [
+  'deepseek/deepseek-v3-0324:free',
+  'google/gemma-3-12b-it:free',
+  'meta-llama/llama-3.1-8b-instruct:free',
+  'mistralai/mistral-7b-instruct:free',
+];
+// Cheap paid models — last resort after all free options exhausted.
+// Costs ~$0.04–0.15 per 1M input tokens (negligible for small conflict resolution prompts).
+const CHEAP_PAID_FALLBACK = [
+  'deepseek/deepseek-chat',        // ~$0.07/1M — DeepSeek V3 paid, very capable
+  'google/gemini-flash-1.5-8b',   // ~$0.04/1M — cheapest capable model
+  'openai/gpt-4o-mini',           // ~$0.15/1M — reliable fallback
+];
+
+const STAGE0_MODEL = STAGE0_MODEL_CHAIN[0];
+const STAGE0_FALLBACK_MODEL = STAGE0_MODEL_CHAIN[1]; // kept for compat, chain handles the rest
+const STAGE1_MODEL = 'deepseek/deepseek-v3-0324:free';
 const STAGE2_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
 const STAGE3_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
@@ -179,7 +194,7 @@ async function callModel(model, messages, json = false) {
         temperature: 0,
         ...(json ? { response_format: { type: 'json_object' } } : {}),
       }),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(CHEAP_PAID_FALLBACK.includes(m) ? 60_000 : 20_000),
     });
     if (!res.ok) {
       const body = await res.text();
@@ -189,16 +204,60 @@ async function callModel(model, messages, json = false) {
     return data?.choices?.[0]?.message?.content?.trim() || '';
   };
 
-  try {
-    return await tryModel(model);
-  } catch (e) {
-    // 404/429/503 = model unavailable or rate-limited → try STAGE0_FALLBACK_MODEL if applicable
-    if ([404, 429, 503].includes(e.status) && model === STAGE0_MODEL && STAGE0_FALLBACK_MODEL) {
-      log('model', `${model} HTTP ${e.status} — falling back to ${STAGE0_FALLBACK_MODEL}`);
-      return await tryModel(STAGE0_FALLBACK_MODEL);
+  // For STAGE0 calls: try full chain (hardcoded free → discovered free → cheap paid)
+  const chain = model === STAGE0_MODEL
+    ? [...STAGE0_MODEL_CHAIN, ...(await discoverFreeModels()), ...CHEAP_PAID_FALLBACK]
+    : [model];
+
+  let lastErr;
+  let reachedPaid = false;
+  for (const m of chain) {
+    const isPaid = CHEAP_PAID_FALLBACK.includes(m);
+    try {
+      if (m !== model) {
+        if (isPaid && !reachedPaid) {
+          reachedPaid = true;
+          log('model', 'all free models exhausted — falling back to cheap paid models');
+        }
+        log('model', `trying ${m}${isPaid ? ' (paid)' : ''}`);
+      }
+      const result = await tryModel(m);
+      if (result) return result; // non-empty → success
+      lastErr = new Error(`${m} returned empty response`);
+      log('model', `${m} empty — trying next`);
+    } catch (e) {
+      lastErr = e;
+      const isRetryable = [400, 403, 404, 429, 503].includes(e.status)
+        || e.name === 'AbortError' || e.name === 'TimeoutError';
+      if (!isRetryable) throw e;
+      if (e.name === 'AbortError' || e.name === 'TimeoutError') log('model', `${m} timed out — trying next`);
     }
-    throw e;
   }
+  throw lastErr;
+}
+
+// Cached list of free models discovered from OpenRouter /models (fetched once per run)
+let _discoveredFreeModels = null;
+async function discoverFreeModels() {
+  if (_discoveredFreeModels !== null) return _discoveredFreeModels;
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) { _discoveredFreeModels = []; return []; }
+    const { data = [] } = await res.json();
+    const known = new Set(STAGE0_MODEL_CHAIN);
+    _discoveredFreeModels = data
+      .filter(m => m.id.endsWith(':free') && !known.has(m.id))
+      .sort((a, b) => (b.context_length || 0) - (a.context_length || 0))
+      .map(m => m.id);
+    log('model', `discovered ${_discoveredFreeModels.length} additional free models from OpenRouter`);
+  } catch (e) {
+    log('model', `free model discovery failed: ${e.message.slice(0, 60)} — skipping`);
+    _discoveredFreeModels = [];
+  }
+  return _discoveredFreeModels;
 }
 
 function extractPatch(raw) {
@@ -236,61 +295,60 @@ async function resolveConflictsWithAI(conflictedFiles, prPurposeArg) {
     }
     if (blocks.length === 0) continue;
 
-    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI (single call)...`);
+    log('conflict-resolve', `${filePath}: resolving ${blocks.length} block(s) with AI (one call per block)...`);
 
-    // Batch all blocks into ONE AI call to avoid per-block rate limits
-    const blocksText = blocks.map((b, i) => `BLOCK ${i + 1}:\n${b.full}`).join('\n\n---\n\n');
-    let aiResponse;
-    try {
-      aiResponse = await callModel(STAGE0_MODEL, [
-        {
-          role: 'system',
-          content: `You are resolving git merge conflicts. The PR's purpose is: "${prPurposeArg}".
-Resolve ALL conflict blocks so the result serves that purpose while keeping unrelated code intact.
-Return ONLY resolutions in this exact format — one per block, separated by "---":
-BLOCK 1:
-<resolved code with no conflict markers>
----
-BLOCK 2:
-<resolved code with no conflict markers>
-No explanations, no code fences, no extra text.`,
-        },
-        {
-          role: 'user',
-          content: `File: ${filePath}\n\n${blocksText}`,
-        },
-      ]);
-    } catch (e) {
-      return { ok: false, reason: `AI call failed for ${filePath}: ${e.message.slice(0, 100)}` };
+    // Resolve each block independently — smaller prompts, no brittle multi-block parsing.
+    // Retry up to 2 times per block on empty response before skipping.
+    const resolvedCode = [];
+    let failedBlocks = 0;
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const blockNum = `${bi + 1}/${blocks.length}`;
+      let blockResult = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          log('conflict-resolve', `${filePath}: block ${blockNum} empty — waiting 5s, retry ${attempt}...`);
+          await new Promise(r => setTimeout(r, 5000));
+        }
+        try {
+          blockResult = await callModel(STAGE0_MODEL, [
+            {
+              role: 'system',
+              content: `Resolve this single git merge conflict. PR purpose: "${prPurposeArg}".
+Return ONLY the resolved code — no conflict markers, no explanations, no markdown fences.`,
+            },
+            {
+              role: 'user',
+              content: `File: ${filePath}\n\n${blocks[bi].full}`,
+            },
+          ]);
+        } catch (e) {
+          log('conflict-resolve', `${filePath}: block ${blockNum} error (attempt ${attempt + 1}): ${e.message.slice(0, 80)}`);
+          blockResult = '';
+        }
+        if (blockResult) break;
+      }
+      if (!blockResult) {
+        log('conflict-resolve', `${filePath}: block ${blockNum} — could not resolve after retries, leaving as-is`);
+        resolvedCode.push(blocks[bi].full); // leave original conflict marker
+        failedBlocks++;
+      } else {
+        log('conflict-resolve', `${filePath}: block ${blockNum} OK`);
+        resolvedCode.push(blockResult.trim());
+      }
     }
 
-    // Parse "BLOCK N:\n<code>" sections from response
-    const parsedBlocks = [];
-    const blockSections = aiResponse.split(/^---$/m);
-    for (const section of blockSections) {
-      const m = section.match(/^BLOCK\s+\d+:\s*\n([\s\S]*)/m);
-      if (m) parsedBlocks.push(m[1].trim());
-    }
-
-    if (parsedBlocks.length !== blocks.length) {
-      // Fallback: if parsing fails, try line-by-line split
-      log('conflict-resolve', `${filePath}: parsed ${parsedBlocks.length}/${blocks.length} blocks — retrying parse`);
-      const altSections = aiResponse.split(/BLOCK\s+\d+:\s*\n/);
-      altSections.shift(); // remove text before first BLOCK
-      parsedBlocks.length = 0;
-      for (const s of altSections) parsedBlocks.push(s.replace(/\s*---\s*$/, '').trim());
-    }
-
-    if (parsedBlocks.length !== blocks.length) {
-      return { ok: false, reason: `AI returned ${parsedBlocks.length} resolutions for ${blocks.length} blocks in ${filePath}` };
+    if (failedBlocks === blocks.length) {
+      return { ok: false, reason: `AI could not resolve any of ${blocks.length} blocks in ${filePath}` };
     }
 
     let resolved = content;
     for (let i = 0; i < blocks.length; i++) {
-      resolved = resolved.replace(blocks[i].full, parsedBlocks[i]);
+      resolved = resolved.replace(blocks[i].full, resolvedCode[i]);
     }
 
-    if (/^<{7} /m.test(resolved) || /^>{7} /m.test(resolved)) {
+    // \w after the markers ensures regex patterns like /<<<<<<< [^\n]+/ in source code
+    // don't trigger a false positive — real markers are always followed by HEAD/branch-name
+    if (/^<{7} \w/m.test(resolved) || /^>{7} \w/m.test(resolved)) {
       return { ok: false, reason: `conflict markers remain in ${filePath} after AI resolution` };
     }
 
@@ -579,11 +637,17 @@ Set is_clear=true for ordinary feature PRs, bug fixes, refactors, dependency upd
   log('stage0', `is_clear: ${reasoning.is_clear}`);
 
   if (!reasoning.is_clear) {
-    const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
-    await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
-    writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
-    log('stage0', `ambiguous PR — stopping`);
-    process.exit(0); // not a failure — just not our job
+    if (BATCH_MODE) {
+      // In batch mode we're here to merge a stale branch, not to diagnose CI failures.
+      // Proceed with branch name as purpose fallback for conflict resolution.
+      log('stage0', `ambiguous in batch mode — proceeding anyway (purpose: ${reasoning.purpose})`);
+    } else {
+      const why = reasoning.ambiguity_reason || 'could not determine PR purpose';
+      await prComment(`🤷 PR purpose unclear — ${why}\n\nSkipping automated fix. Please clarify the PR description or link a related issue.`);
+      writeStats('fail:stage0_ambiguous', { reason: why, purpose: reasoning.purpose });
+      log('stage0', `ambiguous PR — stopping`);
+      process.exit(0); // not a failure — just not our job
+    }
   }
 
   // Announce we're starting — purpose confirmed
@@ -807,18 +871,22 @@ if (patchToApply) {
 }
 
 // ── Verify: run tests ─────────────────────────────────────────────────────────
+// Skip for conflict resolution — push fix PR and let CI report failures.
+// The loop: conflict resolved → fix PR → CI fails → fixer picks up next iteration.
 
-await prComment('🧪 Patch applied — running tests…');
-try {
-  sh('npm test');
-} catch (e) {
-  sh('git checkout -- .');
-  sh('git clean -fd');
-  await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
-  failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
-    problem: diagnosis.problem,
-    test_error: e.message.slice(0, 300),
-  });
+if (!preStageDiagnosis?.category.startsWith('success:pre_a')) {
+  await prComment('🧪 Patch applied — running tests…');
+  try {
+    sh('npm test');
+  } catch (e) {
+    sh('git checkout -- .');
+    sh('git clean -fd');
+    await prComment(`❌ Tests still fail after patch\n\n**Cause:** ${diagnosis.problem}\n\nReverted. Needs human review.\n\n\`\`\`\n${e.message.slice(0, 300)}\n\`\`\``);
+    failWithStats('fail:ai_tests_fail', 'Patch applied but tests still fail', {
+      problem: diagnosis.problem,
+      test_error: e.message.slice(0, 300),
+    });
+  }
 }
 
 // ── Create new fix branch + PR (never push to original branch) ───────────────
@@ -833,11 +901,15 @@ const fixStrategy = preStageDiagnosis
 sh('git config user.name "trained-assist-autofix"');
 sh('git config user.email "autofix@trained-assist.bot"');
 sh('git add -A');
-sh(`git commit -m "fix: auto-fix CI failure [autofix]
+// Pre-stage A (conflict resolution or clean merge) may have already committed.
+// Skip the commit if nothing is staged — avoids "nothing to commit" crash.
+if (sh('git status --porcelain').trim()) {
+  sh(`git commit -m "fix: auto-fix CI failure [autofix]
 
 Diagnosis: ${diagnosis.problem.slice(0, 120).replace(/"/g, "'")}
 Strategy: ${fixStrategy}"
 `);
+}
 sh(`git checkout -b ${fixBranch}`);
 sh(`git push origin ${fixBranch}`);
 
@@ -869,6 +941,23 @@ try {
 
 const newPRNumber = newPRUrl.match(/\/pull\/(\d+)$/)?.[1] || '?';
 log('publish', `created new PR #${newPRNumber}: ${newPRUrl}`);
+
+// Close any stale fix/ci-* PRs for the same original branch (excluding the one just created)
+try {
+  const safeBranchForClose = (ORIGINAL_BRANCH || 'unknown').replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40);
+  const stalePRs = JSON.parse(
+    sh(`gh pr list -R "${REPO}" --json number,headRefName --state open`)
+  ).filter(pr =>
+    pr.headRefName.startsWith(`fix/ci-${safeBranchForClose}-`) &&
+    String(pr.number) !== String(newPRNumber)
+  );
+  for (const stale of stalePRs) {
+    sh(`gh pr close ${stale.number} -R "${REPO}" --comment "♻️ Superseded by #${newPRNumber}: ${newPRUrl}"`);
+    log('publish', `closed stale fix PR #${stale.number} (superseded by #${newPRNumber})`);
+  }
+} catch (e) {
+  log('publish', `could not close stale fix PRs: ${e.message.slice(0, 80)}`);
+}
 
 try {
   sh(`gh pr merge --auto --squash "${newPRNumber}" -R "${REPO}"`);

@@ -6,6 +6,8 @@ const os = require('os');
 const { createHmac } = require('crypto');
 const { runProactiveSearch, buildScoringPromptText, buildProactiveDigest, loadSchedule, saveSchedule } = require('../../hh-proactive-search');
 
+const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+
 function proactiveHmac(username) {
   const secret = process.env.AGENT_SECRET || '';
   return createHmac('sha256', secret).update(username).digest('hex').slice(0, 16);
@@ -54,6 +56,8 @@ function buildNotifyChat(username) {
 }
 
 module.exports = {
+  isReady: () => USER_ID ? fs.existsSync(path.join(os.homedir(), 'agent-tokens', USER_ID, 'hh')) : false,
+  setupTools: [],
   tools: {
     hh_proactive_search: {
       description: 'Запускает проактивный поиск кандидатов в открытой базе HH по критериям ATS. Ищет людей которые не откликались сами. Занимает ~30 секунд.',
