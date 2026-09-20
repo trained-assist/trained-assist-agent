@@ -33,7 +33,7 @@ function renderTags(tags, color, bg) {
   ).join('');
 }
 
-function candidateCard(c, idx) {
+function candidateCard(c, idx, existingComment) {
   const salary = fmtSalary(c.salary);
   const companies = (c.recent_companies || []).slice(0, 3).join(' · ');
 
@@ -59,13 +59,15 @@ function candidateCard(c, idx) {
   ).join('');
 
   const hasAi = Boolean(c.plus_tags || c.summary_why);
+  const isNew = Boolean(c.is_new);
+  const commentText = escHtml(existingComment || '');
 
-  return `<div class="card" data-idx="${idx}" data-id="${escHtml(c.id)}">
+  return `<div class="card ${isNew ? 'card-new' : ''}" data-idx="${idx}" data-id="${escHtml(c.id)}">
   <div class="card-header">
     <div class="card-left">
       <a class="card-title" href="${escHtml(c.hh_url)}" target="_blank" rel="noopener">${escHtml(c.title)}</a>
       <div class="card-meta">
-        ${c.age ? `${c.age} лет · ` : ''}${c.total_exp_years} лет опыта · ${escHtml(c.area)}${salary ? ` · <span class="salary">${escHtml(salary)}</span>` : ''}
+        ${isNew ? '<span class="badge-new">NEW</span> ' : ''}${c.age ? `${c.age} лет · ` : ''}${c.total_exp_years} лет опыта · ${escHtml(c.area)}${salary ? ` · <span class="salary">${escHtml(salary)}</span>` : ''}
       </div>
       ${companies ? `<div class="card-companies">${escHtml(companies)}</div>` : ''}
     </div>
@@ -84,6 +86,11 @@ function candidateCard(c, idx) {
 
   ${expRows ? `<details class="exp-details"><summary class="exp-toggle">Карьера</summary><ul class="exp-list">${expRows}</ul></details>` : ''}
 
+  <div class="comment-row">
+    <textarea class="comment-box" placeholder="Комментарий (например: не из Новосибирска, без банковского опыта…)" rows="2" data-id="${escHtml(c.id)}">${commentText}</textarea>
+    <button class="btn-comment" onclick="saveComment('${escHtml(c.id)}', this)">Сохранить</button>
+  </div>
+
   <div class="card-footer">
     <a class="btn-hh" href="${escHtml(c.hh_url)}" target="_blank" rel="noopener">Открыть резюме ↗</a>
     <button class="btn-ai ${hasAi ? 'btn-ai-secondary' : ''}" onclick="openAiModal('${escHtml(c.id)}','${escHtml(c.title)}')">${hasAi ? 'Обновить AI оценку' : 'AI оценить'}</button>
@@ -91,8 +98,9 @@ function candidateCard(c, idx) {
 </div>`;
 }
 
-function generateProactivePageHtml(results, username, callbackBase, token) {
+function generateProactivePageHtml(results, username, callbackBase, token, existingComments) {
   const candidates = results.candidates || [];
+  const comments = existingComments || {};
   const PER_PAGE = 10;
   const totalPages = Math.max(1, Math.ceil(candidates.length / PER_PAGE));
   const searchedAt = results.searched_at
@@ -100,9 +108,10 @@ function generateProactivePageHtml(results, username, callbackBase, token) {
     : '—';
   const passCount = candidates.filter(c => c.tag === 'PASS').length;
   const reviewCount = candidates.filter(c => c.tag === 'REVIEW').length;
+  const newCount = candidates.filter(c => c.is_new).length;
   const isEnriched = results.ai_enriched !== false && candidates.some(c => c.plus_tags || c.summary_why);
 
-  const cardChunks = candidates.map((c, i) => candidateCard(c, i));
+  const cardChunks = candidates.map((c, i) => candidateCard(c, i, comments[c.id]?.text));
   const cardsJson = JSON.stringify(cardChunks);
 
   return `<!doctype html>
@@ -135,6 +144,16 @@ a:hover{text-decoration:underline}
 
 /* Card */
 .card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:15px;margin-bottom:12px}
+.card-new{border-left:3px solid #2563eb}
+.badge-new{display:inline-block;background:#2563eb;color:#fff;border-radius:3px;padding:1px 5px;font-size:.68rem;font-weight:700;letter-spacing:.04em;vertical-align:middle;margin-right:3px}
+
+/* Comment */
+.comment-row{display:flex;gap:6px;align-items:flex-start;margin:6px 0}
+.comment-box{flex:1;font-size:.78rem;border:1px solid #e2e8f0;border-radius:5px;padding:6px 8px;resize:vertical;color:#1e293b;background:#fff;font-family:inherit}
+.comment-box:focus{outline:none;border-color:#6366f1}
+.btn-comment{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:5px;padding:5px 10px;font-size:.75rem;cursor:pointer;color:#475569;white-space:nowrap;align-self:flex-start}
+.btn-comment:hover{background:#e2e8f0}
+.btn-comment.saved{color:#16a34a;border-color:#86efac}
 .card-header{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;margin-bottom:8px}
 .card-left{flex:1;min-width:0}
 .card-title{font-size:.97rem;font-weight:600;display:block;margin-bottom:3px;line-height:1.3}
@@ -170,6 +189,11 @@ details[open] .exp-toggle::before{content:"▾ "}
 .btn-ai:hover{background:#ddd6fe}
 .btn-ai-secondary{background:#f8fafc;border-color:#e2e8f0;color:#64748b}
 .btn-ai-secondary:hover{background:#f1f5f9}
+
+/* Import row */
+.import-row{margin-top:10px;padding-top:8px;border-top:1px solid #f1f5f9}
+.btn-import{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;color:#475569}
+.btn-import:hover{background:#f1f5f9}
 
 /* Pagination */
 .pagination{display:flex;align-items:center;justify-content:center;gap:12px;margin:20px 0}
@@ -208,6 +232,9 @@ details[open] .exp-toggle::before{content:"▾ "}
   .btn-hh{background:#0c1a2e;border-color:#1e40af;color:#93c5fd}
   .btn-ai{background:#1e1b4b;border-color:#4338ca;color:#a5b4fc}
   .btn-ai-secondary{background:#1e293b;border-color:#334155;color:#64748b}
+  .comment-box{background:#0f172a;border-color:#334155;color:#e2e8f0}
+  .btn-comment{background:#1e293b;border-color:#334155;color:#94a3b8}
+  .btn-comment:hover{background:#334155}
   .modal{background:#1e293b;color:#e2e8f0}
   .modal-score{background:#0f172a;border-color:#334155}
   .exp-list{color:#94a3b8}
@@ -233,7 +260,16 @@ details[open] .exp-toggle::before{content:"▾ "}
     <div class="stat">После фильтра: <strong>${results.total_after_knockout || 0}</strong></div>
     <div class="stat">PASS: <strong style="color:#16a34a">${passCount}</strong></div>
     ${reviewCount ? `<div class="stat">REVIEW: <strong style="color:#ca8a04">${reviewCount}</strong></div>` : ''}
+    ${newCount ? `<div class="stat">Новых: <strong style="color:#2563eb">${newCount}</strong></div>` : ''}
     <div class="stat">Топ: <strong>${candidates.length}</strong></div>
+  </div>
+  <div class="import-row">
+    <button class="btn-import" onclick="toggleImport()">📥 Импорт просмотренных</button>
+    <div id="importPanel" style="display:none;margin-top:8px">
+      <textarea id="importIds" class="comment-box" style="width:100%;height:60px" placeholder="Вставьте ссылки HH или ID резюме (по одному на строку)"></textarea>
+      <button class="btn-comment" style="margin-top:4px" onclick="importSeen()">Добавить в базу просмотренных</button>
+      <span id="importStatus" style="margin-left:8px;font-size:.78rem;color:#64748b"></span>
+    </div>
   </div>
 </div>
 
@@ -375,6 +411,57 @@ async function runSearch() {
     alert('Ошибка: ' + e.message);
     btn.disabled = false;
     btn.textContent = '🔍 Новый поиск';
+  }
+}
+
+async function saveComment(candidateId, btn) {
+  const textarea = document.querySelector('.comment-box[data-id="' + candidateId + '"]');
+  if (!textarea) return;
+  const text = textarea.value.trim();
+  btn.textContent = '…';
+  try {
+    const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/comment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, text }),
+    });
+    const data = await res.json();
+    if (data.error) { btn.textContent = 'Ошибка'; return; }
+    btn.textContent = 'Сохранено';
+    btn.classList.add('saved');
+    setTimeout(() => { btn.textContent = 'Сохранить'; btn.classList.remove('saved'); }, 2000);
+  } catch (e) {
+    btn.textContent = 'Ошибка';
+  }
+}
+
+function toggleImport() {
+  const panel = document.getElementById('importPanel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+async function importSeen() {
+  const raw = document.getElementById('importIds').value;
+  const status = document.getElementById('importStatus');
+  // Extract IDs from HH URLs (e.g. hh.ru/resume/abc123) or bare IDs
+  const ids = raw.split(/\\n|\\r|,/).map(s => {
+    const m = s.match(/\\/resume\\/([a-zA-Z0-9]+)/);
+    return m ? m[1] : s.replace(/[^a-zA-Z0-9]/g, '');
+  }).filter(Boolean);
+  if (!ids.length) { status.textContent = 'Не найдено ID'; return; }
+  status.textContent = 'Отправляю…';
+  try {
+    const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/import-seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, ids }),
+    });
+    const data = await res.json();
+    if (data.error) { status.textContent = 'Ошибка: ' + esc(data.error); return; }
+    status.textContent = 'Добавлено ' + (data.imported || 0) + ' ID в базу просмотренных.';
+    document.getElementById('importIds').value = '';
+  } catch (e) {
+    status.textContent = 'Ошибка: ' + esc(e.message);
   }
 }
 
