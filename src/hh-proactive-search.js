@@ -287,6 +287,55 @@ function mergeSeenIds(username, vacancyId, collectedIds) {
   return { newIds: new Set(newIds), newCount: newIds.length, totalSeenAfter: Object.keys(bucket).length, firstRun };
 }
 
+// Per-vacancy search-query store. Queries live in the same proactive directory, keyed by
+// vacancy ID. This avoids the old anti-pattern of embedding them inside ats_config.json —
+// that file is overwritten on every ATS edit and is shared across all vacancies for a user,
+// causing stale / wrong queries to survive a vacancy switch.
+// Schema: { vacancy_id, queries: string[], config_hash: string, generated_at: ISO }
+function queriesStorePath(username, vacancyId) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', `queries-${vacancyId}.json`);
+}
+
+// Stable hash of the ATS fields that influence query generation.
+// If the recruiter edits required/preferred/knockout, the hash changes and queries regenerate.
+function atsConfigHash(cfg) {
+  const key = JSON.stringify({
+    title: cfg.vacancy_title,
+    context: cfg.vacancy_context,
+    required: (cfg.required || []).map(c => c.name),
+    preferred: (cfg.preferred || []).map(c => c.name),
+    knockout: cfg.knockout || [],
+  });
+  return require('crypto').createHash('md5').update(key).digest('hex').slice(0, 12);
+}
+
+function loadStoredQueries(username, vacancyId, configHash) {
+  try {
+    const data = JSON.parse(fs.readFileSync(queriesStorePath(username, vacancyId), 'utf8'));
+    if (data.config_hash === configHash && Array.isArray(data.queries) && data.queries.length > 0) {
+      return data.queries;
+    }
+    return null;
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-search] queries store read failed:', e.message);
+    return null;
+  }
+}
+
+function saveStoredQueries(username, vacancyId, queries, configHash) {
+  const file = queriesStorePath(username, vacancyId);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify({
+    vacancy_id: vacancyId,
+    queries,
+    config_hash: configHash,
+    generated_at: new Date().toISOString(),
+  }, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
 // Build a short Telegram digest for a successful proactive run with new candidates.
 // Caller passes the already-enriched slice of `newCandidates` (typically ≤10 shown).
 function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, newCandidates, url }) {
@@ -496,16 +545,26 @@ async function runProactiveSearch(username, workDir, options = {}) {
   // search returns 30 random "Аналитик данных" for a "Финансовый советник" vacancy.
   atsConfig = normalizeAtsConfig(atsConfig);
 
-  // Guard: if the recruiter switched active vacancy (hh_set_active_vacancy) after this
-  // config was extracted for a different one, don't silently search with the wrong criteria.
+  // Resolve vacancy ID early — fail fast rather than silently using a shared "unknown"
+  // bucket that collides across vacancies. A real vacancy_id is required so that:
+  //   1. seen-ids for two different vacancies stay in separate buckets
+  //   2. cached search queries are keyed per-vacancy and don't leak between configs
+  let activeVacancy = null;
   try {
-    const activeVacancy = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
-    if (activeVacancy?.id && atsConfig.vacancy_id && atsConfig.vacancy_id !== activeVacancy.id) {
-      throw new Error(`ATS конфиг настроен для другой вакансии («${atsConfig.vacancy_title || atsConfig.vacancy_id}»), а активна «${activeVacancy.title || activeVacancy.id}». Вызови hh_extract_ats_config заново для текущей вакансии.`);
-    }
+    activeVacancy = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
   } catch (e) {
-    if (e instanceof SyntaxError || e.code === 'ENOENT') { /* no active_vacancy context yet — legacy config, allow */ }
-    else throw e;
+    if (!(e instanceof SyntaxError) && e.code !== 'ENOENT') throw e;
+  }
+
+  let vacancyKey = atsConfig.vacancy_id ? String(atsConfig.vacancy_id) : '';
+  if (!vacancyKey && activeVacancy?.id) vacancyKey = String(activeVacancy.id);
+  if (!vacancyKey) {
+    throw new Error('Не удалось определить ID вакансии. Вызови hh_set_active_vacancy или hh_extract_ats_config заново — vacancy_id должен быть задан перед запуском поиска.');
+  }
+
+  // Guard: active vacancy changed after this config was extracted for a different one.
+  if (activeVacancy?.id && atsConfig.vacancy_id && atsConfig.vacancy_id !== activeVacancy.id) {
+    throw new Error(`ATS конфиг настроен для другой вакансии («${atsConfig.vacancy_title || atsConfig.vacancy_id}»), а активна «${activeVacancy.title || activeVacancy.id}». Вызови hh_extract_ats_config заново для текущей вакансии.`);
   }
 
   // Read OpenRouter key for AI enrichment + query generation
@@ -513,29 +572,19 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
   const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
 
-  // Search queries are generated per-vacancy and cached in the ATS config until the
-  // vacancy title changes, so we don't re-call the LLM on every run.
-  // Force regeneration (ignore cache) if caller explicitly requests it.
+  // Search queries are generated per-vacancy and cached in a per-vacancy file keyed by
+  // vacancyKey. They are reused as long as the ATS config fields that influence query
+  // generation haven't changed (detected via configHash). Two vacancies never share the
+  // same query file, so switching between them doesn't corrupt each other's cache.
   const forceRegen = Boolean(options.forceRegenQueries);
-  let queries = !forceRegen && Array.isArray(atsConfig.proactive_search_queries) && atsConfig.proactive_search_queries_for === atsConfig.vacancy_title
-    ? atsConfig.proactive_search_queries
-    : null;
+  const configHash = atsConfigHash(atsConfig);
+  let queries = !forceRegen ? loadStoredQueries(username, vacancyKey, configHash) : null;
   if (!queries) {
     if (!orKey) throw new Error('OpenRouter ключ не найден — нужен, чтобы сгенерировать поисковые запросы под эту вакансию.');
     // Pass recruiter's exclusion comments so the LLM can refine queries accordingly
     const exclusions = getSearchExclusions(username);
     queries = await generateSearchQueries(atsConfig, orKey, exclusions);
-    try {
-      const raw = JSON.parse(fs.readFileSync(atsCtxFile, 'utf8'));
-      raw.value = raw.value || {};
-      raw.value.proactive_search_queries = queries;
-      raw.value.proactive_search_queries_for = atsConfig.vacancy_title;
-      fs.writeFileSync(atsCtxFile, JSON.stringify(raw, null, 2), 'utf8');
-      atsConfig.proactive_search_queries = queries;
-      atsConfig.proactive_search_queries_for = atsConfig.vacancy_title;
-    } catch (e) {
-      console.error('[proactive-search] failed to cache generated queries:', e.message);
-    }
+    saveStoredQueries(username, vacancyKey, queries, configHash);
   }
 
   const allCandidates = new Map();
@@ -600,18 +649,6 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
   const outDir = path.join(dataDir, 'hh', username, 'proactive');
   fs.mkdirSync(outDir, { recursive: true });
-
-  // Normalize vacancyKey: prefer vacancy_id (stable), fall back to title (can change).
-  // Always use the same key across runs so seen-IDs accumulate correctly.
-  // If vacancy_id is missing, try to read it from active_vacancy.json as a fallback.
-  let vacancyKeyId = atsConfig.vacancy_id || '';
-  if (!vacancyKeyId) {
-    try {
-      const av = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
-      if (av?.id) vacancyKeyId = String(av.id);
-    } catch {}
-  }
-  const vacancyKey = vacancyKeyId || atsConfig.vacancy_title || 'unknown';
 
   // Compute seen-IDs BEFORE writing the results file so we can mark is_new on candidates.
   // Any crash after this point means a duplicate alert next time — acceptable trade-off
@@ -736,4 +773,9 @@ module.exports = {
   loadCandidateComments,
   saveCandidateComment,
   getSearchExclusions,
+  // Per-vacancy query store
+  atsConfigHash,
+  queriesStorePath,
+  loadStoredQueries,
+  saveStoredQueries,
 };
