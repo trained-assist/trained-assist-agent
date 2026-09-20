@@ -4,7 +4,17 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
-const { runProactiveSearch, buildScoringPromptText, buildProactiveDigest, loadSchedule, saveSchedule } = require('../../hh-proactive-search');
+const {
+  runProactiveSearch,
+  buildScoringPromptText,
+  buildProactiveDigest,
+  loadSchedule,
+  saveSchedule,
+  atsConfigHash,
+  queriesStorePath,
+  loadStoredQueries,
+  saveStoredQueries,
+} = require('../../hh-proactive-search');
 
 const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
 
@@ -100,6 +110,80 @@ module.exports = {
       handler: async () => {
         const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
         return { text: buildScoringPromptText(userId) };
+      },
+    },
+
+    hh_proactive_queries: {
+      description: 'Показывает и редактирует поисковые фразы проактивного поиска для активной вакансии. action=view — показать текущие фразы и когда сгенерированы; action=update — заменить список (передай queries:[...]); action=reset — удалить сохранённые фразы (регенерация при следующем запуске).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['view', 'update', 'reset'], description: 'Действие: view | update | reset' },
+          queries: { type: 'array', items: { type: 'string' }, description: 'Новый список фраз (только для action=update)' },
+        },
+        required: ['action'],
+      },
+      handler: async ({ action, queries: newQueries }) => {
+        const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+        if (!userId) return { error: 'USER_ID не задан' };
+
+        // Resolve vacancy_id from the current ATS config
+        const workDir = process.cwd();
+        let atsConfig = null;
+        let vacancyId = null;
+        try {
+          const raw = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'ats_config.json'), 'utf8'));
+          atsConfig = raw?.value;
+          vacancyId = atsConfig?.vacancy_id ? String(atsConfig.vacancy_id) : null;
+        } catch {}
+        if (!vacancyId) {
+          try {
+            const av = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
+            if (av?.id) vacancyId = String(av.id);
+          } catch {}
+        }
+        if (!vacancyId) return { error: 'Не удалось определить ID вакансии. Вызови hh_set_active_vacancy или hh_extract_ats_config заново.' };
+
+        const configHash = atsConfig ? atsConfigHash(atsConfig) : null;
+        const storePath = queriesStorePath(userId, vacancyId);
+
+        if (action === 'view') {
+          try {
+            const data = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+            const stale = configHash && data.config_hash !== configHash;
+            return {
+              vacancy_id: vacancyId,
+              queries: data.queries || [],
+              generated_at: data.generated_at,
+              stale,
+              stale_reason: stale ? 'ATS конфиг изменился после генерации — запусти поиск или action=reset для регенерации' : null,
+              message: `${(data.queries || []).length} фраз для вакансии ${vacancyId}${stale ? ' (устарели)' : ''}: ${(data.queries || []).map(q => `"${q}"`).join(', ')}`,
+            };
+          } catch (e) {
+            if (e.code === 'ENOENT') return { vacancy_id: vacancyId, queries: [], message: 'Фразы ещё не сгенерированы. Запусти hh_proactive_search.' };
+            return { error: e.message };
+          }
+        }
+
+        if (action === 'update') {
+          if (!Array.isArray(newQueries) || newQueries.length === 0) return { error: 'queries[] обязателен и не должен быть пустым для action=update' };
+          const validQueries = newQueries.map(q => String(q).trim()).filter(Boolean);
+          if (!validQueries.length) return { error: 'Все фразы пустые — ничего не сохранено' };
+          saveStoredQueries(userId, vacancyId, validQueries, configHash || 'manual');
+          return {
+            ok: true,
+            vacancy_id: vacancyId,
+            queries: validQueries,
+            message: `Сохранено ${validQueries.length} фраз для вакансии ${vacancyId}. Следующий запуск poactive поиска будет использовать этот список.`,
+          };
+        }
+
+        if (action === 'reset') {
+          try { fs.unlinkSync(storePath); } catch (e) { if (e.code !== 'ENOENT') return { error: e.message }; }
+          return { ok: true, vacancy_id: vacancyId, message: `Фразы сброшены. При следующем запуске hh_proactive_search они будут сгенерированы заново через LLM.` };
+        }
+
+        return { error: `Неизвестный action: ${action}` };
       },
     },
 
