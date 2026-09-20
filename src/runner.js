@@ -257,7 +257,8 @@ const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|созд
 const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|напиш[иь]).{0,40}(?:приложени|сервис(?!\s*аккаунт)|бот(?!\s*токен|\s*ключ)(?!\s*weeek|\s*hh|\s*tilda|\s*nalog)|сайт(?!\s*с\s+tilda)(?!\s+tilda)|систем|скрипт(?!\s+для\s+(?:выставки|expo))|библиотек|пакет|модул|апи-сервис)|implement\s+\S|build\s+(?:app|service|bot|api)|develop\s+(?:app|feature|bot)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
-const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
+const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|^\/checklist_turn_off$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
+const ACTIVE_CHECKLIST_INTENT   = /^\/active_checklist$/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
@@ -298,7 +299,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // \b doesn't fire after a Cyrillic letter in JS, so both alternatives end on
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
-const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?)\b/i;
+const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)\b/i;
 const AGENT_INFO_INTENT = /^\/(?:get_agent_info|agent_info|info)(?:@\S+)?(?=\s|$)/i;
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
@@ -565,7 +566,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   // /oc_value, /oc_quality, /oc_free, /oc_mimo, /oc_ru — switch OpenCode model profile globally
   const ocProfileM = task.trim().match(OC_PROFILE_INTENT);
   if (ocProfileM) {
-    const raw = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase().replace(/^ru$/, 'russian-recruiter');
+    const raw = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase().replace(/^ru$/, 'russian-recruiter').replace(/^ll$/, 'lavish-luna');
     const scriptPath = path.join(__dirname, '..', 'infra', 'opencode-switch-profile.sh');
     if (!fs.existsSync(scriptPath)) return '⚠️ infra/opencode-switch-profile.sh не найден';
     try {
@@ -577,6 +578,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
         free:                'FREE — только бесплатный inference (Nemotron)',
         mimo:                'MIMO — A/B-тест MiMo V2.5',
         'russian-recruiter': 'RUSSIAN RECRUITER — GigaChat Pro/Ultra/Max',
+        'lavish-luna':       'LAVISH LUNA — GPT-5.6 Luna main + DeepSeek/Kimi/Qwen companions',
       };
       const label = PROFILE_LABELS[raw] || raw;
       return `✅ OpenCode профиль → ${label}\n\nПрименён глобально на этом VM (все чаты). Следующий запуск OpenCode подхватит новые модели.`;
@@ -1812,6 +1814,35 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
+  // /active_checklist — list all open GTD records for this user.
+  if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
+    const workDir = opts.user.workDir;
+    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+    const chatId = opts.user.id;
+    let msg;
+    if (!workDir) {
+      msg = '📋 Нет активных чек-листов.';
+    } else {
+      const openRecs = (() => { try { return require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+      if (!openRecs.length) {
+        msg = '📋 Нет активных чек-листов.';
+      } else {
+        const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
+        for (const r of openRecs) {
+          const task = (r.originalTask || '').slice(0, 80);
+          lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+        }
+        msg = lines.join('\n');
+      }
+    }
+    if (botToken) {
+      const im = opts.initialMsgId;
+      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+      else     tgSend(botToken, chatId, msg).catch(() => {});
+    }
+    return Promise.resolve(msg);
+  }
+
   // Control commands bypass lanes and admission. Available to every authenticated profile.
   const restart = /^\/restart(?:@\w+)?(?:\s+(status|cancel))?$/i.exec((opts.task || '').trim());
   if (restart) {
@@ -2025,6 +2056,14 @@ function runTask(opts) {
   return current.then(result => result?.queuedRetry || result);
 }
 
+function _relativeTime(ts) {
+  const diffMs = ts - Date.now();
+  if (diffMs <= 0) return 'сейчас';
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 60) return `через ${mins} мин`;
+  return `через ${Math.round(mins / 60)} ч`;
+}
+
 // Returns context card string, or null if no skills configured (no pin needed).
 function buildContextCard(username, workDir, chatId) {
   const services = username ? listConnectedServices(username) : [];
@@ -2106,6 +2145,20 @@ function buildContextCard(username, workDir, chatId) {
     lines.push(`⚙️ Claude · ${m}`);
   }
 
+// GTD section: show when ≥1 open record exists
+  if (workDir) {
+    try {
+      const openRecs = require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
+      if (openRecs.length === 1) {
+        const r = openRecs[0];
+        const preview = (r.originalTask || '').slice(0, 40);
+        lines.push(`📋 Чеклист: «${preview}» · ${_relativeTime(r.dueAt)} · /active_checklist · /checklist_turn_off`);
+      } else if (openRecs.length > 1) {
+        const next = openRecs.reduce((a, b) => a.dueAt < b.dueAt ? a : b);
+        lines.push(`📋 ${openRecs.length} чек-листа · след. ${_relativeTime(next.dueAt)} · /active_checklist · /checklist_turn_off`);
+      }
+    } catch (e) { console.warn('[runner] gtd pin:', e.message); }
+  }
   const time = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
   lines.push('');
   lines.push(`⏱ ${time} МСК`);
@@ -2421,6 +2474,32 @@ async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {})
     console.warn('[soft-incomplete]', e.message);
     return { incomplete: false };
   }
+}
+
+// Builds a runtime capabilities addendum for OpenCode system prompt.
+// OpenCode uses non-Claude models that don't auto-read CLAUDE.md, so we inject what's available.
+function buildOcCapabilitiesBlock(secrets) {
+  const lines = ['## Возможности системы (runtime)'];
+
+  if (secrets && secrets.DEEPGRAM_API_KEY) {
+    lines.push(
+      '',
+      '**Транскрибация аудио:** доступна (Deepgram nova-2)',
+      '• Поддерживает русский и другие языки',
+      '• Форматы: mp3, wav, ogg, m4a, голосовые сообщения Telegram',
+      '• Быстро, точнее Whisper, с пунктуацией и разбивкой по абзацам',
+      '• Пользователь присылает аудиофайл → бот транскрибирует → текст попадает к тебе',
+    );
+  }
+
+  lines.push(
+    '',
+    '**Инструменты (MCP):** доступны только compress-on-input и Neon (Postgres).',
+    'Кастомные скилы (HH, Weeek, nalog, gdrive и др.) для OpenCode НЕ подключены.',
+    'Для задач с кастомными скилами пользователь должен переключиться на Claude (/switch2klod).',
+  );
+
+  return lines.join('\n');
 }
 
 async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
@@ -2862,6 +2941,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   } catch (e) { console.warn('[runner] answer-router block:', e.message); }
 
   const systemPromptText = systemPromptFile && fs.existsSync(systemPromptFile) ? fs.readFileSync(systemPromptFile, 'utf8') : '';
+
+  // OpenCode uses non-Claude models (DeepSeek, GigaChat, etc.) that don't auto-read CLAUDE.md.
+  // Inject a runtime capabilities block so they know what's actually available.
+  const ocCapBlock = engine === 'opencode' ? buildOcCapabilitiesBlock(secrets) : '';
+  const ocSystemPrompt = ocCapBlock
+    ? (systemPromptText ? `${systemPromptText}\n\n${ocCapBlock}` : ocCapBlock)
+    : systemPromptText;
+
   const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = engine === 'codex'
     ? [process.env.CODEX_BIN || 'codex', [
@@ -2878,7 +2965,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         '--format', 'json',
         '--auto',
         ...(opencodeModel ? ['-m', opencodeModel] : []),
-        systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
+        ocSystemPrompt ? `${ocSystemPrompt}\n\n${prompt}` : prompt,
       ]]
     : [process.env.CLAUDE_BIN || 'claude', [
         '--dangerously-skip-permissions',
@@ -3431,7 +3518,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const costFooter = engine === 'opencode'
     ? formatOcFooter(opencodeUsage, opencodeBreakdown)
     : formatCostFooter(claudeUsage, claudeModel);
-  const final = (result + costFooter).slice(-MAX_MSG_LEN);
+  const gtdFooter = (!internalGtd && !incomplete && user.workDir)
+    ? (() => { try { return require('./gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
+    : '';
+  const final = (result + costFooter).slice(-MAX_MSG_LEN) + gtdFooter;
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
   // сессия уже deep (проработка только что и была). После clarify — показываем (чтобы
