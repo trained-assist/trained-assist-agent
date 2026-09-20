@@ -63,8 +63,10 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
-const STAGE0_MODEL = 'deepseek/deepseek-v4-flash-0731:free';
-const STAGE1_MODEL = 'deepseek/deepseek-v4-flash-0731:free';
+// Primary model; if unavailable on free tier, callModel falls back to STAGE0_FALLBACK_MODEL
+const STAGE0_MODEL = 'deepseek/deepseek-chat-v3-5:free';
+const STAGE0_FALLBACK_MODEL = 'google/gemma-3-27b-it:free';
+const STAGE1_MODEL = 'deepseek/deepseek-chat-v3-5:free';
 const STAGE2_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
 const STAGE3_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
@@ -163,23 +165,39 @@ async function prComment(body) {
 }
 
 async function callModel(model, messages, json = false) {
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0,
-      ...(json ? { response_format: { type: 'json_object' } } : {}),
-    }),
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content?.trim() || '';
+  const tryModel = async (m) => {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: m,
+        messages,
+        temperature: 0,
+        ...(json ? { response_format: { type: 'json_object' } } : {}),
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw Object.assign(new Error(`OpenRouter HTTP ${res.status}: ${body}`), { status: res.status });
+    }
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content?.trim() || '';
+  };
+
+  try {
+    return await tryModel(model);
+  } catch (e) {
+    // 404 = model unavailable on free tier → try STAGE0_FALLBACK_MODEL if applicable
+    if (e.status === 404 && model === STAGE0_MODEL && STAGE0_FALLBACK_MODEL) {
+      log('model', `${model} unavailable (404) — falling back to ${STAGE0_FALLBACK_MODEL}`);
+      return await tryModel(STAGE0_FALLBACK_MODEL);
+    }
+    throw e;
+  }
 }
 
 function extractPatch(raw) {
@@ -286,20 +304,13 @@ async function tryFixOutOfDate(failedLog, prPurposeArg) {
       };
     }
 
-    if (!prPurposeArg) {
-      try { sh('git merge --abort'); } catch {}
-      return {
-        ok: false,
-        category: 'fail:merge_conflict',
-        reason: `merge with ${BASE_BRANCH} had ${conflictedFiles.length} conflict(s) but no PR purpose for AI resolution`,
-        detail: conflictedFiles.join(', '),
-      };
-    }
+    // If Stage 0 failed to get purpose, fall back to branch name — still useful context for AI
+    const effectivePurpose = prPurposeArg || `Changes in PR branch: ${ORIGINAL_BRANCH}`;
 
     log('pre-A', `${conflictedFiles.length} conflict(s): ${conflictedFiles.join(', ')} — asking AI to resolve...`);
-    await prComment(`🔀 Merge conflicts in ${conflictedFiles.length} file(s): \`${conflictedFiles.join('`, `')}\`\n\nAsking AI to resolve using PR purpose: _"${prPurposeArg.slice(0, 100)}"_…`);
+    await prComment(`🔀 Merge conflicts in ${conflictedFiles.length} file(s): \`${conflictedFiles.join('`, `')}\`\n\nAsking AI to resolve using context: _"${effectivePurpose.slice(0, 100)}"_…`);
 
-    const resolveResult = await resolveConflictsWithAI(conflictedFiles, prPurposeArg);
+    const resolveResult = await resolveConflictsWithAI(conflictedFiles, effectivePurpose);
     if (!resolveResult.ok) {
       try { sh('git merge --abort'); } catch {}
       return {
@@ -317,7 +328,7 @@ async function tryFixOutOfDate(failedLog, prPurposeArg) {
       ok: true,
       category: 'success:pre_a_conflict_resolved',
       problem: `Branch had merge conflicts with \`${BASE_BRANCH}\` — AI resolved them using PR purpose`,
-      fix_approach: `Merged \`origin/${BASE_BRANCH}\`, AI resolved ${conflictedFiles.length} file(s): ${conflictedFiles.join(', ')}`,
+      fix_approach: `Merged \`origin/${BASE_BRANCH}\`, AI resolved ${conflictedFiles.length} file(s): ${conflictedFiles.join(', ')} (context: "${effectivePurpose.slice(0, 60)}")`,
     };
   }
 }
