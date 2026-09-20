@@ -224,7 +224,7 @@ async function callModel(model, messages, json = false) {
       return await tryModel(m);
     } catch (e) {
       lastErr = e;
-      if (![404, 429, 503].includes(e.status)) throw e; // hard error — don't retry
+      if (![400, 404, 429, 503].includes(e.status)) throw e; // 400 = bad model ID — retry next
     }
   }
   throw lastErr;
@@ -246,7 +246,7 @@ async function discoverFreeModels() {
       .filter(m => m.id.endsWith(':free') && !known.has(m.id))
       .sort((a, b) => (b.context_length || 0) - (a.context_length || 0))
       .map(m => m.id);
-    log('model', `discovered ${_discoveredFreeModels.length} additional free models from OpenRouter`);
+    log('model', `discovered ${_discoveredFreeModels.length} additional free models from OpenRouter: ${_discoveredFreeModels.slice(0, 5).join(', ')}${_discoveredFreeModels.length > 5 ? '...' : ''}`);
   } catch (e) {
     log('model', `free model discovery failed: ${e.message.slice(0, 60)} — skipping`);
     _discoveredFreeModels = [];
