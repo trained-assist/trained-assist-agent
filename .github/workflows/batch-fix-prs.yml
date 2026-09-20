@@ -89,9 +89,9 @@ jobs:
           ref: ${{ steps.pr-info.outputs.branch }}
           fetch-depth: 0
 
-      - name: Use latest fixer script from main (not from the PR branch)
+      - name: Save latest fixer script from main to /tmp (keep worktree clean)
         if: steps.guard.outputs.skip == 'false'
-        run: git show origin/main:scripts/autofix-openrouter.mjs > scripts/autofix-openrouter.mjs
+        run: git show origin/main:scripts/autofix-openrouter.mjs > /tmp/autofix-from-main.mjs
 
       - uses: actions/setup-node@v4
         if: steps.guard.outputs.skip == 'false'
@@ -112,7 +112,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ matrix.pr }}
           ORIGINAL_BRANCH: ${{ steps.pr-info.outputs.branch }}
-        run: node scripts/autofix-openrouter.mjs
+        run: node /tmp/autofix-from-main.mjs
 
       - name: Upload stats artifact
         if: steps.guard.outputs.skip == 'false' && always()

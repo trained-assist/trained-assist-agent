@@ -63,10 +63,11 @@ const DIFF_CHAR_LIMIT = 10000;
 const FILE_CHAR_LIMIT = 8000;
 const MAX_FILES = 8;
 
-// Primary model; if unavailable on free tier, callModel falls back to STAGE0_FALLBACK_MODEL
-const STAGE0_MODEL = 'deepseek/deepseek-chat-v3-5:free';
-const STAGE0_FALLBACK_MODEL = 'google/gemma-3-27b-it:free';
-const STAGE1_MODEL = 'deepseek/deepseek-chat-v3-5:free';
+// Free models that actually work on OpenRouter (checked 2026-09-20)
+// If primary returns 404/400, callModel retries with STAGE0_FALLBACK_MODEL
+const STAGE0_MODEL = 'google/gemma-3-27b-it:free';
+const STAGE0_FALLBACK_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
+const STAGE1_MODEL = 'google/gemma-3-27b-it:free';
 const STAGE2_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
 const STAGE3_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
