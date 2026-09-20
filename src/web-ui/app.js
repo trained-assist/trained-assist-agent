@@ -55,12 +55,6 @@ function md(text) {
   return marked.parse(text, { breaks: true, gfm: true });
 }
 
-// ─── View switching ─────────────────────────────────────────────────────────
-const VIEWS = ['view-loading', 'view-sessions', 'view-session'];
-const showView = id => VIEWS.forEach(v =>
-  document.getElementById(v).classList.toggle('hidden', v !== id)
-);
-
 const $ = id => document.getElementById(id);
 
 // Durable confirmations are independent of the currently selected session.
@@ -112,22 +106,10 @@ async function loadRestartIntents() {
   }
 }
 
-// ─── Sessions list ──────────────────────────────────────────────────────────
-async function loadSessions() {
-  showView('view-loading');
-  try {
-    const res = await api('/web/sessions');
-    const sessions = await res.json();
-    renderSessions(Array.isArray(sessions) ? sessions : []);
-    await loadRestartIntents();
-    showView('view-sessions');
-  } catch (err) {
-    if (err.message !== 'Unauthorized') {
-      showView('view-sessions');
-      $('sessions-list').innerHTML =
-        '<div class="empty"><h3>Failed to load</h3><p>Check connection and try refreshing</p></div>';
-    }
-  }
+// ─── Sidebar: session list ──────────────────────────────────────────────────
+function highlightSession(id) {
+  document.querySelectorAll('.session-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.id === id));
 }
 
 function renderSessions(sessions) {
@@ -137,7 +119,7 @@ function renderSessions(sessions) {
     return;
   }
   el.innerHTML = sessions.map(s => `
-    <div class="session-item" data-id="${esc(s.id)}">
+    <div class="session-item" data-id="${esc(s.id)}" data-testid="session-item">
       <div class="session-info">
         <div class="session-path">${esc(s.topic || s.lastUserMessage || s.id)}</div>
         <div class="session-meta">${timeAgo(s.lastAt || s.createdAt)}${s.messageCount ? ` · ${s.messageCount} msg` : ''}</div>
@@ -150,6 +132,65 @@ function renderSessions(sessions) {
   );
 }
 
+// Lightweight sidebar refresh — no full-page loading state.
+async function refreshSidebar() {
+  try {
+    const res = await api('/web/sessions');
+    const sessions = await res.json();
+    renderSessions(Array.isArray(sessions) ? sessions : []);
+    highlightSession(currentSessionId);
+    await loadRestartIntents();
+  } catch (err) {
+    if (err.message !== 'Unauthorized') {
+      $('sessions-list').innerHTML = '<div class="empty"><h3>Failed to load</h3><p>Check connection and try refreshing</p></div>';
+    }
+  }
+}
+
+// ─── Composer: creates a session (state A) or replies in one (state B) ─────
+function setComposerMode(mode) {
+  const isNew = mode === 'new';
+  $('composer-project-row').classList.toggle('hidden', !isNew);
+  $('composer-input').placeholder = isNew ? 'Опиши задачу…' : 'Ответ Клоду…';
+  $('btn-composer-submit').textContent = isNew ? 'Start' : 'Send';
+}
+
+async function loadFolderOptions() {
+  const sel = $('folder-select');
+  try {
+    const res  = await api('/web/files/tree');
+    const data = await res.json();
+    const tree = data.tree || [];
+    sel.innerHTML = tree.length
+      ? '<option value="">Select a folder…</option>' + tree.map(f => `<option value="${esc(f.path)}">${esc(f.name)}</option>`).join('')
+      : '<option value="">No folders available</option>';
+  } catch {
+    sel.innerHTML = '<option value="">Failed to load folders</option>';
+  }
+}
+
+// Reset the main panel + composer back to "new task" (state A).
+function showNewState({ clearInput = false } = {}) {
+  if (streamAbort) streamAbort.abort();
+  clearInterval(pollTimer);
+  currentSessionId = null;
+  $('session-title').textContent = 'New session';
+  $('btn-stop').classList.add('hidden');
+  $('messages-container').classList.add('hidden');
+  $('messages-container').innerHTML = '';
+  $('empty-state').classList.remove('hidden');
+  $('stream-area').classList.add('hidden');
+  $('reconnect-notice').classList.add('hidden');
+  if (clearInput) $('composer-input').value = '';
+  setComposerMode('new');
+  highlightSession(null);
+}
+
+async function onComposerSubmit() {
+  if (currentSessionId) await sendReply();
+  else await submitNewSession();
+}
+
 // ─── Session detail ─────────────────────────────────────────────────────────
 let currentSessionId = null;
 let streamAbort = null;
@@ -157,8 +198,11 @@ let pollTimer = null;
 
 async function loadSession(id) {
   currentSessionId = id;
-  showView('view-session');
+  setComposerMode('active');
+  highlightSession(id);
   $('session-title').textContent = id;
+  $('empty-state').classList.add('hidden');
+  $('messages-container').classList.remove('hidden');
   $('messages-container').innerHTML =
     '<div class="loading" style="padding:24px;justify-content:center"><div class="spinner"></div> Loading…</div>';
   $('stream-area').classList.add('hidden');
@@ -246,8 +290,8 @@ async function startStream(endpoint, body, appendUserMsg = null) {
 
   const streamEl = $('stream-area');
   const btnStop  = $('btn-stop');
-  const btnSend  = $('btn-send');
-  const input    = $('reply-input');
+  const btnSend  = $('btn-composer-submit');
+  const input    = $('composer-input');
   const notice   = $('reconnect-notice');
 
   if (appendUserMsg) {
@@ -328,9 +372,11 @@ async function startStream(endpoint, body, appendUserMsg = null) {
                 currentSessionId = sid;
                 navigate(`/session/${sid}`, false); // reflect real id in the URL
                 await loadSession(sid);
+                await refreshSidebar();
               } else {
                 // No id came back (e.g. task produced no session) — refresh the list
-                await loadSessions();
+                await refreshSidebar();
+                showNewState();
               }
               return;
             } else if (msg.type === 'error') {
@@ -371,63 +417,36 @@ async function startStream(endpoint, body, appendUserMsg = null) {
   finalise();
 }
 
-// ─── New session modal ──────────────────────────────────────────────────────
-async function openNewModal() {
-  const modal = $('modal-new');
-  const sel   = $('folder-select');
-  $('task-input').value = '';
-  sel.innerHTML = '<option value="">Loading folders…</option>';
-  sel.disabled  = true;
-  modal.classList.remove('hidden');
-
-  try {
-    const res  = await api('/web/files/tree');
-    const data = await res.json();
-    const tree = data.tree || [];
-    if (!tree.length) {
-      sel.innerHTML = '<option value="">No folders available</option>';
-    } else {
-      sel.innerHTML = '<option value="">Select a folder…</option>' +
-        tree.map(f => `<option value="${esc(f.path)}">${esc(f.name)}</option>`).join('');
-      sel.disabled = false;
-    }
-  } catch {
-    sel.innerHTML = '<option value="">Failed to load folders</option>';
-  }
-}
-
+// ─── New session (state A submit) ──────────────────────────────────────────
 async function submitNewSession() {
   const path    = $('folder-select').value;
-  const message = $('task-input').value.trim();
-  const btn     = $('btn-start-new');
-  if (!message) { $('task-input').focus(); return; }
+  const input   = $('composer-input');
+  const message = input.value.trim();
+  if (!message) { input.focus(); return; }
 
-  btn.disabled = true;
-  btn.textContent = 'Starting…';
+  currentSessionId = null;
+  setComposerMode('active');
+  highlightSession(null);
+  $('session-title').textContent = path || 'New session';
+  $('empty-state').classList.add('hidden');
+  $('messages-container').classList.remove('hidden');
+  $('messages-container').innerHTML = '';
+  input.value = '';
 
+  // The backend creates the session implicitly inside /web/run — no separate
+  // create step. We don't have an id yet; it arrives on the SSE `done` event.
+  // MVP folder targeting: prepend the chosen folder to the task text.
+  const task = path ? `[Work in folder: ${path}]\n\n${message}` : message;
   try {
-    // The backend creates the session implicitly inside /web/run — no separate
-    // create step. We don't have an id yet; it arrives on the SSE `done` event.
-    $('modal-new').classList.add('hidden');
-    currentSessionId = null;
-    showView('view-session');
-    $('session-title').textContent = path || 'New session';
-    $('messages-container').innerHTML = '';
-
-    // MVP folder targeting: prepend the chosen folder to the task text.
-    const task = path ? `[Work in folder: ${path}]\n\n${message}` : message;
     await startStream('/web/run', { task }, message);
   } catch (err) {
     alert('Error starting session: ' + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Start';
   }
 }
 
-// ─── Reply ──────────────────────────────────────────────────────────────────
+// ─── Reply (state B submit) ─────────────────────────────────────────────────
 async function sendReply() {
-  const input   = $('reply-input');
+  const input   = $('composer-input');
   const message = input.value.trim();
   if (!message || !currentSessionId) return;
   input.value = '';
@@ -447,6 +466,55 @@ async function stopSession() {
   await loadSession(currentSessionId);
 }
 
+// ─── Attachments — always land in the composer textarea ────────────────────
+function insertAtCursor(textarea, text) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end   = textarea.selectionEnd ?? textarea.value.length;
+  const before = textarea.value.slice(0, start);
+  const after  = textarea.value.slice(end);
+  const sep = before && !before.endsWith('\n') ? '\n' : '';
+  const insertion = `${sep}${text}`;
+  textarea.value = `${before}${insertion}${after}`;
+  const pos = (before + insertion).length;
+  textarea.focus();
+  textarea.setSelectionRange(pos, pos);
+}
+
+// No /web/upload endpoint exists — browsers also never expose a real local
+// path for security reasons, so we insert a reference the task text can use.
+function attachFiles(fileList) {
+  const input = $('composer-input');
+  for (const file of fileList) insertAtCursor(input, `[File: ${file.name}]`);
+}
+
+// ─── Voice input — client-side only (Web Speech API), no backend involved ──
+function setupVoice() {
+  const btn = $('btn-voice');
+  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Ctor) {
+    btn.disabled = true;
+    btn.title = 'Voice input not supported in this browser';
+    return;
+  }
+  const recognizer = new Ctor();
+  recognizer.continuous = false;
+  recognizer.interimResults = false;
+  recognizer.lang = document.documentElement.lang || 'en-US';
+  let recording = false;
+
+  recognizer.onresult = e => {
+    const text = Array.from(e.results).map(r => r[0].transcript).join(' ').trim();
+    if (text) insertAtCursor($('composer-input'), text);
+  };
+  recognizer.onend = () => { recording = false; btn.classList.remove('recording'); };
+  recognizer.onerror = () => { recording = false; btn.classList.remove('recording'); };
+
+  btn.addEventListener('click', () => {
+    if (recording) { recognizer.stop(); return; }
+    try { recognizer.start(); recording = true; btn.classList.add('recording'); } catch {}
+  });
+}
+
 // ─── Router ─────────────────────────────────────────────────────────────────
 function navigate(path, pushState = true) {
   if (pushState) location.hash = path;
@@ -454,48 +522,56 @@ function navigate(path, pushState = true) {
 
 async function route() {
   if (!requireAuth()) return;
-  clearInterval(pollTimer);
-  if (streamAbort) { streamAbort.abort(); streamAbort = null; }
-
   const hash = location.hash.slice(1); // strip '#'
   if (hash.startsWith('/session/')) {
     const id = hash.slice('/session/'.length);
-    if (id) await loadSession(id);
-    else    await loadSessions();
-  } else {
-    await loadSessions();
+    if (id) { await loadSession(id); return; }
   }
+  showNewState();
 }
 
 // ─── Event listeners ────────────────────────────────────────────────────────
-$('btn-new').addEventListener('click', openNewModal);
+$('btn-new').addEventListener('click', () => {
+  showNewState({ clearInput: true });
+  navigate('/');
+});
 
 $('btn-logout').addEventListener('click', async () => {
   try { await fetch('/web/logout', { method: 'POST', credentials: 'include' }); } catch {}
   location.href = 'login.html';
 });
 
-$('btn-back').addEventListener('click', e => {
-  e.preventDefault();
-  if (streamAbort) streamAbort.abort();
-  clearInterval(pollTimer);
-  navigate('/');
-});
-
 $('btn-stop').addEventListener('click', stopSession);
 
-$('btn-send').addEventListener('click', sendReply);
-$('reply-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendReply(); }
+$('btn-composer-submit').addEventListener('click', onComposerSubmit);
+$('composer-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onComposerSubmit(); }
 });
 
-$('btn-cancel-new').addEventListener('click', () => $('modal-new').classList.add('hidden'));
-$('btn-start-new').addEventListener('click', submitNewSession);
-$('modal-new').addEventListener('click', e => {
-  if (e.target === e.currentTarget) e.currentTarget.classList.add('hidden');
+$('btn-attach').addEventListener('click', () => $('file-input').click());
+$('file-input').addEventListener('change', e => {
+  if (e.target.files.length) attachFiles(e.target.files);
+  e.target.value = '';
+});
+
+const composerEl = $('composer');
+composerEl.addEventListener('dragover', e => { e.preventDefault(); composerEl.classList.add('dragover'); });
+composerEl.addEventListener('dragleave', () => composerEl.classList.remove('dragover'));
+composerEl.addEventListener('drop', e => {
+  e.preventDefault();
+  composerEl.classList.remove('dragover');
+  if (e.dataTransfer?.files?.length) attachFiles(e.dataTransfer.files);
 });
 
 window.addEventListener('hashchange', route);
 
 // ─── Boot ───────────────────────────────────────────────────────────────────
-route();
+async function boot() {
+  await Promise.all([loadFolderOptions(), refreshSidebar()]);
+  $('view-loading').classList.add('hidden');
+  $('shell').classList.remove('hidden');
+  setupVoice();
+  await route();
+}
+
+boot();
