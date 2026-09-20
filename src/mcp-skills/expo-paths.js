@@ -73,4 +73,10 @@ function expoConfigDir(workDir) {
   return path.join(profileRoot(workDir), 'expo-pipeline');
 }
 
-module.exports = { profileRoot, activeExpoProject, expoDataDir, expoDeployDir, expoConfigDir };
+// Flag-based gate: expo/flexi tools are only registered when this flag exists.
+// Created by expo_enable tool in 85-expo.js.
+function isExpoEnabled() {
+  return fs.existsSync(path.join(process.cwd(), 'contexts', 'expo', '.enabled'));
+}
+
+module.exports = { profileRoot, activeExpoProject, expoDataDir, expoDeployDir, expoConfigDir, isExpoEnabled };

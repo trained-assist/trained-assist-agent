@@ -1,5 +1,9 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const { isExpoEnabled } = require('../expo-paths.js');
+
 // Expo Participants skill
 // Finds the participants/exhibitors page of an exhibition site and extracts
 // company names as a CSV list ready for INN enrichment.
@@ -264,7 +268,20 @@ function toCSV(entries) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 module.exports = {
+  isReady: isExpoEnabled,
+  setupTools: ['expo_enable'],
   tools: {
+
+    expo_enable: {
+      description: 'Активирует скилы выставочного пайплайна (Expo + Flexi). После активации доступны: expo_find_participants, expo_classify_targets, expo_pipeline_*, flexi_* и другие инструменты для работы с выставками.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => {
+        const flagDir = path.join(process.cwd(), 'contexts', 'expo');
+        fs.mkdirSync(flagDir, { recursive: true });
+        fs.writeFileSync(path.join(flagDir, '.enabled'), JSON.stringify({ enabled_at: new Date().toISOString() }));
+        return { status: 'enabled', message: 'Expo/Flexi скилы активированы. Теперь доступны все инструменты для работы с выставками.' };
+      },
+    },
 
     expo_find_participants: {
       description: 'Найти страницу участников/экспонентов выставки и вернуть список компаний (CSV).\n\n' +
