@@ -13,6 +13,7 @@ const { spawn } = require('node:child_process');
 const { runEngineProcess, buildEngineCommand } = require('../src/runner/claude-runner');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-'));
+const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-mcp-'));
 
 function writeFake(binPath, script) {
   fs.writeFileSync(binPath, script);
@@ -81,6 +82,31 @@ const baseOpts = {
   assert.ok(args.includes('--mcp-config'), 'claude args mcp-config');
   assert.equal(args[args.length - 1], 'P');
 
+  // (5) codex/opencode MCP wiring — regression for the gap where codex/opencode had no
+  // MCP tools at all (agent_store_artifact, hermes_run, etc. were invisible to them).
+  const mcpFixture = path.join(tmp2, '.mcp.json');
+  fs.writeFileSync(mcpFixture, JSON.stringify({
+    mcpServers: {
+      'trained-skills': { command: 'node', args: ['/opt/mcp-skills/index.js'], env: { USER_ID: '99', HOME: '/home/x' } },
+    },
+  }));
+
+  const { codexMcpArgs, writeOpencodeMcpConfig } = require('../src/runner/claude-runner');
+  const [, codexArgs] = buildEngineCommand({
+    engine: 'codex', prompt: 'P', systemPromptText: null, mcpConfig: mcpFixture, user: { cwd: tmp2 },
+  });
+  assert.ok(codexArgs.includes('-c'), 'codex args include -c overrides');
+  assert.ok(codexArgs.some(a => a === 'mcp_servers.trained-skills.command="node"'), 'codex mcp command override');
+  assert.ok(codexArgs.some(a => a.startsWith('mcp_servers.trained-skills.env=') && a.includes('USER_ID="99"')), 'codex mcp env override');
+  assert.deepEqual(codexMcpArgs(mcpFixture), codexArgs.slice(6, -1), 'codexMcpArgs matches what buildEngineCommand spliced in');
+
+  const ocConfigPath = writeOpencodeMcpConfig(tmp2, mcpFixture);
+  const ocConfig = JSON.parse(fs.readFileSync(ocConfigPath, 'utf8'));
+  assert.deepEqual(ocConfig.mcp['trained-skills'].command, ['node', '/opt/mcp-skills/index.js'], 'opencode mcp command array');
+  assert.deepEqual(ocConfig.mcp['trained-skills'].environment, { USER_ID: '99', HOME: '/home/x' }, 'opencode mcp environment');
+  assert.equal(ocConfig.mcp['trained-skills'].type, 'local', 'opencode mcp type=local');
+
   fs.rmSync(tmp, { recursive: true, force: true });
-  console.log('V2 PASS: happy path + crash-no-hang + timers cleanup + command build');
+  fs.rmSync(tmp2, { recursive: true, force: true });
+  console.log('V2 PASS: happy path + crash-no-hang + timers cleanup + command build + codex/opencode mcp wiring');
 })();

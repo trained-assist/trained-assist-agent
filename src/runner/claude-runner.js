@@ -23,6 +23,55 @@ const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-re
 
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
+// Reads the per-user .mcp.json (written by writeMcpConfig) and returns its mcpServers map.
+// Shared translation source for codex (-c overrides) and opencode (OPENCODE_CONFIG file) below.
+function loadMcpServers(mcpConfig) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(mcpConfig, 'utf8'));
+    return raw.mcpServers || {};
+  } catch { return {}; }
+}
+
+// TOML inline-table literal, e.g. {FOO="bar",BAZ="qux"} — for codex's `-c key=value` overrides,
+// where value is parsed as TOML. codex has no native --mcp-config flag (verified via `codex mcp
+// list -c mcp_servers.<name>.{command,args,env}=...`); this stays per-invocation, not a
+// persistent `codex mcp add`, so concurrent users never race on the shared ~/.codex/config.toml.
+function tomlInlineTable(obj) {
+  return '{' + Object.entries(obj).map(([k, v]) => `${k}=${JSON.stringify(String(v))}`).join(',') + '}';
+}
+
+function codexMcpArgs(mcpConfig) {
+  const servers = loadMcpServers(mcpConfig);
+  const args = [];
+  for (const [name, srv] of Object.entries(servers)) {
+    if (!srv.command) continue;
+    args.push('-c', `mcp_servers.${name}.command=${JSON.stringify(srv.command)}`);
+    if (srv.args) args.push('-c', `mcp_servers.${name}.args=${JSON.stringify(srv.args)}`);
+    if (srv.env) args.push('-c', `mcp_servers.${name}.env=${tomlInlineTable(srv.env)}`);
+  }
+  return args;
+}
+
+// opencode has no per-invocation MCP flag either, but does merge config from the file at
+// $OPENCODE_CONFIG on top of the global ~/.config/opencode/opencode.json (verified against
+// opencode's own config docs), so a per-user file set via env var is the isolation-safe
+// equivalent of claude's --mcp-config — no shared-file mutation, no cross-user race.
+function writeOpencodeMcpConfig(cwd, mcpConfig) {
+  const servers = loadMcpServers(mcpConfig);
+  const mcp = {};
+  for (const [name, srv] of Object.entries(servers)) {
+    if (!srv.command) continue;
+    mcp[name] = {
+      type: 'local',
+      command: [srv.command, ...(srv.args || [])],
+      ...(srv.env ? { environment: srv.env } : {}),
+    };
+  }
+  const configPath = path.join(cwd, '.opencode-mcp.json');
+  fs.writeFileSync(configPath, JSON.stringify({ mcp }, null, 2));
+  return configPath;
+}
+
 // Reads opencode.json and returns agent-name -> shortened model-id map (for footer breakdown).
 function readOcAgentModels() {
   try {
@@ -50,6 +99,7 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
       '-C', user.cwd || user.workDir,
+      ...codexMcpArgs(mcpConfig),
       systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
     ]];
   }
@@ -115,7 +165,9 @@ function formatToolActivity(name, input = {}) {
  *   restartShutdown: () => boolean,
  *   activeTimers: Map (register sessionState so /stop and /restart can reach the proc),
  *   tgEdit, tgSend, outputCallback,
- *   engineBin, engineArgs (already built), cwd, env,
+ *   engineBin, engineArgs (already built), cwd, env, mcpConfig (path to the per-user .mcp.json;
+ *   used to derive OPENCODE_CONFIG for opencode — codex gets its MCP wiring baked into
+ *   engineArgs already, via codexMcpArgs in buildEngineCommand),
  *   formatToolActivity, readOcAgentModels
  *
  * Returns a plain result object — never throws for process-level failures:
@@ -128,7 +180,7 @@ async function runEngineProcess(opts) {
   const {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, restartShutdown, activeTimers,
-    tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env,
+    tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
   } = opts;
 
   const proc = spawn(engineBin, engineArgs, {
@@ -150,6 +202,7 @@ async function runEngineProcess(opts) {
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
       AGENT_TASK_ID: taskId,
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
+      ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(cwd, mcpConfig) } : {}),
     },
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
@@ -493,6 +546,9 @@ module.exports = {
   buildEngineCommand,
   formatToolActivity,
   readOcAgentModels,
+  // exposed for tests — MCP translation helpers (codex/opencode wiring)
+  codexMcpArgs,
+  writeOpencodeMcpConfig,
   // constants exposed for tests
   _const: { STREAM_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, MAX_MSG_LEN, CLAUDE_TIMEOUT_MS, WARN_TIMEOUT_MS, INACTIVITY_TIMEOUT_MS },
 };
