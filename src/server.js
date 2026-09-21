@@ -2,6 +2,7 @@
 const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
+const { isTaskResumable } = require('./pending-task-resume');
 const { refreshHhToken } = require('./hh-utils');
 const http = require('http');
 const https = require('https');
@@ -258,8 +259,21 @@ function scheduleGtdController(secrets) {
 // A restart is instant and silent: tasks it cuts off stay in the pending-task journal and
 // the new process re-runs them with no status messages. The user hears from us only when a
 // task cannot come back.
-const RESUME_WINDOW_MS = 20 * 60 * 1000;      // re-run tasks interrupted within this window
-const ABANDONED_NOTICE_MS = 2 * 60 * 60 * 1000; // older but still recent: tell the user it is gone
+//
+// The resume window used to be 20 min, on the assumption restarts are rare, brief blips.
+// Measured reality (2026-09-21, live prod log): 34 restarts in one day from routine
+// CI/CD auto-merge deploys, with gaps of 20-140 min between them several times that day —
+// not crashes, just normal deploy spacing. Any deep/long task whose window straddled one
+// of those gaps got silently abandoned ("Задача была прервана перезапуском и не
+// возобновилась") even though nothing was actually lost — the journal had everything needed
+// to resume. Resuming a Claude session has no wall-clock expiry, so there's no technical
+// reason to cut this shorter than the point where we'd give up notifying the user at all.
+// ABANDONED_NOTICE_MS stays wider than RESUME_WINDOW_MS: beyond the resume window we still
+// want one notice for a genuinely abandoned task (e.g. extended downtime); collapsing the two
+// to the same value makes that notice unreachable (resumable is false only once age already
+// exceeds RESUME_WINDOW_MS, so "age < ABANDONED_NOTICE_MS" can never hold if they're equal).
+const RESUME_WINDOW_MS = 2 * 60 * 60 * 1000;    // re-run tasks interrupted within this window
+const ABANDONED_NOTICE_MS = 6 * 60 * 60 * 1000; // older but not ancient: tell the user it is gone
 
 async function resumePendingTasks(secrets) {
   if (!secrets?.BOT_TOKEN) return;
@@ -280,8 +294,9 @@ async function resumePendingTasks(secrets) {
     : tgCall('sendMessage', { chat_id: p.userId, text });
 
   for (const p of pending) {
-    const age = Date.now() - (p.startedAt || 0);
-    const resumable = p.startedAt && age < RESUME_WINDOW_MS && p.username && p.userId && p.task;
+    const now = Date.now();
+    const age = now - (p.startedAt || 0);
+    const resumable = isTaskResumable(p, now, RESUME_WINDOW_MS);
     if (!resumable) {
       // Stale entries would otherwise block GTD indefinitely: isTaskRunning() reads this journal.
       clearPendingTask(p.taskId);
