@@ -69,6 +69,12 @@ jobs:
             echo "❌ HH_*_INTENT definition found in src/runner/intent-engine.js — HH intents belong in src/domains/hh/intents.js, loaded via loadDomainIntents('hh') (issue #942 P2.1/P2.2)"
             exit 1
           fi
+      - name: server.js must not define inline HH functions (issue #942 P3.2)
+        run: |
+          if grep -nE '^\s*(async\s+)?function\s+\w*[Hh][Hh]\w*\s*\(' src/server.js | grep -vE '^[0-9]+:\s*(//|\*|/\*)'; then
+            echo "❌ Inline HH function definition found in src/server.js — HH logic belongs in src/handlers/hh.js, server.js is a router (issue #942 P3.1/P3.2)"
+            exit 1
+          fi
 
   coherence:
     needs: [ci]
