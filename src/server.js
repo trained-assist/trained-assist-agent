@@ -4,6 +4,7 @@ process.once('exit', () => executionOwner.close());
 const { maintenance, atomicJson } = require('./maintenance');
 const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, buildResumeText, resumeNotice } = require('./hh-resume');
+const { hhFetch, hhPut, hhPostForm, hhTokenPath } = require('./hh-utils');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -237,14 +238,14 @@ function scheduleNalogExpiryChecks(secrets) {
 let _secretsCache = null;
 
 // HH negotiations/messages/background-scoring — moved to src/hh-negotiations.js (issue #942 P0.3).
-// hhApiRequest/refreshHhToken are hoisted `function` declarations defined later in this file
-// (dedup with hh-utils' client is a separate step, P0.4), so referencing them here is safe.
+// The HH HTTP client lives in hh-utils (single implementation, issue #942 P0.4).
+// refreshHhToken is still defined inline in this file (OAuth refresh, not an HTTP client).
+// readChatId is defined inline here too (used by many other handlers).
 const {
   fetchAllHhNegotiations, hhCacheFile, getHhNegotiationsWithCache,
   syncHhMessagesToHistory, runHhScoringForUser,
   buildProactiveUrlForScheduler, scheduleProactiveSearchRuns, scheduleHhBackgroundScoring,
 } = createHhNegotiations({
-  hhApiRequest: (...a) => hhApiRequest(...a),
   refreshHhToken: (...a) => refreshHhToken(...a),
   readChatId,
   getSecretsCache: () => _secretsCache,
@@ -1306,7 +1307,7 @@ async function main() {
       // Fetch single negotiation from HH API for resume + cover letter
       let neg = null;
       try {
-        neg = await hhApiRequest('GET', `/negotiations/${neg_id}`, tokenData.access_token);
+        neg = await hhFetch(`/negotiations/${neg_id}`, tokenData);
         await hydrateResume(neg, tokenData);
       } catch (e) {
         console.error(`[hh/candidate] fetch neg ${neg_id}:`, e.message);
@@ -1462,15 +1463,15 @@ async function main() {
 
       const firstContact = !history.messages.some(m => m.role === 'employer');
       try {
-        await hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message });
+        await hhPostForm(`/negotiations/${negotiation_id}/messages`, tokenData, { message });
         history.messages.push({ role: 'employer', text: message, timestamp: new Date().toISOString() });
         fs.writeFileSync(histFile, JSON.stringify(history, null, 2), { mode: 0o600 });
         // Delivery already succeeded: a stage error must never suggest resending.
         if (firstContact) {
           try {
-            const negotiation = await hhApiRequest('GET', `/negotiations/${negotiation_id}`, tokenData.access_token);
+            const negotiation = await hhFetch(`/negotiations/${negotiation_id}`, tokenData);
             if (negotiation.state?.id === 'response') {
-              await hhApiPut(`/negotiations/consider/${negotiation_id}`, tokenData.access_token);
+              await hhPut(`/negotiations/consider/${negotiation_id}`, tokenData);
             }
           } catch (e) {
             console.warn('[hh/send] stage move to consider failed:', e.message);
@@ -1533,7 +1534,7 @@ async function main() {
       let fullResumeText = (resume_text || '').trim();
       if (hhToken) {
         try {
-          const neg = await hhApiRequest('GET', `/negotiations/${negotiation_id}`, hhToken.access_token);
+          const neg = await hhFetch(`/negotiations/${negotiation_id}`, hhToken);
           await hydrateResume(neg, hhToken);
           if (neg._resume_status === 'full') fullResumeText = buildResumeText(neg);
         } catch { /* use page text if HH is temporarily unavailable */ }
@@ -1546,7 +1547,7 @@ async function main() {
           const vacancyCtxFile = path.join(dataDir, 'sessions', String(username), 'contexts', 'hh', 'active_vacancy.json');
           const vacData = fs.existsSync(vacancyCtxFile) ? JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value : null;
           if (vacData?.id) {
-            const vac = await hhApiRequest('GET', `/vacancies/${vacData.id}`, hhToken.access_token);
+            const vac = await hhFetch(`/vacancies/${vacData.id}`, hhToken);
             const descText = (vac.description || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 2000);
             const skills = (vac.key_skills || []).map(s => s.name).join(', ');
             const parts = [`Вакансия: ${vac.name || ''}`];
@@ -1664,7 +1665,7 @@ async function main() {
       const results = [];
       for (const negId of negotiation_ids) {
         try {
-          await hhApiPut(`/negotiations/discard_vacancy_closed/${negId}`, tokenData2.access_token);
+          await hhPut(`/negotiations/discard_vacancy_closed/${negId}`, tokenData2);
           results.push({ negotiation_id: negId, ok: true });
         } catch (e) { results.push({ negotiation_id: negId, ok: false, error: e.message }); }
       }
@@ -1714,8 +1715,8 @@ async function main() {
         const result = await sendRejection({
           historyFile: histFile2,
           message,
-          send: text => hhApiPostForm(`/negotiations/${negotiation_id}/messages`, tokenData.access_token, { message: text }),
-          discard: () => hhApiPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData.access_token),
+          send: text => hhPostForm(`/negotiations/${negotiation_id}/messages`, tokenData, { message: text }),
+          discard: () => hhPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData),
         });
         console.log(`[hh/send-and-reject] user=${username} neg=${negotiation_id} ok=${result.ok}`);
         return json(res, 200, result);
@@ -4281,18 +4282,10 @@ async function doSend(force) {
 }
 
 
-// ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────
-
-const HH_API_TIMEOUT_MS = 15_000;
-
-// HH token file lives in ~/agent-tokens/<username>/hh (a flat JSON file, not a directory).
-function hhTokenPath(username) {
-  return path.join(os.homedir(), 'agent-tokens', String(username), 'hh');
-}
-
 // Refresh an expired HH OAuth access_token using the stored refresh_token.
 // Returns the new access_token on success, or null on failure (caller is expected
 // to surface "HH re-auth required" to the recruiter).
+// Token path comes from hh-utils (respects AGENT_TOKENS_DIR).
 async function refreshHhToken(username, secrets) {
   if (!secrets?.HH_CLIENT_ID || !secrets?.HH_CLIENT_SECRET) {
     console.warn('[hh-refresh] no HH_CLIENT_ID/SECRET in env — cannot refresh');
@@ -4334,85 +4327,6 @@ async function refreshHhToken(username, secrets) {
     console.error(`[hh-refresh] error for ${username}: ${e.message}`);
     return null;
   }
-}
-
-function hhApiRequest(method, apiPath, accessToken, body) {
-  return new Promise((resolve, reject) => {
-    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
-    const u = new URL(base);
-    const lib = u.protocol === 'https:' ? https : http;
-    const bodyStr = body ? JSON.stringify(body) : '';
-    const reqOpts = {
-      hostname: u.hostname,
-      path: apiPath,
-      method,
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        ...(body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
-      },
-    };
-    if (u.port) reqOpts.port = parseInt(u.port, 10);
-    const req = lib.request(reqOpts, (r) => {
-      const chunks = [];
-      r.on('data', c => chunks.push(c));
-      r.on('end', () => {
-        const data = Buffer.concat(chunks).toString('utf8');
-        if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
-        if (r.statusCode === 204 || !data) return resolve({});
-        try { resolve(JSON.parse(data)); } catch { resolve({}); }
-      });
-    });
-    req.setTimeout(HH_API_TIMEOUT_MS, () => {
-      req.destroy(new Error(`HH API timeout after ${HH_API_TIMEOUT_MS / 1000}s: ${method} ${apiPath}`));
-    });
-    req.on('error', reject);
-    if (body) req.write(bodyStr);
-    req.end();
-  });
-}
-
-function hhApiPost(apiPath, token, body) { return hhApiRequest('POST', apiPath, token, body); }
-function hhApiPut(apiPath, token, body) { return hhApiRequest('PUT', apiPath, token, body || undefined); }
-
-// HH messages endpoint requires application/x-www-form-urlencoded, not JSON
-function hhApiPostForm(apiPath, token, fields) {
-  return new Promise((resolve, reject) => {
-    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
-    const u = new URL(base);
-    const lib = u.protocol === 'https:' ? https : http;
-    const bodyStr = new URLSearchParams(fields).toString();
-    const reqOpts = {
-      hostname: u.hostname,
-      path: apiPath,
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(bodyStr),
-      },
-    };
-    if (u.port) reqOpts.port = parseInt(u.port, 10);
-    const req = lib.request(reqOpts, (r) => {
-      const chunks = [];
-      r.on('data', c => chunks.push(c));
-      r.on('end', () => {
-        const data = Buffer.concat(chunks).toString('utf8');
-        if (r.statusCode >= 400) return reject(new Error(`HH ${r.statusCode}: ${data.slice(0, 200)}`));
-        if (r.statusCode === 204 || !data) return resolve({});
-        try { resolve(JSON.parse(data)); } catch { resolve({}); }
-      });
-    });
-    req.setTimeout(HH_API_TIMEOUT_MS, () => {
-      req.destroy(new Error(`HH API timeout after ${HH_API_TIMEOUT_MS / 1000}s: POST ${apiPath}`));
-    });
-    req.on('error', reject);
-    req.write(bodyStr);
-    req.end();
-  });
 }
 
 process.on('unhandledRejection', (reason, promise) => {

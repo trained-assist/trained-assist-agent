@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
+const { hhFetch } = require('./hh-utils');
 const { hydrateResumes } = require('./hh-resume');
 const { maintenance } = require('./maintenance');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
@@ -20,17 +21,19 @@ const BASE_USERS_DIR = process.env.USERS_DIR ||
 const HH_REVIEW_STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer'];
 
 // HH negotiations/messages/background-scoring (moved from server.js, see issue #942 Phase 0).
-// hhApiRequest/refreshHhToken are still defined inline in server.js (dedup with hh-utils'
-// client is a separate step, issue #942 P0.4) — injected here to avoid a circular require.
+// Uses the shared HH HTTP client from hh-utils (single implementation, issue #942 P0.4).
+// refreshHhToken is still defined inline in server.js (it is not an HTTP client — OAuth
+// refresh with secrets) — injected here to avoid a circular require.
 // readChatId is also still in server.js (used by many other handlers there).
 // getSecretsCache reads server.js's live `_secretsCache` (populated once in main()).
-function createHhNegotiations({ hhApiRequest, refreshHhToken, readChatId, getSecretsCache }) {
+function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
   async function fetchAllHhNegotiations(vacancyId, accessToken) {
+    const token = { access_token: accessToken };
     const results = await Promise.all(HH_REVIEW_STATES.map(async state => {
       let items = [];
       let page = 0, totalPages = 1;
       do {
-        const data = await hhApiRequest('GET', `/negotiations/${state}?vacancy_id=${vacancyId}&per_page=50&page=${page}`, accessToken);
+        const data = await hhFetch(`/negotiations/${state}?vacancy_id=${vacancyId}&per_page=50&page=${page}`, token);
         items = items.concat(data.items || []);
         totalPages = data.pages ?? 1;
         page++;
@@ -124,7 +127,7 @@ function createHhNegotiations({ hhApiRequest, refreshHhToken, readChatId, getSec
           // Fetch full message thread (HH supports up to 50 per page; paginate if needed)
           let allHhMsgs = [];
           for (let page = 0; ; page++) {
-            const data = await hhApiRequest('GET', `/negotiations/${neg.id}/messages?per_page=50&page=${page}`, accessToken);
+            const data = await hhFetch(`/negotiations/${neg.id}/messages?per_page=50&page=${page}`, { access_token: accessToken });
             const items = (data.items || []).filter(m => m.text);
             allHhMsgs = allHhMsgs.concat(items);
             if (!data.pages || page >= data.pages - 1) break;

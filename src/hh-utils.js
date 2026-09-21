@@ -97,4 +97,23 @@ async function hhPut(apiPath, token, body) {
   return data;
 }
 
-module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhPut, hhTokenPath };
+// Form-encoded POST — HH messages endpoint requires application/x-www-form-urlencoded, not JSON.
+async function hhPostForm(apiPath, token, fields) {
+  const bodyStr = new URLSearchParams(fields).toString();
+  const res = await fetch(`${hhApiBase()}${apiPath}`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(HH_FETCH_TIMEOUT_MS),
+    headers: {
+      Authorization: `Bearer ${token.access_token}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+      'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
+    },
+    body: bodyStr,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`HH API POST ${res.status}: ${JSON.stringify(data).slice(0, 200)}`);
+  return data;
+}
+
+module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhPut, hhPostForm, hhTokenPath };
