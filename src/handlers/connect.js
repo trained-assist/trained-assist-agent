@@ -9,7 +9,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
-const { receiveConnect } = require('../user-tokens');
+const { receiveConnect, readConnectPending, consumeConnectPending } = require('../user-tokens');
 const { startNalogLogin, confirmNalogCode } = require('../nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('../getcourse-login');
 const { connectSite } = require('../site-connector');
@@ -128,15 +128,13 @@ if (req.method === 'GET' && url.pathname === '/connect/gdrive/start') {
     return;
   }
 
-  const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
-  const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
-  let pending;
-  try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch {
+  const pending = readConnectPending(t);
+  if (!pending) {
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Ссылка недействительна или устарела.'));
     return;
   }
   if (pending.expires < Date.now()) {
-    try { fs.unlinkSync(pendingFile); } catch {}
+    consumeConnectPending(t);
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Ссылка устарела. Попроси новую через Telegram.'));
     return;
   }
@@ -150,7 +148,7 @@ if (req.method === 'GET' && url.pathname === '/connect/gdrive/start') {
   }
 
   // Consume pending token; generate OAuth state
-  try { fs.unlinkSync(pendingFile); } catch {
+  if (!consumeConnectPending(t)) {
     // Already consumed by a concurrent request — return the same error as expired
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(gdriveErrorHtml('Ссылка уже использована.'));
     return;
@@ -276,15 +274,13 @@ if (req.method === 'GET' && url.pathname === '/connect/hh/start') {
     return;
   }
 
-  const CONNECT_PENDING_DIR_HH = path.join(os.homedir(), 'connect-pending');
-  const pendingFile = path.join(CONNECT_PENDING_DIR_HH, `${t}.json`);
-  let pending;
-  try { pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch {
+  const pending = readConnectPending(t);
+  if (!pending) {
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка недействительна или устарела.'));
     return;
   }
   if (pending.expires < Date.now()) {
-    try { fs.unlinkSync(pendingFile); } catch {}
+    consumeConnectPending(t);
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка устарела. Попроси новую через Telegram.'));
     return;
   }
@@ -310,15 +306,13 @@ if (req.method === 'GET' && url.pathname === '/connect/hh/authorize') {
     return;
   }
 
-  const CONNECT_PENDING_DIR_AUTH = path.join(os.homedir(), 'connect-pending');
-  const pendingFileAuth = path.join(CONNECT_PENDING_DIR_AUTH, `${t}.json`);
-  let pendingAuth;
-  try { pendingAuth = JSON.parse(fs.readFileSync(pendingFileAuth, 'utf8')); } catch {
+  const pendingAuth = readConnectPending(t);
+  if (!pendingAuth) {
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка недействительна или устарела.'));
     return;
   }
   if (pendingAuth.expires < Date.now()) {
-    try { fs.unlinkSync(pendingFileAuth); } catch {}
+    consumeConnectPending(t);
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка устарела. Попроси новую через Telegram.'));
     return;
   }
@@ -331,7 +325,7 @@ if (req.method === 'GET' && url.pathname === '/connect/hh/authorize') {
     return;
   }
 
-  try { fs.unlinkSync(pendingFileAuth); } catch {
+  if (!consumeConnectPending(t)) {
     res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(hhErrorHtml('Ссылка уже использована.'));
     return;
   }
@@ -453,7 +447,6 @@ if (req.method === 'GET' && url.pathname === HH_CALLBACK_PATH) {
 const connectMatch = url.pathname.match(/^\/connect\/([a-z0-9_-]+)$/);
 if (connectMatch) {
   const service = connectMatch[1];
-  const CONNECT_PENDING_DIR = path.join(os.homedir(), 'connect-pending');
 
   // ── nalog — multi-step browser login via Госуслуги ──────────────────────
   if (service === 'nalog') {
@@ -530,21 +523,18 @@ if (connectMatch) {
       // Pre-fill from saved config if available
       let gcSaved = null;
       try {
-        if (/^[a-f0-9]{32}$/.test(t)) {
-          const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
-          const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
-          if (pending.uid && pending.expires > Date.now()) {
-            const cfgFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'getcourse', 'config.json');
-            if (fs.existsSync(cfgFile)) {
-              const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
-              gcSaved = {
-                domain: cfg.accountDomain || null,
-                apiKey: cfg.apiKey || null,
-                login: cfg.login || null,
-                password: cfg.password || null,
-                hasSession: !!(cfg.sessionCookies && cfg.sessionCookies.length > 0),
-              };
-            }
+        const pending = readConnectPending(t);
+        if (pending && pending.uid && pending.expires > Date.now()) {
+          const cfgFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'getcourse', 'config.json');
+          if (fs.existsSync(cfgFile)) {
+            const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+            gcSaved = {
+              domain: cfg.accountDomain || null,
+              apiKey: cfg.apiKey || null,
+              login: cfg.login || null,
+              password: cfg.password || null,
+              hasSession: !!(cfg.sessionCookies && cfg.sessionCookies.length > 0),
+            };
           }
         }
       } catch { /* non-critical: render form without pre-fill */ }
@@ -612,15 +602,12 @@ if (connectMatch) {
       const t = url.searchParams.get('t') || '';
       let lcSaved = null;
       try {
-        if (/^[a-f0-9]{32}$/.test(t)) {
-          const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
-          const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
-          if (pending.uid && pending.expires > Date.now()) {
-            const credsFile = path.join(os.homedir(), 'agent-tokens', pending.uid, service);
-            if (fs.existsSync(credsFile)) {
-              const stored = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
-              lcSaved = { email: stored.email || null, password: stored.password || null };
-            }
+        const pending = readConnectPending(t);
+        if (pending && pending.uid && pending.expires > Date.now()) {
+          const credsFile = path.join(os.homedir(), 'agent-tokens', pending.uid, service);
+          if (fs.existsSync(credsFile)) {
+            const stored = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+            lcSaved = { email: stored.email || null, password: stored.password || null };
           }
         }
       } catch { /* non-critical */ }
@@ -677,17 +664,14 @@ if (connectMatch) {
       const t = url.searchParams.get('t') || '';
       let savedToken = null, savedLogin = null;
       try {
-        if (/^[a-f0-9]{32}$/.test(t)) {
-          const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
-          const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
-          if (pending.uid && pending.expires > Date.now()) {
-            const tokFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'weeek');
-            if (fs.existsSync(tokFile)) savedToken = fs.readFileSync(tokFile, 'utf8').trim() || null;
-            const loginFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'weeek-login');
-            if (fs.existsSync(loginFile)) {
-              const stored = JSON.parse(fs.readFileSync(loginFile, 'utf8'));
-              savedLogin = { email: stored.email || null, password: stored.password || null };
-            }
+        const pending = readConnectPending(t);
+        if (pending && pending.uid && pending.expires > Date.now()) {
+          const tokFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'weeek');
+          if (fs.existsSync(tokFile)) savedToken = fs.readFileSync(tokFile, 'utf8').trim() || null;
+          const loginFile = path.join(os.homedir(), 'agent-tokens', pending.uid, 'weeek-login');
+          if (fs.existsSync(loginFile)) {
+            const stored = JSON.parse(fs.readFileSync(loginFile, 'utf8'));
+            savedLogin = { email: stored.email || null, password: stored.password || null };
           }
         }
       } catch { /* non-critical */ }
@@ -790,12 +774,9 @@ if (connectMatch) {
   if (!meta) {
     const t = url.searchParams.get('t') || (req.method === 'POST' ? null : '');
     const readPending = (token) => {
-      if (!token || !/^[a-f0-9]{32}$/.test(token)) return null;
-      try {
-        const p = JSON.parse(fs.readFileSync(path.join(CONNECT_PENDING_DIR, `${token}.json`), 'utf8'));
-        if (p.expires < Date.now() || p.service !== service || !p.schema) return null;
-        return p;
-      } catch { return null; }
+      const p = readConnectPending(token);
+      if (!p || p.expires < Date.now() || p.service !== service || !p.schema) return null;
+      return p;
     };
 
     if (req.method === 'GET') {
@@ -857,14 +838,11 @@ if (connectMatch) {
     // Pre-fill from saved token if available
     let savedValue = null;
     try {
-      if (/^[a-f0-9]{32}$/.test(t)) {
-        const pf = path.join(os.homedir(), 'connect-pending', `${t}.json`);
-        const pending = JSON.parse(fs.readFileSync(pf, 'utf8'));
-        if (pending.uid && pending.expires > Date.now()) {
-          const tokenFile = path.join(os.homedir(), 'agent-tokens', pending.uid, service);
-          if (fs.existsSync(tokenFile)) {
-            savedValue = fs.readFileSync(tokenFile, 'utf8').trim() || null;
-          }
+      const pending = readConnectPending(t);
+      if (pending && pending.uid && pending.expires > Date.now()) {
+        const tokenFile = path.join(os.homedir(), 'agent-tokens', pending.uid, service);
+        if (fs.existsSync(tokenFile)) {
+          savedValue = fs.readFileSync(tokenFile, 'utf8').trim() || null;
         }
       }
     } catch { /* non-critical */ }
