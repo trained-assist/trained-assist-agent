@@ -306,6 +306,113 @@ function mergeSeenIds(username, vacancyId, collectedIds) {
   return { newIds: new Set(newIds), newCount: newIds.length, totalSeenAfter: Object.keys(bucket).length, firstRun };
 }
 
+// Unified candidate store: consolidates auto-discovered (source:'search') and
+// manually-added (source:'manual') candidates into one persistent, accumulating
+// list so the proactive page can render a single scrollable feed instead of the
+// old "overwritten every search run" search-results-<date>.json snapshot.
+// Keyed by HH resume id (global, not per-vacancy — a candidate found for one
+// vacancy today is the same person if added manually tomorrow).
+// Schema: { "<hh_resume_id>": { ...candidate fields, source, found_at|added_at }, ... }
+function allCandidatesPath(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', 'all-candidates.json');
+}
+
+function loadAllCandidates(username) {
+  try {
+    const raw = fs.readFileSync(allCandidatesPath(username), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-search] all-candidates read failed:', e.message);
+    return {};
+  }
+}
+
+function saveAllCandidates(username, data) {
+  const file = allCandidatesPath(username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+// Merge a batch of freshly-scored/enriched search candidates into the unified store.
+// Existing records (e.g. manually-added, or already found+annotated) are NOT clobbered
+// wholesale — we merge new fields in while preserving the original found_at/source so
+// re-running search doesn't reset "when we first found this person" or flip a manual
+// candidate back to source:'search'.
+function mergeSearchCandidatesIntoAll(username, candidates, foundAtById) {
+  const store = loadAllCandidates(username);
+  const now = new Date().toISOString();
+  for (const c of candidates || []) {
+    if (!c || !c.id) continue;
+    const id = String(c.id);
+    const existing = store[id];
+    const foundAt = (foundAtById && foundAtById[id]) || existing?.found_at || now;
+    store[id] = {
+      ...existing,
+      ...c,
+      source: existing?.source === 'manual' ? 'manual' : 'search',
+      found_at: foundAt,
+    };
+  }
+  saveAllCandidates(username, store);
+  return store;
+}
+
+// Add a single manually-added candidate (from a pasted HH resume URL/id) to the
+// unified store. `resumeData` is the raw HH /resumes/{id} response, shaped through
+// the same field mapping runProactiveSearch uses for search results so the card
+// renderer doesn't need to special-case manual entries.
+function addManualCandidate(username, resumeData) {
+  if (!resumeData || !resumeData.id) throw new Error('resumeData.id required');
+  const id = String(resumeData.id);
+  const expMonths = resumeData.total_experience?.months ?? 0;
+  const companies = (resumeData.experience || []).slice(0, 3).map(e => e.company || '').filter(Boolean);
+  const now = new Date().toISOString();
+  const store = loadAllCandidates(username);
+  const existing = store[id];
+  const record = {
+    id,
+    hh_url: resumeData.alternate_url || `https://hh.ru/resume/${id}`,
+    title: resumeData.title || '',
+    first_name: resumeData.first_name || '',
+    last_name: resumeData.last_name || '',
+    age: resumeData.age || null,
+    area: resumeData.area?.name || '',
+    total_exp_months: expMonths,
+    total_exp_years: Math.round(expMonths / 12 * 10) / 10,
+    score: existing?.score ?? 0,
+    tag: existing?.tag ?? 'REVIEW',
+    score_signals: existing?.score_signals || [],
+    salary: resumeData.salary || null,
+    recent_companies: companies,
+    experience: (resumeData.experience || []).slice(0, 5).map(e => ({
+      position: e.position || '',
+      company: e.company || '',
+      start: e.start || '',
+      end: e.end || null,
+    })),
+    ...existing,
+    source: 'manual',
+    added_at: existing?.added_at || now,
+    found_at: existing?.found_at || now,
+  };
+  store[id] = record;
+  saveAllCandidates(username, store);
+  return record;
+}
+
+// Parse an HH resume id out of a full resume URL (e.g. https://hh.ru/resume/abc123def)
+// or accept a bare id as-is. Strips query strings/fragments and non-alphanumeric noise.
+function parseResumeId(input) {
+  const str = String(input || '').trim();
+  const m = str.match(/\/resume\/([a-zA-Z0-9]+)/);
+  if (m) return m[1];
+  return str.replace(/[^a-zA-Z0-9]/g, '');
+}
+
 // Per-vacancy search-query store. Queries live in the same proactive directory, keyed by
 // vacancy ID. This avoids the old anti-pattern of embedding them inside ats_config.json —
 // that file is overwritten on every ATS edit and is shared across all vacancies for a user,
@@ -715,6 +822,21 @@ async function runProactiveSearch(username, workDir, options = {}) {
     is_new: seenInfo.newIds.has(c.id),
   }));
 
+  // Merge into the unified all-candidates store so the proactive page can render a
+  // single accumulating list (search + manual) instead of only the latest snapshot.
+  // found_at comes from the per-vacancy seen-ids bucket (date the id was first seen)
+  // when available, so re-running search doesn't reset "when we found this person".
+  try {
+    const seenBucket = loadSeenIds(username)[vacancyKey] || {};
+    const foundAtById = {};
+    for (const c of markedCandidates) {
+      if (c.id && seenBucket[c.id]) foundAtById[c.id] = new Date(seenBucket[c.id]).toISOString();
+    }
+    mergeSearchCandidatesIntoAll(username, markedCandidates, foundAtById);
+  } catch (e) {
+    console.error('[proactive-search] all-candidates merge failed:', e.message);
+  }
+
   const outFile = path.join(outDir, `search-results-${dateStr}.json`);
   const output = {
     vacancy_id: vacancyKey,
@@ -847,6 +969,13 @@ module.exports = {
   loadCandidateComments,
   saveCandidateComment,
   getSearchExclusions,
+  // Unified all-candidates store (search + manual)
+  allCandidatesPath,
+  loadAllCandidates,
+  saveAllCandidates,
+  mergeSearchCandidatesIntoAll,
+  addManualCandidate,
+  parseResumeId,
 // Per-vacancy query store
   atsConfigHash,
   queriesStorePath,
