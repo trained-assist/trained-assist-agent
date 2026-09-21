@@ -78,36 +78,34 @@ function formatCostFooter(usage, model) {
   const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  const parts = [`${fmt(inp)} вх`, `${fmt(out)} вых`];
-  if (cw > 0) parts.push(`💾+${fmtK(cw)}`);
-  if (cr > 0) parts.push(`💾/${fmtK(cr)}`);
+  const parts = [`вход ${fmt(inp)}`, `выход ${fmt(out)}`];
+  if (cw > 0) parts.push(`кэш +${fmtK(cw)}`);
+  if (cr > 0) parts.push(`кэш /${fmtK(cr)}`);
   parts.push(`~${costStr}`);
-  return `\n\n\`📊 ${parts.join(' · ')}\``;
+  return `\n\nИспользование: ${parts.join(' · ')}`;
 }
 
 // breakdown: [{ agent, model, input, output, cacheRead, cacheWrite, cost }]
+// Одна строка, словами, без иконок. Показываем только реально использованную
+// модель (в проде из всего конфига профиля реально работает одна).
 function formatOcFooter(usage, breakdown) {
   if (!usage) return '';
   const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
   const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
   const cost = usage.cost || 0;
   const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
-  const cacheStr = (usage.cacheRead > 0 || usage.cacheWrite > 0)
-    ? ` · 💾${usage.cacheWrite > 0 ? `+${fmtK(usage.cacheWrite)}` : ''}${usage.cacheRead > 0 ? `/${fmtK(usage.cacheRead)}` : ''}`
-    : '';
-  if (!breakdown || breakdown.length <= 1) {
-    return `\n\n\`📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых${cacheStr} · ~${costStr}\``;
+  let model = '';
+  if (breakdown) {
+    for (const s of breakdown) {
+      if (s.model) { model = s.model.split('/').pop().replace(/:free$/, ''); break; }
+    }
   }
-  const header = `📊 ${fmt(usage.input)} вх · ${fmt(usage.output)} вых${cacheStr} · ~${costStr}`;
-  const rows = breakdown.map(s => {
-    const tag = s.model ? `${s.agent}(${s.model.split('/').pop().replace(/:free$/, '')})` : (s.agent || '?');
-    const sc = (s.cacheRead > 0 || s.cacheWrite > 0)
-      ? ` 💾${s.cacheWrite > 0 ? `+${fmtK(s.cacheWrite)}` : ''}${s.cacheRead > 0 ? `/${fmtK(s.cacheRead)}` : ''}`
-      : '';
-    const sc2 = s.cost > 0 ? ` ~$${s.cost.toFixed(4)}` : '';
-    return `  ${tag}: ${fmtK(s.input)}вх·${fmtK(s.output)}вых${sc}${sc2}`;
-  });
-  return `\n\n\`\`\`\n${header}\n${rows.join('\n')}\n\`\`\``;
+  const parts = [`вход ${fmt(usage.input)}`, `выход ${fmt(usage.output)}`];
+  if (usage.cacheWrite > 0) parts.push(`кэш +${fmtK(usage.cacheWrite)}`);
+  if (usage.cacheRead > 0) parts.push(`кэш /${fmtK(usage.cacheRead)}`);
+  parts.push(`~${costStr}`);
+  const m = model ? ` ${model}` : '';
+  return `\n\nИспользование${m}: ${parts.join(' · ')}`;
 }
 
 // Reads opencode.json and returns agent-name -> shortened model-id map (for footer breakdown).
@@ -2482,6 +2480,8 @@ module.exports = {
   _pin: { updateContextPin, readPinStore },
   // Exported for final-text-selection tests only
   _final: { pickFinalText, isScratchpadFallback },
+  // Exported for oc-footer tests only
+  _footer: { formatOcFooter, formatCostFooter },
   // Exported for lane-granularity tests only
   _laneKey,
   // Exported for per-profile cap-isolation tests only (R7/S8a)
