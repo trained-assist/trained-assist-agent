@@ -9,25 +9,34 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
-const sessions = require('./session-store');
-const { generateSummary } = require('./session-summary');
-const projects = require('./projects');
+const sessions = require('../session-store');
+const { generateSummary } = require('../session-summary');
+const projects = require('../projects');
 const {
   listConnectedServices,
   revokeService,
   getSecretsLog,
   generateConnectLink,
   SERVICE_DISPLAY,
-} = require('./user-tokens');
-const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, readActiveVacancy, hhSendPreview, hhSendConfirm, hhSendCancel, hhRejectDryRun, hhRejectConfirm, hhRejectCancel, hhBatchEvaluate, hhManualScan } = require('./hh-quick');
-const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('./hh-vacancy');
-const { loadUserSiteIntents } = require('./user-sites');
-const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
-const persona = require('./persona');
-const candidateReport = require('./candidate-report');
-const profiles = require('./profiles');
-const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('./web-auth');
-const { getUsageTotals } = require('./usage-store');
+} = require('../user-tokens');
+const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, readActiveVacancy, hhSendPreview, hhSendConfirm, hhSendCancel, hhRejectDryRun, hhRejectConfirm, hhRejectCancel, hhBatchEvaluate, hhManualScan } = require('../hh-quick');
+const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('../hh-vacancy');
+const { loadUserSiteIntents } = require('../user-sites');
+const { deleteServiceAccount: deleteGdriveSA } = require('../mcp-skills/tools/50-gdrive');
+const persona = require('../persona');
+const profiles = require('../profiles');
+const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('../web-auth');
+const { getUsageTotals } = require('../usage-store');
+const { loadDomainIntents } = require('../domains/load-intents');
+
+// HH domain intent patterns — regexes live in src/domains/hh/intents.js (issue #942 P2.1).
+const {
+  HH_STATUS_INTENT, HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT,
+  HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, HH_WHERE_PROMPT_INTENT, HH_SHOW_ATS_CONFIG_INTENT,
+  HH_STYLE_INTENT, HH_EVALUATE_INTENT, HH_SEND_INTENT, HH_SEND_CONFIRM_INTENT, HH_SEND_CANCEL_INTENT,
+  HH_REJECT_INTENT, HH_REJECT_CONFIRM_INTENT, HH_REJECT_CANCEL_INTENT, HH_SCAN_INTENT, HH_DISCONNECT_INTENT,
+  VACANCY_HH_PUBLISH_INTENT, VACANCY_PREP_DRAFT_INTENT,
+} = loadDomainIntents('hh');
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
@@ -66,33 +75,6 @@ const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,
 const BUG_OR_FEATURE_INTENT = /^\/(?:bug_or_feature|bug|feature|баг|фича|report|репорт)(?=\s|$)/i;
 // "Подробнее N" / "/session N" / "подробнее о 3" — expand one session from the last /sessions list
 const SESSION_DETAIL_INTENT = /^\/(?:sessions?|диалог)\s*(\d{1,2})\b|^подробнее(?:\s+(?:о|про|по))?\s*(?:диалог[ае]?\s*|сесси[июя]\s*|№\s*)?(\d{1,2})\b|^(\d{1,2})\s*подробнее/i;
-const HH_STATUS_INTENT       = /hh.{0,10}статус|статус.{0,10}hh|статус.{0,10}(?:рекрут|вакансии|оценки|скоринга)|как.{0,15}дела.{0,15}hh|что.{0,15}активн.{0,15}hh|включена.{0,15}оценка|работает.{0,15}(?:скоринг|оценка|hh)|\/hh_status/i;
-const HH_MY_VACANCIES_INTENT = /мои.{0,10}вакансии|список.{0,10}вакансий|какие.{0,10}вакансии|с чем работать|покажи.{0,15}вакансии|дай.{0,15}вакансии|мои.{0,10}активные|\/hh_vacancies|\/hh_switch/i;
-const HH_FUNNEL_INTENT      = /сколько откликов|статистика воронки|что новенького|воронка кандидатов|статистика.{0,15}вакансии|кандидатов по.{0,15}вакансии|обновление.{0,15}вакансии|\/hh_funnel/i;
-const HH_RESPONSES_INTENT   = /новые отклики|кто откликнулся|покажи.{0,10}кандидатов|новых кандидатов|список откликов|пришли отклики|новые кандидаты|\/hh_responses|\/hh_new/i;
-const HH_ATS_EDITOR_INTENT  = /открой.{0,10}(?:ats|редактор|конфигуратор)|ats.{0,10}(?:редактор|editor|открой|настрой)|редактор.{0,10}ats|(?:скин|дай|пришл|покажи|дай).{0,20}(?:страниц|ссылк).{0,30}(?:настройк|candidate.?flow|ats|воронк|funnel)|страниц.{0,15}(?:настройк|candidate.?flow|ats|воронк|funnel)|candidate.?flow.{0,20}(?:страниц|ссылк|настройк|редактор)|\/hh_ats_editor/i;
-const HH_REVIEW_PAGE_INTENT = /страниц.{0,20}ревью|ревью.{0,20}кандидат|страниц.{0,20}кандидат|открой.{0,15}кандидат|ссылк.{0,20}кандидат|покажи.{0,15}ссылк|хочу.{0,20}посмотреть.{0,20}откликнувш|кандидат.{0,30}(?:с оценк|с драфт|с баллами|с ответами)|(?:оценки|оценк).{0,20}кандидат|(?:покажи|открой|дай|хочу|нужн).{0,20}драфты|(?:список|покажи|кто).{0,30}кандидат.{0,60}(?:сообщени|написать|отправить|отказать|отклонить|драфт|ответ|нужно)|кому.{0,20}(?:написать|отправить|отказать|отклонить|сообщени)|покажи.{0,20}(?:список|всех).{0,20}кандидат|\/hh_review/i;
-const HH_WHERE_PROMPT_INTENT = /где.{0,30}(?:промпт|конфиг|настройк|критери).{0,30}(?:ats|воронк|оценк|кандидат)|(?:промпт|конфиг|настройки).{0,30}(?:ats|воронк|оценк|кандидат)|как.{0,30}(?:посмотреть|правит|редактиров|изменить).{0,50}(?:промпт|конфиг|критери|воронк|оценк)/i;
-const HH_SHOW_ATS_CONFIG_INTENT = /(?:покажи|посмотр|какие|что за|дай|вывед).{0,30}(?:правила|критери|оценк|ats|конфиг|настройк).{0,30}(?:кандидат|воронк|оценк|скрининг|ats)|(?:правила|критери|настройки).{0,20}(?:для|по).{0,10}(?:кандидат|оценк|скрининг)|ats.{0,15}правила|что.{0,15}у меня.{0,30}(?:правила|критери|оценк|ats)|\/hh_ats(?!\s*_)/i;
-const HH_STYLE_INTENT        = /(?:обнови|загрузи|обновить|загрузить|настрой|поменяй|задай|update).{0,30}стиль|стиль.{0,30}(?:общения|переписки|сообщений|рекрут)|communication.{0,15}style|update.{0,15}style/i;
-// /hh_evaluate — manual trigger of batch scoring (idempotent, no confirm needed)
-const HH_EVALUATE_INTENT     = /\/hh_evaluate|\/hh_score|переоцени|обнови оценк|прогони оценку|оцени (?:всех |кандидат|новых|откликнувш)/i;
-// /hh_send <id> <text> — show preview, then save to pending_send, await /hh_send_yes to actually send
-const HH_SEND_INTENT         = /^\/hh_send(?:\s|$)|\/hh_send\s+\S+|отправь сообщени.{0,20}кандидат|напиши кандидат\s+\S/i;
-const HH_SEND_CONFIRM_INTENT = /^\/hh_send_(?:yes|confirm|go)|^\/hh_send\s+(?:yes|да|go|confirm)\b/i;
-const HH_SEND_CANCEL_INTENT  = /^\/hh_send_(?:no|cancel|stop|отмена)\b/i;
-// /hh_reject [ids] — dry-run, then /hh_reject_yes to execute mass reject
-const HH_REJECT_INTENT       = /^\/hh_reject(?:\s|$)|\/hh_reject\s+\S|массовый отказ|отклони (?:всех |кандидат)|откажи (?:всем|кандидат)/i;
-const HH_REJECT_CONFIRM_INTENT = /^\/hh_reject_(?:yes|confirm|go)|^\/hh_reject\s+(?:yes|да|go|confirm)\b/i;
-const HH_REJECT_CANCEL_INTENT  = /^\/hh_reject_(?:no|cancel|stop|отмена)\b/i;
-// /hh_scan — manual trigger of proactive search outside cron schedule
-const HH_SCAN_INTENT         = /\/hh_scan|запусти скан|просканируй|обнови скан|ручн.{0,15}скан/i;
-// /hh_disconnect — revoke stored HH OAuth token. Lives OUTSIDE the hhConnected
-// block (runner.js:1334) because the action is symmetric: must work even when no
-// token is saved (returns "HH не подключён"), and the intent must NOT be in
-// hhIntents (which gates on hhConnected) — otherwise disconnected users could
-// not type /hh_disconnect to clean up a stale token file.
-const HH_DISCONNECT_INTENT   = /\/hh_disconnect|отключи(?:ть)?\s*(?:hh|хх|headhunter)|удали(?:ть)?\s*(?:hh|хх|headhunter)|hh.{0,15}(?:отключи|удали|разъедин|сброс)|сброс.{0,15}(?:hh|хх|headhunter|авторизац)|выключи.{0,15}(?:hh|хх|headhunter)|reset.{0,15}hh/i;
 const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
 const ILLUSTRATE_ENABLE_INTENT = /включ.{0,20}(?:рисован|иллюстр|картинк|рисунок)|добав.{0,20}(?:рисован|иллюстр|генерац)|активируй.{0,20}(?:рисован|иллюстр|скил.{0,10}рисован)|\/enable_illustrate/i;
 // Matches concrete draw commands with subject content — these go to Claude even when skill is enabled
@@ -102,16 +84,13 @@ const ILLUSTRATE_DRAW_COMMAND = /(?:нарисуй|нарисовать|созд
 const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|напиш[иь]).{0,40}(?:приложени|сервис(?!\s*аккаунт)|бот(?!\s*токен|\s*ключ)(?!\s*weeek|\s*hh|\s*tilda|\s*nalog)|сайт(?!\s*с\s+tilda)(?!\s+tilda)|систем|скрипт(?!\s+для\s+(?:выставки|expo))|библиотек|пакет|модул|апи-сервис)|implement\s+\S|build\s+(?:app|service|bot|api)|develop\s+(?:app|feature|bot)/i;
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
-const GTD_STOP_INTENT           = /^\/gtd_stop$|^\/stop_gtd$|^\/checklist_turn_off$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
-const ACTIVE_CHECKLIST_INTENT   = /^\/active_checklist$/i;
+const GTD_STOP_INTENT           = /^(?:\[Сообщение \d+\]\s*)?\/(?:gtd_stop|stop_gtd|checklist_turn_off)(?:@\w+)?$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
+const ACTIVE_CHECKLIST_INTENT   = /^(?:\[Сообщение \d+\]\s*)?\/active_checklist(?:@\w+)?$/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
 const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|опубликуй.{0,20}(?:страниц|лендинг)|создай.{0,20}(?:страниц.{0,20}вакансии|лендинг)|сгенерир.{0,20}страниц|сделай.{0,20}страниц.{0,20}вакансии|страниц.{0,30}(?:вакансии.{0,30})?(?:сгенерир|создай|опубликуй|сделай)|страниц.{0,20}готов/i;
-const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
-// "Подготовь черновик вакансии на HH" — fast-path when vacancy data already exists or is provided inline
-const VACANCY_PREP_DRAFT_INTENT   = /подготов.{0,20}(?:черновик|драфт|вакансию).{0,30}(?:hh|хх|хэдхантер)|создай.{0,20}(?:черновик|драфт).{0,30}(?:hh|хх|хэдхантер)|(?:черновик|драфт).{0,30}(?:в|на)\s+(?:hh|хх|хэдхантер)|положи.{0,20}(?:вакансию|на).{0,20}(?:hh|хх|хэдхантер)|вакансию.{0,20}(?:на|в)\s+(?:hh|хх|хэдхантер)|подготов.{0,10}(?:вакансию|черновик)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 // /usage klod, /usage codex — CLI subscription rate-limit check (Claude Code / Codex CLI
 // OAuth session on THIS VM: ~/.claude/.credentials.json, ~/.codex/auth.json). Distinct from
@@ -419,7 +398,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   const ocProfileM = task.trim().match(OC_PROFILE_INTENT);
   if (ocProfileM) {
     const raw = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase().replace(/^ru$/, 'russian-recruiter').replace(/^ll$/, 'lavish-luna');
-    const scriptPath = path.join(__dirname, '..', 'infra', 'opencode-switch-profile.sh');
+    const scriptPath = path.join(__dirname, '..', '..', 'infra', 'opencode-switch-profile.sh');
     if (!fs.existsSync(scriptPath)) return '⚠️ infra/opencode-switch-profile.sh не найден';
     try {
       const { execFileSync } = require('child_process');
@@ -904,7 +883,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     try {
       const pipelineDirC = path.join(workDir, 'expo-pipeline');
       if (fs.existsSync(pipelineDirC)) {
-        const { formatCriteriaText, readCriteria } = require('./mcp-skills/tools/87-expo-pipeline.js');
+        const { formatCriteriaText, readCriteria } = require('../mcp-skills/tools/87-expo-pipeline.js');
         const criteria = readCriteria(workDir);
         return formatCriteriaText(criteria);
       }
@@ -918,7 +897,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     try {
       const pipelineDir = path.join(workDir, 'expo-pipeline');
       if (fs.existsSync(pipelineDir)) {
-        const { formatSiteConfigText, readSiteConfig } = require('./mcp-skills/tools/87-expo-pipeline.js');
+        const { formatSiteConfigText, readSiteConfig } = require('../mcp-skills/tools/87-expo-pipeline.js');
         const config = readSiteConfig(workDir);
         return formatSiteConfigText(config);
       }
@@ -1132,7 +1111,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
           return '❌ Отменил. Отчёт не отправлен.';
         } else {
           fs.unlinkSync(ofPending);
-          const { createBugReport } = require('./bug-report');
+          const { createBugReport } = require('../bug-report');
           return await createBugReport({ workDir, chatId, userId, note: task });
         }
       }
@@ -1182,7 +1161,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
           const meta = projects.getProject(workDir, activePid);
           const projSess = sessions.listSessions(workDir, 1000).filter(s => s.projectId === activePid);
           if (meta && projects.needsSummary(meta, projSess.length)) {
-            const { generateProjectSummary } = require('./project-summary');
+            const { generateProjectSummary } = require('../project-summary');
             const res = await generateProjectSummary(projSess, { apiKey: orK });
             if (res) projects.setProjectSummary(workDir, activePid, res, projSess.length);
           }
@@ -1209,7 +1188,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
         '(Чтобы отменить — напиши «отмена».)',
       ].join('\n');
     }
-    const { createBugReport } = require('./bug-report');
+    const { createBugReport } = require('../bug-report');
     return await createBugReport({ workDir, chatId, userId, note });
   }
 

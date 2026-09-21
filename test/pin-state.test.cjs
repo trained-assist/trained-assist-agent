@@ -32,7 +32,7 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   await new Promise(r => server.listen(0, r));
   process.env.TELEGRAM_API_URL = `http://127.0.0.1:${server.address().port}`;
 
-  const { _pin } = require('../src/runner.js');
+  const { _pin } = require('../src/runner');
   const { updateContextPin, readPinStore } = _pin;
   const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'pin-'));
   const pinFile = path.join(wd, '.pin_state.json');

@@ -13,8 +13,10 @@
 //
 // Layout (FLAT — projects are typed by a name prefix, never nested by domain):
 //   <workDir>/projects/<id>/
-//       project.json          meta {id,name,type,createdAt,lastAt}
-//       PROFILE.md            domain rules for this project (merged into the system prompt)
+//       project.json           meta {id,name,type,createdAt,lastAt}
+//       PROFILE.md             domain rules for this project (hand-authored, merged into system prompt)
+//       agent-project-notes.md agent-LEARNED notes scoped to this project (mirrors profile-tier
+//                               agent-notes.md; not seeded — Claude writes it as it learns).
 //       <type scaffold>       recruiting → interviews/{transcripts,analysis}, criteria.md, applylink/
 //   <workDir>/projects/active-<chatId>.json   which project this chat is currently in
 //
@@ -28,6 +30,7 @@ const path = require('path');
 const PROJECTS_DIR = 'projects';
 const META_FILE = 'project.json';
 const PROFILE_FILE = 'PROFILE.md';
+const NOTES_FILE = 'agent-project-notes.md';
 const MAX_NAME = 120;
 
 // ── Type registry ─────────────────────────────────────────────────────────────
@@ -126,6 +129,9 @@ function metaPath(workDir, id) {
 }
 function profilePath(workDir, id) {
   return path.join(projectDir(workDir, id), PROFILE_FILE);
+}
+function notesPath(workDir, id) {
+  return path.join(projectDir(workDir, id), NOTES_FILE);
 }
 
 function atomicWrite(fp, data) {
@@ -296,6 +302,19 @@ function profileText(workDir, id) {
   }
 }
 
+// agent-project-notes.md text — same shape as profile-tier agent-notes.md, but scoped to
+// one project. Never seeded (unlike PROFILE.md): only exists once Claude/Hermes writes
+// something project-specific it learned, so an empty file never pollutes the prompt.
+function notesText(workDir, id) {
+  if (!id) return null;
+  try {
+    const t = fs.readFileSync(notesPath(workDir, id), 'utf8').trim();
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   TYPES,
   parseTypedName,
@@ -303,6 +322,7 @@ module.exports = {
   projectsRoot,
   projectDir,
   profilePath,
+  notesPath,
   getProject,
   listProjects,
   createProject,
@@ -311,6 +331,7 @@ module.exports = {
   setActiveProjectId,
   decideNewSessionProject,
   profileText,
+  notesText,
   setProjectSummary,
   needsSummary,
   renameProject,
