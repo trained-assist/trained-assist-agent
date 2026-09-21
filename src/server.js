@@ -15,7 +15,7 @@ const { handleWebRoute } = require('./web-routes');
 const { handleHhPublic, handleHhAuthed } = require('./handlers/hh');
 const { handleConnect } = require('./handlers/connect');
 const { handleWeb } = require('./handlers/web');
-const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, interruptForRestart } = require('./runner');
+const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, interruptForRestart, reconcileSoftContinuations } = require('./runner');
 const { runMcpTool } = require('./mcp-action');
 const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
@@ -335,6 +335,7 @@ async function main() {
   const secrets = await loadSecrets();
   _secretsCache = secrets; // expose to background tasks for HH auto-refresh
   resumePendingTasks(secrets).catch(err => console.error('[resume] failed:', err.message));
+  reconcileSoftContinuations(secrets).catch(err => console.error('[soft-incomplete] reconcile failed:', err.message));
   const intakeQuick = require('./intake-quick').createIntakeQuick({
     baseDir: BASE_USERS_DIR, answer: require('./runner').runQuickAnswer, apiKey: secrets.OPENROUTER_API_KEY,
   });
