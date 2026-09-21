@@ -211,51 +211,23 @@ function listSoftContinuations() {
 
 // ── Concurrency model ────────────────────────────────────────────────────────
 //
-// Three layers, each with a different scope:
+// THERE ARE NO PER-CHAT, PER-SESSION OR PER-PROFILE LOCKS. Any number of tasks
+// may run at once, including several in the same chat, session or profile. This
+// is deliberate: a stale promise in those queues repeatedly left chats saying
+// "waiting for previous work" with nothing running. Do not reintroduce them.
+// Parallel claudes are safe because context is rebuilt from the session store
+// (no `claude --resume`), so they never share a transcript file.
 //
-//  1. perChatQueue (Map<chatId, Promise>) — ONE TASK AT A TIME PER CHAT.
-//     The top-level invariant: tasks from the same Telegram chat/group always
-//     queue behind each other, regardless of which session they belong to.
-//     Different chats (even sharing the same workDir/profile) run in parallel.
-//     chatId=0 (internal/web calls) is excluded.
+// The only gate is the global OOM guard (task-queue.js): MAX_CONCURRENT_TASKS
+// live `claude` processes + a soft free-RAM watchdog.
 //
-//  2. chatLanes (Map<laneKey, Promise>) — TRANSCRIPT PROTECTION PER SESSION.
-//     Prevents two `claude` processes from appending to the same session
-//     transcript simultaneously. Lane key = session id; a brand-new session
-//     (no id yet) falls back to chat key so first-messages collapse into one
-//     session instead of spawning two claudes.
-//
-//  3. Per-profile cap + global semaphore — FAIRNESS / OOM GUARD.
-//     Bounds how many live `claude` processes one profile can hold at once
-//     (runner-lanes.js) and globally (MAX_CONCURRENT_TASKS + RAM watchdog).
-//
-// Confusingly-named historical note: "one active session per chat" was always
-// the invariant, NOT "one session per workDir". Multiple chats can share a
-// workDir and their tasks run in parallel — that is correct and expected.
-//
-// Map<laneKey(string), Promise> — the tail of each transcript lane. laneKey is
-// `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
+// Map<taskId, Promise> — in-flight registry used only by waitForIdle() (graceful
+// drain on restart) and getActiveTaskCount(). It never blocks or orders anything.
 const chatLanes = new Map();
 
-// Session serialization lane + per-profile cap primitives live in a pure module
-// (runner-lanes.js) so the REAL admission logic is vendorable/testable in staging
-// without pulling in the whole runner (same discipline as intake-routing.js).
-// See that file for why the lane keys on the SESSION, not the workDir/profile.
+// Global RAM-aware concurrency semaphore (the OOM guard) lives in
+// src/runner/task-queue.js so admission logic is unit-testable.
 const {
-  _laneKey,
-  DEFAULT_MAX_CONCURRENT_PER_KEY,
-  _capForKey,
-  setKeyCap,
-  _acquireKeySlot,
-  _releaseKeySlot,
-} = require('../runner-lanes');
-
-// Per-chat serialization (layer 1) + the global RAM-aware concurrency
-// semaphore (layer 3) live in src/runner/task-queue.js so admission logic is
-// unit-testable without pulling in the whole runner (same pattern as
-// runner-lanes.js for layer 2). Per-profile cap stays in runner-lanes.js.
-const {
-  chatQueue,
   _acquireSlot,
   _releaseSlot,
   _waitForRam,
@@ -298,7 +270,7 @@ function stopTask(taskId) {
 
 // Stop running task(s) for a given username (used by the /stop quick command).
 // One profile's workDir is deliberately shared across multiple Telegram chats
-// (see runTask's queueKey comment), so a plain-text "стоп" typed in one chat
+// (see the concurrency model comment above), so a plain-text "стоп" typed in one chat
 // must NOT reach into another chat's running task or orphaned process — pass
 // chatId to scope the kill to the task that chat actually started. Omit chatId
 // only for genuinely profile-wide callers (e.g. /gtd_stop's explicit hard-stop).
@@ -398,14 +370,6 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Transcript lane key — session-scoped to prevent two `claude` processes from
-  // writing to the same transcript at once. Sharing a workDir across chats is
-  // fine and expected; those tasks are serialized by perChatQueue, not here.
-  //   • sessionId present → serialize messages within the same session.
-  //   • no sessionId (brand-new) → fall back to chat key so concurrent
-  //     first-messages from the same chat collapse into one session.
-  let queueKey = _laneKey(opts.sessionId, opts.user.id);
-
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -508,8 +472,6 @@ function runTask(opts) {
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username, chatId);
-    // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
-    chatLanes.delete(queueKey);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const msg = stopped
       ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
@@ -558,83 +520,54 @@ function runTask(opts) {
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('../admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
-    '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
-  );
+  // NO per-chat / per-session / per-profile locks (removed deliberately — a stale
+  // promise in any of them made a chat say "waiting for previous work" with nothing
+  // running). Any number of tasks may run concurrently, even in one chat or session:
+  // context is rebuilt from the session store (no `claude --resume`), so parallel
+  // claudes never share a transcript file. Only the global OOM guard below remains.
 
-  // Per-profile cap key ("repository" = one profile's workspace). The owner is a
-  // PROFILE (L1 shim sets user.profileId = payload.profileId ?? username), so key on
-  // profileId; fall back to username, then chatId for internal/system callers that
-  // build a bare user object. In-memory Map key only — never a path/env key.
-  const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
-
-  // chatQueue.enqueue serializes at the per-chat level (layer 1). Inside the fn,
-  // we handle the session-lane (layer 2) and then run the actual work.
-  //
-  // IMPORTANT: capture sessionPrev HERE, before enqueue(), not inside the fn callback.
-  // The fn runs as a deferred microtask (.then(fn)), so chatLanes.set(queueKey, current)
-  // below executes first — reading chatLanes inside fn would return `current` itself,
-  // creating a circular dependency (work waits for current, current waits for work → deadlock).
-  const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
   // Postmortem diagnostics for issue #1015 ("session hung, no evidence of where
   // the time went"): stamp how long each admission stage actually took. Cheap
   // (a handful of Date.now() calls + one console.log per stage) but turns a
   // future "it was stuck" report into a log grep instead of guesswork.
   const stageT0 = Date.now();
   const logStage = (stage, since) => console.log(`[${opts.taskId}] stage=${stage} tookMs=${Date.now() - since}`);
-  const current = chatQueue.enqueue(opts.user.id, () => {
-    const work = sessionPrev.catch(() => {}).then(async () => {
-      logStage('session_lane_wait', stageT0);
-      // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
-      // profile's 4-slot cap waits here without holding a scarce global slot.
-      // Only show "waiting for slot" when the slot isn't immediately available —
-      // resolving at once means there's no real queue, so stay silent.
-      const capT0 = Date.now();
-      let capAcquired = false;
-      const capP = _acquireKeySlot(capKey);
-      capP.then(() => { capAcquired = true; });
-      await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
-      if (!capAcquired) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
-      await capP;
-      logStage('profile_cap_wait', capT0);
+  const current = Promise.resolve().then(async () => {
+    try {
+      // Global admission control: wait for a free slot + enough RAM before we
+      // actually spawn `claude`. This is the OOM guard — the only remaining gate.
+      const ramT0 = Date.now();
+      await _waitForRam();
+      logStage('ram_wait', ramT0);
+      const slotT0 = Date.now();
+      await _acquireSlot();
+      logStage('global_slot_wait', slotT0);
       try {
-        // Global admission control: wait for a free slot + enough RAM before we
-        // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
-        const ramT0 = Date.now();
-        await _waitForRam();
-        logStage('ram_wait', ramT0);
-        const slotT0 = Date.now();
-        await _acquireSlot();
-        logStage('global_slot_wait', slotT0);
+        await status.finish('🧠 Начинаю работу…');
+        const runT0 = Date.now();
         try {
-          await status.finish('🧠 Начинаю работу…');
-          const runT0 = Date.now();
-          try {
-            return await _runTask(opts);
-          } finally {
-            logStage('run_task', runT0);
-          }
+          return await _runTask(opts);
         } finally {
-          _releaseSlot();
+          logStage('run_task', runT0);
         }
       } finally {
-        _releaseKeySlot(capKey);
+        _releaseSlot();
       }
-    });
-    return work;
+    } finally {
+      logStage('total', stageT0);
+    }
   }).catch(async err => {
-    const msg = err.message === 'capacity_wait_timeout'
-      ? '⏰ Сервер перегружен — задача слишком долго ждала свободного места. Попробуй ещё раз через минуту.'
-      : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
+    const msg = '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
     await status.finish(msg);
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
-  chatLanes.set(queueKey, current);
+  // chatLanes is now only an in-flight registry for waitForIdle() (graceful drain),
+  // keyed per task so parallel tasks never overwrite each other. It blocks nothing.
+  chatLanes.set(opts.taskId, current);
   current.finally(() => {
     // A task cut off by a restart keeps its journal entry: the next process resumes it.
     if (!restartShutdown) clearPendingTask(opts.taskId);
-    // Only clear if no newer task was enqueued after us
-    if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
+    chatLanes.delete(opts.taskId);
   });
   // Await retries for callers, but never hold their predecessor lane/lease.
   return current.then(result => result?.queuedRetry || result);
@@ -1987,8 +1920,4 @@ module.exports = {
   _final: { pickFinalText, isScratchpadFallback },
   // Exported for oc-footer tests only
   _footer: { formatOcFooter, formatCostFooter },
-  // Exported for lane-granularity tests only
-  _laneKey,
-  // Exported for per-profile cap-isolation tests only (R7/S8a)
-  _cap: { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY },
 };
