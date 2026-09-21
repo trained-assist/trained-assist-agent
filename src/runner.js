@@ -2301,7 +2301,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     classifyTaskCompleteness(result, secrets.OPENROUTER_API_KEY).then(async (cls) => {
       if (!cls.incomplete || !cls.auto_continue) return;
       const delayMs = 3 * 60 * 1000;
-      const timeStr = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" });
+      const timeStr = new Date(Date.now() + delayMs).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" });
       const footer = `\n\n⏱ Выглядит незавершённым. Продолжу через ~3 мин (в ${timeStr}) — напишите что-нибудь, чтобы отменить.`;
       await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}${footer}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       console.log(`[soft-incomplete] username=${user.username} reason=${cls.reason} round=${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
