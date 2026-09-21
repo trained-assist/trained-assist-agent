@@ -180,6 +180,34 @@ function getPendingTasks() {
     .map(f => JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')));
 }
 
+// ── Soft-continuation journal — survives process restart ─────────────────────
+// The in-memory pendingContinuations Map (below) drives the live 3-min timer,
+// but a restart during that window used to lose it silently: the user was told
+// "Продолжу через ~3 мин", the process restarted, and nothing ever continued
+// — no error, no notice, just a broken promise. Mirrors the PENDING_DIR journal
+// pattern so reconcileSoftContinuations() (called at startup, see server.js)
+// can re-arm or fire whatever was scheduled when the process went down.
+const SOFT_CONT_DIR = path.join(
+  process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
+  'soft-continuations'
+);
+
+function _softContFile(username) { return path.join(SOFT_CONT_DIR, `${username}.json`); }
+
+function saveSoftContinuationFile(username, record) {
+  atomicJson(_softContFile(username), record);
+}
+
+function clearSoftContinuationFile(username) {
+  try { fs.unlinkSync(_softContFile(username)); } catch (e) { if (e.code !== 'ENOENT') console.warn('[runner] clearSoftContinuationFile:', e.message); }
+}
+
+function listSoftContinuations() {
+  if (!fs.existsSync(SOFT_CONT_DIR)) return [];
+  return fs.readdirSync(SOFT_CONT_DIR).filter(f => f.endsWith('.json'))
+    .map(f => JSON.parse(fs.readFileSync(path.join(SOFT_CONT_DIR, f), 'utf8')));
+}
+
 
 // ── Concurrency model ────────────────────────────────────────────────────────
 //
@@ -251,6 +279,7 @@ function clearPendingContinuation(username) {
   const entry = pendingContinuations.get(username);
   if (entry?.timer) clearTimeout(entry.timer);
   pendingContinuations.delete(username);
+  clearSoftContinuationFile(username);
 }
 
 /**
@@ -619,7 +648,9 @@ function _relativeTime(ts) {
   return `через ${Math.round(mins / 60)} ч`;
 }
 
-// Returns context card string, or null if no skills configured (no pin needed).
+// Returns context card string, or null if no skills configured (no pin needed). Quick-answer
+// commands (/ping etc.) are contractually one-message-only (see runner-e2e.test.js) — this must
+// stay opt-in via connected services, never fire unconditionally on every task completion.
 function buildContextCard(username, workDir, chatId) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
@@ -687,12 +718,19 @@ function buildContextCard(username, workDir, chatId) {
   // Engine / model line
   const eng = chatId ? profiles.getEngine(workDir, chatId) : 'claude';
   if (eng === 'opencode') {
-    let ocProfile = null;
+    // Per-workDir profile (profiles.getOcProfile), NOT the old shared
+    // ~/.config/opencode/.current-profile file — that file is machine-wide and went stale
+    // once #1045 scoped /oc_* switching to each profile individually.
+    const ocProfile = profiles.getOcProfile(workDir);
+    let ocModel = process.env.OPENCODE_MODEL || null;
     try {
-      const pf = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
-      if (fs.existsSync(pf)) ocProfile = fs.readFileSync(pf, 'utf8').trim();
-    } catch {}
-    lines.push(`⚙️ OpenCode${ocProfile ? ` · ${ocProfile}` : ''}`);
+      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfile}.json`);
+      if (fs.existsSync(ocProfilePath)) {
+        const ocCfg = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
+        if (ocCfg.model) ocModel = ocCfg.model;
+      }
+    } catch (e) { console.warn('[runner] oc pin model:', e.message); }
+    lines.push(`⚙️ OpenCode · ${ocProfile}${ocModel ? ` (${ocModel})` : ''}`);
   } else if (eng === 'codex') {
     lines.push('⚙️ Codex CLI');
   } else {
@@ -1457,8 +1495,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     : '';
 
   // Per-chat engine switch (claude|codex) — see ENGINE_SWITCH_INTENT / profiles.getEngine.
-  // v1 codex path has no MCP tools (codex's MCP wiring is TOML-based, not wired up yet) and no
-  // separate system-prompt flag — the system prompt is folded into the prompt text instead.
+  // codex and opencode now get the same MCP tools as claude too (wired via per-invocation
+  // `-c mcp_servers.*` overrides for codex, OPENCODE_CONFIG for opencode — see buildEngineCommand
+  // / runEngineProcess in claude-runner.js). Both still have no separate system-prompt flag —
+  // the system prompt is folded into the prompt text instead.
   const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
@@ -1525,6 +1565,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     mcpConfig, systemPromptFile, user,
   });
 
+  // Per-profile OpenCode model set (value|quality|free|mimo|...), folded into the per-invocation
+  // OPENCODE_CONFIG in runEngineProcess/writeOpencodeMcpConfig instead of the old shell script
+  // that overwrote one shared ~/.config/opencode/opencode.json for every profile on the VM.
+  let ocProfileOverrides = null;
+  if (engine === 'opencode') {
+    try {
+      const ocProfileName = profiles.getOcProfile(user.workDir);
+      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfileName}.json`);
+      ocProfileOverrides = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
+    } catch (e) { console.warn('[runner] ocProfileOverrides:', e.message); }
+  }
+
   // Engine execution (spawn + stream-json + timeout/close) lives in
   // claude-runner.js (issue #942 P1.3). The module owns the process lifecycle
   // and the progress edits; this block interprets its result: on timeout →
@@ -1535,7 +1587,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     cleanEnv, userTokens, sessionFilePath,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
-    engineBin, engineArgs,
+    engineBin, engineArgs, mcpConfig, ocProfileOverrides,
     cwd: user.cwd || user.workDir,
   });
   const {
@@ -1791,7 +1843,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   }
 
   // Soft-incomplete: if task looks unfinished, schedule auto-continuation after 3 min.
-  // Fires async after delivery — does not block the response.
+  // Fires async after delivery — does not block the response. The record is journaled
+  // to disk (see saveSoftContinuationFile) so a server restart during the 3-min window
+  // doesn't silently drop the promise made to the user in the footer below — see
+  // reconcileSoftContinuations(), called at startup from server.js.
   if (!incomplete && !internalGtd && chatId && msgId && result && continuationCount < MAX_SOFT_CONTINUATIONS) {
     classifyTaskCompleteness(result, secrets.OPENROUTER_API_KEY).then(async (cls) => {
       if (!cls.incomplete || !cls.auto_continue) return;
@@ -1800,24 +1855,16 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       const footer = `\n\n⏱ Выглядит незавершённым. Продолжу через ~3 мин (в ${timeStr}) — напишите что-нибудь, чтобы отменить.`;
       await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}${footer}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       console.log(`[soft-incomplete] username=${user.username} reason=${cls.reason} round=${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
-      const timer = setTimeout(async () => {
+      const record = {
+        username: user.username, workDir: user.workDir, profileId: user.profileId, telegramUserId: user.telegramUserId,
+        chatId, msgId, sessionId: activeSessionId, pinnedMsgId, engine, internalGtd,
+        task, finalText: final, reason: cls.reason, continuationCount, dueAt: Date.now() + delayMs,
+      };
+      saveSoftContinuationFile(user.username, record);
+      const timer = setTimeout(() => {
         if (!pendingContinuations.has(user.username)) return; // cancelled by new message
         pendingContinuations.delete(user.username);
-        await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
-        runTask({
-          taskId: `${user.username}-${Date.now()}`,
-          user,
-          task: `[АВТОПРОДОЛЖЕНИЕ ${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}] Предыдущий ответ выглядел незавершённым (${cls.reason}). Посмотри историю сессии — там видно что сделано. Продолжи работу. Оригинальная задача:\n${task}`,
-          context: '',
-          sessionId: activeSessionId,
-          forceClaude: true,
-          initialMsgId: null,
-          pinnedMsgId,
-          secrets,
-          continuationCount: continuationCount + 1,
-          internalGtd,
-          engine,
-        });
+        fireSoftContinuation(record, secrets).catch(() => {});
       }, delayMs);
       setPendingContinuation(user.username, { chatId, msgId, sessionId: activeSessionId }, timer);
     }).catch(() => {});
@@ -1874,15 +1921,68 @@ function interruptForRestart() {
   }
 }
 
+// Fires one journaled soft-continuation record: clears its own disk entry first
+// (so a crash mid-fire can't double-run it), restores the delivered message
+// (drops the "Продолжу через ~3 мин" footer), then re-opens the session. Shared
+// by the live setTimeout callback and reconcileSoftContinuations() below.
+async function fireSoftContinuation(record, secrets) {
+  clearSoftContinuationFile(record.username);
+  const { BOT_TOKEN } = secrets;
+  await tgEdit(BOT_TOKEN, record.chatId, record.msgId, `🧠 ${record.finalText}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+  console.log(`[soft-incomplete] fire username=${record.username} reason=${record.reason} round=${record.continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
+  const user = {
+    id: record.chatId, name: record.username, username: record.username, workDir: record.workDir,
+    profileId: record.profileId, telegramUserId: record.telegramUserId,
+  };
+  return runTask({
+    taskId: `${record.username}-${Date.now()}`,
+    user,
+    task: `[АВТОПРОДОЛЖЕНИЕ ${record.continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}] Предыдущий ответ выглядел незавершённым (${record.reason}). Посмотри историю сессии — там видно что сделано. Продолжи работу. Оригинальная задача:\n${record.task}`,
+    context: '',
+    sessionId: record.sessionId,
+    forceClaude: true,
+    initialMsgId: null,
+    pinnedMsgId: record.pinnedMsgId,
+    secrets,
+    continuationCount: record.continuationCount + 1,
+    internalGtd: record.internalGtd,
+    engine: record.engine,
+  });
+}
+
+// Startup reconciliation for the soft-continuation journal (mirrors resumePendingTasks
+// in server.js, called alongside it). Overdue records fire immediately; records still
+// within their window get their remaining delay re-armed so a restart never silently
+// drops the "I'll continue in ~3 min" promise shown to the user.
+async function reconcileSoftContinuations(secrets) {
+  for (const record of listSoftContinuations()) {
+    const remaining = (record.dueAt || 0) - Date.now();
+    if (remaining <= 0) {
+      console.log(`[soft-incomplete] reconcile: firing overdue username=${record.username}`);
+      fireSoftContinuation(record, secrets).catch(e => console.error('[soft-incomplete] reconcile fire:', e.message));
+    } else {
+      console.log(`[soft-incomplete] reconcile: re-arming username=${record.username} in ${Math.round(remaining / 1000)}s`);
+      const timer = setTimeout(() => {
+        if (!pendingContinuations.has(record.username)) return; // cancelled by new message
+        pendingContinuations.delete(record.username);
+        fireSoftContinuation(record, secrets).catch(() => {});
+      }, remaining);
+      setPendingContinuation(record.username, { chatId: record.chatId, msgId: record.msgId, sessionId: record.sessionId }, timer);
+    }
+  }
+}
+
 module.exports = {
   interruptForRestart,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
-  clearPendingContinuation,
+  clearPendingContinuation, reconcileSoftContinuations,
+  // Exported for soft-continuation journal tests only
+  _softCont: { saveSoftContinuationFile, clearSoftContinuationFile, listSoftContinuations, SOFT_CONT_DIR },
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
   // Exported for pin-state tests only
-  _pin: { updateContextPin, readPinStore },
+  _pin: { updateContextPin, readPinStore, buildContextCard },
   // Exported for final-text-selection tests only
   _final: { pickFinalText, isScratchpadFallback },
   // Exported for oc-footer tests only
