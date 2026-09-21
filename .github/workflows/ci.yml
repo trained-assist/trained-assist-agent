@@ -203,7 +203,7 @@ jobs:
       needs.ci.result == 'success' &&
       needs.staging-gate.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
-      (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      (needs.merge.outputs.sha != '' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-gcp
@@ -256,7 +256,7 @@ jobs:
       needs.ci.result == 'success' &&
       needs.staging-gate.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
-      (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      (needs.merge.outputs.sha != '' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-ru
