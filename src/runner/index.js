@@ -1527,6 +1527,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     mcpConfig, systemPromptFile, user,
   });
 
+  // Per-profile OpenCode model set (value|quality|free|mimo|...), folded into the per-invocation
+  // OPENCODE_CONFIG in runEngineProcess/writeOpencodeMcpConfig instead of the old shell script
+  // that overwrote one shared ~/.config/opencode/opencode.json for every profile on the VM.
+  let ocProfileOverrides = null;
+  if (engine === 'opencode') {
+    try {
+      const ocProfileName = profiles.getOcProfile(user.workDir);
+      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfileName}.json`);
+      ocProfileOverrides = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
+    } catch (e) { console.warn('[runner] ocProfileOverrides:', e.message); }
+  }
+
   // Engine execution (spawn + stream-json + timeout/close) lives in
   // claude-runner.js (issue #942 P1.3). The module owns the process lifecycle
   // and the progress edits; this block interprets its result: on timeout →
@@ -1537,7 +1549,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     cleanEnv, userTokens, sessionFilePath,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
-    engineBin, engineArgs, mcpConfig,
+    engineBin, engineArgs, mcpConfig, ocProfileOverrides,
     cwd: user.cwd || user.workDir,
   });
   const {
