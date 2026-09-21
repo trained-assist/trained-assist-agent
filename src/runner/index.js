@@ -1457,8 +1457,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     : '';
 
   // Per-chat engine switch (claude|codex) — see ENGINE_SWITCH_INTENT / profiles.getEngine.
-  // v1 codex path has no MCP tools (codex's MCP wiring is TOML-based, not wired up yet) and no
-  // separate system-prompt flag — the system prompt is folded into the prompt text instead.
+  // codex and opencode now get the same MCP tools as claude too (wired via per-invocation
+  // `-c mcp_servers.*` overrides for codex, OPENCODE_CONFIG for opencode — see buildEngineCommand
+  // / runEngineProcess in claude-runner.js). Both still have no separate system-prompt flag —
+  // the system prompt is folded into the prompt text instead.
   const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
@@ -1535,7 +1537,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     cleanEnv, userTokens, sessionFilePath,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
-    engineBin, engineArgs,
+    engineBin, engineArgs, mcpConfig,
     cwd: user.cwd || user.workDir,
   });
   const {
