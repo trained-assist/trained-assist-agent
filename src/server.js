@@ -545,7 +545,7 @@ function scheduleGtdController(secrets) {
     // don't let them block GTD indefinitely in case cleanup was skipped.
     const GTD_TASK_TTL_MS = 30 * 60 * 1000;
     return gtd.runDue({
-    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: username => isTaskRunning(username) || getPendingTasks().some(p => p.username === username && Date.now() - (p.startedAt || 0) < GTD_TASK_TTL_MS), runTask, getSession,
+    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: (_username, sessionId) => getPendingTasks().some(p => p.sessionId === sessionId && Date.now() - (p.startedAt || 0) < GTD_TASK_TTL_MS), runTask, getSession,
     canRunSession: (_username, _sessionId) => true,
   }).catch(err => console.error('[gtd] tick error:', err.message));
   };
