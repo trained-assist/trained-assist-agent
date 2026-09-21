@@ -9,24 +9,24 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
-const sessions = require('./session-store');
-const { generateSummary } = require('./session-summary');
-const projects = require('./projects');
+const sessions = require('../session-store');
+const { generateSummary } = require('../session-summary');
+const projects = require('../projects');
 const {
   listConnectedServices,
   revokeService,
   getSecretsLog,
   generateConnectLink,
   SERVICE_DISPLAY,
-} = require('./user-tokens');
-const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, readActiveVacancy, hhSendPreview, hhSendConfirm, hhSendCancel, hhRejectDryRun, hhRejectConfirm, hhRejectCancel, hhBatchEvaluate, hhManualScan } = require('./hh-quick');
-const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('./hh-vacancy');
-const { loadUserSiteIntents } = require('./user-sites');
-const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
-const persona = require('./persona');
-const profiles = require('./profiles');
-const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('./web-auth');
-const { getUsageTotals } = require('./usage-store');
+} = require('../user-tokens');
+const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, readActiveVacancy, hhSendPreview, hhSendConfirm, hhSendCancel, hhRejectDryRun, hhRejectConfirm, hhRejectCancel, hhBatchEvaluate, hhManualScan } = require('../hh-quick');
+const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('../hh-vacancy');
+const { loadUserSiteIntents } = require('../user-sites');
+const { deleteServiceAccount: deleteGdriveSA } = require('../mcp-skills/tools/50-gdrive');
+const persona = require('../persona');
+const profiles = require('../profiles');
+const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('../web-auth');
+const { getUsageTotals } = require('../usage-store');
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
 // Returns a string if the task matches, null otherwise.
@@ -826,7 +826,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     try {
       const pipelineDirC = path.join(workDir, 'expo-pipeline');
       if (fs.existsSync(pipelineDirC)) {
-        const { formatCriteriaText, readCriteria } = require('./mcp-skills/tools/87-expo-pipeline.js');
+        const { formatCriteriaText, readCriteria } = require('../mcp-skills/tools/87-expo-pipeline.js');
         const criteria = readCriteria(workDir);
         return formatCriteriaText(criteria);
       }
@@ -840,7 +840,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     try {
       const pipelineDir = path.join(workDir, 'expo-pipeline');
       if (fs.existsSync(pipelineDir)) {
-        const { formatSiteConfigText, readSiteConfig } = require('./mcp-skills/tools/87-expo-pipeline.js');
+        const { formatSiteConfigText, readSiteConfig } = require('../mcp-skills/tools/87-expo-pipeline.js');
         const config = readSiteConfig(workDir);
         return formatSiteConfigText(config);
       }
@@ -1054,7 +1054,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
           return '❌ Отменил. Отчёт не отправлен.';
         } else {
           fs.unlinkSync(ofPending);
-          const { createBugReport } = require('./bug-report');
+          const { createBugReport } = require('../bug-report');
           return await createBugReport({ workDir, chatId, userId, note: task });
         }
       }
@@ -1104,7 +1104,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
           const meta = projects.getProject(workDir, activePid);
           const projSess = sessions.listSessions(workDir, 1000).filter(s => s.projectId === activePid);
           if (meta && projects.needsSummary(meta, projSess.length)) {
-            const { generateProjectSummary } = require('./project-summary');
+            const { generateProjectSummary } = require('../project-summary');
             const res = await generateProjectSummary(projSess, { apiKey: orK });
             if (res) projects.setProjectSummary(workDir, activePid, res, projSess.length);
           }
@@ -1131,7 +1131,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
         '(Чтобы отменить — напиши «отмена».)',
       ].join('\n');
     }
-    const { createBugReport } = require('./bug-report');
+    const { createBugReport } = require('../bug-report');
     return await createBugReport({ workDir, chatId, userId, note });
   }
 

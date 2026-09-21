@@ -47,7 +47,7 @@ const {
   HH_ATS_EDITOR_INTENT,
   HH_REVIEW_PAGE_INTENT,
   ENGINE_SWITCH_INTENT,
-} = require('./intent-engine');
+} = require('./runner/intent-engine');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
