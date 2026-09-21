@@ -50,7 +50,7 @@ function makeJwt(sa) {
   const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(JSON.stringify({
     iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets',
+    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/documents',
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -108,6 +108,50 @@ async function sheetsApi(method, apiPath, body = null, sa = null) {
   const data = await res.json();
   if (!res.ok) throw new Error(`Sheets ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
   return data;
+}
+
+// ── Docs API helper (structural, index-based edits — preserves formatting) ───
+
+async function docsApi(method, apiPath, body = null, sa = null) {
+  if (!sa) sa = requireSa();
+  const token = await getAccessToken(sa);
+  const res = await fetch(`https://docs.googleapis.com/v1${apiPath}`, {
+    method,
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Docs API ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
+  return data;
+}
+
+// Flatten a Docs API document.body.content tree into a linear list of paragraphs.
+// Each entry keeps the Docs API character index range so callers can compute a
+// precise insertText location without touching anything else in the document.
+function flattenDocStructure(doc) {
+  const out = [];
+  const walk = (elements) => {
+    for (const el of elements || []) {
+      if (el.paragraph) {
+        const style = el.paragraph.paragraphStyle?.namedStyleType || 'NORMAL_TEXT';
+        const bullet = el.paragraph.bullet ? true : false;
+        const text = (el.paragraph.elements || [])
+          .map(e => e.textRun?.content || '')
+          .join('')
+          .replace(/\n$/, '');
+        out.push({ startIndex: el.startIndex, endIndex: el.endIndex, style, bullet, text });
+      } else if (el.table) {
+        for (const row of el.table.tableRows || []) {
+          for (const cell of row.tableCells || []) walk(cell.content);
+        }
+      } else if (el.sectionBreak) {
+        // no text content
+      }
+    }
+  };
+  walk(doc.body?.content);
+  return out;
 }
 
 // ── Drive API helper ──────────────────────────────────────────────────────────
@@ -735,6 +779,35 @@ module.exports = {
       },
     },
 
+    gdrive_docs_get_structure: {
+      description: 'Read the STRUCTURE of a Google Doc (headings, paragraphs, list items) with precise Docs-API character indices — for PRECISE editing that does not touch formatting. ' +
+        'Use this before gdrive_docs_insert_text: find the paragraph you want to anchor to (a heading or an existing line), then pass its endIndex (or the next paragraph\'s startIndex) as the insert location. ' +
+        'Unlike gdrive_read_file (which flattens the doc to plain text and is safe only for READING), this never modifies the file.',
+      inputSchema: {
+        type: 'object',
+        required: ['file_id'],
+        properties: {
+          file_id: { type: 'string', description: 'Google Doc file ID' },
+        },
+      },
+      handler: async ({ file_id }) => {
+        const sa  = requireSa();
+        const doc = await docsApi('GET', `/documents/${file_id}`, null, sa);
+        const paragraphs = flattenDocStructure(doc).filter(p => p.text.trim() !== '' || p.style !== 'NORMAL_TEXT');
+        return {
+          file_id,
+          title: doc.title,
+          paragraphs: paragraphs.map(p => ({
+            start_index: p.startIndex,
+            end_index: p.endIndex,
+            style: p.style,       // e.g. HEADING_1, HEADING_2, NORMAL_TEXT
+            bullet: p.bullet,
+            text: p.text,
+          })),
+        };
+      },
+    },
+
     gdrive_search: {
       description: 'Search files in Google Drive by name or full-text content.',
       inputSchema: {
@@ -821,6 +894,30 @@ module.exports = {
         if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(`Update ${res.status}: ${err.error?.message || res.statusText}`); }
         const file = await res.json();
         return { updated: true, file_id: file.id, name: file.name, modified: file.modifiedTime };
+      },
+    },
+
+    gdrive_docs_insert_text: {
+      description: 'Insert text into a Google Doc at a PRECISE character index, without touching the rest of the document — formatting, headings, tables, images elsewhere are untouched. ' +
+        'This is the PRECISE alternative to gdrive_update_file (which overwrites the whole doc as plain text and destroys all native formatting — never use gdrive_update_file on a real Google Doc that has headings/bold/lists/tables). ' +
+        'Workflow: 1) call gdrive_docs_get_structure to find the anchor paragraph and its index range. 2) Pass index = anchor paragraph\'s end_index - 1 to insert as a new line right after that paragraph (inherits ITS style — good for adding a list item after another item). ' +
+        'Pass index = the NEXT paragraph\'s start_index to insert as a new first line of the section below a heading (inherits the body-text style, not the heading style). ' +
+        'Always prefix text with "\\n" unless you intend to merge into the existing line.',
+      inputSchema: {
+        type: 'object',
+        required: ['file_id', 'index', 'text'],
+        properties: {
+          file_id: { type: 'string', description: 'Google Doc file ID' },
+          index:   { type: 'number', description: 'Docs API character index to insert at (from gdrive_docs_get_structure)' },
+          text:    { type: 'string', description: 'Text to insert (include a leading \\n to start a new paragraph/list item)' },
+        },
+      },
+      handler: async ({ file_id, index, text }) => {
+        const sa = requireSa();
+        const resp = await docsApi('POST', `/documents/${file_id}:batchUpdate`, {
+          requests: [{ insertText: { location: { index }, text } }],
+        }, sa);
+        return { inserted: true, file_id, index, chars_inserted: text.length, reply: resp.replies?.[0] ?? null };
       },
     },
 
