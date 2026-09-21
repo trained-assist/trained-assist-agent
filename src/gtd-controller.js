@@ -40,6 +40,37 @@ const GTD_DIR = 'gtd';
 const CHECKLIST_FILE = 'checklist.md';
 const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'agent-tokens');
 
+// ── Mirror into checklist.trainedassist.store (2026-09-21) ─────────────────
+// checklist.md in projectDir stays the ONE source of truth the tick loop reads/writes —
+// this only pushes a read-only-for-the-loop copy so the human sees GTD auto-tracking
+// checklists in the SAME UI as their manual ones (was two unrelated things sharing the
+// word "checklist": this file's own /active_checklist list vs the standalone app).
+// Best-effort: unconfigured or unreachable → silently skipped, never blocks a GTD tick.
+const CHECKLIST_API_BASE = process.env.CHECKLIST_API_BASE || 'https://checklist.trainedassist.store';
+
+async function mirrorGtdChecklist({ username, sessionId, checklist, rec }) {
+  const apiKey = process.env.CHECKLIST_API_KEY;
+  if (!apiKey || !checklist || !checklist.items.length) return;
+  const externalKey = `gtd:${username}:${sessionId}`;
+  const name = (checklist.goal || rec?.originalTask || 'GTD чек-лист').slice(0, 200);
+  const headers = { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' };
+  const opts = { signal: AbortSignal.timeout(8000) };
+  try {
+    const createRes = await fetch(`${CHECKLIST_API_BASE}/api/checklists`, {
+      ...opts, method: 'POST', headers,
+      body: JSON.stringify({ name, external_key: externalKey, source: 'agent' }),
+    });
+    if (!createRes.ok) return;
+    const { id } = await createRes.json();
+    await fetch(`${CHECKLIST_API_BASE}/api/checklists/${id}/sync-items`, {
+      ...opts, method: 'POST', headers,
+      body: JSON.stringify({ items: checklist.items.map(i => ({ text: i.text, done: i.done })) }),
+    });
+  } catch (e) {
+    console.warn('[gtd] mirrorGtdChecklist:', e.message);
+  }
+}
+
 // Дешёвый pre-gate: без хотя бы одного из этих сигналов LLM не зовём —
 // ложный пинг дороже пропуска, а большинство задач контроля не просят.
 const CONTROL_HINT = /(проконтролир|доведи|довед[её]шь|до конца|убедись|удостовер|проследи|проверь(?:\s+(?:потом|позже|через|что))|перепровер|дойд[её]т ли|доехал|на\s+прод|в\s+прод|задеплой|раскат|не\s+забуд|напомни(?:\s+(?:проверить|мне))|follow.?up|make sure|double.?check|verify later|check (?:back|later|it landed))/i;
@@ -254,6 +285,7 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
   };
   writeGtd(workDir, rec);
   console.log(`[gtd] scheduled(checklist) session=${sessionId} user=${username} eta=${ETA_MIN_CLAMP}m maxIterations=${maxIterations} due=${new Date(rec.dueAt).toISOString()}`);
+  mirrorGtdChecklist({ username, sessionId, checklist, rec }).catch(() => {});
   return rec;
 }
 
@@ -471,6 +503,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
           try { pre = await checklistCheapPrecheck(checklist, { username }); }
           catch (e) { console.warn(`[gtd] precheck ${rec.sessionId}:`, e.message); }
           if (pre.changed) writeChecklistDone(rec.projectDir, pre.items);
+          mirrorGtdChecklist({ username, sessionId: rec.sessionId, checklist: { ...checklist, items: pre.items }, rec }).catch(() => {});
           if (pre.items.every(i => i.done)) {
             rec.status = 'closed'; rec.closedReason = 'done-precheck';
             writeGtd(workDir, rec);
@@ -557,6 +590,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
           // Progress-check: if checklist exists and no new items were checked off, track stall.
           if (_recSnap.projectDir && doneCountBefore >= 0) {
             const checklistAfter = readChecklist(_recSnap.projectDir);
+            mirrorGtdChecklist({ username, sessionId: _recSnap.sessionId, checklist: checklistAfter, rec: fresh }).catch(() => {});
             const doneCountAfter = checklistAfter ? checklistAfter.items.filter(i => i.done).length : doneCountBefore;
             if (doneCountAfter > doneCountBefore) {
               fresh.consecutiveNoProgress = 0;
@@ -591,7 +625,7 @@ module.exports = {
   detectIntent, maybeSchedule, scheduleFromChecklist, runDue, buildReopenMessage,
   readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
-  checklistCheapPrecheck, writeChecklistDone,
+  checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
   CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS,
 };
