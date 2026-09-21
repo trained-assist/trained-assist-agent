@@ -541,8 +541,11 @@ function scheduleGtdController(secrets) {
   const { getSession } = require('./session-store');
   const run = () => {
     if (maintenance.paused()) return Promise.resolve();
+    // Pending tasks older than 30 min are stale (normally cleaned on startup);
+    // don't let them block GTD indefinitely in case cleanup was skipped.
+    const GTD_TASK_TTL_MS = 30 * 60 * 1000;
     return gtd.runDue({
-    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: username => isTaskRunning(username) || getPendingTasks().some(p => p.username === username), runTask, getSession,
+    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: username => isTaskRunning(username) || getPendingTasks().some(p => p.username === username && Date.now() - (p.startedAt || 0) < GTD_TASK_TTL_MS), runTask, getSession,
     canRunSession: (_username, _sessionId) => true,
   }).catch(err => console.error('[gtd] tick error:', err.message));
   };
@@ -561,6 +564,15 @@ async function resumePendingTasks(secrets) {
   const toResume = pending.filter(p =>
     p.startedAt && p.startedAt > cutoff && p.username && p.userId && p.task
   );
+  // Clean up stale tasks that won't be resumed — they otherwise block GTD
+  // indefinitely because isTaskRunning() checks getPendingTasks() from disk.
+  const resumeIds = new Set(toResume.map(p => p.taskId));
+  for (const p of pending) {
+    if (!resumeIds.has(p.taskId)) {
+      clearPendingTask(p.taskId);
+      console.log(`[resume] cleared stale task ${p.taskId} (user=${p.username}, age=${Math.round((Date.now() - (p.startedAt || 0)) / 60000)}min)`);
+    }
+  }
   if (toResume.length === 0) return;
 
   console.log(`[resume] ${toResume.length} task(s) interrupted by restart`);
