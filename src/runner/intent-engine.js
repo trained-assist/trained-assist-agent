@@ -28,6 +28,7 @@ const profiles = require('../profiles');
 const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('../web-auth');
 const { getUsageTotals } = require('../usage-store');
 const { loadDomainIntents } = require('../domains/load-intents');
+const candidateReport = require('../candidate-report');
 
 // HH domain intent patterns — regexes live in src/domains/hh/intents.js (issue #942 P2.1).
 const {
@@ -103,6 +104,14 @@ const CLI_USAGE_SCRIPTS     = { klod: '/home/vova/bin/usage-klod.sh', codex: '/h
 const CONTEXT_OFF_INTENT    = /^\/context_off$|выключи.{0,15}контекст|скрой.{0,15}контекст|отключи.{0,15}(?:статус|контекст|карточк)/i;
 const CONTEXT_ON_INTENT     = /^\/context_on$|включи.{0,15}контекст|покажи.{0,15}контекст|включи.{0,15}(?:статус|карточк)/i;
 const CALLTIPS_PREPARE_INTENT = /(?:подготов|составь|сделай|создай).{0,30}(?:план|вопросы|интервью).{0,30}(?:для|с|звонк)|подготов.{0,20}(?:к|для).{0,10}звонк|план.{0,20}(?:интервью|звонка|встречи).{0,30}(?:с|для)|call.?tips.{0,20}(?:для|с|план|prepare)/i;
+// Candidate-for-client report (issue #982): persistent recruiter requirements log per candidate.
+// «добавь в требования [к профилю Чайка]: не упоминать удалёнку» / /report_add [имя]: текст
+// → group 1 = command head, 2 = optional «к профилю <имя>» middle, 3 = the requirement text.
+const REPORT_NOTE_ADD_INTENT  = /^(\/report_add(?:@\S+)?|добавь(?:те)?\s+в\s+требования)([^:\n]{0,80}?)\s*:\s*([\s\S]+)$/i;
+// «покажи текущие требования к профилю [Чайка]» / /report_notes [имя]
+const REPORT_NOTE_SHOW_INTENT = /^\/report_notes(?:@\S+)?(?:\s+(.+))?$|^(?:покажи|дай|открой|какие|что за)\s+(?:мне\s+)?(?:текущие\s+|мои\s+)?требования\s+(?:к|для)\s+(?:профил\S*|отч[её]т\S*)(?:\s+(.+))?$/i;
+// «умеешь делать профиль кандидата для клиента?» — capability question only (NOT the task itself)
+const REPORT_CAPABILITY_INTENT = /(?:умееш|можешь|можно|есть.{0,30}(?:возможн|функц|скил|инструм)|как.{0,25}(?:сделать|подготовить|получить|оформить)).{0,60}(?:профил\S*\s+кандидат|отч[её]т\S*\s+(?:по|о)\s+кандидат|кандидат\S*\s+для\s+клиент|резюме\s+для\s+клиент)/i;
 const PING_INTENT           = /^\/ping$|^ты живой|^ты онлайн|^ты работаешь|^привет бот|^ping$/i;
 const HELP_INTENT           = /^\/help$|^\/start$|что.{0,10}умееш|чем.{0,10}помож|какие.{0,10}возможн|список.{0,10}команд|помощь/i;
 // /persona command (aliases /role /роль /персона /character /характер). Cyrillic word boundaries:
@@ -451,6 +460,70 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     }
   }
 
+  // ── Candidate-for-client report: requirements log (issue #982) ─────────────
+  // Deterministic file ops on <workDir>/candidate-reports/<candidate>-report-notes.md — no Claude.
+  // Generating / regenerating the profile itself is Claude's job (candidate_report_* MCP tools,
+  // which read the same file); everything around the notes file is answered instantly here.
+  // Collecting-mode vacancy flow above wins: there «добавь в требования» means the vacancy.
+  const reportAdd = task.trim().match(REPORT_NOTE_ADD_INTENT);
+  if (reportAdd && workDir) {
+    const isSlash = reportAdd[1].startsWith('/');
+    const mid = reportAdd[2].trim();
+    // "к профилю Чайка" → explicit report command, may create a new candidate.
+    // Bare "к вакансии" / "Чайка" without "профил" → only accepted for an existing candidate.
+    const explicit = isSlash || /профил/i.test(mid);
+    const hint = mid.replace(/^(?:(?:к|для)\s+)?(?:профил\S*\s*)?/i, '').trim();
+    const found = candidateReport.resolveCandidate(workDir, hint);
+    if (found.ambiguous) {
+      return `Под «${hint}» подходит несколько кандидатов: ${found.ambiguous.join(', ')}. Уточни: \`добавь в требования к профилю <имя>: …\``;
+    }
+    let slug = found.slug;
+    if (!slug && explicit && hint) slug = candidateReport.slugify(hint);
+    if (slug && reportAdd[3].trim().length <= 500) {
+      const r = candidateReport.addNote(workDir, slug, reportAdd[3], { nameForNew: hint });
+      const where = r.section === 'include' ? 'Что включать' : 'Что НЕ включать / формулировки';
+      const who = candidateReport.readNotes(workDir, slug)?.name || slug;
+      return r.duplicate
+        ? `ℹ️ Такое требование к профилю «${who}» уже записано — ничего не менял.`
+        : `✅ Записал в требования к профилю «${who}» (${where}). При каждой перегенерации применю автоматически — повторять не нужно.\n\nСмотреть все: «покажи требования к профилю ${who}» · пересобрать: «перегенерируй профиль ${who}»`;
+    }
+    // No candidate to attach to → fall through: Claude asks/decides (may not be about a report at all).
+  }
+
+  const reportShow = task.trim().match(REPORT_NOTE_SHOW_INTENT);
+  if (reportShow && workDir) {
+    const hint = (reportShow[1] || reportShow[2] || '').trim();
+    const found = candidateReport.resolveCandidate(workDir, hint);
+    if (found.ambiguous) return `Под «${hint}» подходит несколько кандидатов: ${found.ambiguous.join(', ')}. Уточни имя.`;
+    if (found.slug) {
+      candidateReport.setLastCandidate(workDir, found.slug);
+      return `📋 ${candidateReport.renderNotes(candidateReport.readNotes(workDir, found.slug))}\nДобавить: «добавь в требования: …» · пересобрать: «перегенерируй профиль ${found.slug.replace(/-/g, ' ')}»`;
+    }
+    const known = candidateReport.listCandidates(workDir);
+    if (hint) return `Для «${hint}» требований к профилю пока нет. Добавить: «добавь в требования к профилю ${hint}: не упоминать …»`;
+    return known.length
+      ? `Требования к профилям есть у: ${known.join(', ')}. Уточни: «покажи требования к профилю <имя>».`
+      : 'Пока нет ни одного профиля с требованиями. Начни с «сделай профиль кандидата <имя> для клиента <компания>» — файл требований создастся сам.';
+  }
+
+  // Capability question only ("умеешь делать профиль кандидата для клиента?"). A polite task with a
+  // concrete target ("можешь сделать профиль кандидата Чайка для клиента АТОН") goes to Claude.
+  if (REPORT_CAPABILITY_INTENT.test(task) &&
+      !/клиента\s+\p{L}/iu.test(task) && !/(?:кандидата|профиль|профиля)\s+\p{Lu}/u.test(task)) {
+    return [
+      '📄 Да, делаю профиль кандидата для клиента — аккуратная HTML-страница (печать A4, 2–3 стр.):',
+      'шапка с бейджами, кратко о себе, матрица соответствия вакансии ✓/~/✗, опыт, вывод рекрутера от первого лица, видео скрининга.',
+      '',
+      'Главное — я запоминаю твои правки в файле требований к профилю и применяю их при каждой перегенерации, повторять не нужно.',
+      '',
+      'Команды:',
+      '• «сделай профиль кандидата [имя] для клиента [компания]»',
+      '• «перегенерируй профиль [имя]» — читает требования автоматически',
+      '• «добавь в требования: не упоминать …» — запомню навсегда',
+      '• «покажи требования к профилю [имя]»',
+    ].join('\n');
+  }
+
   // New job post command — start collecting mode (guard against overwriting live drafts)
   if (NEW_JOB_INTENT.test(task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
@@ -498,6 +571,11 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       '  • «опубликуй черновик на HH» — отправить готовый черновик на hh.ru',
       '  • «опубликуй страницу вакансии» — лендинг с вакансией',
       '  • Просмотр откликов, воронка, список вакансий',
+      '',
+      '📄 Профиль кандидата для клиента:',
+      '  • «сделай профиль кандидата [имя] для клиента [компания]» / «перегенерируй профиль [имя]»',
+      '  • «добавь в требования: не упоминать …» — правки запоминаются и применяются каждый раз',
+      '  • «покажи требования к профилю [имя]»',
       '',
       'Команды:',
       '/secrets_list — подключённые сервисы',
