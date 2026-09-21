@@ -377,46 +377,46 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const vmName = process.env.VM_NAME || 'unknown';
     let commit = 'unknown';
     try { commit = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
-    let ocModel = process.env.OPENCODE_MODEL || '(из opencode.json)';
-    let ocProfile = 'не задан';
+    let ocModel = process.env.OPENCODE_MODEL || '(из профиля)';
+    let ocProfile = workDir ? profiles.getOcProfile(workDir) : 'не задан';
     try {
-      const ocCfgPath = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
-      if (fs.existsSync(ocCfgPath)) {
-        const ocCfg = JSON.parse(fs.readFileSync(ocCfgPath, 'utf8'));
+      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfile}.json`);
+      if (fs.existsSync(ocProfilePath)) {
+        const ocCfg = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
         if (ocCfg.model) ocModel = ocCfg.model;
       }
-      const profileFile = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
-      if (fs.existsSync(profileFile)) ocProfile = fs.readFileSync(profileFile, 'utf8').trim();
     } catch {}
     const engineLabel = eng === 'opencode' ? 'OpenCode' : eng === 'codex' ? 'Codex CLI' : 'Claude Code';
     const modelLine = eng === 'opencode'
       ? `🧠 Модель: \`${ocModel}\`\n📦 Профиль OC: ${ocProfile}`
-      : `🧠 Модель: \`${process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
+      : eng === 'codex'
+        ? `🧠 Модель: настроена в ~/.codex/config.toml (вне нашего профиля)`
+        : `🧠 Модель: \`${process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
     return `🤖 Агент: \`${user?.username || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
   }
 
-  // /oc_value, /oc_quality, /oc_free, /oc_mimo, /oc_ru — switch OpenCode model profile globally
+  // /oc_value, /oc_quality, /oc_free, /oc_mimo, /oc_ru — switch OpenCode model profile for
+  // THIS profile only (profiles.setOcProfile → profile.json ocProfile). Used to shell out to
+  // opencode-switch-profile.sh, which overwrote one shared ~/.config/opencode/opencode.json
+  // for every profile on the VM — fixed 2026-09-21: see writeOpencodeMcpConfig in
+  // claude-runner.js, which now folds the chosen profile's models into the per-invocation
+  // OPENCODE_CONFIG file instead.
   const ocProfileM = task.trim().match(OC_PROFILE_INTENT);
-  if (ocProfileM) {
+  if (ocProfileM && workDir) {
     const raw = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase().replace(/^ru$/, 'russian-recruiter').replace(/^ll$/, 'lavish-luna');
-    const scriptPath = path.join(__dirname, '..', '..', 'infra', 'opencode-switch-profile.sh');
-    if (!fs.existsSync(scriptPath)) return '⚠️ infra/opencode-switch-profile.sh не найден';
-    try {
-      const { execFileSync } = require('child_process');
-      execFileSync('bash', [scriptPath, raw], { timeout: 10_000 });
-      const PROFILE_LABELS = {
-        value:               'VALUE — DeepSeek V4 Flash :free (дефолт)',
-        quality:             'QUALITY — DeepSeek paid + GigaChat Ultra plan',
-        free:                'FREE — только бесплатный inference (Nemotron)',
-        mimo:                'MIMO — A/B-тест MiMo V2.5',
-        'russian-recruiter': 'RUSSIAN RECRUITER — GigaChat Pro/Ultra/Max',
-        'lavish-luna':       'LAVISH LUNA — GPT-5.6 Luna main + DeepSeek/Kimi/Qwen companions',
-      };
-      const label = PROFILE_LABELS[raw] || raw;
-      return `✅ OpenCode профиль → ${label}\n\nПрименён глобально на этом VM (все чаты). Следующий запуск OpenCode подхватит новые модели.`;
-    } catch (e) {
-      return `⚠️ Не удалось переключить профиль: ${e.message.slice(0, 200)}`;
-    }
+    const profileFile = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${raw}.json`);
+    if (!fs.existsSync(profileFile)) return `⚠️ Профиль '${raw}' не найден (.opencode/profiles/${raw}.json)`;
+    profiles.setOcProfile(workDir, raw);
+    const PROFILE_LABELS = {
+      value:               'VALUE — DeepSeek V4 Flash :free (дефолт)',
+      quality:             'QUALITY — DeepSeek paid + GigaChat Ultra plan',
+      free:                'FREE — только бесплатный inference (Nemotron)',
+      mimo:                'MIMO — A/B-тест MiMo V2.5',
+      'russian-recruiter': 'RUSSIAN RECRUITER — GigaChat Pro/Ultra/Max',
+      'lavish-luna':       'LAVISH LUNA — GPT-5.6 Luna main + DeepSeek/Kimi/Qwen companions',
+    };
+    const label = PROFILE_LABELS[raw] || raw;
+    return `✅ OpenCode профиль → ${label}\n\nПрименён только для твоего профиля (другие юзеры VM не затронуты). Следующая задача в OpenCode подхватит новые модели.`;
   }
 
   // Developer intent — if GitHub not connected, ask to connect before doing anything

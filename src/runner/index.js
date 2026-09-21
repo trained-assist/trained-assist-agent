@@ -619,7 +619,9 @@ function _relativeTime(ts) {
   return `через ${Math.round(mins / 60)} ч`;
 }
 
-// Returns context card string, or null if no skills configured (no pin needed).
+// Returns context card string, or null if no skills configured (no pin needed). Quick-answer
+// commands (/ping etc.) are contractually one-message-only (see runner-e2e.test.js) — this must
+// stay opt-in via connected services, never fire unconditionally on every task completion.
 function buildContextCard(username, workDir, chatId) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
@@ -687,12 +689,19 @@ function buildContextCard(username, workDir, chatId) {
   // Engine / model line
   const eng = chatId ? profiles.getEngine(workDir, chatId) : 'claude';
   if (eng === 'opencode') {
-    let ocProfile = null;
+    // Per-workDir profile (profiles.getOcProfile), NOT the old shared
+    // ~/.config/opencode/.current-profile file — that file is machine-wide and went stale
+    // once #1045 scoped /oc_* switching to each profile individually.
+    const ocProfile = profiles.getOcProfile(workDir);
+    let ocModel = process.env.OPENCODE_MODEL || null;
     try {
-      const pf = path.join(os.homedir(), '.config', 'opencode', '.current-profile');
-      if (fs.existsSync(pf)) ocProfile = fs.readFileSync(pf, 'utf8').trim();
-    } catch {}
-    lines.push(`⚙️ OpenCode${ocProfile ? ` · ${ocProfile}` : ''}`);
+      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfile}.json`);
+      if (fs.existsSync(ocProfilePath)) {
+        const ocCfg = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
+        if (ocCfg.model) ocModel = ocCfg.model;
+      }
+    } catch (e) { console.warn('[runner] oc pin model:', e.message); }
+    lines.push(`⚙️ OpenCode · ${ocProfile}${ocModel ? ` (${ocModel})` : ''}`);
   } else if (eng === 'codex') {
     lines.push('⚙️ Codex CLI');
   } else {
@@ -1527,6 +1536,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     mcpConfig, systemPromptFile, user,
   });
 
+  // Per-profile OpenCode model set (value|quality|free|mimo|...), folded into the per-invocation
+  // OPENCODE_CONFIG in runEngineProcess/writeOpencodeMcpConfig instead of the old shell script
+  // that overwrote one shared ~/.config/opencode/opencode.json for every profile on the VM.
+  let ocProfileOverrides = null;
+  if (engine === 'opencode') {
+    try {
+      const ocProfileName = profiles.getOcProfile(user.workDir);
+      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfileName}.json`);
+      ocProfileOverrides = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
+    } catch (e) { console.warn('[runner] ocProfileOverrides:', e.message); }
+  }
+
   // Engine execution (spawn + stream-json + timeout/close) lives in
   // claude-runner.js (issue #942 P1.3). The module owns the process lifecycle
   // and the progress edits; this block interprets its result: on timeout →
@@ -1537,7 +1558,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     cleanEnv, userTokens, sessionFilePath,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
-    engineBin, engineArgs, mcpConfig,
+    engineBin, engineArgs, mcpConfig, ocProfileOverrides,
     cwd: user.cwd || user.workDir,
   });
   const {
@@ -1884,7 +1905,7 @@ module.exports = {
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
   // Exported for pin-state tests only
-  _pin: { updateContextPin, readPinStore },
+  _pin: { updateContextPin, readPinStore, buildContextCard },
   // Exported for final-text-selection tests only
   _final: { pickFinalText, isScratchpadFallback },
   // Exported for oc-footer tests only
