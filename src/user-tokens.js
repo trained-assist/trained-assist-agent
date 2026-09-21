@@ -362,6 +362,26 @@ function receiveConnect(t) {
   return pending;
 }
 
+/**
+ * Reads a connect-pending token WITHOUT consuming it.
+ * Returns the parsed pending object, or null if the token is malformed/unreadable.
+ * Caller is responsible for expiry + service checks; nothing is deleted.
+ */
+function readConnectPending(t) {
+  if (!t || !/^[a-f0-9]{32}$/.test(t)) return null;
+  const pendingFile = path.join(CONNECT_PENDING_DIR, `${t}.json`);
+  try { return JSON.parse(fs.readFileSync(pendingFile, 'utf8')); } catch { return null; }
+}
+
+/**
+ * Deletes a connect-pending token file. Returns true if a token file existed and was removed,
+ * false if the token is malformed or the file was already gone (e.g. consumed concurrently).
+ */
+function consumeConnectPending(t) {
+  if (!t || !/^[a-f0-9]{32}$/.test(t)) return false;
+  try { fs.unlinkSync(path.join(CONNECT_PENDING_DIR, `${t}.json`)); return true; } catch { return false; }
+}
+
 module.exports = {
   loadUserTokens,
   listConnectedServices,
@@ -371,6 +391,8 @@ module.exports = {
   generateLegacyConnectLink,
   readTokenValue,
   receiveConnect,
+  readConnectPending,
+  consumeConnectPending,
   SERVICE_DISPLAY,
   SERVICE_FORM_SCHEMA,
 };
