@@ -97,6 +97,51 @@ async function hhPut(apiPath, token, body) {
   return data;
 }
 
+// OAuth token refresh. Needs client id/secret from env secrets; rewrites the token
+// file in place with the fresh access/refresh pair. Returns the new access_token or null.
+async function refreshHhToken(userId, secrets) {
+  if (!secrets?.HH_CLIENT_ID || !secrets?.HH_CLIENT_SECRET) {
+    console.warn('[hh-refresh] no HH_CLIENT_ID/SECRET in env — cannot refresh');
+    return null;
+  }
+  const file = hhTokenPath(userId);
+  if (!fs.existsSync(file)) return null;
+  let stored;
+  try { stored = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  if (!stored.refresh_token) return null;
+
+  try {
+    const res = await fetch('https://hh.ru/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: secrets.HH_CLIENT_ID,
+        client_secret: secrets.HH_CLIENT_SECRET,
+        refresh_token: stored.refresh_token,
+      }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await res.json();
+    if (!data.access_token) {
+      console.warn(`[hh-refresh] HH refused refresh for ${userId}: ${data.error || 'no access_token'}`);
+      return null;
+    }
+    const updated = {
+      ...stored,
+      access_token: data.access_token,
+      refresh_token: data.refresh_token || stored.refresh_token,
+      saved_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(file, JSON.stringify(updated, null, 2), { mode: 0o600 });
+    console.log(`[hh-refresh] refreshed HH token for ${userId}`);
+    return data.access_token;
+  } catch (e) {
+    console.error(`[hh-refresh] error for ${userId}: ${e.message}`);
+    return null;
+  }
+}
+
 // Form-encoded POST — HH messages endpoint requires application/x-www-form-urlencoded, not JSON.
 async function hhPostForm(apiPath, token, fields) {
   const bodyStr = new URLSearchParams(fields).toString();
@@ -116,4 +161,4 @@ async function hhPostForm(apiPath, token, fields) {
   return data;
 }
 
-module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhPut, hhPostForm, hhTokenPath };
+module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhPut, hhPostForm, hhTokenPath, refreshHhToken };
