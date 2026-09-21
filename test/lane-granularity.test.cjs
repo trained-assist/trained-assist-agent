@@ -14,7 +14,7 @@
 //   L4 brand-new session (no id), same chat              → SAME chat key (collapse)
 //   L5 brand-new sessions in different chats             → DISTINCT chat keys
 
-const { _laneKey } = require('../src/runner.js');
+const { _laneKey } = require('../src/runner');
 
 let pass = 0, fail = 0;
 function ok(c, m) { c ? pass++ : (fail++, console.log('FAIL:', m)); }

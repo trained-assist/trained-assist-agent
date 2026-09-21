@@ -15,7 +15,7 @@
 //      (default) cap — A's tight limit does NOT leak into B
 //   C4 clearing A's override (setKeyCap(A, null)) restores the default for A
 
-const { _cap } = require('../src/runner.js');
+const { _cap } = require('../src/runner');
 const { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY } = _cap || {};
 
 let pass = 0, fail = 0;

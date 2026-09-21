@@ -12,7 +12,7 @@ import { createRequire } from 'module';
 import nock from 'nock';
 
 const require = createRequire(import.meta.url);
-const { runQuickAnswer } = require('../../src/runner.js');
+const { runQuickAnswer } = require('../../src/runner');
 
 const TEST_UID = 'quick-gate-test-0001';
 let workDir;

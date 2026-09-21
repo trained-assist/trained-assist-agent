@@ -16,7 +16,7 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
   const messages = [], journal = new Map();
   const lanes = new Map(previous ? [['s1', previous]] : []);
   const sandbox = {
-    require: name => { assert.equal(name, './admission-status'); return { createAdmissionStatus }; },
+    require: name => { assert.equal(name, '../admission-status'); return { createAdmissionStatus }; },
     recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
     restartShutdown: false,
     console, Promise, Set, Date,
