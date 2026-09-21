@@ -505,66 +505,66 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       const checklistBefore = rec.projectDir ? readChecklist(rec.projectDir) : null;
       const doneCountBefore = checklistBefore ? checklistBefore.items.filter(i => i.done).length : -1;
 
-      let reply = '';
-      try {
-        reply = await runTask({
-          taskId, user, task: buildReopenMessage(rec),
-          sessionId: rec.sessionId, forceClaude: true,
-          secrets, internalGtd: true,
-        });
-      } catch (e) {
-        console.error(`[gtd] runTask ${rec.sessionId}:`, e.message);
-        // Не закрываем — попробуем на следующем tick (в пределах maxIterations).
-        rec.dueAt = now + rec.etaMinutes * 60 * 1000;
-        writeGtd(workDir, rec);
-        continue;
-      }
-
-      // Терминал: итерация сказала done/escalated, либо исчерпали cap на этом же шаге.
-      const said = typeof reply === 'string' ? reply : '';
-      const doneNow      = DONE_RE.test(said) || DONE_RE.test(session.summary?.ended || '');
-      const escalatedNow = ESCALATED_RE.test(said);
-      const fresh = readGtd(workDir, rec.sessionId) || rec; // мог измениться в _runTask
-      if (doneNow) {
-        fresh.status = 'closed'; fresh.closedReason = 'done';
-        writeGtd(workDir, fresh);
-        console.log(`[gtd] closed ${rec.sessionId}: done`);
-      } else if (escalatedNow) {
-        fresh.status = 'closed'; fresh.closedReason = 'complexity-escalated';
-        writeGtd(workDir, fresh);
-        console.log(`[gtd] closed ${rec.sessionId}: complexity-escalated`);
-        _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
-          `⚠️ GTD остановлен — задача оказалась сложнее первоначальной оценки.\n`
-          + `Агент остановил попытки (было ${fresh.iterations}), чтобы не усложнять.\n`
-          + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`
-        ).catch(() => {});
-      } else if (fresh.iterations >= fresh.maxIterations) {
-        fresh.status = 'closed'; fresh.closedReason = 'max-iterations';
-        writeGtd(workDir, fresh);
-        console.log(`[gtd] closed ${rec.sessionId}: max-iterations (post-run)`);
-      } else {
-        // Progress-check: if checklist exists and no new items were checked off, track stall.
-        if (rec.projectDir && doneCountBefore >= 0) {
-          const checklistAfter = readChecklist(rec.projectDir);
-          const doneCountAfter = checklistAfter ? checklistAfter.items.filter(i => i.done).length : doneCountBefore;
-          if (doneCountAfter > doneCountBefore) {
-            fresh.consecutiveNoProgress = 0;
-          } else {
-            fresh.consecutiveNoProgress = (fresh.consecutiveNoProgress || 0) + 1;
-            if (fresh.consecutiveNoProgress >= 2) {
-              fresh.status = 'closed'; fresh.closedReason = 'no-progress';
-              writeGtd(workDir, fresh);
-              console.log(`[gtd] closed ${rec.sessionId}: no-progress (${fresh.consecutiveNoProgress} consecutive stalled iterations)`);
-              _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
-                `⚠️ GTD: остановлен — нет прогресса за 2 итерации. Задача: «${(fresh.originalTask || '').slice(0, 100)}»`
-              ).catch(() => {});
-              continue;
+      // Fire without awaiting — loop continues to next session immediately.
+      // Completion logic runs in .then()/.catch() once Claude responds.
+      const _recSnap = { ...rec };
+      runTask({
+        taskId, user, task: buildReopenMessage(_recSnap),
+        sessionId: _recSnap.sessionId, forceClaude: true,
+        secrets, internalGtd: true,
+      }).then(reply => {
+        // Терминал: итерация сказала done/escalated, либо исчерпали cap.
+        const said = typeof reply === 'string' ? reply : '';
+        const doneNow      = DONE_RE.test(said) || DONE_RE.test(session.summary?.ended || '');
+        const escalatedNow = ESCALATED_RE.test(said);
+        const fresh = readGtd(workDir, _recSnap.sessionId) || _recSnap;
+        if (doneNow) {
+          fresh.status = 'closed'; fresh.closedReason = 'done';
+          writeGtd(workDir, fresh);
+          console.log(`[gtd] closed ${_recSnap.sessionId}: done`);
+        } else if (escalatedNow) {
+          fresh.status = 'closed'; fresh.closedReason = 'complexity-escalated';
+          writeGtd(workDir, fresh);
+          console.log(`[gtd] closed ${_recSnap.sessionId}: complexity-escalated`);
+          _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+            `⚠️ GTD остановлен — задача оказалась сложнее первоначальной оценки.\n`
+            + `Агент остановил попытки (было ${fresh.iterations}), чтобы не усложнять.\n`
+            + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`
+          ).catch(() => {});
+        } else if (fresh.iterations >= fresh.maxIterations) {
+          fresh.status = 'closed'; fresh.closedReason = 'max-iterations';
+          writeGtd(workDir, fresh);
+          console.log(`[gtd] closed ${_recSnap.sessionId}: max-iterations (post-run)`);
+        } else {
+          // Progress-check: if checklist exists and no new items were checked off, track stall.
+          if (_recSnap.projectDir && doneCountBefore >= 0) {
+            const checklistAfter = readChecklist(_recSnap.projectDir);
+            const doneCountAfter = checklistAfter ? checklistAfter.items.filter(i => i.done).length : doneCountBefore;
+            if (doneCountAfter > doneCountBefore) {
+              fresh.consecutiveNoProgress = 0;
+            } else {
+              fresh.consecutiveNoProgress = (fresh.consecutiveNoProgress || 0) + 1;
+              if (fresh.consecutiveNoProgress >= 2) {
+                fresh.status = 'closed'; fresh.closedReason = 'no-progress';
+                writeGtd(workDir, fresh);
+                console.log(`[gtd] closed ${_recSnap.sessionId}: no-progress (${fresh.consecutiveNoProgress} consecutive stalled iterations)`);
+                _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+                  `⚠️ GTD: остановлен — нет прогресса за 2 итерации. Задача: «${(fresh.originalTask || '').slice(0, 100)}»`
+                ).catch(() => {});
+                return;
+              }
             }
           }
+          fresh.dueAt = now + fresh.etaMinutes * 60 * 1000; // backoff до следующей проверки
+          writeGtd(workDir, fresh);
         }
-        fresh.dueAt = now + fresh.etaMinutes * 60 * 1000; // backoff до следующей проверки
-        writeGtd(workDir, fresh);
-      }
+      }).catch(e => {
+        console.error(`[gtd] runTask ${_recSnap.sessionId}:`, e.message);
+        // Не закрываем — попробуем на следующем tick (в пределах maxIterations).
+        const r = readGtd(workDir, _recSnap.sessionId) || _recSnap;
+        r.dueAt = now + r.etaMinutes * 60 * 1000;
+        writeGtd(workDir, r);
+      });
     }
   }
 }
