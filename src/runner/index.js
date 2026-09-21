@@ -547,26 +547,44 @@ function runTask(opts) {
   // below executes first — reading chatLanes inside fn would return `current` itself,
   // creating a circular dependency (work waits for current, current waits for work → deadlock).
   const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
+  // Postmortem diagnostics for issue #1015 ("session hung, no evidence of where
+  // the time went"): stamp how long each admission stage actually took. Cheap
+  // (a handful of Date.now() calls + one console.log per stage) but turns a
+  // future "it was stuck" report into a log grep instead of guesswork.
+  const stageT0 = Date.now();
+  const logStage = (stage, since) => console.log(`[${opts.taskId}] stage=${stage} tookMs=${Date.now() - since}`);
   const current = chatQueue.enqueue(opts.user.id, () => {
     const work = sessionPrev.catch(() => {}).then(async () => {
+      logStage('session_lane_wait', stageT0);
       // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
       // profile's 4-slot cap waits here without holding a scarce global slot.
       // Only show "waiting for slot" when the slot isn't immediately available —
       // resolving at once means there's no real queue, so stay silent.
+      const capT0 = Date.now();
       let capAcquired = false;
       const capP = _acquireKeySlot(capKey);
       capP.then(() => { capAcquired = true; });
       await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
       if (!capAcquired) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
       await capP;
+      logStage('profile_cap_wait', capT0);
       try {
         // Global admission control: wait for a free slot + enough RAM before we
         // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
+        const ramT0 = Date.now();
         await _waitForRam();
+        logStage('ram_wait', ramT0);
+        const slotT0 = Date.now();
         await _acquireSlot();
+        logStage('global_slot_wait', slotT0);
         try {
           await status.finish('🧠 Начинаю работу…');
-          return await _runTask(opts);
+          const runT0 = Date.now();
+          try {
+            return await _runTask(opts);
+          } finally {
+            logStage('run_task', runT0);
+          }
         } finally {
           _releaseSlot();
         }
