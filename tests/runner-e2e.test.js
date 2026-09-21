@@ -344,6 +344,78 @@ describe('Utility commands do not pollute sessions', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO 2b: pure-info quick answers bypass the per-chat admission queue
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Pre-queue quick answers skip the chat queue', () => {
+
+  function writeSlowClaudeScript(delayMs) {
+    const script = `#!/bin/bash
+sleep ${(delayMs / 1000).toFixed(2)}
+REPLY=$(cat "${claudeReplyFile}" 2>/dev/null || echo "OK")
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$REPLY"'"}]}}'
+echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output_tokens":50}}'
+`;
+    writeFileSync(join(fakeBinDir, 'claude'), script);
+    chmodSync(join(fakeBinDir, 'claude'), 0o755);
+  }
+
+  it('/agent_info answers immediately while a real task is still running in the same chat', { timeout: 20000 }, async () => {
+    const SLOW_MS = 4000;
+    writeSlowClaudeScript(SLOW_MS);
+    const userId = 555444333;
+    try {
+      // Kick off a slow task in this chat — deliberately NOT awaited, it occupies the
+      // per-chat queue for SLOW_MS.
+      const slowTask = runTask({
+        taskId: `slow-${Date.now()}`,
+        user: makeUser(userId),
+        task: 'сделай что-нибудь долгое',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        // Real callers (server.js) pass both keys — TELEGRAM_BOT_TOKEN is an alias of
+        // BOT_TOKEN that the pre-queue bypass blocks (/stop, /agent_info, ...) read.
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+
+      // Give the slow task a moment to actually enter the queue/admission path.
+      await new Promise(r => setTimeout(r, 300));
+
+      const t0 = Date.now();
+      await runTask({
+        taskId: `info-${Date.now()}`,
+        user: makeUser(userId),
+        task: '/agent_info',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+      const elapsedMs = Date.now() - t0;
+
+      expect(elapsedMs, `/agent_info took ${elapsedMs}ms — looks like it waited behind the slow task instead of bypassing the queue`).toBeLessThan(SLOW_MS / 2);
+
+      // The bypass sends its Telegram reply fire-and-forget (same style as /stop etc.,
+      // see runTask()) — runTask() itself resolves before that HTTP call necessarily lands.
+      // Poll briefly instead of asserting immediately.
+      let texts = [];
+      for (let i = 0; i < 20; i++) {
+        texts = tgTexts();
+        if (texts.some(t => /Модель:|Движок:|VM:/i.test(t))) break;
+        await new Promise(r => setTimeout(r, 25));
+      }
+      expect(texts.some(t => /Модель:|Движок:|VM:/i.test(t)), 'expected an agent-info-shaped reply').toBe(true);
+
+      await slowTask; // drain before the next test reuses fakeBinDir/claude
+    } finally {
+      restoreNormalClaude();
+    }
+  });
+
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENARIO 3: session continuity — 4h TTL
 // ═══════════════════════════════════════════════════════════════════════════════
 

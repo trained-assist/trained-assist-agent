@@ -43,6 +43,8 @@ const {
   CONTEXT_ON_INTENT,
   PERSONA_INTENT,
   PROJECT_INTENT,
+  AGENT_INFO_INTENT,
+  isPreQueueQuickIntent,
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,
   HH_RESPONSES_INTENT,
@@ -540,6 +542,34 @@ function runTask(opts) {
       else     tgSend(botToken, chatId, msg).catch(() => {});
     }
     return Promise.resolve(msg);
+  }
+
+  // Pure-info quick answers (/agent_info, /secrets_list, /usage, ...) bypass the queue
+  // entirely, same as /stop above — they read local state synchronously and don't touch
+  // Claude or the session transcript, so there's no reason to make them wait behind
+  // whatever this chat's admission queue is currently running (issue: "/agent_info waits
+  // for the previous task to finish, but it doesn't need to call the agent at all").
+  // forceClaude means the user explicitly wants Claude (e.g. a "proработка" button tap on
+  // one of these commands' replies) — respect that and fall through to the normal path.
+  if (!opts.forceClaude && isPreQueueQuickIntent((opts.task || '').trim())) {
+    const quick = getQuickAnswer(opts.task, opts.user.username, opts.user.workDir, false, opts.user.id, opts.user.telegramUserId);
+    if (quick) {
+      const msg = `⚡ ${quick}`;
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
+      const chatId = opts.user.id;
+      return (async () => {
+        if (botToken) {
+          const im = opts.initialMsgId;
+          try {
+            if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg));
+            else     await tgSend(botToken, chatId, msg);
+          } catch (e) { console.warn('[runner] pre-queue quick-answer send:', e.message); }
+        }
+        return quick;
+      })();
+    }
+    // Matched the whitelist regex but getQuickAnswer returned nothing (shouldn't happen for
+    // this fixed set of intents) — fall through to the normal queued path as a safety net.
   }
 
   if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id) || null;
@@ -1301,7 +1331,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       SESSIONS_INTENT.test(task) || SESSION_DETAIL_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
       CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
-      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task);
+      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task) || AGENT_INFO_INTENT.test(task);
 
     if (!isUtility) {
       if (sessionExists) {
