@@ -967,7 +967,7 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   let results;
   try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const { loadCandidateComments, loadAllCandidates } = require('./hh-proactive-search');
+  const { loadCandidateComments, loadAllCandidates } = require('../hh-proactive-search');
   const pageComments = loadCandidateComments(username);
   // Render from the unified all-candidates store (search + manual, accumulated
   // across runs) rather than only the latest search-results snapshot — keeps the
@@ -983,7 +983,7 @@ if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
   const username = url.searchParams.get('username') || '';
   const given = url.searchParams.get('token') || '';
   if (process.env.AGENT_SECRET && given !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
-  const { loadAllCandidates } = require('./hh-proactive-search');
+  const { loadAllCandidates } = require('../hh-proactive-search');
   const all = Object.values(loadAllCandidates(username))
     .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
   return json(res, 200, { total: all.length, candidates: all });
@@ -1075,7 +1075,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/search') {
         if (!chatId) return; // chat not bound yet — silent skip
         const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
         if (!botToken) return;
-        const { buildProactiveDigest } = require('./hh-proactive-search');
+        const { buildProactiveDigest } = require('../hh-proactive-search');
         const text = buildProactiveDigest({
           vacancyTitle: info.vacancyTitle,
           newCount: info.newCount,
@@ -1105,7 +1105,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/comment') {
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
   try {
-    const { saveCandidateComment } = require('./hh-proactive-search');
+    const { saveCandidateComment } = require('../hh-proactive-search');
     saveCandidateComment(username, candidate_id, { text: String(text).slice(0, 1000) });
     return json(res, 200, { ok: true });
   } catch (e) {
@@ -1120,7 +1120,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/mark-read') {
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
   try {
-    const { setCandidateReadState } = require('./hh-proactive-search');
+    const { setCandidateReadState } = require('../hh-proactive-search');
     const rec = setCandidateReadState(username, candidate_id, Boolean(read));
     return json(res, 200, { ok: true, read: Boolean(rec.read), read_at: rec.read_at });
   } catch (e) {
@@ -1135,7 +1135,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/import-seen') {
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   if (!Array.isArray(ids) || !ids.length) return json(res, 400, { error: 'ids array required' });
   try {
-    const { loadSeenIds, saveSeenIds } = require('./hh-proactive-search');
+    const { loadSeenIds, saveSeenIds } = require('../hh-proactive-search');
     // Resolve vacancy key the same way runProactiveSearch does — from the ATS
     // config / active vacancy, NOT from the latest results file. Results files
     // don't exist before the first search run, and the recruiter legitimately
@@ -1188,7 +1188,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/add-manual') {
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   if (!resume_url_or_id) return json(res, 400, { error: 'resume_url_or_id required' });
   try {
-    const { parseResumeId, addManualCandidate } = require('./hh-proactive-search');
+    const { parseResumeId, addManualCandidate } = require('../hh-proactive-search');
     const resumeId = parseResumeId(resume_url_or_id);
     if (!resumeId) return json(res, 400, { error: 'could not parse resume id from input' });
     const hhToken = readHhToken(username);
