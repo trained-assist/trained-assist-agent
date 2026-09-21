@@ -505,3 +505,45 @@ describe('runDue — progress-check', () => {
     expect(after.closedReason).toBe('done');
   });
 });
+
+// ── settleResumedGtd (GTD turn resumed after a restart) ───────────────────────
+
+describe('settleResumedGtd', () => {
+  let base, workDir, G;
+  const rec = (over = {}) => ({
+    sessionId: 's-1', chatId: 42, status: 'open', iterations: 1, maxIterations: 5,
+    etaMinutes: 20, dueAt: 0, originalTask: 't', ...over,
+  });
+  beforeEach(() => { base = mkTmp(); workDir = makeUserDir(base, 'alice'); G = freshG(); });
+  afterEach(() => { rmSync(base, { recursive: true, force: true }); });
+
+  it('closes the record when the resumed turn says GTD: done', () => {
+    G.writeGtd(workDir, rec());
+    G.settleResumedGtd(workDir, 's-1', 'Всё доехало.\n\nGTD: done');
+    const after = G.readGtd(workDir, 's-1');
+    expect(after.status).toBe('closed');
+    expect(after.closedReason).toBe('done');
+    expect(G.listGtd(workDir).filter(r => r.status === 'open')).toHaveLength(0);
+  });
+
+  it('closes on GTD: escalated', () => {
+    G.writeGtd(workDir, rec());
+    G.settleResumedGtd(workDir, 's-1', 'слишком сложно\nGTD: escalated');
+    expect(G.readGtd(workDir, 's-1').closedReason).toBe('complexity-escalated');
+  });
+
+  it('keeps the record open and pushes dueAt out when not done', () => {
+    G.writeGtd(workDir, rec());
+    G.settleResumedGtd(workDir, 's-1', 'ещё жду CI\nGTD: continue', { now: 1_000_000 });
+    const after = G.readGtd(workDir, 's-1');
+    expect(after.status).toBe('open');
+    expect(after.dueAt).toBe(1_000_000 + 20 * 60 * 1000);
+  });
+
+  it('is a no-op for a missing or already-closed record', () => {
+    expect(G.settleResumedGtd(workDir, 's-none', 'GTD: done')).toBeNull();
+    G.writeGtd(workDir, rec({ status: 'closed', closedReason: 'no-progress' }));
+    G.settleResumedGtd(workDir, 's-1', 'GTD: done');
+    expect(G.readGtd(workDir, 's-1').closedReason).toBe('no-progress');
+  });
+});
