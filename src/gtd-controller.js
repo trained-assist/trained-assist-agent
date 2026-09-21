@@ -436,9 +436,10 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
     for (const rec of recs) {
       if (fired >= MAX_FIRES_PER_TICK) break;
 
-      // Re-entrancy guard: первый (или предыдущий) Claude ещё жив — не переоткрываем.
-      // Ждём следующего tick; dueAt уже в прошлом, поэтому запись не потеряется.
-      if (isTaskRunning(username)) { console.log(`[gtd] skip ${rec.sessionId}: task running`); continue; }
+      // Re-entrancy guard: тот же sessionId уже обрабатывается — не переоткрываем.
+      // Проверяем по sessionId, а не по username, чтобы разные GTD одного профиля
+      // могли стрелять параллельно (разные чаты, разные задачи).
+      if (isTaskRunning(username, rec.sessionId)) { console.log(`[gtd] skip ${rec.sessionId}: task running for this session`); continue; }
 
       if (!canRunSession(username, rec.sessionId)) continue;
       const session = getSession(workDir, rec.sessionId);
