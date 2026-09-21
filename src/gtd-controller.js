@@ -495,7 +495,9 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       }
 
       const user = { id: chatId, name: username, username, workDir };
-      const taskId = `${username}-gtd-${now}`;
+      // sessionId in the id: sessions fired in one tick share `now`, and taskId keys the pending
+      // journal and the active-run map — a shared id would merge two concurrent runs into one.
+      const taskId = `${username}-gtd-${rec.sessionId}-${now}`;
       fired += 1;
       console.log(`[gtd] fire session=${rec.sessionId} iter=${rec.iterations}/${rec.maxIterations}`);
 
