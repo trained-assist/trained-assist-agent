@@ -54,6 +54,80 @@
       перезапущен, `hermes_run`/`hermes_candidate_report` подтверждены живыми
       в MCP-тулсете (2026-09-21).
 
+## Phase 1.5 — Hermes с доступом в интернет: Playwright + веб-поиск (STARTED THIS SESSION)
+
+Триггер: явный запрос владельца — Hermes должен уметь «плейрайтингом [Playwright]
+и поиском сети [веб-поиском] заниматься хорошо». Проверено по коду (2026-09-21):
+`hermesRun` (Phase 1) — это ОДИН сырой вызов `gcCall`/`llmCall` (chat-completions
+API), без единого инструмента. Он не может открыть страницу и не может искать —
+только обрабатывает текст, который ему дали в `context`. Для роли «исследовательский
+воркер» из исходного ТЗ («изучи CV + интервью + доступные источники») это дыра:
+«доступные источники» = сеть, а сети у Hermes не было вообще.
+
+Рассмотрено два варианта, выбор обоснован по коду, не с нуля:
+
+- **(A, выбран) Scoped headless-инвокация существующего движка.** Каждая обычная
+  сессия УЖЕ получает `.mcp.json` с двумя MCP-серверами — `playwright`
+  (`@playwright/mcp`, headless) и `trained-skills` (ru_browser_fetch,
+  website_request/discover и т.д.) — это `writeMcpConfig` в `src/browser.js:77`.
+  MCP-обвязка codex/opencode для этого же файла уже чинилась в этой же теме
+  (PR #1040). Значит «дать Hermes Playwright» = не писать браузер-драйвер заново,
+  а один раз позвать `writeMcpConfig`+`buildEngineCommand`+`runEngineProcess`
+  headless (без Telegram). Проверено по коду `claude-runner.js`: все
+  Telegram-вызовы (`progressEdit`→`tgEdit`, heartbeat, typing-индикатор) уже
+  ЗАВИСЯТ от `msgId` и не вызываются при `msgId: null` — кроме `tgSend` в
+  38-минутном тайм-аут-предупреждении, для него передан no-op. Это подтверждено
+  фактическим запуском `hermesRunWithTools({username:'x', task:''})` и т.п. —
+  ловятся все guard-ошибки до спавна процесса (`test/hermes-tools-run.test.cjs`).
+- **(B, отклонён) Function-calling loop внутри `hermes-run.js` напрямую к
+  OpenRouter/GigaChat.** Это дублирует и Playwright-драйвер (`@playwright/mcp`
+  уже решает эту задачу), и веб-поиск. По поиску `grep -rniE
+  "websearch|web_search|web-search"` по `src/` — единственное упоминание
+  `WebSearch` во всём репо это `case 'WebSearch':` в `formatToolActivity`
+  (`claude-runner.js:140`) — просто ярлык для UI-статуса Claude Code. Своего
+  веб-поиска (Brave/Serper/Bing API) в системе НЕТ. Строить его отдельным
+  провайдером под GigaChat/OpenRouter — новая внешняя интеграция + платный API-
+  ключ ради того, что Claude Code уже даёт бесплатно как встроенный тул.
+
+**Решение:** `hermesRunWithTools({username, task, context, outputSchema, engine})`
+(`src/hermes-tools-run.js`) — новый примитив РЯДОМ с `hermesRun`, не вместо него:
+`hermesRun` остаётся дешёвым путём по умолчанию для задач, которым хватает текста
+в `context`; `hermesRunWithTools` — для задач, которым реально нужна сеть.
+`engine` по умолчанию `'claude'` — единственный из трёх движков со встроенным
+`WebSearch`/`WebFetch`, поэтому веб-поиск получаем бесплатно, без нового
+провайдера и без нового платного API-ключа.
+
+- [x] `src/hermes-tools-run.js` — `hermesRunWithTools`, реюзает
+      `writeMcpConfig`/`buildEngineCommand`/`runEngineProcess` из
+      `browser.js`/`claude-runner.js`, headless (`msgId: null`, no-op
+      `tgEdit`/`tgSend`, throwaway `activeTimers`), workDir —
+      `~/agent-tokens/<user>/hermes-tmp/`.
+- [x] MCP-тул `hermes_research` в `src/mcp-skills/tools/100-hermes.js` —
+      обёртка над `hermesRunWithTools`, с явным предупреждением в описании
+      («медленнее и дороже `hermes_run`, не гоняй без реальной потребности
+      в интернете»), чтобы не стало дефолтом на месте дешёвого `hermes_run`.
+- [x] `test/hermes-tools-run.test.cjs` — контрактные тесты (guard-clauses, без
+      сети/спавна процесса в CI — как и `hermes-run.test.cjs`), вписаны в
+      `npm run check`/`test:cjs`; полный прогон `npm run test:cjs` зелёный (без
+      регрессий по остальным 60+ тестам).
+- [ ] Смок на живом ключе: реальный `hermes_research` c задачей вида «найди Х на
+      сайте Y и верни поле Z» — подтвердить, что реально спавнится claude CLI,
+      Playwright MCP реально открывает страницу, а не просто модель домысливает
+      ответ (тот же класс риска, что и «отказ предложением», см. заметку про
+      ApplyLink OCR). Не сделано в этой сессии — требует реального сетевого
+      сценария, не сфабрикован.
+- [ ] Тайм-аут headless-вызова сейчас = дефолтный 40-минутный `CLAUDE_TIMEOUT_MS`
+      движка (не параметризован под более короткую scoped-задачу) — приемлемо
+      для Phase 1.5 (бывает вызвано редко, вручную), но при переходе на cron/
+      proactive Hermes (Phase 4) стоит дать `hermesRunWithTools` свой, более
+      короткий потолок.
+- [ ] `codex`/`opencode` как `engine` для `hermesRunWithTools` технически
+      проходят (MCP-обвязка одна на всех после #1040), но без Claude'овского
+      `WebSearch` — для них останется только `playwright`+`trained-skills`
+      (фетч по известным URL, не поисковая выдача). Не блокирует Phase 1.5
+      (дефолт `claude` уже даёт оба), но стоит явно задокументировать пользователю
+      Hermes, если он когда-то попробует сменить `engine`.
+
 ## Phase 2 — общий слой знаний (PR #1036 MERGED+LIVE)
 
 - [x] Добавить `projects/<id>/agent-project-notes.md` в `src/projects.js`
