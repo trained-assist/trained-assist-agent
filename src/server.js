@@ -37,6 +37,7 @@ const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { hhStylePageHtml } = require('./hh-style-html');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
+const hhAutoscan = require('./hh-autoscan');
 const { receiveConnect } = require('./user-tokens');
 
 const PORT = process.env.PORT || 3001;
@@ -438,6 +439,37 @@ async function runHhScoringForUser(username) {
       refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
     });
     if (proactiveScored > 0) console.log(`[hh-bg] enriched ${proactiveScored} cold-search candidates for ${username}`);
+
+     // --- AUTOSCAN WIRING ---
+     const autoscanState = hhAutoscan.readState(username);
+     if (hhAutoscan.shouldRun(autoscanState, Date.now())) {
+       await hhProactiveSearch.runProactiveSearch(username, workDir, {
+         refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
+         notifyChat: async (info) => {
+           const chatId = readChatId(username);
+           if (!chatId) return;
+           const botToken = _secretsCache?.TELEGRAM_BOT_TOKEN || _secretsCache?.BOT_TOKEN;
+           if (!botToken) return;
+           const text = hhProactiveSearch.buildProactiveDigest({
+             vacancyTitle: info.vacancyTitle,
+             newCount: info.newCount,
+             totalSeen: info.totalSeen,
+             newCandidates: info.newCandidates,
+             url: info.proactiveUrl,
+           });
+           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+           await fetch(`${tgBase}/bot${botToken}/sendMessage`, {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+             signal: AbortSignal.timeout(10_000),
+           });
+         },
+         proactiveUrl: hhAutoscan.proactiveUrlFor(username),
+       });
+       hhAutoscan.markRun(username);
+     }
+     // --- END AUTOSCAN WIRING ---
   } catch (e) {
     console.error(`[hh-bg] error for ${username}:`, e.message);
   } finally {
