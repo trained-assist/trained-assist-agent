@@ -653,7 +653,7 @@ ${prefStr}
 PASS/REVIEW считаются относительно суммы весов этой вакансии — точную оценку даёт следующий шаг.
 
 🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
-Топ-30 по предварительному скорингу прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента.`;
+Топ-30 по предварительному скорингу + ВСЕ новые кандидаты этого прогона (даже если не попали в топ-30) прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест новые кандидаты попадают всегда, показ ограничен топ-10 на прогон.`;
 }
 
 // HH resume search with optional one-shot refresh on token-expired (401/403).
@@ -797,14 +797,42 @@ async function runProactiveSearch(username, workDir, options = {}) {
   }
 
   scored.sort((a, b) => b.score - a.score);
-  const top30 = scored.slice(0, 30);
 
-  // AI enrichment for top-30 (tags + summary)
-  let enriched = top30;
-  if (orKey && top30.length > 0) {
-    console.log(`[proactive-search] enriching ${top30.length} candidates with AI…`);
+  // Seen/new status must be computed against the FULL scored pool, not just the
+  // AI-enriched slice below — otherwise a genuinely new candidate who scores outside
+  // the top-30 never gets marked seen or surfaced as "new" and silently vanishes
+  // forever (recruiter never sees them, digest never mentions them).
+  const collectedIds = scored.map(c => c.id).filter(Boolean);
+  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
+  try {
+    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
+  } catch (e) {
+    console.error('[proactive-search] seen-ids merge failed:', e.message);
+  }
+
+  const top30 = scored.slice(0, 30);
+  const top30Ids = new Set(top30.map(c => c.id));
+  // AI enrichment covers the top-30 by pre-score (for the review page) plus every
+  // candidate that's new this run, so new candidates always get tags/summary and
+  // show up in the Telegram digest even when their pre-score doesn't crack the
+  // top-30. Skipped on first run — then every candidate is "new" and this would
+  // enrich the entire backlog; first run keeps the old top-30-only behavior.
+  // Capped as a cost safety net for an unusually large incremental batch.
+  const NEW_ENRICH_CAP = 50;
+  let newButNotTop30 = seenInfo.firstRun
+    ? []
+    : scored.filter(c => seenInfo.newIds.has(c.id) && !top30Ids.has(c.id));
+  if (newButNotTop30.length > NEW_ENRICH_CAP) {
+    console.warn(`[proactive-search] ${newButNotTop30.length} new candidates outside top-30, capping AI enrichment at ${NEW_ENRICH_CAP}`);
+    newButNotTop30 = newButNotTop30.slice(0, NEW_ENRICH_CAP);
+  }
+  const toEnrich = [...top30, ...newButNotTop30];
+
+  let enriched = toEnrich;
+  if (orKey && toEnrich.length > 0) {
+    console.log(`[proactive-search] enriching ${toEnrich.length} candidates with AI (top-30 + ${newButNotTop30.length} new)…`);
     try {
-      enriched = await enrichCandidates(top30, atsConfig, orKey);
+      enriched = await enrichCandidates(toEnrich, atsConfig, orKey);
     } catch (e) {
       console.error('[proactive-search] enrichment failed:', e.message);
     }
@@ -817,17 +845,6 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
   const outDir = path.join(dataDir, 'hh', username, 'proactive');
   fs.mkdirSync(outDir, { recursive: true });
-
-  // Compute seen-IDs BEFORE writing the results file so we can mark is_new on candidates.
-  // Any crash after this point means a duplicate alert next time — acceptable trade-off
-  // (losing seen-IDs would cause candidates to be shown again forever).
-  const collectedIds = enriched.map(c => c.id).filter(Boolean);
-  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
-  try {
-    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
-  } catch (e) {
-    console.error('[proactive-search] seen-ids merge failed:', e.message);
-  }
 
   // Mark is_new on candidates that appear for the first time
   const markedCandidates = enriched.map(c => ({
