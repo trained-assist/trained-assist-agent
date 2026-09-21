@@ -2172,6 +2172,24 @@ ${expLines || '—'}
       }
     }
 
+    // POST /api/hh/proactive/mark-read {username, token, candidate_id, read}
+    // Toggles the persistent "viewed" flag stored directly on the candidate record
+    // in all-candidates.json, so it is consistent across the HTML page and the API.
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/mark-read') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', token: givenToken = '', candidate_id = '', read = false } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
+      try {
+        const { setCandidateReadState } = require('./hh-proactive-search');
+        const rec = setCandidateReadState(username, candidate_id, Boolean(read));
+        return json(res, 200, { ok: true, read: Boolean(rec.read), read_at: rec.read_at });
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
     // POST /api/hh/proactive/import-seen {username, token, ids: string[]}
     // Bulk-marks candidate IDs as already seen so they don't appear as "new" in future runs.
     // Accepts HH resume IDs (bare or extracted from URLs by the client).

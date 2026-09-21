@@ -512,6 +512,19 @@ function saveCandidateComment(username, candidateId, commentData) {
   fs.renameSync(tmp, file);
 }
 
+// Set persistent "viewed/read" flag directly on the candidate record in the
+// unified all-candidates store. Because both the HTML page and the JSON API
+// read the same file, the flag is consistent everywhere without extra sync.
+function setCandidateReadState(username, candidateId, read) {
+  const store = loadAllCandidates(username);
+  const id = String(candidateId);
+  if (!store[id]) throw new Error('candidate not found');
+  store[id].read = Boolean(read);
+  store[id].read_at = read ? new Date().toISOString() : null;
+  saveAllCandidates(username, store);
+  return store[id];
+}
+
 // Extract search exclusion hints from candidate comments.
 // These are comments that describe what we DON'T want (typically negative feedback).
 // Returns an array of strings like ["не из Новосибирска", "без опыта в рознице"].
@@ -968,6 +981,7 @@ module.exports = {
   seenIdsPath,
   loadCandidateComments,
   saveCandidateComment,
+  setCandidateReadState,
   getSearchExclusions,
   // Unified all-candidates store (search + manual)
   allCandidatesPath,

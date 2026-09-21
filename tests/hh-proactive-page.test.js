@@ -137,6 +137,46 @@ describe('header markup (#3, #4, #5)', () => {
   });
 });
 
+describe('persistent viewed flag (#6)', () => {
+  it('renders the read toggle with a checkbox on each card', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
+    expect(html).toContain('markRead(');
+    expect(html).toContain('☐ Просмотрено');
+  });
+
+  it('checks the box and dims the card (card-read class, data-read=true) for read candidates', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', read: true, experience: [] }]);
+    expect(html).toContain('card  card-read');
+    expect(html).toContain('checked');
+    expect(html).toContain('☑ Просмотрено');
+    expect(html).toContain('data-read=\\"true\\"');
+  });
+
+  it('leaves unread candidates unchecked with data-read=false and no card-read class', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
+    expect(html).not.toContain('card  card-read');
+    expect(html).toContain('data-read=\\"false\\"');
+    expect(html).not.toContain('data-read=\\"true\\"');
+  });
+
+  it('posts to the mark-read endpoint from the client script', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
+    expect(html).toContain('/api/hh/proactive/mark-read');
+    expect(html).toContain('candidate_id: candidateId, read');
+  });
+
+  it('includes the "Скрыть просмотренные" filter toggle in the filter bar', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
+    expect(html).toContain('id="hideRead"');
+    expect(html).toContain('Скрыть просмотренные');
+  });
+
+  it('hides read candidates in the client filter (data-read check in matchesFilters)', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
+    expect(html).toContain("if (hideRead && el.dataset.read === 'true') return false;");
+  });
+});
+
 describe('unchanged behaviors', () => {
   it('still renders PASS/REVIEW badge colors from the existing tag field', () => {
     const html = render([{ id: 'r1', title: 'X', score: 9, tag: 'PASS', experience: [] }]);

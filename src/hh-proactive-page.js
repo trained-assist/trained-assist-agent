@@ -81,8 +81,11 @@ function candidateCard(c, idx, existingComment) {
   const source = c.source === 'manual' ? 'manual' : 'search';
   const fullName = `${c.first_name || ''} ${c.last_name || ''}`.trim();
   const searchBlob = escHtml(`${fullName} ${c.title || ''}`.trim());
+  // #6: persistent "viewed" flag lives on the candidate record (all-candidates.json),
+  // so the page renders it from the same source the API reads.
+  const read = Boolean(c.read);
 
-  return `<div class="card ${isNew ? 'card-new' : ''}" data-idx="${idx}" data-id="${escHtml(c.id)}" data-score="${Number(c.score || 0)}" data-tag="${escHtml(c.tag || '')}" data-source="${source}" data-search="${searchBlob.toLowerCase()}">
+  return `<div class="card ${isNew ? 'card-new' : ''}${read ? ' card-read' : ''}" data-idx="${idx}" data-id="${escHtml(c.id)}" data-score="${Number(c.score || 0)}" data-tag="${escHtml(c.tag || '')}" data-source="${source}" data-read="${read ? 'true' : 'false'}" data-search="${searchBlob.toLowerCase()}">
   <div class="card-header">
     <div class="card-left">
       <a class="card-title" href="${escHtml(c.hh_url)}" target="_blank" rel="noopener">${escHtml(c.title)}</a>
@@ -96,6 +99,10 @@ function candidateCard(c, idx, existingComment) {
       </div>
     </div>
     <div class="card-right">
+      <label class="read-toggle" title="Отметить как просмотренное">
+        <input type="checkbox" ${read ? 'checked' : ''} onclick="markRead('${escHtml(c.id)}', this)">
+        ${read ? '☑ Просмотрено' : '☐ Просмотрено'}
+      </label>
       <span class="badge" style="background:${tagBadgeBg(c.tag)}">${escHtml(c.tag)} ${(Number(c.score) || 0).toFixed(1)}</span>
     </div>
   </div>
@@ -174,6 +181,8 @@ a:hover{text-decoration:underline}
 /* Card */
 .card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:15px;margin-bottom:12px}
 .card-new{border-left:3px solid #2563eb}
+.card-read{opacity:.68;background:#f8fafc;border-color:#e2e8f0}
+.card-read:hover{opacity:.9}
 .badge-new{display:inline-block;background:#2563eb;color:#fff;border-radius:3px;padding:1px 5px;font-size:.68rem;font-weight:700;letter-spacing:.04em;vertical-align:middle;margin-right:3px}
 .card-badges-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
 .badge-found{display:inline-block;font-size:.72rem;color:#64748b;background:#f1f5f9;border-radius:4px;padding:1px 7px}
@@ -192,7 +201,9 @@ a:hover{text-decoration:underline}
 .card-meta{font-size:.8rem;color:#64748b;margin-bottom:3px}
 .salary{color:#16a34a;font-weight:500}
 .card-companies{font-size:.78rem;color:#94a3b8}
-.card-right{flex-shrink:0;padding-top:1px}
+.card-right{flex-shrink:0;padding-top:1px;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.read-toggle{font-size:.72rem;color:#64748b;cursor:pointer;user-select:none;white-space:nowrap;display:inline-flex;align-items:center;gap:4px}
+.read-toggle input{cursor:pointer}
 .badge{display:inline-block;color:#fff;border-radius:5px;padding:3px 9px;font-size:.75rem;font-weight:700;letter-spacing:.03em}
 
 /* Tags */
@@ -245,6 +256,8 @@ details[open] .exp-toggle::before{content:"▾ "}
 .btn-preset:hover{background:#e2e8f0}
 .btn-preset.active{background:#2563eb;color:#fff;border-color:#2563eb}
 .source-filter{font-size:.78rem;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px;color:#1e293b;background:#fff;font-family:inherit}
+.hide-read{display:flex;align-items:center;gap:5px;font-size:.78rem;color:#64748b;cursor:pointer;user-select:none;white-space:nowrap}
+.hide-read input{cursor:pointer}
 .filter-count{font-size:.8rem;color:#64748b;white-space:nowrap;margin-left:auto}
 
 /* Modal */
@@ -267,6 +280,7 @@ details[open] .exp-toggle::before{content:"▾ "}
   .vacancy-title,.stat strong{color:#e2e8f0}
   .stat{background:#0f172a;color:#94a3b8}
   .card{background:#1e293b;border-color:#334155}
+  .card-read{opacity:.68;background:#0f172a;border-color:#1e293b}
   .card-meta,.page-info{color:#94a3b8}
   .summary{background:#1a1f2e;border-left-color:#818cf8}
   .summary-why{color:#e2e8f0}
@@ -291,6 +305,7 @@ details[open] .exp-toggle::before{content:"▾ "}
   .btn-preset:hover{background:#334155}
   .btn-preset.active{background:#2563eb;color:#fff;border-color:#2563eb}
   .source-filter{background:#0f172a;border-color:#334155;color:#e2e8f0}
+  .hide-read,.read-toggle{color:#94a3b8}
   .filter-count,.score-filter-label{color:#94a3b8}
   .filter-bar{border-color:#334155}
 }
@@ -351,6 +366,9 @@ details[open] .exp-toggle::before{content:"▾ "}
       <option value="search">Найдены поиском</option>
       <option value="manual">Добавлены вручную</option>
     </select>
+    <label class="hide-read" title="Показать только непросмотренные">
+      <input id="hideRead" type="checkbox"> Скрыть просмотренные
+    </label>
     <span class="filter-count" id="filterCount"></span>
   </div>
 </div>
@@ -390,8 +408,9 @@ function debounce(fn, ms) {
 }
 
 // Composite client-side filter (#5): name/title search + score floor + quick preset
-// (all/PASS/REVIEW/top-score) + optional source, all combined with AND, no reload.
-function matchesFilters(el, nameQuery, minScore, preset, source) {
+// (all/PASS/REVIEW/top-score) + optional source + hide-read (#6), all combined with
+// AND, no reload.
+function matchesFilters(el, nameQuery, minScore, preset, source, hideRead) {
   const score = parseFloat(el.dataset.score) || 0;
   const tag = el.dataset.tag || '';
   if (nameQuery) {
@@ -405,6 +424,7 @@ function matchesFilters(el, nameQuery, minScore, preset, source) {
   if (preset === 'review' && tag !== 'REVIEW') return false;
   if (preset === 'top9' && score < 9) return false;
   if (source && el.dataset.source !== source) return false;
+  if (hideRead && el.dataset.read === 'true') return false;
   return true;
 }
 
@@ -412,10 +432,11 @@ function applyFilters() {
   const nameQuery = document.getElementById('nameSearch').value.trim().toLowerCase();
   const minScore = parseFloat(document.getElementById('scoreSlider').value) || 0;
   const source = document.getElementById('sourceFilter').value;
+  const hideRead = document.getElementById('hideRead').checked;
   const cards = document.querySelectorAll('#cards .card');
   let shown = 0;
   cards.forEach(el => {
-    const visible = matchesFilters(el, nameQuery, minScore, activePreset, source);
+    const visible = matchesFilters(el, nameQuery, minScore, activePreset, source, hideRead);
     el.style.display = visible ? '' : 'none';
     if (visible) shown++;
   });
@@ -436,6 +457,7 @@ function renderCards() {
 
 document.getElementById('nameSearch').addEventListener('input', applyFiltersDebounced);
 document.getElementById('sourceFilter').addEventListener('change', applyFilters);
+document.getElementById('hideRead').addEventListener('change', applyFilters);
 document.getElementById('scoreSlider').addEventListener('input', e => {
   document.getElementById('scoreSliderVal').textContent = parseFloat(e.target.value).toFixed(1);
   applyFiltersDebounced();
@@ -566,6 +588,36 @@ function toggleImport() {
 function toggleManualAdd() {
   const panel = document.getElementById('manualAddPanel');
   panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+// #6: persistent "viewed" toggle. Visual feedback immediately (checkbox + label +
+// card dimming), then persist via the API; on error roll the checkbox back and show
+// the failure — no silent fail.
+async function markRead(candidateId, checkbox) {
+  const card = checkbox.closest('.card');
+  const label = checkbox.closest('.read-toggle');
+  const read = checkbox.checked;
+  const apply = (r) => {
+    checkbox.checked = r;
+    label.innerHTML = r ? '☑ Просмотрено' : '☐ Просмотрено';
+    card.classList.toggle('card-read', r);
+    card.dataset.read = r ? 'true' : 'false';
+  };
+  apply(read);
+  try {
+    const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/mark-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, read }),
+    });
+    const data = await res.json();
+    if (data.error) { apply(!read); alert('Ошибка: ' + data.error); return; }
+    apply(data.read);
+    if (document.getElementById('hideRead').checked) applyFilters();
+  } catch (e) {
+    apply(!read);
+    alert('Ошибка: ' + e.message);
+  }
 }
 
 // #2: real manual-add — creates a persisted candidate card (distinct from
