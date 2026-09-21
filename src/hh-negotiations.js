@@ -5,7 +5,6 @@ const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
 const { hydrateResumes } = require('./hh-resume');
-const { maintenance } = require('./maintenance');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const {
   runProactiveSearch, scoreUnscoredProactiveCandidates,
@@ -308,9 +307,7 @@ function createHhNegotiations({ hhApiRequest, refreshHhToken, readChatId, getSec
       const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
       if (!fs.existsSync(hhTokensBase)) return;
       for (const username of fs.readdirSync(hhTokensBase)) {
-        const release = maintenance.acquire();
-        if (!release) return;
-        runHhScoringForUser(username).catch(() => {}).finally(release);
+        runHhScoringForUser(username).catch(() => {});
         await new Promise(r => setTimeout(r, 1000)); // stagger users to avoid API burst
       }
     }
