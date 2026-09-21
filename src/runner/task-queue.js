@@ -1,15 +1,10 @@
 'use strict';
-// Task admission for the runner: per-chat serialization + the global
-// RAM-aware concurrency semaphore. Extracted from runner.js (issue #942 P1.2)
+// Task admission for the runner: the global RAM-aware concurrency semaphore. Extracted from runner.js (issue #942 P1.2)
 // so the queueing/admission logic is a self-contained, testable unit.
 //
-// Per-chat serialization (layer 1) already lived in runner-chat-queue.js
-// (same pattern as runner-lanes.js) — re-exported here as `chatQueue` rather
-// than duplicated, so this module is the one place runner.js reaches for
-// queue/admission primitives.
+// There is intentionally NO per-chat / per-session / per-profile locking.
 
 const os = require('os');
-const chatQueue = require('../runner-chat-queue');
 
 // Global concurrency cap on live `claude` processes (across all profiles).
 // RAM is cheap and monitored externally, so this is deliberately generous;
@@ -57,7 +52,6 @@ async function _waitForRam() {
 }
 
 module.exports = {
-  chatQueue,
   MAX_CONCURRENT_TASKS,
   MIN_FREE_RAM_MB,
   _acquireSlot,

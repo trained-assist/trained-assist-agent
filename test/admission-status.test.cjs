@@ -9,24 +9,22 @@ const opts = { taskId: 'task', user: { id: 42, username: 'test' }, secrets: { BO
 
 // Execute the real runTask admission function with isolated infrastructure.
 // No server, subprocess, network or production journal is touched.
-function harness({ previous, capacity, run = async () => {} } = {}) {
+function harness({ previous, run = async () => {} } = {}) {
   const source = fs.readFileSync(require.resolve('../src/runner'), 'utf8');
   const start = source.indexOf('function runTask(opts) {');
   const end = source.indexOf('// Returns context card string', start);
   const messages = [], journal = new Map();
-  const lanes = new Map(previous ? [['s1', previous]] : []);
+  const lanes = new Map(previous ? [['s1', previous]] : []); // legacy shape; runner must ignore it
   const sandbox = {
     require: name => { assert.equal(name, '../admission-status'); return { createAdmissionStatus }; },
     recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
     restartShutdown: false,
     console, Promise, Set, Date,
-    _laneKey: s => s, chatLanes: lanes,
+    chatLanes: lanes,
     STOP_TASK_INTENT: /$^/, GTD_STOP_INTENT: /$^/, WAKEUP_INTENT: /$^/, SKIP_TASK_INTENT: /$^/, ACTIVE_CHECKLIST_INTENT: /$^/,
-    chatQueue: { enqueue: (_id, fn) => fn(), hasPending: () => false },
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
     tgEdit: async (token, chat, id, text) => { assert.equal(token, 'canonical-token'); messages.push(text); return { ok: true }; },
     tgSend: async () => { throw Error('unexpected fallback'); },
-    _acquireKeySlot: async () => { if (capacity) await capacity; }, _releaseKeySlot: () => {},
     _waitForRam: async () => {}, _acquireSlot: async () => {}, _releaseSlot: () => {},
     _runTask: run,
   };
@@ -35,26 +33,18 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
   return { start: () => sandbox.runTask(opts), messages, journal };
 }
 
-test('same-session wait is immediate with canonical BOT_TOKEN; journal precedes wait; start follows release', async () => {
-  const gate = deferred(); let runs = 0;
-  const h = harness({ previous: gate.promise, run: async () => { runs++; assert.match(h.messages.at(-1), /Начинаю работу/); } });
+test('NO locks: a stuck task in the same chat/session/profile never delays a new one', async () => {
+  // A never-settling predecessor (the classic "stale lock" bug) sits in chatLanes
+  // under every key the old code used. The new task must start immediately,
+  // with no "Ожидаю завершения предыдущей работы" message.
+  const stuck = new Promise(() => {}); let runs = 0;
+  const h = harness({ previous: stuck, run: async () => { runs++; assert.match(h.messages.at(-1), /Начинаю работу/); } });
   const done = h.start();
   assert.equal(h.journal.get('task').mode, 'deep');
   assert.equal(h.journal.get('task').projectId, 'p1');
-  await tick();
-  assert.match(h.messages[0], /Ожидаю завершения предыдущей работы/);
-  assert.equal(runs, 0);
-  gate.resolve(); await done; await tick();
+  await done; await tick();
   assert.equal(runs, 1); assert.equal(h.journal.size, 0);
-});
-
-test('capacity wait remains visible even without a same-session predecessor', async () => {
-  const gate = deferred(); let runs = 0;
-  const h = harness({ capacity: gate.promise, run: async () => { runs++; } });
-  const done = h.start(); await tick();
-  assert.match(h.messages.at(-1), /Ожидаю свободного места/); assert.equal(runs, 0);
-  gate.resolve(); await done;
-  assert.equal(runs, 1); assert.match(h.messages.at(-1), /Начинаю работу/);
+  assert.ok(!h.messages.some(m => /Ожидаю/.test(m)), 'must never announce waiting for a previous task');
 });
 
 test('unexpected runner error replaces waiting/start with explicit failure', async () => {
