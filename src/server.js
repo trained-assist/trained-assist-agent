@@ -2459,14 +2459,34 @@ ${expLines || '—'}
       if (!Array.isArray(ids) || !ids.length) return json(res, 400, { error: 'ids array required' });
       try {
         const { loadSeenIds, saveSeenIds } = require('./hh-proactive-search');
-        // Resolve vacancy key from the latest results file (same logic as runProactiveSearch)
-        const latestFile = latestProactiveFile(username);
+        // Resolve vacancy key the same way runProactiveSearch does — from the ATS
+        // config / active vacancy, NOT from the latest results file. Results files
+        // don't exist before the first search run, and the recruiter legitimately
+        // imports "old 100 candidates" BEFORE enabling the search (so those 100 are
+        // never re-notified). Falling back to 'unknown' would put the imports in a
+        // bucket the search never reads — the old candidates would be re-notified.
         let vacancyKey = 'unknown';
-        if (latestFile) {
+        const ctxAts = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
+        try {
+          const raw = JSON.parse(fs.readFileSync(ctxAts, 'utf8'));
+          let v = raw?.value;
+          if (typeof v === 'string') { try { v = JSON.parse(v); } catch { v = null; } }
+          if (v?.vacancy_id) vacancyKey = String(v.vacancy_id);
+        } catch { /* no ats config — fall through */ }
+        if (vacancyKey === 'unknown') {
           try {
-            const r = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
-            vacancyKey = r.vacancy_id || r.vacancy_title || 'unknown';
-          } catch {}
+            const avRaw = JSON.parse(fs.readFileSync(path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'active_vacancy.json'), 'utf8'));
+            if (avRaw?.value?.id) vacancyKey = String(avRaw.value.id);
+          } catch { /* no active vacancy — fall through */ }
+        }
+        if (vacancyKey === 'unknown') {
+          const latestFile = latestProactiveFile(username);
+          if (latestFile) {
+            try {
+              const r = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+              vacancyKey = r.vacancy_id || r.vacancy_title || 'unknown';
+            } catch {}
+          }
         }
         const seen = loadSeenIds(username);
         const today = new Date().toISOString().slice(0, 10);
