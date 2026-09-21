@@ -4936,6 +4936,7 @@ onCheck();
 
 // ── HH API helpers (used by /hh/send and /hh/reject) ─────────────────────────
 // hhApiRequest and refreshHhToken are imported from ./hh-utils at the top of this file.
+const HH_API_TIMEOUT_MS = 15_000;
 
 function hhApiPost(apiPath, token, body) { return hhApiRequest('POST', apiPath, token, body); }
 function hhApiPut(apiPath, token, body) { return hhApiRequest('PUT', apiPath, token, body || undefined); }
