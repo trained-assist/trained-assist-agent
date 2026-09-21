@@ -9,7 +9,7 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const report = require('../../src/candidate-report.js');
-const { getQuickAnswer } = require('../../src/runner.js');
+const { getQuickAnswer } = require('../../src/runner');
 
 const roots = [];
 function freshDir() {
