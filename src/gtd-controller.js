@@ -381,6 +381,22 @@ function buildReopenMessage(rec) {
 const DONE_RE      = /GTD:\s*done/i;
 const ESCALATED_RE = /GTD:\s*escalated/i;
 
+// Итог GTD-итерации, перезапущенной после рестарта (resumePendingTasks): исходный
+// .then() из runDue умер вместе с процессом, поэтому «GTD: done» некому разобрать —
+// запись оставалась open, футер «Чеклист активен» висел под ответом «сделано».
+function settleResumedGtd(workDir, sessionId, reply, { now = Date.now() } = {}) {
+  const rec = readGtd(workDir, sessionId);
+  if (!rec || rec.status !== 'open') return null;
+  const said = typeof reply === 'string' ? reply : '';
+  if (DONE_RE.test(said)) rec.closedReason = 'done';
+  else if (ESCALATED_RE.test(said)) rec.closedReason = 'complexity-escalated';
+  else { rec.dueAt = now + rec.etaMinutes * 60 * 1000; writeGtd(workDir, rec); return rec; }
+  rec.status = 'closed';
+  writeGtd(workDir, rec);
+  console.log(`[gtd] closed ${sessionId}: ${rec.closedReason} (resumed after restart)`);
+  return rec;
+}
+
 // Cancel all open GTD records for a profile (all its chats). Only meant for a
 // genuinely profile-wide caller — most /stop-style commands should use
 // clearGtdForChat below, since one profile's workDir is shared across chats.
@@ -573,7 +589,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 
 module.exports = {
   detectIntent, maybeSchedule, scheduleFromChecklist, runDue, buildReopenMessage,
-  readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd,
+  readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,

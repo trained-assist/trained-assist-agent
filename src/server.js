@@ -335,7 +335,10 @@ async function resumePendingTasks(secrets) {
       contextFromSession: p.contextFromSession || null,
       forceClaude: true, projectId: p.projectId || null,
       initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
-      secrets,
+      secrets, internalGtd: !!p.internalGtd,
+    }).then(reply => {
+      // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
+      if (p.internalGtd && p.sessionId) require('./gtd-controller').settleResumedGtd(workDir, p.sessionId, reply);
     }).catch(err => console.error(`[resume] user=${p.username} error:`, err.message));
     await new Promise(r => setTimeout(r, 500)); // stagger multiple resumes
   }
