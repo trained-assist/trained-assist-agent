@@ -1366,6 +1366,19 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? `[AGENT NOTES — твои собственные заметки о логике/решениях для этого юзера]\n${agentNotes}`
     : '';
 
+  // Inject per-project agent notes (learned knowledge scoped to the bound project, e.g.
+  // client preferences, past decisions — distinct from PROFILE.md's hand-authored domain
+  // rules). Mirrors agent-notes.md above but keyed by project so it doesn't leak across
+  // a profile's sibling projects. Write with the Write/Edit tool at
+  // projects/<id>/agent-project-notes.md when you learn something worth keeping for next time.
+  const projectNotesRaw = boundProjectId ? projects.notesText(user.workDir, boundProjectId) : null;
+  const projectNotes = projectNotesRaw && projectNotesRaw.length > MAX_SECTION_CHARS
+    ? projectNotesRaw.slice(0, MAX_SECTION_CHARS) + '\n...[заметки обрезаны]'
+    : projectNotesRaw;
+  const projectNotesSection = projectNotes
+    ? `[AGENT PROJECT NOTES — твои заметки о накопленном опыте в этом проекте]\n${projectNotes}`
+    : '';
+
   // If a quick-answer API call just failed, inject the error so Claude knows what happened.
   // The error is written to vacancy state before returning null; read it once here and clear it.
   let vacancyApiErrorSection = '';
@@ -1428,7 +1441,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
   }
 
-  let baseContext = [timeoutSection, notesSection, reqLogSection, vacancyApiErrorSection, bugReportSection, artifactsSection].filter(Boolean).join('\n\n');
+  let baseContext = [timeoutSection, notesSection, projectNotesSection, reqLogSection, vacancyApiErrorSection, bugReportSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   let prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
