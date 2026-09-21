@@ -56,7 +56,14 @@ function codexMcpArgs(mcpConfig) {
 // $OPENCODE_CONFIG on top of the global ~/.config/opencode/opencode.json (verified against
 // opencode's own config docs), so a per-user file set via env var is the isolation-safe
 // equivalent of claude's --mcp-config — no shared-file mutation, no cross-user race.
-function writeOpencodeMcpConfig(cwd, mcpConfig) {
+//
+// ocProfileOverrides (optional): the {model, agent: {build|plan|explore|general|review: {model}}}
+// shape from .opencode/profiles/<name>.json (see profiles.getOcProfile). Folding it in here —
+// same per-invocation file, same deep-merge-on-top-of-global-file behaviour — replaces the old
+// opencode-switch-profile.sh, which overwrote the one shared ~/.config/opencode/opencode.json
+// for every profile on the VM. Deep merge means agent.review's base fields (prompt/permission/
+// etc., only present in the global file) survive; only .model gets overridden per profile.
+function writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) {
   const servers = loadMcpServers(mcpConfig);
   const mcp = {};
   for (const [name, srv] of Object.entries(servers)) {
@@ -68,7 +75,7 @@ function writeOpencodeMcpConfig(cwd, mcpConfig) {
     };
   }
   const configPath = path.join(cwd, '.opencode-mcp.json');
-  fs.writeFileSync(configPath, JSON.stringify({ mcp }, null, 2));
+  fs.writeFileSync(configPath, JSON.stringify({ mcp, ...ocProfileOverrides }, null, 2));
   return configPath;
 }
 
@@ -168,6 +175,8 @@ function formatToolActivity(name, input = {}) {
  *   engineBin, engineArgs (already built), cwd, env, mcpConfig (path to the per-user .mcp.json;
  *   used to derive OPENCODE_CONFIG for opencode — codex gets its MCP wiring baked into
  *   engineArgs already, via codexMcpArgs in buildEngineCommand),
+ *   ocProfileOverrides (optional, opencode only — {model, agent} from profiles.getOcProfile,
+ *   folded into the same per-invocation OPENCODE_CONFIG file),
  *   formatToolActivity, readOcAgentModels
  *
  * Returns a plain result object — never throws for process-level failures:
@@ -181,6 +190,7 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
+    ocProfileOverrides,
   } = opts;
 
   const proc = spawn(engineBin, engineArgs, {
@@ -202,7 +212,7 @@ async function runEngineProcess(opts) {
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
       AGENT_TASK_ID: taskId,
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
-      ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(cwd, mcpConfig) } : {}),
+      ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) } : {}),
     },
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
