@@ -196,6 +196,21 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   ok(closedByPrecheck && closedByPrecheck.status === 'closed' && closedByPrecheck.closedReason === 'done-precheck',
     'runDue: closes with done-precheck reason');
 
+  // 14. two sessions of one profile fired in the same tick must get distinct taskIds
+  const wd6 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd6-'));
+  const userDir6 = path.join(wd6, 'u');
+  fs.mkdirSync(userDir6, { recursive: true });
+  G.writeGtd(userDir6, { ...rec, sessionId: 's-a', chatId: '1', dueAt: 100 });
+  G.writeGtd(userDir6, { ...rec, sessionId: 's-b', chatId: '2', dueAt: 100 });
+  const firedIds = [];
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd6, now: 200,
+    isTaskRunning: () => false,
+    getSession: () => ({ summary: {} }),
+    runTask: async o => { firedIds.push(o.taskId); return 'x'; },
+  });
+  ok(firedIds.length === 2 && new Set(firedIds).size === 2, 'runDue: concurrent sessions of one profile get distinct taskIds');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
