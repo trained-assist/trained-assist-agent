@@ -25,7 +25,7 @@ const { loadUserSiteIntents } = require('./user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('./mcp-skills/tools/50-gdrive');
 const persona = require('./persona');
 const profiles = require('./profiles');
-const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('./web-auth');
+const { savePassword: saveWebPassword, generatePassword: genWebPassword, generateMagicToken } = require('./web-auth');
 const { getUsageTotals } = require('./usage-store');
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
@@ -285,17 +285,21 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   if (GET_WEBPASS_INTENT.test(task)) {
     const target = (userId || '').trim();
     if (!target) return 'Не удалось определить профиль. Попробуй ещё раз.';
+    // Generate a magic one-click login link (15 min TTL) + password as fallback
+    const magicToken = generateMagicToken(target);
+    const publicUrl = process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru';
+    const magicUrl = `${publicUrl}/web/magic?t=${magicToken}`;
+    // Also save a password as backup (in case token expires)
     const pass = genWebPassword();
     saveWebPassword(target, pass);
     return [
-      `🔑 Твой новый веб-пароль:`,
+      `🌐 Войди в веб-интерфейс:`,
       '',
-      `\`${pass}\``,
+      `👉 [Открыть и войти автоматически](${magicUrl})`,
       '',
-      `Вход: https://app.trainedassist.store`,
-      `Username: \`${target}\` · пароль — выше.`,
+      `_(Ссылка одноразовая, действует 15 минут)_`,
       '',
-      '⚠️ Это НОВЫЙ пароль — прежний (если был) больше не работает.',
+      `Или войди вручную на ${publicUrl.replace(/^https?:\/\//, '').replace(/\/.*/, '')}: логин \`${target}\`, пароль \`${pass}\``,
     ].join('\n');
   }
 

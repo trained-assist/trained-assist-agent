@@ -11,7 +11,7 @@ const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
-const { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkPassword, generatePassword } = require('./web-auth');
+const { webAuth, signJwt, setTokenCookie, clearTokenCookie, switchProfileCookie, savePassword, checkPassword, generatePassword, generateMagicToken, consumeMagicToken, listAuthedProfiles } = require('./web-auth');
 const { handleWebRoute } = require('./web-routes');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, waitForIdle, getActiveTaskCount } = require('./runner');
 const { runMcpTool } = require('./mcp-action');
@@ -2517,7 +2517,15 @@ ${expLines || '—'}
     }
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' && url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer') {
+    // Note: /web/magic, /web/auth, /web/logout, /web/me, /web/profiles,
+    //       /web/switch-profile are handled above (no handleWebRoute delegation needed)
+    if (url.pathname.startsWith('/web/') &&
+        url.pathname !== '/web/auth' && url.pathname !== '/web/magic' &&
+        url.pathname !== '/web/logout' && url.pathname !== '/web/me' &&
+        url.pathname !== '/web/profiles' && url.pathname !== '/web/switch-profile' &&
+        url.pathname !== '/web/verify' && url.pathname !== '/web/projects' &&
+        url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' &&
+        url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer') {
       if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
@@ -2690,6 +2698,29 @@ ${expLines || '—'}
       return streamWebTask({ req, res, secrets, username, task: message.trim(), sessionId: id });
     }
 
+    // ── GET /web/magic?t=<token> — one-click login via magic link ────────────
+    if (req.method === 'GET' && url.pathname === '/web/magic') {
+      const t = url.searchParams.get('t') || '';
+      if (!secrets.WEB_JWT_SECRET) {
+        res.writeHead(503, { 'Content-Type': 'text/plain' }).end('web auth not configured');
+        return;
+      }
+      const username = consumeMagicToken(t);
+      if (!username) {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' }).end(
+          '<!doctype html><html><body style="font-family:sans-serif;padding:2rem">' +
+          '<h2>Ссылка устарела или уже использована</h2>' +
+          '<p>Запроси новую: отправь <code>/get_webpass</code> боту.</p>' +
+          '<p><a href="/web/">Перейти на главную</a></p></body></html>'
+        );
+        return;
+      }
+      const jwtToken = signJwt(username, secrets.WEB_JWT_SECRET);
+      setTokenCookie(res, jwtToken, username);
+      res.writeHead(302, { Location: '/web/' }).end();
+      return;
+    }
+
     // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
     if (req.method === 'POST' && url.pathname === '/web/auth') {
       let body;
@@ -2699,14 +2730,44 @@ ${expLines || '—'}
       if (!secrets.WEB_JWT_SECRET) return json(res, 503, { error: 'web auth not configured' });
       if (!checkPassword(username, password)) return json(res, 401, { error: 'invalid username or password' });
       const token = signJwt(username, secrets.WEB_JWT_SECRET);
-      setTokenCookie(res, token);
+      setTokenCookie(res, token, username);
       return json(res, 200, { ok: true, username });
     }
 
-    // ── POST /web/logout — clear the auth cookie ─────────────────────────────
+    // ── POST /web/logout — clear the auth cookie for current profile ──────────
     if (req.method === 'POST' && url.pathname === '/web/logout') {
-      clearTokenCookie(res);
+      const currentUser = webAuth(req, secrets.WEB_JWT_SECRET);
+      clearTokenCookie(res, currentUser);
       return json(res, 200, { ok: true });
+    }
+
+    // ── GET /web/me — current authenticated username ──────────────────────────
+    if (req.method === 'GET' && url.pathname === '/web/me') {
+      const username = webAuth(req, secrets.WEB_JWT_SECRET);
+      if (!username) return json(res, 401, { error: 'unauthorized' });
+      return json(res, 200, { username });
+    }
+
+    // ── GET /web/profiles — list all profiles with valid tokens in cookies ────
+    if (req.method === 'GET' && url.pathname === '/web/profiles') {
+      if (!secrets.WEB_JWT_SECRET) return json(res, 503, { error: 'web auth not configured' });
+      const profiles = listAuthedProfiles(req, secrets.WEB_JWT_SECRET);
+      const current = webAuth(req, secrets.WEB_JWT_SECRET);
+      return json(res, 200, { profiles, current });
+    }
+
+    // ── POST /web/switch-profile — switch active profile ─────────────────────
+    if (req.method === 'POST' && url.pathname === '/web/switch-profile') {
+      if (!secrets.WEB_JWT_SECRET) return json(res, 503, { error: 'web auth not configured' });
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      // Verify the target profile has a valid cookie in this request
+      const profiles = listAuthedProfiles(req, secrets.WEB_JWT_SECRET);
+      if (!profiles.includes(username)) return json(res, 403, { error: 'no valid session for that profile — get a magic link first' });
+      switchProfileCookie(res, username);
+      return json(res, 200, { ok: true, username });
     }
 
     // ── GET /web, /web/, /web/<asset> — serve the vendored web UI (public) ────
@@ -2727,7 +2788,7 @@ ${expLines || '—'}
       return;
     }
 
-    // ── POST /admin/webpass — generate password for a profile (AGENT_SECRET) ─
+    // ── POST /admin/webpass — generate magic link (or password) for a profile ─
     if (req.method === 'POST' && url.pathname === '/admin/webpass') {
       const auth = req.headers['authorization'] || '';
       if (auth !== `Bearer ${secrets.AGENT_SECRET}`) return json(res, 401, { error: 'unauthorized' });
@@ -2735,9 +2796,13 @@ ${expLines || '—'}
       try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
       const { username } = body || {};
       if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      // Generate magic token (preferred) + password as fallback
+      const magicToken = generateMagicToken(username);
+      const publicUrl = process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru';
+      const magicUrl = `${publicUrl}/web/magic?t=${magicToken}`;
       const password = generatePassword();
       savePassword(username, password);
-      return json(res, 200, { ok: true, username, password });
+      return json(res, 200, { ok: true, username, password, magicUrl });
     }
 
     // GET /calltips-session?profile=xxx&token=yyy — latest Call Tips session written by agent

@@ -386,3 +386,51 @@ input:focus, textarea:focus, select:focus {
 .section-header h2 { font-size: 15px; font-weight: 600; }
 
 .hidden { display: none !important; }
+
+/* ── Profile switcher ──────────────────────────────────────────────────────── */
+.profile-switcher {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.btn-sm {
+  padding: 2px 8px;
+  font-size: 13px;
+}
+
+.profile-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  min-width: 160px;
+  z-index: 100;
+  overflow: hidden;
+}
+
+.profile-option {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 14px;
+}
+.profile-option:hover { background: var(--bg); }
+.profile-option.active { font-weight: 600; color: var(--accent); }
+.profile-option.active::before { content: '✓ '; }
+
+.profile-hint {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+}

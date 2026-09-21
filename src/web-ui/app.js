@@ -541,6 +541,64 @@ $('btn-logout').addEventListener('click', async () => {
   location.href = 'login.html';
 });
 
+// ─── Profile switcher ──────────────────────────────────────────────────────
+async function loadProfileSwitcher() {
+  try {
+    const res = await fetch('/web/profiles', { credentials: 'include' });
+    if (!res.ok) return;
+    const { profiles, current } = await res.json();
+
+    const header = document.querySelector('.sidebar-header');
+    if (!header) return;
+
+    // Show current profile name
+    const title = header.querySelector('.nav-title');
+    if (title && current) title.textContent = current;
+
+    if (profiles.length <= 1) return;  // nothing to switch to
+
+    // Build profile dropdown
+    const wrap = document.createElement('div');
+    wrap.className = 'profile-switcher';
+    wrap.innerHTML = `
+      <button class="btn btn-ghost btn-sm" id="btn-profile-menu" title="Switch profile">⇄</button>
+      <div class="profile-menu hidden" id="profile-menu">
+        ${profiles.map(p => `<button class="profile-option${p === current ? ' active' : ''}" data-profile="${esc(p)}">${esc(p)}</button>`).join('')}
+        <div class="profile-hint">Добавить: /get_webpass в боте</div>
+      </div>`;
+    header.appendChild(wrap);
+
+    document.getElementById('btn-profile-menu').addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('profile-menu').classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', () => {
+      document.getElementById('profile-menu')?.classList.add('hidden');
+    });
+
+    wrap.querySelectorAll('.profile-option').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const target = btn.dataset.profile;
+        if (target === current) return;
+        try {
+          const r = await fetch('/web/switch-profile', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: target }),
+          });
+          if (r.ok) location.reload();
+          else {
+            const err = await r.json().catch(() => ({}));
+            alert(err.error || 'Ошибка переключения профиля');
+          }
+        } catch {}
+      });
+    });
+  } catch {}
+}
+
 $('btn-stop').addEventListener('click', stopSession);
 
 $('btn-composer-submit').addEventListener('click', onComposerSubmit);
@@ -567,7 +625,7 @@ window.addEventListener('hashchange', route);
 
 // ─── Boot ───────────────────────────────────────────────────────────────────
 async function boot() {
-  await Promise.all([loadFolderOptions(), refreshSidebar()]);
+  await Promise.all([loadFolderOptions(), refreshSidebar(), loadProfileSwitcher()]);
   $('view-loading').classList.add('hidden');
   $('shell').classList.remove('hidden');
   setupVoice();
