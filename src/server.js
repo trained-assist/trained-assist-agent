@@ -42,6 +42,8 @@ const { processMishaUpdate } = require('./misha-bot');
 const { createHhNegotiations, hhInterviewConfigAllowsTime } = require('./hh-negotiations');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
 const { receiveConnect } = require('./user-tokens');
+const profiles = require('./profiles');
+const mediaVision = require('./media-vision');
 
 const PORT = process.env.PORT || 3001;
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -3123,6 +3125,22 @@ ${recent || '(пока нет)'}
       const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null };
       trackChat(userId);
 
+      // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
+      // Code whose own Read tool hands images to the model natively — so a photo attachment
+      // is otherwise invisible to that engine (just an opaque path in the note below). Run it
+      // through vision OCR up front and fold the extracted text into the note. Claude/Codex are
+      // left alone: no known gap, and no point paying for a call the model doesn't need.
+      const runEngine = profiles.getEngine(workDir, userId);
+      async function buildFileNote(filePath, mimeType) {
+        const typeNote = mimeType ? ` (${mimeType})` : '';
+        let note = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+        if (runEngine === 'opencode' && mimeType && mimeType.startsWith('image/') && secrets.OPENROUTER_API_KEY) {
+          const vision = await mediaVision.extractImageText({ filePath, mimeType, openrouterKey: secrets.OPENROUTER_API_KEY });
+          if (vision.ok) note += `\n[Распознано на изображении:\n${vision.text}]`;
+        }
+        return note;
+      }
+
       // Save attached file (base64) to workDir and prepend path info to the task.
       let effectiveTask = task || '';
       if (fileBase64 && fileName) {
@@ -3135,8 +3153,7 @@ ${recent || '(пока нет)'}
           try { fs.writeFileSync(fd, Buffer.from(fileBase64, 'base64')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
           const dirFd = fs.openSync(uploadsDir, 'r');
           try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-          const typeNote = fileMimeType ? ` (${fileMimeType})` : '';
-          const fileNote = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+          const fileNote = await buildFileNote(filePath, fileMimeType);
           effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
         } catch (e) {
           console.error('[/run] file save error:', e.message);
@@ -3167,8 +3184,7 @@ ${recent || '(пока нет)'}
             try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
             const dirFd = fs.openSync(uploadsDir, 'r');
             try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-            const typeNote = ref.mime ? ` (${ref.mime})` : '';
-            const fileNote = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+            const fileNote = await buildFileNote(filePath, ref.mime);
             effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
           } catch (e) {
             console.error('[/run] fileRef copy error:', e.message);
