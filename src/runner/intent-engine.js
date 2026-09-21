@@ -410,7 +410,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   const ocProfileM = task.trim().match(OC_PROFILE_INTENT);
   if (ocProfileM) {
     const raw = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase().replace(/^ru$/, 'russian-recruiter').replace(/^ll$/, 'lavish-luna');
-    const scriptPath = path.join(__dirname, '..', 'infra', 'opencode-switch-profile.sh');
+    const scriptPath = path.join(__dirname, '..', '..', 'infra', 'opencode-switch-profile.sh');
     if (!fs.existsSync(scriptPath)) return '⚠️ infra/opencode-switch-profile.sh не найден';
     try {
       const { execFileSync } = require('child_process');
