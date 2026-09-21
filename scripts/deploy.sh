@@ -1,5 +1,10 @@
 #!/bin/bash
-# Deploy script — run on the VM after git pull
+# Deploy script — run on the VM after the checkout was reset to the target commit.
+#
+# Restart is instant: no drain, no admission gate, no waiting for active work. Everything
+# slow (nginx, npm ci, unit files) happens BEFORE the service is touched; the downtime is
+# just stop → swap deps (only if package-lock changed) → start → health check. Tasks cut
+# off by the stop stay in the pending-task journal and the new process resumes them silently.
 set -Eeuo pipefail
 
 case "${DEPLOY_ENV:-}" in
@@ -16,86 +21,61 @@ if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
   export ASSIST_DEPLOY_LOCKED=1
 fi
 
-# Save current commit so we can roll back if smoke tests fail
+# Save current commit so we can roll back if the new process never gets healthy
 PREV_COMMIT=${PREV_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")}
-# First installation needs a quiescent bootstrap; legacy code cannot maintain a
-# closed gate through rollback. Refuse before stopping or changing dependencies.
-git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/maintenance.js" || {
-  echo "Legacy runtime: install the drain-aware baseline in a quiet bootstrap window first"
-  exit 1
-}
-
 export PREV_COMMIT
 DEPS_STAGE=""
 OLD_DEPS=""
 DEPS_SWAPPED=0
+
 rollback() {
   if [ -z "$PREV_COMMIT" ]; then
-    echo "No previous commit recorded; queue remains paused"
+    echo "No previous commit recorded; cannot roll back"
     return 1
   fi
-  if [ -f "${AGENT_DATA_DIR:-$HOME/agent-data}/execution-authority.json" ] &&
-     ! git -C "$REPO_DIR" cat-file -e "$PREV_COMMIT:src/restart-execution.js"; then
-    echo "Rollback refused: legacy runtime cannot safely read v2 execution authority; admission stays closed"
-    return 1
-  fi
-  echo "==> Rolling back to $PREV_COMMIT with the saved dependencies..."
-  if [ "$(systemctl show "$SERVICE" -p MainPID --value)" != 0 ]; then
-    python3 "$REPO_DIR/scripts/restart-coordinator.py" --rollback || return 1
-  fi
+  echo "==> Rolling back to $PREV_COMMIT..."
   sudo systemctl stop "$SERVICE" || return 1
-  python3 "$REPO_DIR/scripts/prepare-deploy-journal.py" --rollback || return 1
   git -C "$REPO_DIR" reset --hard "$PREV_COMMIT" || return 1
   if [ "$DEPS_SWAPPED" = "1" ]; then
-    sudo systemctl stop "$SERVICE" || return 1
     rm -rf "$REPO_DIR/node_modules" || return 1
     mv "$OLD_DEPS" "$REPO_DIR/node_modules" || return 1
   fi
-  sudo systemctl restart "$SERVICE" || return 1
-  python3 "$REPO_DIR/scripts/restart-coordinator.py" --ready || return 1
+  sudo systemctl reset-failed "$SERVICE" 2>/dev/null || true
+  sudo systemctl start "$SERVICE" || return 1
   echo "==> Rolled back to previous version. Deploy failed."
 }
 
-# Any failure after the gate is claimed attempts recovery; never reports success.
-# Rollback failure leaves the queue paused for an operator, not silently dropped.
 on_deploy_error() {
   local code=$?
   trap - ERR
-  echo "Deploy failed (exit $code); attempting rollback with admission closed"
-  rollback || echo "ROLLBACK FAILED: queue retained; operator recovery required"
+  echo "Deploy failed (exit $code); attempting rollback"
+  rollback || echo "ROLLBACK FAILED: operator recovery required"
   exit "$code"
 }
 
 echo "==> Validating and applying nginx config ($DEPLOY_ENV)..."
 bash "$REPO_DIR/scripts/deploy-nginx.sh"
 
-# The CI caller also drains before git reset; direct invocations still must drain.
-python3 "$REPO_DIR/scripts/drain-for-deploy.py"
 trap on_deploy_error ERR
-# Prepare dependencies while the old process is still healthy and gated. Network
-# or npm failures must not leave a stopped service with its dependencies deleted.
-echo "==> Preparing dependencies in an isolated directory..."
-DEPS_STAGE=$(mktemp -d "$REPO_DIR/../.agent-deps.XXXXXX")
-cp "$REPO_DIR/package.json" "$REPO_DIR/package-lock.json" "$DEPS_STAGE/"
-npm ci --prefix "$DEPS_STAGE" --omit=dev
 
-echo "==> Stopping drained service and swapping dependencies..."
-sudo systemctl stop "$SERVICE"
-python3 "$REPO_DIR/scripts/prepare-deploy-journal.py"
-OLD_DEPS="$DEPS_STAGE/previous-node_modules"
-if [ -d "$REPO_DIR/node_modules" ]; then
-  mv "$REPO_DIR/node_modules" "$OLD_DEPS"
+# ── Everything below until "Stopping service" runs while the old process keeps serving ──
+
+# Dependencies: only reinstall when they actually changed. Staged in a side directory so a
+# network/npm failure never leaves the live node_modules half-deleted.
+if [ -d "$REPO_DIR/node_modules" ] && [ -n "$PREV_COMMIT" ] &&
+   git -C "$REPO_DIR" diff --quiet "$PREV_COMMIT" HEAD -- package.json package-lock.json; then
+  echo "==> package.json / package-lock.json unchanged — keeping node_modules"
 else
-  mkdir "$OLD_DEPS"
+  echo "==> Preparing dependencies in an isolated directory..."
+  DEPS_STAGE=$(mktemp -d "$REPO_DIR/../.agent-deps.XXXXXX")
+  cp "$REPO_DIR/package.json" "$REPO_DIR/package-lock.json" "$DEPS_STAGE/"
+  npm ci --prefix "$DEPS_STAGE" --omit=dev
 fi
-DEPS_SWAPPED=1
-mv "$DEPS_STAGE/node_modules" "$REPO_DIR/node_modules"
-cd "$REPO_DIR"
 
 # Install Playwright Chromium if not already present (idempotent)
 if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; then
   echo "==> Installing Playwright Chromium..."
-  npx playwright install chromium --with-deps 2>&1 | tail -5 || true
+  (cd "$REPO_DIR" && npx playwright install chromium --with-deps 2>&1 | tail -5) || true
 fi
 
 echo "==> Installing systemd unit file..."
@@ -120,6 +100,16 @@ if [ -f "$NOTIFY_SRC" ]; then
     echo "  Notify-failure unit updated"
   fi
 fi
+
+# The drain-aware restart coordinator (timer + service) is gone: restarts are instant now.
+# A leftover timer would fail every 10s because its script no longer exists.
+if [ -f /etc/systemd/system/assist-agent-restart.timer ] || [ -f /etc/systemd/system/assist-agent-restart.service ]; then
+  echo "==> Removing retired restart coordinator timer..."
+  sudo systemctl disable --now assist-agent-restart.timer 2>/dev/null || true
+  sudo systemctl stop assist-agent-restart.service 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/assist-agent-restart.timer /etc/systemd/system/assist-agent-restart.service
+  CHANGED=1
+fi
 if [ "$CHANGED" = "1" ]; then
   sudo systemctl daemon-reload
   echo "  daemon reloaded"
@@ -134,12 +124,6 @@ for OLD_SVC in alesa-agent trained-assist-agent; do
   fi
 done
 
-echo "==> Killing any orphan node processes on port 8080..."
-# systemctl restart only kills the tracked PID; orphan processes (started outside systemd)
-# stay alive on port 8080 and serve stale code — kill them before the restart.
-sudo fuser -k 8080/tcp 2>/dev/null || true
-sleep 1
-
 echo "==> Migrating data directory (alesa-data → agent-data) if needed..."
 if [ -d "/home/vova/alesa-data" ] && [ ! -d "/home/vova/agent-data" ]; then
   mv /home/vova/alesa-data /home/vova/agent-data
@@ -152,28 +136,45 @@ echo "==> Ensuring data directories exist..."
 DATA_DIR="${AGENT_DATA_DIR:-/home/vova/agent-data}"
 mkdir -p "$DATA_DIR/system-flags"
 chown -R vova:vova "$DATA_DIR" 2>/dev/null || true
-
-sudo cp "$REPO_DIR/systemd/assist-agent-restart.service" /etc/systemd/system/
-sudo cp "$REPO_DIR/systemd/assist-agent-restart.timer" /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now assist-agent-restart.timer
+# Leftovers of the retired drain gate — nothing reads them any more.
+rm -f "$DATA_DIR/maintenance.json.drain" "$DATA_DIR/maintenance.json.recipients" 2>/dev/null || true
 
 echo "==> Applying OpenCode profile..."
 bash "$REPO_DIR/infra/opencode-switch-profile.sh" || echo "opencode-switch-profile: skipped (jq missing or no profile set)"
 
-echo "==> Restarting service..."
+# ── Downtime window starts here ──────────────────────────────────────────────────────
+
+echo "==> Stopping service..."
+sudo systemctl stop "$SERVICE"
+
+if [ -n "$DEPS_STAGE" ]; then
+  echo "==> Swapping dependencies..."
+  OLD_DEPS="$DEPS_STAGE/previous-node_modules"
+  if [ -d "$REPO_DIR/node_modules" ]; then
+    mv "$REPO_DIR/node_modules" "$OLD_DEPS"
+  else
+    mkdir "$OLD_DEPS"
+  fi
+  DEPS_SWAPPED=1
+  mv "$DEPS_STAGE/node_modules" "$REPO_DIR/node_modules"
+fi
+cd "$REPO_DIR"
+
+# Orphan processes (started outside systemd) stay alive on port 8080 and serve stale code.
+sudo fuser -k 8080/tcp 2>/dev/null || true
+
+echo "==> Starting service..."
 # Clear any failed state (e.g. StartLimitBurst exhausted from crash loops) so
 # systemd accepts the start request even if the previous run ended badly.
 sudo systemctl reset-failed "$SERVICE" 2>/dev/null || true
-sudo systemctl restart "$SERVICE"
+sudo systemctl start "$SERVICE"
 
 echo "==> Waiting for service to be healthy (up to 60s)..."
 HEALTHY=0
-for i in $(seq 1 12); do
-  STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:8080/health 2>/dev/null || echo 000)
-  echo "  attempt $i: HTTP $STATUS_CODE"
-  if [ "$STATUS_CODE" = "200" ]; then HEALTHY=1; break; fi
-  sleep 5
+for i in $(seq 1 60); do
+  STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:8080/health 2>/dev/null || echo 000)
+  if [ "$STATUS_CODE" = "200" ]; then HEALTHY=1; echo "  healthy after ${i}s"; break; fi
+  sleep 1
 done
 sudo systemctl status "$SERVICE" --no-pager --lines=10 || true
 echo "==> Service journal (last 20 lines)..."
@@ -186,6 +187,7 @@ if [ "$HEALTHY" = "0" ]; then
   echo "ERROR: service did not respond on /health after 60s — failing deploy to trigger rollback"
   false
 fi
+trap - ERR
 
 echo "==> Installing disk-hygiene crons..."
 if [ -x "$REPO_DIR/ops/cron/install.sh" ]; then
@@ -196,9 +198,5 @@ if [ -x "$REPO_DIR/ops/cron/install.sh" ]; then
   fi
 fi
 
-# Check the new boot without spawning an LLM task or messaging a test account.
-echo "==> Verifying new process and recovered queue..."
-python3 "$REPO_DIR/scripts/restart-coordinator.py" --ready
-trap - ERR
-rm -rf "$DEPS_STAGE"
+[ -n "$DEPS_STAGE" ] && rm -rf "$DEPS_STAGE"
 echo "==> Deploy complete ✅"
