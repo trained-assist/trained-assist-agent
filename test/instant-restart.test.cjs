@@ -20,6 +20,13 @@ test('no pause/drain gate or restart chatter survives in the runtime', () => {
   assert.equal(fs.existsSync(path.join(__dirname, '..', 'src/maintenance.js')), false);
 });
 
+test('/maintenance still advertises durableIngress: 1 — the bot outbox holds every task without it', () => {
+  const start = serverSrc.indexOf("url.pathname === '/maintenance'");
+  const body = serverSrc.slice(start, serverSrc.indexOf("'/restart/activity'", start));
+  assert.match(body, /durableIngress: 1/);
+  assert.match(body, /paused: false/);
+});
+
 test('SIGTERM handler flags the restart and exits without draining', () => {
   const start = serverSrc.indexOf('let shuttingDown = false;');
   const end = serverSrc.indexOf("process.once('SIGINT'", start);

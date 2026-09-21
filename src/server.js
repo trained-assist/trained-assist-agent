@@ -2556,7 +2556,9 @@ ${recent || '(пока нет)'}
         catch { return json(res, 400, { error: 'bad json' }); }
       }
       const restarting = action === 'request';
-      json(res, 200, { paused: false, phase: restarting ? 'restarting' : 'ready', active: 0, runtimeCommit: RUNTIME_REVISION });
+      // durableIngress: 1 is load-bearing — the bot's RunOutbox reads it before every /run
+      // submit and holds all work if it is missing (see tg-bot src/run-outbox.js).
+      json(res, 200, { paused: false, phase: restarting ? 'restarting' : 'ready', active: 0, maintenanceProtocol: 2, durableIngress: 1, runtimeCommit: RUNTIME_REVISION });
       if (restarting) res.once('finish', () => setTimeout(() => process.kill(process.pid, 'SIGTERM'), 50));
       return;
     }
