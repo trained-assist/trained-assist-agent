@@ -9,8 +9,8 @@ import { tmpdir } from 'os';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { getQuickAnswer } = require('../../src/runner.js');
-const { ENGINE_SWITCH_INTENT } = require('../../src/runner.js')._intents;
+const { getQuickAnswer } = require('../../src/runner');
+const { ENGINE_SWITCH_INTENT } = require('../../src/runner')._intents;
 const profiles = require('../../src/profiles.js');
 
 describe('ENGINE_SWITCH_INTENT regex', () => {

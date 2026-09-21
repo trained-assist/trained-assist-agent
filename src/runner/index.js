@@ -1,28 +1,28 @@
-const { atomicJson } = require('./atomic-json');
+const { atomicJson } = require('../atomic-json');
 let restartShutdown = false;
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { writeMcpConfig } = require('./browser');
-const sessions = require('./session-store');
-const { getCurrentSessionId, setCurrentSessionId } = require('./session-store');
-const projects = require('./projects');
-const { isAuthError, detectReason, setAuthFailedFlag } = require('./auth-flag');
-const { recordUsage } = require('./usage-store');
+const { writeMcpConfig } = require('../browser');
+const sessions = require('../session-store');
+const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
+const projects = require('../projects');
+const { isAuthError, detectReason, setAuthFailedFlag } = require('../auth-flag');
+const { recordUsage } = require('../usage-store');
 const {
   loadUserTokens,
   listConnectedServices,
   generateConnectLink,
-} = require('./user-tokens');
-const { initLog, readLog } = require('./requirements-log');
-const { readVacancyState, writeVacancyState } = require('./hh-vacancy');
-const persona = require('./persona');
-const profiles = require('./profiles');
-const answerRouter = require('./answer-router');
+} = require('../user-tokens');
+const { initLog, readLog } = require('../requirements-log');
+const { readVacancyState, writeVacancyState } = require('../hh-vacancy');
+const persona = require('../persona');
+const profiles = require('../profiles');
+const answerRouter = require('../answer-router');
 // Telegram send/edit + markdown-degradation ladder chokepoint live in
 // tg-stream.js (issue #942 P1.4). The module owns the format/send/edit
 // primitives; runner.js keeps orchestration (queueing, retries around them).
-const { TG_API, tgSend, tgEdit } = require('./runner/tg-stream');
+const { TG_API, tgSend, tgEdit } = require('./tg-stream');
 const {
   getQuickAnswer,
   verifyQuickAnswerIntent,
@@ -49,11 +49,11 @@ const {
   HH_ATS_EDITOR_INTENT,
   HH_REVIEW_PAGE_INTENT,
   ENGINE_SWITCH_INTENT,
-} = require('./runner/intent-engine');
+} = require('./intent-engine');
 
 // Engine execution (spawn + stream-json + timeout/close) lives in claude-runner.js
 // (issue #942 P1.3) so the process machinery is a self-contained testable unit.
-const { runEngineProcess, buildEngineCommand } = require('./runner/claude-runner');
+const { runEngineProcess, buildEngineCommand } = require('./claude-runner');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -220,7 +220,7 @@ const {
   setKeyCap,
   _acquireKeySlot,
   _releaseKeySlot,
-} = require('./runner-lanes');
+} = require('../runner-lanes');
 
 // Per-chat serialization (layer 1) + the global RAM-aware concurrency
 // semaphore (layer 3) live in src/runner/task-queue.js so admission logic is
@@ -231,7 +231,7 @@ const {
   _acquireSlot,
   _releaseSlot,
   _waitForRam,
-} = require('./runner/task-queue');
+} = require('./task-queue');
 
 // Active task timer state — allows Claude to extend its own session via MCP tool.
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
@@ -387,7 +387,7 @@ function runTask(opts) {
     const stopped = stopUserTask(username, chatId);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('./gtd-controller').clearGtdForChat(workDir, chatId); }
+      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
       catch (e) { console.warn('[runner] stop gtd clear:', e.message); }
     }
     const parts = [];
@@ -414,7 +414,7 @@ function runTask(opts) {
     stopUserTask(username, chatId);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('./gtd-controller').clearGtdForChat(workDir, chatId); }
+      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
       catch (e) { console.warn('[runner] gtd_stop clear:', e.message); }
     }
     const msg = gtdCancelled > 0
@@ -438,7 +438,7 @@ function runTask(opts) {
     if (!workDir) {
       msg = '📋 Нет активных чек-листов.';
     } else {
-      const openRecs = (() => { try { return require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+      const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
       if (!openRecs.length) {
         msg = '📋 Нет активных чек-листов.';
       } else {
@@ -528,7 +528,7 @@ function runTask(opts) {
     continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
-  const status = require('./admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
+  const status = require('../admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
   if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
@@ -685,7 +685,7 @@ function buildContextCard(username, workDir, chatId) {
   // GTD section: show when ≥1 open record exists
   if (workDir) {
     try {
-      const openRecs = require('./gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
+      const openRecs = require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
       if (openRecs.length === 1) {
         const r = openRecs[0];
         const preview = (r.originalTask || '').slice(0, 40);
@@ -1426,7 +1426,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
   const { ANTHROPIC_API_KEY: _stripped, ...cleanEnv } = process.env;
 
-  const basePromptFile = path.join(__dirname, 'agent-system-prompt.txt');
+  const basePromptFile = path.join(__dirname, '..', 'agent-system-prompt.txt');
   // Merge the user's per-profile persona into the system prompt (returns base file if none set).
   let systemPromptFile = persona.buildSystemPromptFile(user.workDir, basePromptFile);
   // Fold the bound project's PROFILE.md (domain rules) on top of the persona-merged prompt.
@@ -1685,7 +1685,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? formatOcFooter(opencodeUsage, opencodeBreakdown)
     : formatCostFooter(claudeUsage, claudeModel);
   const gtdFooter = (!internalGtd && !incomplete && user.workDir)
-    ? (() => { try { return require('./gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
+    ? (() => { try { return require('../gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
     : '';
   const final = (result + costFooter).slice(-MAX_MSG_LEN) + gtdFooter;
 
@@ -1795,7 +1795,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // Skip на внутренних GTD re-runs (no self-loop).
     if (!internalGtd) {
       try {
-        const gtd = require('./gtd-controller');
+        const gtd = require('../gtd-controller');
         const checklistArgs = {
           workDir: user.workDir, sessionId: activeSessionId, chatId,
           username: user.username, projectDir: user.cwd || null,

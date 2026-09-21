@@ -10,7 +10,7 @@ const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const serverSrc = read('src/server.js');
 
 test('no pause/drain gate or restart chatter survives in the runtime', () => {
-  for (const f of ['src/server.js', 'src/runner.js', 'src/admission-status.js']) {
+  for (const f of ['src/server.js', 'src/runner/index.js', 'src/admission-status.js']) {
     const src = read(f);
     for (const re of [/maintenance\.(paused|acquire|pause|request|beginRecovery)/, /После рестарта проверю актуальность/,
                       /Рестарт завершён/, /waitForIdle|currentExecution/]) {

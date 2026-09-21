@@ -6,9 +6,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "node --check src/server.js src/runner.js src/session-store.js src/secrets.js src/browser.js",
+    "check": "node --check src/server.js src/runner/index.js src/runner/intent-engine.js src/runner/claude-runner.js src/runner/task-queue.js src/runner/tg-stream.js src/session-store.js src/secrets.js src/browser.js",
     "test": "vitest run && npm run test:cjs",
-    "test:cjs": "node --test test/execution-owner-lock.test.cjs test/r2-media.test.cjs && node test/answer-router.test.cjs && node test/gtd-controller.test.cjs && node test/session-context-batch.test.cjs && node test/final-text-select.test.cjs && node test/oc-footer.test.cjs && node test/session-store-recency.test.cjs && node test/lane-granularity.test.cjs && node test/cap-per-profile.test.cjs && node test/per-chat-queue.test.cjs && node --test test/instant-restart.test.cjs test/admission-status.test.cjs test/intake-quick.test.cjs test/intake-media-retention.test.cjs && node --test test/deploy-nginx.test.cjs test/run-ingress.test.cjs && node test/claude-runner.smoke.test.cjs",
+    "test:cjs": "node --test test/execution-owner-lock.test.cjs test/r2-media.test.cjs && node test/answer-router.test.cjs && node test/gtd-controller.test.cjs && node test/session-context-batch.test.cjs && node test/final-text-select.test.cjs && node test/oc-footer.test.cjs && node test/session-store-recency.test.cjs && node test/lane-granularity.test.cjs && node test/cap-per-profile.test.cjs && node test/per-chat-queue.test.cjs && node --test test/instant-restart.test.cjs test/admission-status.test.cjs test/intake-quick.test.cjs test/intake-media-retention.test.cjs && node --test test/deploy-nginx.test.cjs test/run-ingress.test.cjs && node test/claude-runner.smoke.test.cjs && node test/runner-index-contract.test.cjs",
     "test:watch": "vitest",
     "test:staging": "node scripts/staging/run.mjs",
     "test:mainstream": "node src/mainstream-tester/index.js"

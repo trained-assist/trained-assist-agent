@@ -18,7 +18,7 @@ import { tmpdir, homedir } from 'os';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { getQuickAnswer } = require('../src/runner.js');
+const { getQuickAnswer } = require('../src/runner');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -391,7 +391,7 @@ describe('False positives — real tasks must reach Claude', () => {
 // We test the raw intent regexes exported for this purpose.
 
 describe('HH intents — vacancies', () => {
-  const { HH_MY_VACANCIES_INTENT } = require('../src/runner.js')._intents;
+  const { HH_MY_VACANCIES_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'мои вакансии',
@@ -413,7 +413,7 @@ describe('HH intents — vacancies', () => {
 });
 
 describe('HH intents — funnel stats', () => {
-  const { HH_FUNNEL_INTENT } = require('../src/runner.js')._intents;
+  const { HH_FUNNEL_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'сколько откликов',
@@ -433,7 +433,7 @@ describe('HH intents — funnel stats', () => {
 });
 
 describe('HH intents — new responses', () => {
-  const { HH_RESPONSES_INTENT } = require('../src/runner.js')._intents;
+  const { HH_RESPONSES_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'новые отклики',
@@ -454,7 +454,7 @@ describe('HH intents — new responses', () => {
 });
 
 describe('HH intents — ATS editor', () => {
-  const { HH_ATS_EDITOR_INTENT } = require('../src/runner.js')._intents;
+  const { HH_ATS_EDITOR_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'открой ats редактор',

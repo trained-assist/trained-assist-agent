@@ -141,7 +141,7 @@ beforeAll(async () => {
   process.env.CLAUDE_BIN = join(fakeBinDir, 'claude'); // explicit path, no PATH manipulation
   process.env.AGENT_TOKENS_ROOT = testTokensRoot;     // isolate from real ~/agent-tokens/
 
-  const mod = require('../src/runner.js');
+  const mod = require('../src/runner');
   runTask = mod.runTask;
   sessionStore = require('../src/session-store.js');
 });
