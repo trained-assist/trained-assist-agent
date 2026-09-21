@@ -221,10 +221,6 @@ function listSoftContinuations() {
 // The only gate is the global OOM guard (task-queue.js): MAX_CONCURRENT_TASKS
 // live `claude` processes + a soft free-RAM watchdog.
 //
-// Map<taskId, Promise> — in-flight registry used only by waitForIdle() (graceful
-// drain on restart) and getActiveTaskCount(). It never blocks or orders anything.
-const chatLanes = new Map();
-
 // Global RAM-aware concurrency semaphore (the OOM guard) lives in
 // src/runner/task-queue.js so admission logic is unit-testable.
 const {
@@ -561,13 +557,9 @@ function runTask(opts) {
     await status.finish(msg);
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
-  // chatLanes is now only an in-flight registry for waitForIdle() (graceful drain),
-  // keyed per task so parallel tasks never overwrite each other. It blocks nothing.
-  chatLanes.set(opts.taskId, current);
   current.finally(() => {
     // A task cut off by a restart keeps its journal entry: the next process resumes it.
     if (!restartShutdown) clearPendingTask(opts.taskId);
-    chatLanes.delete(opts.taskId);
   });
   // Await retries for callers, but never hold their predecessor lane/lease.
   return current.then(result => result?.queuedRetry || result);

@@ -14,7 +14,7 @@ function harness({ previous, run = async () => {} } = {}) {
   const start = source.indexOf('function runTask(opts) {');
   const end = source.indexOf('// Returns context card string', start);
   const messages = [], journal = new Map();
-  const lanes = new Map(previous ? [['s1', previous]] : []);
+  const lanes = new Map(previous ? [['s1', previous]] : []); // legacy shape; runner must ignore it
   const sandbox = {
     require: name => { assert.equal(name, '../admission-status'); return { createAdmissionStatus }; },
     recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
