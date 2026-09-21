@@ -4,7 +4,6 @@ const { hydrateResume, buildResumeText, resumeHash, RESUME_VERSION } = require('
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const http = require('http');
 const https = require('https');
 const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, loadBaseOverride } = require('../../hh-message-prompts');
 
@@ -30,7 +29,7 @@ function writeContext(skill, key, value) {
 
 // ── Token storage ──────────────────────────────────────────────────────────
 
-const { readHhToken: _readHhTokenUtil, hhTokenPath } = require('../../hh-utils');
+const { readHhToken: _readHhTokenUtil, hhTokenPath, hhFetch: hhGet, hhPost, hhPut } = require('../../hh-utils');
 
 function tokenBase() {
   return process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -91,63 +90,6 @@ function saveRejectionTemplate(userId, template) {
   fs.writeFileSync(file, template.trim(), { mode: 0o600 });
 }
 
-// ── HH API ─────────────────────────────────────────────────────────────────
-
-function hhRequest(method, apiPath, accessToken, body) {
-  return new Promise((resolve, reject) => {
-    const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
-    const u = new URL(base);
-    const lib = u.protocol === 'https:' ? https : http;
-    const bodyStr = body ? JSON.stringify(body) : undefined;
-    const options = {
-      hostname: u.hostname,
-      path: apiPath,
-      method,
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
-        ...(bodyStr
-          ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) }
-          : {}),
-      },
-    };
-    if (u.port) options.port = parseInt(u.port, 10);
-    const req = lib.request(options, (res) => {
-      let data = '';
-      res.on('data', c => (data += c));
-      res.on('end', () => {
-        if (res.statusCode === 204 || !data) {
-          resolve({ status: res.statusCode });
-          return;
-        }
-        if (res.statusCode >= 400) {
-          reject(new Error(`HH API ${res.statusCode}: ${data.slice(0, 300)}`));
-          return;
-        }
-        try { resolve(JSON.parse(data)); } catch { resolve({ raw: data }); }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(15_000, () => {
-      req.destroy(new Error(`HH API timeout after 15s: ${method} ${apiPath}`));
-    });
-    if (bodyStr) req.write(bodyStr);
-    req.end();
-  });
-}
-
-async function hhGet(apiPath, token) {
-  return hhRequest('GET', apiPath, token.access_token);
-}
-
-async function hhPost(apiPath, token, body) {
-  return hhRequest('POST', apiPath, token.access_token, body);
-}
-
-async function hhPut(apiPath, token) {
-  return hhRequest('PUT', apiPath, token.access_token);
-}
 
 // ── OpenRouter LLM ─────────────────────────────────────────────────────────
 
@@ -1382,7 +1324,7 @@ module.exports = {
         try {
           // HH uses PUT with state in body for most transitions
           const body = { state: { id: action } };
-          const result = await hhRequest('PUT', `/negotiations/${negotiation_id}`, token.access_token, body);
+          const result = await hhPut(`/negotiations/${negotiation_id}`, token, body);
           return { ok: true, negotiation_id, new_state: action };
         } catch (e) {
           return { error: e.message };

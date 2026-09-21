@@ -2,28 +2,27 @@
 # Install CI auto-fixer into a target GitHub repository.
 #
 # Usage:
-#   ./scripts/install-ci-fixer.sh <owner/repo> [--ci-workflow "CI Workflow Name"]
+#   ./scripts/install-ci-fixer.sh <owner/repo> [--ci-jobs "ci,staging-gate"]
 #
 # What it does:
 #   1. Clones the target repo to a temp dir
-#   2. Copies auto-fix-ci.yml, ci-fix-cleanup.yml, scripts/autofix-openrouter.mjs
-#   3. Adjusts the CI workflow trigger name if --ci-workflow is provided
+#   2. Adds autofix job to the CI workflow (calls trained-assist/pr-autofix@v1)
+#   3. Copies ci-fix-cleanup.yml
 #   4. Creates a branch + commit + PR in the target repo
 #
-# Required: gh CLI authenticated, OPENROUTER_API_KEY set as a repo secret (see output)
+# Required: gh CLI authenticated
+# Required secret in target repo: OPENROUTER_API_KEY (see output)
 
 set -euo pipefail
 
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_REPO="${1:-}"
-CI_WORKFLOW_NAME="CI"
+CI_JOBS="ci"   # comma-separated list of jobs that trigger autofix on failure
 
-# Parse --ci-workflow flag
 shift || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --ci-workflow)
-      CI_WORKFLOW_NAME="$2"
+    --ci-jobs)
+      CI_JOBS="$2"
       shift 2
       ;;
     *)
@@ -34,97 +33,134 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$TARGET_REPO" ]; then
-  echo "Usage: $0 <owner/repo> [--ci-workflow 'Workflow Name']"
+  echo "Usage: $0 <owner/repo> [--ci-jobs 'ci,staging-gate']"
   echo ""
   echo "Examples:"
-  echo "  $0 trained-assist/trained-assist-tg-bot --ci-workflow 'CI'"
-  echo "  $0 myorg/my-web-app --ci-workflow 'Build and Test'"
+  echo "  $0 myorg/my-web-app"
+  echo "  $0 myorg/my-web-app --ci-jobs 'ci,staging-gate'"
   exit 1
 fi
 
 echo "Installing CI auto-fixer into $TARGET_REPO"
-echo "  CI workflow to watch: \"$CI_WORKFLOW_NAME\""
+echo "  Jobs that trigger autofix: $CI_JOBS"
 echo ""
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Clone target repo
-echo "Cloning $TARGET_REPO..."
 gh repo clone "$TARGET_REPO" "$TMPDIR/repo" -- --depth=1 --quiet
-
 cd "$TMPDIR/repo"
 
-# Detect default branch
 DEFAULT_BRANCH=$(git symbolic-ref --short HEAD)
-echo "Default branch: $DEFAULT_BRANCH"
-
-# Create install branch
 INSTALL_BRANCH="ci-fixer/install-$(date +%s)"
 git checkout -b "$INSTALL_BRANCH"
+mkdir -p .github/workflows
 
-# Create .github/workflows/ if needed
-mkdir -p .github/workflows scripts
+# ── Build the needs array and condition ─────────────────────────────────────
+NEEDS_ARRAY=$(echo "$CI_JOBS" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | paste -sd ',' -)
+NEEDS_CONDITION=$(echo "$CI_JOBS" | tr ',' '\n' | sed "s/.*/needs['&'].result == 'failure'/" | paste -sd ' ||
+        ' -)
 
-# ── Copy and adapt auto-fix-ci.yml ──────────────────────────────────────────
-sed "s/workflows: \[\"CI + Deploy\"\]/workflows: [\"${CI_WORKFLOW_NAME}\"]/" \
-  "$SOURCE_DIR/.github/workflows/auto-fix-ci.yml" \
-  > .github/workflows/auto-fix-ci.yml
+# ── Append autofix job to the CI workflow ───────────────────────────────────
+# Find the main ci.yml (most common name, fall back to other names)
+CI_WORKFLOW=""
+for name in ci.yml CI.yml main.yml build.yml test.yml; do
+  if [ -f ".github/workflows/$name" ]; then
+    CI_WORKFLOW=".github/workflows/$name"
+    break
+  fi
+done
 
-# ── Copy ci-fix-cleanup.yml (identical for all repos) ────────────────────────
-cp "$SOURCE_DIR/.github/workflows/ci-fix-cleanup.yml" .github/workflows/ci-fix-cleanup.yml
+if [ -z "$CI_WORKFLOW" ]; then
+  echo "⚠️  Could not find a CI workflow file. Creating standalone autofix.yml..."
+  CI_WORKFLOW=".github/workflows/autofix.yml"
+  cat > "$CI_WORKFLOW" <<WORKFLOW
+name: PR Autofix
 
-# ── Copy the autofix script ──────────────────────────────────────────────────
-cp "$SOURCE_DIR/scripts/autofix-openrouter.mjs" scripts/autofix-openrouter.mjs
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+WORKFLOW
+fi
+
+# Check if autofix job already exists
+if grep -q "^  autofix:" "$CI_WORKFLOW"; then
+  echo "⚠️  autofix job already exists in $CI_WORKFLOW — skipping"
+else
+  cat >> "$CI_WORKFLOW" <<AUTOFIXJOB
+
+  autofix:
+    needs: [$NEEDS_ARRAY]
+    if: |
+      always() &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      (
+        $NEEDS_CONDITION
+      ) &&
+      !startsWith(github.head_ref, 'fix/ci-')
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: trained-assist/pr-autofix/.github/workflows/autofix-callable.yml@v1
+    with:
+      pr_number: \${{ github.event.pull_request.number }}
+      original_branch: \${{ github.head_ref }}
+      run_id: \${{ github.run_id }}
+    secrets:
+      openrouter_api_key: \${{ secrets.OPENROUTER_API_KEY }}
+      gh_token: \${{ secrets.AUTOFIX_PAT || github.token }}
+AUTOFIXJOB
+fi
+
+# ── Copy ci-fix-cleanup.yml ──────────────────────────────────────────────────
+curl -fsSL \
+  https://raw.githubusercontent.com/trained-assist/pr-autofix/main/templates/ci-fix-cleanup.yml \
+  -o .github/workflows/ci-fix-cleanup.yml
 
 # ── Commit and push ───────────────────────────────────────────────────────────
-git add .github/workflows/auto-fix-ci.yml \
-        .github/workflows/ci-fix-cleanup.yml \
-        scripts/autofix-openrouter.mjs
-
+git add .github/workflows/
 git -c user.name="CI Fixer Installer" \
     -c user.email="autofix@trained-assist.bot" \
-    commit -m "ci: add CI auto-fixer (auto-fix + new-PR flow)
+    commit -m "ci: add pr-autofix callable workflow
 
-Watches \"${CI_WORKFLOW_NAME}\" failures. On failure:
-- Diagnoses root cause via 3 free OpenRouter models
-- Creates fix/ci-* branch + PR (never touches the original branch)
-- Auto-merges fix PR when CI passes
-- Closes original PR automatically
+Uses trained-assist/pr-autofix@v1 (https://github.com/trained-assist/pr-autofix).
+On CI failure: diagnoses root cause, patches with free OpenRouter models,
+creates fix/ci-* branch + PR that auto-merges when CI passes.
 
-Requires OPENROUTER_API_KEY secret — see scripts/autofix-openrouter.mjs"
+Requires OPENROUTER_API_KEY secret in repo settings."
 
 git push origin "$INSTALL_BRANCH"
 
-# ── Create PR ────────────────────────────────────────────────────────────────
 PR_URL=$(gh pr create \
   --repo "$TARGET_REPO" \
   --base "$DEFAULT_BRANCH" \
   --head "$INSTALL_BRANCH" \
-  --title "ci: add CI auto-fixer" \
+  --title "ci: add pr-autofix callable workflow" \
   --body "$(cat <<'EOF'
 ## CI Auto-Fixer
 
-Adds automatic CI failure recovery using free OpenRouter models.
+Connects [trained-assist/pr-autofix](https://github.com/trained-assist/pr-autofix) as a reusable GitHub Action.
 
 ### How it works
 
-1. When CI fails on a PR, `auto-fix-ci.yml` triggers
-2. 3-stage OpenRouter pipeline (deepseek-r1 → gemini-flash-lite → qwen3) diagnoses and patches
-3. Creates a new `fix/ci-*` branch + PR — **never pushes to the original branch**
-4. Enables auto-merge on the fix PR
-5. Comments on the original PR with a link to the fix
-6. `ci-fix-cleanup.yml` closes the original PR after the fix PR merges
+1. CI fails on a PR → `autofix` job triggers
+2. Free OpenRouter models diagnose + patch the issue
+3. A `fix/ci-*` branch + PR is created — never touches the original branch
+4. The fix PR auto-merges when CI passes
+5. `ci-fix-cleanup.yml` closes the original PR after the fix merges
 
-### Race conditions handled
-- Original PR closed/merged before fix starts → abort
-- Fix PR already exists for this branch → skip (no duplicates)
-- Fix branch is itself a `fix/ci-*` → skip (no meta-loops)
+### Required: add one secret
 
-### Required secret
+**Settings → Secrets and variables → Actions → New repository secret**
 
-Add `OPENROUTER_API_KEY` to repo **Settings → Secrets → Actions**.
-Get a free key at https://openrouter.ai — the models used are all free tier.
+| Secret | Value |
+|--------|-------|
+| `OPENROUTER_API_KEY` | Free key from [openrouter.ai](https://openrouter.ai) |
+
+Optionally add `AUTOFIX_PAT` (Fine-Grained PAT with contents+pull_requests write) if your org restricts workflow write permissions.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
@@ -133,8 +169,7 @@ EOF
 echo ""
 echo "✅ Done! PR created: $PR_URL"
 echo ""
-echo "⚠️  One required step:"
+echo "⚠️  Required step:"
 echo "   Add OPENROUTER_API_KEY to $TARGET_REPO repo secrets:"
 echo "   https://github.com/$TARGET_REPO/settings/secrets/actions"
-echo ""
 echo "   Get a free key at: https://openrouter.ai"

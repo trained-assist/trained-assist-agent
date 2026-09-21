@@ -331,15 +331,13 @@ describe('hhStatus — HH token expiry awareness', () => {
 });
 
 describe('HH_DISCONNECT_INTENT regex — /hh_disconnect + natural-language matches', () => {
-  // The regex lives in src/runner.js, not hh-quick.js, so we read the source
-  // and exec the const declaration. Keeps the test in sync with the regex
-  // without pulling in the whole runner module (heavy side-effects on require).
-  const runnerSrc = require('fs').readFileSync(
-    require('path').join(__dirname, '../../src/runner.js'),
-    'utf8'
-  );
-  const m = runnerSrc.match(/const HH_DISCONNECT_INTENT\s*=\s*(\/[^;]+\/[gimsuy]*);/);
-  if (!m) throw new Error('HH_DISCONNECT_INTENT not found in runner.js — update this test');
+  // The regex may live in src/runner.js or src/intent-engine.js depending on refactor stage.
+  const fs = require('fs'), path = require('path');
+  const src = ['src/runner.js', 'src/intent-engine.js']
+    .map(f => { try { return fs.readFileSync(path.join(__dirname, '../..', f), 'utf8'); } catch { return ''; } })
+    .join('\n');
+  const m = src.match(/const HH_DISCONNECT_INTENT\s*=\s*(\/[^;]+\/[gimsuy]*);/);
+  if (!m) throw new Error('HH_DISCONNECT_INTENT not found in runner.js or intent-engine.js — update this test');
   const HH_DISCONNECT_INTENT = new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), m[1].slice(m[1].lastIndexOf('/') + 1));
 
   it('slash /hh_disconnect matches', () => {
