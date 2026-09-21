@@ -50,10 +50,11 @@
 - [ ] Пилот №1 (vacancy → ideal candidate profile) и №2 (candidate deep
       analysis) — отдельные тулы поверх того же `hermesRun`, только после того
       как пилот №3 подтвердит качество/цену.
-- [ ] Смержить PR, задеплоить (MCP-сервер, обычный рестарт assist-agent —
-      аддитивное изменение, существующие тулы не трогает).
+- [x] Смержить PR #1035, задеплоить — смерджен в `main` (`dfb750e`), сервис
+      перезапущен, `hermes_run`/`hermes_candidate_report` подтверждены живыми
+      в MCP-тулсете (2026-09-21).
 
-## Phase 2 — общий слой знаний (IN PROGRESS)
+## Phase 2 — общий слой знаний (PR #1036 MERGED+LIVE)
 
 - [x] Добавить `projects/<id>/agent-project-notes.md` в `src/projects.js`
       (`notesPath`/`notesText`, не сеется при создании проекта — как и
@@ -65,8 +66,14 @@
       верно и для codex/opencode: инъекция — это простой текст промпта
       (`baseContext`, до ветвления по движку), а запись — обычный
       Write/Edit-тул файла, не MCP. Для ЭТОГО слоя знаний MCP не нужен.
-- [ ] Явно зафиксировать: встроенная память Claude Code — disposable cache,
-      не source of truth (уже решено в `hermes-training-storage-architecture`).
+- [x] Смержить PR #1036, задеплоить — смерджен в `main` (`2370839`), сервис
+      перезапущен 2026-09-21, `src/projects.js`/`src/runner/index.js` на
+      диске идентичны репо (сверено `diff`).
+- [x] Явно зафиксировать: встроенная память Claude Code — disposable cache,
+      не source of truth. Зафиксировано выше в этом же чеклисте и в
+      `hermes-training-storage-architecture` — намеренно НЕ подключаем Hermes
+      к ней, только к файловым слоям (`agent-notes.md`/`agent-project-notes.md`/
+      `PROFILE.md`), которые видны claude/codex/opencode одинаково.
 - [ ] Отдельный, более крупный техдолг (НЕ блокирует Hermes): `claude-runner.js`
       передаёт `--mcp-config` только на claude-ветке — `agent_store_artifact`
       и другие MCP-тулы недоступны на codex/opencode. Не трогали в этом PR
