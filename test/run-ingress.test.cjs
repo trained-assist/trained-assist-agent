@@ -2,6 +2,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const vm=require('node:vm');
 const {atomicJson}=require('../src/atomic-json');
+const profiles=require('../src/profiles');
 function fixture(t) {
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'run-ingress-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const source=fs.readFileSync(require.resolve('../src/server'),'utf8');
@@ -9,7 +10,7 @@ function fixture(t) {
  const end=source.indexOf('    // POST /action',start);
  const runs=[];const pending=new Map();
  const sandbox={fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
-  isValidProjectId:()=>true,trackChat:()=>{},getPendingTasks:()=>[...pending.values()],atomicJson,
+  isValidProjectId:()=>true,trackChat:()=>{},getPendingTasks:()=>[...pending.values()],atomicJson,profiles,
   readBody:async req=>JSON.stringify(req.body),json:(res,status,data)=>Object.assign(res,{status,data}),
   runTask:opts=>{pending.set(opts.taskId,opts);runs.push(opts);return Promise.resolve();},
  };
