@@ -1,6 +1,5 @@
 const { atomicJson } = require('./atomic-json');
 let restartShutdown = false;
-const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -48,6 +47,10 @@ const {
   HH_REVIEW_PAGE_INTENT,
   ENGINE_SWITCH_INTENT,
 } = require('./runner/intent-engine');
+
+// Engine execution (spawn + stream-json + timeout/close) lives in claude-runner.js
+// (issue #942 P1.3) so the process machinery is a self-contained testable unit.
+const { runEngineProcess, buildEngineCommand } = require('./runner/claude-runner');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -103,22 +106,6 @@ function formatOcFooter(usage, breakdown) {
   parts.push(`~${costStr}`);
   const m = model ? ` ${model}` : '';
   return `\n\nИспользование${m}: ${parts.join(' · ')}`;
-}
-
-// Reads opencode.json and returns agent-name -> shortened model-id map (for footer breakdown).
-function readOcAgentModels() {
-  try {
-    const cfgPath = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
-    if (!fs.existsSync(cfgPath)) return {};
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-    const shorten = m => (m || '').replace(/^openrouter\//, '').replace(/^gigachat\//, '');
-    const defaultModel = shorten(cfg.model);
-    const result = { _default: defaultModel };
-    for (const [name, agent] of Object.entries(cfg.agent || {})) {
-      result[name] = shorten(agent.model || cfg.model);
-    }
-    return result;
-  } catch { return {}; }
 }
 
 // Pick the text shown to the user. Prefer Claude's clean result-event string; otherwise
@@ -1419,7 +1406,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     console.warn('[%s] prompt too large (%d chars), truncating to %d', taskId, prompt.length, MAX_PROMPT_CHARS);
     prompt = prompt.slice(0, MAX_PROMPT_CHARS) + '\n...[промпт обрезан из-за размера]';
   }
-  const fullOutput = { text: '' };
 
   const sessionFilePath = activeSessionId
     ? path.join(user.workDir, 'sessions', `${activeSessionId}.json`)
@@ -1489,424 +1475,78 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     : systemPromptText;
 
   const opencodeModel = process.env.OPENCODE_MODEL || null;
-  const [engineBin, engineArgs] = engine === 'codex'
-    ? [process.env.CODEX_BIN || 'codex', [
-        'exec',
-        '--json',
-        '--skip-git-repo-check',
-        '--dangerously-bypass-approvals-and-sandbox',
-        '-C', user.cwd || user.workDir,
-        systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
-      ]]
-    : engine === 'opencode'
-    ? [process.env.OPENCODE_BIN || 'opencode', [
-        'run',
-        '--format', 'json',
-        '--auto',
-        ...(opencodeModel ? ['-m', opencodeModel] : []),
-        ocSystemPrompt ? `${ocSystemPrompt}\n\n${prompt}` : prompt,
-      ]]
-    : [process.env.CLAUDE_BIN || 'claude', [
-        '--dangerously-skip-permissions',
-        '--output-format', 'stream-json',
-        '--verbose',
-        '--mcp-config', mcpConfig,
-        ...(systemPromptFile && fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
-        '--print', prompt,
-      ]];
-
-  const proc = spawn(engineBin, engineArgs, {
-    cwd: user.cwd || user.workDir,
-    env: {
-      ...cleanEnv,
-      ...userTokens,
-      AGENT_USER_ID: String(user.username),
-      AGENT_CHAT_ID: String(chatId),
-      ...(secrets.BOT_TOKEN      ? { AGENT_BOT_TOKEN:    secrets.BOT_TOKEN }      : {}),
-      ...(secrets.DEEPGRAM_API_KEY ? { DEEPGRAM_API_KEY: secrets.DEEPGRAM_API_KEY } : {}),
-      ...(secrets.OPENAI_API_KEY ? { OPENAI_API_KEY:     secrets.OPENAI_API_KEY } : {}),
-      ...(secrets.FAL_KEY        ? { FAL_KEY:            secrets.FAL_KEY }        : {}),
-      ...(secrets.IDEOGRAM_API_KEY ? { IDEOGRAM_API_KEY: secrets.IDEOGRAM_API_KEY } : {}),
-      ...(secrets.RECRAFT_API_KEY  ? { RECRAFT_API_KEY:  secrets.RECRAFT_API_KEY }  : {}),
-      ...(secrets.CF_API_TOKEN     ? { CLOUDFLARE_API_TOKEN: secrets.CF_API_TOKEN } : {}),
-      ...(user.name     ? { AGENT_USER_NAME: user.name }         : {}),
-      ...(user.username ? { AGENT_USER_HANDLE: user.username }   : {}),
-      ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
-      AGENT_TASK_ID: taskId,
-      CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
-    },
-    // codex exec and opencode run both block on open stdin — close it explicitly.
-    // claude doesn't read stdin in --print mode.
-    // opencode waits 3s for stdin data before proceeding — use 'pipe' + immediate .end()
-    // so it sees EOF instantly rather than waiting the full 3-second timeout.
-    ...(engine === 'codex' || engine === 'opencode' ? { stdio: ['pipe', 'pipe', 'pipe'] } : {}),
+  const [engineBin, engineArgs] = buildEngineCommand({
+    engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel,
+    mcpConfig, systemPromptFile, user,
   });
-  if (engine === 'codex' || engine === 'opencode') proc.stdin.end();
 
-  let streamTimer = null;
-  let heartbeatTimer = null;
-  let typingTimer = null;   // periodic sendChatAction: typing during active streaming
-  let outputStarted = false;
-  let lastSent = '';
-  let lineBuffer = '';
-  let claudeResult = null;  // text from result event
-  let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
-  let terminalSuccess = false; // explicit engine completion, never inferred from narration
-  let processSignal = null;
-  let processError = null;
-  let claudeUsage = null;   // usage from result event (Claude Code / Codex)
-  let opencodeUsage = null; // accumulated totals from step_finish events (OpenCode)
-  let opencodeBreakdown = []; // per-agent steps: [{agent, model, input, output, cacheRead, cacheWrite, cost}]
-  let currentOcAgent = null; // last 'agent' event name, to label the next step_finish
-  let ocAgentModels = {}; // lazily loaded from opencode.json
-  let claudeModel = null;   // model name from assistant event
-  let lastActivity = '';     // last tool name/cmd for heartbeat
-  let exitCode = 0;
-  let codexErrorMsg = null;  // last turn.failed / error message from codex/opencode
-  let lastOutputAt = Date.now(); // updated on any raw stdout data for inactivity detection
-  let inactivityKill = false;   // true when killed due to silence, not 40-min timeout
-  let inactivityCheckTimer = null;
+  // Engine execution (spawn + stream-json + timeout/close) lives in
+  // claude-runner.js (issue #942 P1.3). The module owns the process lifecycle
+  // and the progress edits; this block interprets its result: on timeout →
+  // auto-continuation (needs runTask recursion, so it stays in the runner),
+  // otherwise the post-processing below (retry, incomplete detection, usage).
+  const engineResult = await runEngineProcess({
+    engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
+    cleanEnv, userTokens, sessionFilePath,
+    restartShutdown: () => restartShutdown,
+    activeTimers, tgEdit, tgSend, outputCallback,
+    engineBin, engineArgs,
+    cwd: user.cwd || user.workDir,
+  });
+  const {
+    fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
+    claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
+    lastActivity, exitCode, processSignal, processError, timedOut,
+    inactivityKill, outputPersistenceError, codexErrorMsg, sessionState,
+  } = engineResult;
 
-  // Drain in-flight progress edits before posting a terminal message.
-  const progressEdits = new Set();
-  let progressStopped = false;
-  function progressEdit(...args) {
-    if (progressStopped) return Promise.resolve();
-    const pending = tgEdit(...args).catch(() => {});
-    progressEdits.add(pending);
-    pending.finally(() => progressEdits.delete(pending));
-    return pending;
-  }
-  async function stopProgress() {
-    progressStopped = true;
-    clearInterval(streamTimer);
-    clearInterval(heartbeatTimer);
-    clearInterval(typingTimer); typingTimer = null;
-    clearInterval(inactivityCheckTimer); inactivityCheckTimer = null;
-    await Promise.allSettled([...progressEdits]);
-  }
+  // Timeout / inactivity kill → durable partial + auto-continuation.
+  if (timedOut) {
+    const nextCount = continuationCount + 1;
+    const partialText = fullOutput.text.trim();
+    // Durable record keeps the full progress; the Telegram summary shows only
+    // the last coherent turn so scratchpad narration never leaks to the user.
+    const partialDisplay = pickFinalText(null, lastAssistantMsg, partialText);
 
-  // Heartbeat: show elapsed seconds while Claude hasn't produced output yet
-  let stopButtonShown = false;
-  if (msgId) {
-    heartbeatTimer = setInterval(async () => {
-      if (outputStarted) return;
-      const secs = Math.round((Date.now() - thinkingStart) / 1000);
-      const label = lastActivity || 'Думаю…';
-      const extra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
-        ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
-        : {};
-      await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, extra).catch(() => {});
-    }, HEARTBEAT_INTERVAL_MS);
-  }
-
-  function scheduleStream() {
-    if (streamTimer || progressStopped) return;
-    outputStarted = true;
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-    // sendChatAction: typing every 4s — keeps "typing..." indicator alive in Telegram
-    // (indicator expires after ~5s, so refresh before it disappears)
-    if (msgId && !typingTimer) {
-      const sendTyping = () => fetch(`${TG_API}/bot${BOT_TOKEN}/sendChatAction`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-        signal: AbortSignal.timeout(5_000),
-      }).catch(() => {});
-      sendTyping();
-      typingTimer = setInterval(sendTyping, 4_000);
+    // Save partial progress so the next run sees what was done
+    if (activeSessionId && partialText) {
+      sessions.appendReply(user.workDir, activeSessionId, `[${inactivityKill ? 'прервано: молчал 5 мин' : 'прервано таймаутом'}]\n${partialText}`);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId);
     }
-    let streamEditInProgress = false;
-    streamTimer = setInterval(async () => {
-      if (streamEditInProgress) return;
-      streamEditInProgress = true;
-      try {
-        const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
-        const secs = Math.round((Date.now() - thinkingStart) / 1000);
-        const stopExtra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
-          ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
-          : {};
-        if (snippet) {
-          // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
-          const silentMins = Math.round((Date.now() - lastOutputAt) / 60000);
-          const silentSuffix = silentMins >= 1 ? ` — молчит ${silentMins}мин` : '';
-          const activitySuffix = lastActivity ? `\n\n⚡ ${lastActivity} (${secs}с)${silentSuffix}` : `\n\n⚡ Пишу… (${secs}с)${silentSuffix}`;
-          const newText = `🧠 ${snippet}${activitySuffix}`;
-          if (newText === lastSent && !stopExtra.reply_markup) return;
-          lastSent = newText;
-          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
-        } else {
-          // No text yet (e.g. Claude running tools) — show activity + elapsed
-          const label = lastActivity || 'Думаю…';
-          const newText = `🧠 ${label} (${secs}с)`;
-          if (newText === lastSent && !stopExtra.reply_markup) return;
-          lastSent = newText;
-          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
-        }
-      } finally {
-        streamEditInProgress = false;
-      }
-    }, STREAM_INTERVAL_MS);
-  }
 
-  let firstJsonEventSeen = false;
-  let outputPersistenceError = null;
-  proc.stdout.setEncoding('utf8'); // preserve Cyrillic split across byte chunks
-  function consumeOutput(chunk, flush = false) {
-    lineBuffer += chunk;
-    const lines = lineBuffer.split('\n');
-    lineBuffer = lines.pop(); // keep trailing incomplete line
-    if (flush && lineBuffer) { lines.push(lineBuffer); lineBuffer = ''; }
+    if (continuationCount < MAX_CONTINUATIONS) {
+      const statusLine = inactivityKill
+        ? `⏱ Молчал 5 мин — перезапускаю (${nextCount}/${MAX_CONTINUATIONS})...`
+        : `⏱ Прервал по 40-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
+      const tgMsg = partialDisplay.length > 20
+        ? `🧠 ${partialDisplay.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
+        : statusLine;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
+      else await tgSend(BOT_TOKEN, chatId, tgMsg);
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const event = JSON.parse(line);
-        firstJsonEventSeen = true;
-        if (engine === 'opencode') {
-          if (event.type === 'text' && typeof event.part?.text === 'string') {
-            fullOutput.text += event.part.text;
-            lastAssistantMsg = fullOutput.text;
-            scheduleStream();
-          } else if (event.type === 'agent') {
-            // Track which agent is about to run so we can label its step_finish
-            currentOcAgent = event.part?.name || null;
-          } else if (event.type === 'step_finish') {
-            terminalSuccess = true;
-            claudeResult = fullOutput.text.trim() || null;
-            const usage = event.part?.tokens;
-            if (usage) {
-              if (!ocAgentModels || !Object.keys(ocAgentModels).length) ocAgentModels = readOcAgentModels();
-              const agentModel = ocAgentModels[currentOcAgent] || ocAgentModels._default || null;
-              const stepIn = usage.input || 0;
-              const stepOut = usage.output || 0;
-              const stepCR = usage.cache?.read || 0;
-              const stepCW = usage.cache?.write || 0;
-              const stepCost = event.part.cost || 0;
-              opencodeBreakdown.push({ agent: currentOcAgent || 'run', model: agentModel, input: stepIn, output: stepOut, cacheRead: stepCR, cacheWrite: stepCW, cost: stepCost });
-              if (!opencodeUsage) opencodeUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-              opencodeUsage.input += stepIn; opencodeUsage.output += stepOut;
-              opencodeUsage.cacheRead += stepCR; opencodeUsage.cacheWrite += stepCW;
-              opencodeUsage.cost += stepCost;
-              console.log(`[${taskId}] opencode step[${currentOcAgent}/${agentModel}]: in=${stepIn} out=${stepOut} cR=${stepCR} cW=${stepCW} cost=${stepCost}`);
-            }
-          } else if (event.type === 'error') {
-            const errMsg = event.error?.data?.message || event.error?.message || JSON.stringify(event.error);
-            console.warn(`[${taskId}] opencode error event:`, errMsg);
-            codexErrorMsg = errMsg;
-            const isRateLimit = /429|rate.?limit|too many requests/i.test(errMsg);
-            const userErrMsg = isRateLimit
-              ? `⚠️ OpenCode: превышен лимит запросов к модели. Переключись на Claude: /switch2klod`
-              : `❌ OpenCode ошибка: ${errMsg}`;
-            fullOutput.text += `\n${userErrMsg}`;
-            lastAssistantMsg = fullOutput.text.trim();
-            scheduleStream();
-          }
-          continue;
-        }
-        if (engine === 'codex') {
-          if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
-            fullOutput.text += event.item.text;
-            lastAssistantMsg = event.item.text;
-            // A message alone is not proof that the turn completed.
-            if (outputCallback) try { outputCallback(event.item.text); } catch {}
-            scheduleStream();
-          } else if (event.type === 'item.started' && event.item?.type === 'command_execution') {
-            lastAssistantMsg = '';
-            lastActivity = formatToolActivity('Bash', { command: event.item.command });
-            if (!outputStarted && msgId) {
-              const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
-            }
-          } else if (event.type === 'turn.completed') {
-            terminalSuccess = true;
-            claudeResult = lastAssistantMsg;
-            claudeUsage = event.usage || null;
-            if (claudeUsage) {
-              console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cached_input_tokens || 0} cache_write=${claudeUsage.cache_write_input_tokens || 0}`);
-            }
-          } else if (event.type === 'turn.failed' || event.type === 'error') {
-            console.warn(`[${taskId}] codex ${event.type}:`, JSON.stringify(event).slice(0, 500));
-            codexErrorMsg = event.error?.message || event.message || codexErrorMsg;
-          }
-          continue;
-        }
-        if (event.type === 'result') {
-          terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
-          claudeResult = typeof event.result === 'string' ? event.result : null;
-          claudeUsage = event.usage || null;
-          if (claudeUsage) {
-            console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
-          }
-        } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
-          if (event.message?.model && !claudeModel) claudeModel = event.message.model;
-          let turnText = '';
-          for (const block of event.message.content) {
-            if (block.type === 'text') {
-              fullOutput.text += block.text;
-              turnText += block.text;
-              if (outputCallback) try { outputCallback(block.text); } catch {}
-            } else if (block.type === 'tool_use') {
-              lastActivity = formatToolActivity(block.name, block.input);
-              if (!outputStarted && msgId) {
-                const secs = Math.round((Date.now() - thinkingStart) / 1000);
-                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
-              }
-            }
-          }
-          // Only treat as a final-answer candidate if the turn has no tool calls.
-          // Text + tool_use in the same event = narration ("Смотрю X:"), not a conclusion.
-          const turnHasTool = event.message.content.some(b => b.type === 'tool_use');
-          // Claude emits text and tool blocks separately, with stop_reason=tool_use
-          // even on the text-only event. A later tool event also invalidates old text.
-          if (turnHasTool || event.message.stop_reason === 'tool_use') lastAssistantMsg = '';
-          else if (turnText.trim() && event.message.stop_reason === 'end_turn') lastAssistantMsg = turnText;
-          scheduleStream();
-        }
-      } catch (error) {
-        if (!(error instanceof SyntaxError)) {
-          outputPersistenceError = error;
-          try { proc.kill('SIGTERM'); } catch {}
-          continue;
-        }
-        if (!firstJsonEventSeen) {
-          console.warn(`[${taskId}] pre-JSON stdout:`, line);
-          continue;
-        }
-        // Non-JSON line after stream started — treat as plain text
-        fullOutput.text += line + '\n';
-        scheduleStream();
-      }
-    }
-  }
-  proc.stdout.on('data', chunk => { lastOutputAt = Date.now(); consumeOutput(chunk); });
-  proc.stdout.on('end', () => consumeOutput('', true));
-
-  proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
-
-  let timedOut = false;
-  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId };
-  activeTimers.set(taskId, sessionState);
-  try {
-    await new Promise((resolve, reject) => {
-      // 38 min: graceful SIGTERM + warn user. Claude Code handles SIGTERM by finishing current step and exiting.
-      // timedOut is set here so that if Claude exits voluntarily after SIGTERM, the close handler still
-      // triggers auto-continuation (not just when SIGKILL fires at 40 min).
-      const warnTimer = setTimeout(() => {
-        timedOut = true;
-        console.log(`[${taskId}] timeout warning — sending SIGTERM, 2 min left`);
-        try { proc.kill('SIGTERM'); } catch {}
-        const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
-        const engineLabel = engine === 'codex' ? 'Кодекс' : engine === 'opencode' ? 'OpenCode' : 'Клод';
-        tgSend(BOT_TOKEN, chatId,
-          `⚠️ ${engineLabel} работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
-          `Получил сигнал завершить текущий шаг и вывести итоги.`
-        ).catch(() => {});
-      }, WARN_TIMEOUT_MS);
-
-      // 40 min: hard kill (SIGTERM already sent at 38 min, SIGKILL now)
-      sessionState.killFn = () => {
-        timedOut = true;
-        clearTimeout(warnTimer);
-        try { proc.kill('SIGKILL'); } catch (e) { console.warn('[runner] SIGKILL:', e.message); }
-        reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
-      };
-      sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
-
-      // Inactivity check: if no stdout for 5 min, kill + auto-restart (works for all engines).
-      // Checked every 30s; lastOutputAt updated on any raw stdout chunk before JSON parsing.
-      inactivityCheckTimer = setInterval(() => {
-        if (timedOut || sessionState.userStopped) return;
-        const silentMs = Date.now() - lastOutputAt;
-        if (silentMs >= INACTIVITY_TIMEOUT_MS) {
-          clearInterval(inactivityCheckTimer); inactivityCheckTimer = null;
-          inactivityKill = true;
-          timedOut = true;
-          const silentMins = Math.round(silentMs / 60000);
-          console.warn(`[${taskId}] inactivity: no stdout for ${silentMins}min — SIGTERM`);
-          try { proc.kill('SIGTERM'); } catch {}
-          reject(new Error(`inactivity timeout: no output for ${silentMins}min`));
-        }
-      }, 30_000);
-
-      proc.on('close', (code, signal) => {
-        processSignal = signal;
-        clearTimeout(sessionState.killTimer);
-        clearTimeout(warnTimer);
-        clearInterval(inactivityCheckTimer); inactivityCheckTimer = null;
-        if (code !== null && code !== 0) {
-          console.error(`[${taskId}] claude exited with code ${code}`);
-          exitCode = code;
-        }
-        // If SIGTERM already fired (timedOut=true), reject so the catch block runs auto-continuation
-        if (timedOut && !restartShutdown) {
-          reject(new Error(`claude exited after SIGTERM (code ${code})`));
-        } else {
-          resolve(code);
-        }
+      const continuationTask = inactivityKill
+        ? `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Процесс завис (молчал 5 мин без вывода) и был перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`
+        : `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
+      runTask({
+        taskId: `${user.username}-${Date.now()}`,
+        user,
+        task: continuationTask, initiatedAt, threadId,
+        context: '',
+        sessionId: activeSessionId,
+        forceClaude: true,
+        initialMsgId: msgId,
+        pinnedMsgId,
+        secrets,
+        continuationCount: nextCount, mode, projectId, internalGtd, engine,
       });
-      proc.on('error', (err) => {
-        clearTimeout(sessionState.killTimer);
-        clearTimeout(warnTimer);
-        reject(err);
-      });
-    });
-  } catch (err) {
-    processError = err.message;
-    await stopProgress();
-    console.error(`[${taskId}] claude process error:`, err.message);
-    if (timedOut) {
-      const nextCount = continuationCount + 1;
-      const partialText = fullOutput.text.trim();
-      // Durable record keeps the full progress; the Telegram summary shows only the last
-      // coherent turn so the scratchpad narration never leaks to the user.
-      const partialDisplay = pickFinalText(null, lastAssistantMsg, partialText);
-
-      // Save partial progress so the next run sees what was done
-      if (activeSessionId && partialText) {
-        sessions.appendReply(user.workDir, activeSessionId, `[${inactivityKill ? 'прервано: молчал 5 мин' : 'прервано таймаутом'}]\n${partialText}`);
-        setCurrentSessionId(user.workDir, activeSessionId, chatId);
-      }
-
-      if (continuationCount < MAX_CONTINUATIONS) {
-        const statusLine = inactivityKill
-          ? `⏱ Молчал 5 мин — перезапускаю (${nextCount}/${MAX_CONTINUATIONS})...`
-          : `⏱ Прервал по 40-мин. таймауту, автоматически продолжаю (${nextCount}/${MAX_CONTINUATIONS})...`;
-        const tgMsg = partialDisplay.length > 20
-          ? `🧠 ${partialDisplay.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
-          : statusLine;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
-        else await tgSend(BOT_TOKEN, chatId, tgMsg);
-
-        const continuationTask = inactivityKill
-          ? `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Процесс завис (молчал 5 мин без вывода) и был перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`
-          : `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
-        runTask({
-          taskId: `${user.username}-${Date.now()}`,
-          user,
-          task: continuationTask, initiatedAt, threadId,
-          context: '',
-          sessionId: activeSessionId,
-          forceClaude: true,
-          initialMsgId: msgId,
-          pinnedMsgId,
-          secrets,
-          continuationCount: nextCount, mode, projectId, internalGtd, engine,
-        });
-      } else {
-        const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
-        else await tgSend(BOT_TOKEN, chatId, limitMsg);
-      }
-      clearInterval(streamTimer);
-      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-      activeTimers.delete(taskId);
-      return;
+    } else {
+      const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
+      else await tgSend(BOT_TOKEN, chatId, limitMsg);
     }
-  } finally {
-    activeTimers.delete(taskId);
-    await stopProgress();
-    heartbeatTimer = null;
+    return;
   }
+
 
   if (outputPersistenceError) throw outputPersistenceError;
   if (sessionState.restartInterrupted) {
@@ -2180,39 +1820,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   return result;
 }
 
-
-function formatToolActivity(name, input = {}) {
-  switch (name) {
-    case 'Bash': {
-      const cmd = (input.command || '').trim().replace(/\n/g, ' ').slice(0, 80);
-      return `💻 ${cmd}`;
-    }
-    case 'Read':
-      return `📖 Читаю ${(input.file_path || '').replace(/^.*\//, '').slice(0, 60)}`;
-    case 'Write':
-      return `✍️ Пишу ${(input.file_path || '').replace(/^.*\//, '').slice(0, 60)}`;
-    case 'Edit':
-      return `✏️ Редактирую ${(input.file_path || '').replace(/^.*\//, '').slice(0, 60)}`;
-    case 'WebFetch':
-      return `🌐 ${(input.url || '').slice(0, 60)}`;
-    case 'WebSearch':
-      return `🔍 ${(input.query || '').slice(0, 60)}`;
-    case 'Agent':
-      return `🤖 Запускаю агента…`;
-    default: {
-      // MCP tool names: strip "mcp__<server>__" prefix for display
-      const shortName = name.replace(/^mcp__[^_]+__/, '');
-      switch (shortName) {
-        case 'illustrate_generate':  return `🎨 Генерирую иллюстрацию…`;
-        case 'illustrate_refine':    return `🎨 Дорабатываю иллюстрацию…`;
-        case 'illustrate_preview_prompt': return `🖊 Готовлю промпт…`;
-        case 'image_label':          return `🏷 Добавляю подписи на изображение…`;
-        case 'image_label_adjust':   return `🏷 Корректирую подписи…`;
-        default:                     return `🔧 ${shortName}`;
-      }
-    }
-  }
-}
 
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 

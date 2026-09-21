@@ -1,0 +1,86 @@
+'use strict';
+// V2 smoke for issue #942 P1.3 (claude-runner extraction).
+// (1) End-to-end: a fake engine binary emits stream-json → module must stream
+//     and return terminalSuccess=true + claudeResult.
+// (2) Crash: fake engine exits 1 quickly with no JSON → module must NOT hang,
+//     return exitCode!=0, no throw.
+// (3) Inactivity/timeout machinery present.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawn } = require('node:child_process');
+const { runEngineProcess, buildEngineCommand } = require('../src/runner/claude-runner');
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-'));
+
+function writeFake(binPath, script) {
+  fs.writeFileSync(binPath, script);
+  fs.chmodSync(binPath, 0o755);
+}
+
+const okBin = path.join(tmp, 'fake-claude-ok');
+writeFake(okBin, `#!/usr/bin/env sh
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Привет"}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":" мир"}]}}'
+echo '{"type":"result","result":"Привет мир","usage":{"input_tokens":10,"output_tokens":5}}'
+`);
+
+const crashBin = path.join(tmp, 'fake-claude-crash');
+writeFake(crashBin, `#!/usr/bin/env sh
+echo "boom" >&2
+exit 1
+`);
+
+const baseOpts = {
+  engine: 'claude', taskId: 't-smoke', chatId: '42', thinkingStart: Date.now(),
+  msgId: null, BOT_TOKEN: 'tok', secrets: { BOT_TOKEN: 'tok' },
+  user: { username: 'smoke', workDir: tmp, name: 'Smoke' },
+  cleanEnv: { PATH: process.env.PATH }, userTokens: {}, sessionFilePath: '',
+  restartShutdown: () => false,
+  activeTimers: new Map(),
+  tgEdit: async () => ({ ok: true }), tgSend: async () => ({ ok: true }),
+  outputCallback: null,
+  engineBin: okBin, engineArgs: ['--print', 'test'], cwd: tmp,
+};
+
+(async () => {
+  // (1) happy path
+  let streamed = '';
+  const r1 = await runEngineProcess({ ...baseOpts, outputCallback: (t) => { streamed += t; } });
+  assert.equal(r1.terminalSuccess, true, 'terminalSuccess on result event');
+  assert.equal(r1.claudeResult, 'Привет мир');
+  assert.equal(r1.exitCode, 0);
+  assert.equal(r1.processError, null);
+  assert.equal(r1.timedOut, false);
+  assert.equal(r1.sessionState.userStopped, false);
+  assert.ok(r1.claudeUsage && r1.claudeUsage.input_tokens === 10, 'usage captured');
+  assert.ok(streamed.includes('Привет'), 'outputCallback streamed text');
+  assert.ok(r1.fullOutput.text.includes('Привет мир'), 'fullOutput accumulated');
+
+  // (2) crash — no hang, exitCode set, no throw
+  const started = Date.now();
+  const r2 = await runEngineProcess({ ...baseOpts, engineBin: crashBin });
+  const elapsed = Date.now() - started;
+  assert.notEqual(r2.exitCode, 0, 'crash exit code non-zero');
+  assert.equal(r2.terminalSuccess, false);
+  assert.equal(r2.timedOut, false);
+  assert.ok(elapsed < 5000, `crash returns promptly (${elapsed}ms)`);
+  assert.equal(r2.fullOutput.text.trim(), '', 'no streamed text on crash');
+
+  // (3) activeTimers registration + cleanup
+  assert.equal(baseOpts.activeTimers.has('t-smoke'), false, 'timer cleaned up');
+
+  // (4) buildEngineCommand — claude path uses stream-json + mcp-config
+  const [bin, args] = buildEngineCommand({
+    engine: 'claude', prompt: 'P', systemPromptText: null, ocSystemPrompt: null,
+    opencodeModel: null, mcpConfig: '/tmp/mcp.json', systemPromptFile: null,
+    user: { cwd: '/tmp' },
+  });
+  assert.ok(args.includes('--output-format') && args.includes('stream-json'), 'claude args stream-json');
+  assert.ok(args.includes('--mcp-config'), 'claude args mcp-config');
+  assert.equal(args[args.length - 1], 'P');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+  console.log('V2 PASS: happy path + crash-no-hang + timers cleanup + command build');
+})();
