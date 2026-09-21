@@ -122,7 +122,15 @@ async function docsApi(method, apiPath, body = null, sa = null) {
     signal: AbortSignal.timeout(15000),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(`Docs API ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
+  if (!res.ok) {
+    if (data.error?.status === 'PERMISSION_DENIED' && data.error?.details?.some(d => d.reason === 'SERVICE_DISABLED')) {
+      throw new Error(
+        'Google Docs API отключён в GCP-проекте сервис-аккаунта. Точечное редактирование Google Docs (gdrive_docs_get_structure / gdrive_docs_insert_text) недоступно, пока владелец проекта его не включит: ' +
+        'https://console.cloud.google.com/apis/library/docs.googleapis.com?project=trained-assist-gdrive-sa — у самого сервис-аккаунта нет прав включить API себе.'
+      );
+    }
+    throw new Error(`Docs API ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
+  }
   return data;
 }
 
@@ -870,8 +878,14 @@ module.exports = {
       },
     },
 
+    // mimeTypes that render rich formatting Drive would silently flatten on a
+    // plain-text media overwrite: headings, bold/italic runs, lists, tables all
+    // become one plain-text blob. Never allow gdrive_update_file on these —
+    // gdrive_docs_insert_text (index-based) is the safe alternative for Docs.
     gdrive_update_file: {
-      description: 'Overwrite content of an existing file in Google Drive.',
+      description: 'Overwrite content of an existing PLAIN file (.txt, .csv, .json, .md) in Google Drive. ' +
+        'REFUSES on native Google Docs/Sheets/Slides — a media overwrite flattens the whole file to plain text and destroys all formatting (headings, bold, lists, tables). ' +
+        'For a Google Doc, use gdrive_docs_get_structure + gdrive_docs_insert_text instead (precise, index-based, preserves formatting).',
       inputSchema: {
         type: 'object',
         required: ['file_id', 'content'],
@@ -881,7 +895,20 @@ module.exports = {
         },
       },
       handler: async ({ file_id, content }) => {
-        const sa    = requireSa();
+        const sa   = requireSa();
+        const meta = await driveApi('GET', `/drive/v3/files/${file_id}?fields=id,name,mimeType&supportsAllDrives=true`, null, sa);
+        const FORMATTED_MIMES = new Set([
+          'application/vnd.google-apps.document',
+          'application/vnd.google-apps.spreadsheet',
+          'application/vnd.google-apps.presentation',
+        ]);
+        if (FORMATTED_MIMES.has(meta.mimeType)) {
+          throw new Error(
+            `Отказ: "${meta.name}" — это нативный Google ${meta.mimeType.split('.').pop()}, а не plain-text файл. ` +
+            'gdrive_update_file перезапишет его как один текстовый блок и уничтожит всё форматирование (заголовки, списки, таблицы, жирный/курсив). ' +
+            'Для Google Docs используй gdrive_docs_get_structure + gdrive_docs_insert_text — точечная вставка по индексу, не трогает остальной документ.'
+          );
+        }
         const token = await getAccessToken(sa);
         const res   = await fetch(
           `https://www.googleapis.com/upload/drive/v3/files/${file_id}?uploadType=media&fields=id,name,modifiedTime&supportsAllDrives=true`,
