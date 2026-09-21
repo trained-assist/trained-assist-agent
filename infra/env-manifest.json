@@ -51,7 +51,8 @@
       { "name": "OPENCODE_MODEL",    "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "OpenCode primary model (fallback when no per-role override; default: openrouter/deepseek/deepseek-v4-flash-0731:free)" },
       { "name": "OPENCODE_PROFILE", "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Active OpenCode profile: value|quality|free|mimo|russian-recruiter (infra/opencode-switch-profile.sh applies it on deploy)" },
       { "name": "ZEROCREDS_ADMIN_TOKEN",  "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": false, "description": "Shared admin token for zerocreds-server /api/session/create (read by user-tokens.js via process.env)" },
-      { "name": "GITHUB_ISSUES_TOKEN",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "GitHub fine-grained PAT (issues:write on trained-assist/trained-assist-agent) — used by POST /report to create user-report issues" }
+      { "name": "GITHUB_ISSUES_TOKEN",   "required": false, "written_to": ["gcp", "ru"],  "gcp_sm": true,  "description": "GitHub fine-grained PAT (issues:write on trained-assist/trained-assist-agent) — used by POST /report to create user-report issues" },
+      { "name": "CHECKLIST_API_KEY",     "required": false, "written_to": ["gcp"],        "gcp_sm": false, "description": "Bearer key for checklist.trainedassist.store's agent auth path — gtd-controller.js mirrors GTD auto-tracking checklists there. GCP only (that's the live instance); best-effort, silently skipped if unset." }
     ]
   },
 
