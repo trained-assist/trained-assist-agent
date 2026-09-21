@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const { createHmac } = require('crypto');
 const { hhFetch } = require('./hh-utils');
+const { hasRealAvailability } = require('./hh-message-prompts');
 const { hydrateResumes } = require('./hh-resume');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const {
@@ -14,6 +15,20 @@ const {
 
 const BASE_USERS_DIR = process.env.USERS_DIR ||
   path.join(process.env.HOME || '/home/vova', 'users');
+
+// Whether the recruiter's ATS config carries real (non-placeholder) interview time slots.
+// Used by the /hh message flows to decide whether to offer specific-time suggestions.
+function hhInterviewConfigAllowsTime(username) {
+  try {
+    const configFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
+    if (!fs.existsSync(configFile)) return false;
+    let config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value || {};
+    if (typeof config === 'string') config = JSON.parse(config);
+    return hasRealAvailability(config.interview_config);
+  } catch {
+    return false;
+  }
+}
 
 // Fetch negotiations across all active stages for a vacancy (parallel per-state requests).
 // Excludes 'discard' (rejected) and 'hired' (done) — only actionable/in-progress candidates.
@@ -330,4 +345,4 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
   };
 }
 
-module.exports = { createHhNegotiations, HH_REVIEW_STATES };
+module.exports = { createHhNegotiations, HH_REVIEW_STATES, hhInterviewConfigAllowsTime };

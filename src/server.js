@@ -4,7 +4,7 @@ process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, buildResumeText, resumeNotice } = require('./hh-resume');
-const { hhFetch, hhPut, hhPostForm, hhTokenPath, readHhToken } = require('./hh-utils');
+const { hhFetch, hhPut, hhPostForm, readHhToken, refreshHhToken } = require('./hh-utils');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -33,13 +33,13 @@ const { genericMultiFormHtml } = require('./connect-forms/generic-multi');
 const { weeekFormHtml } = require('./connect-forms/weeek');
 const { scoreUnscoredCandidates, generateDraftMessages } = require('./hh-scoring');
 const { bullshitGuard } = require('./hh-bullshit-guard');
-const { hasRealAvailability, buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride, BASE_PROMPT_FILENAME, DEFAULT_MESSAGE_BASE } = require('./hh-message-prompts');
+const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride, BASE_PROMPT_FILENAME, DEFAULT_MESSAGE_BASE } = require('./hh-message-prompts');
 const { storeApplication } = require('./hh-vacancy');
 const { generateProactivePageHtml } = require('./hh-proactive-page');
 const { hhStylePageHtml } = require('./hh-style-html');
 const { generateReviewPageHtml } = require('./hh-review-page-html');
 const { processMishaUpdate } = require('./misha-bot');
-const { createHhNegotiations } = require('./hh-negotiations');
+const { createHhNegotiations, hhInterviewConfigAllowsTime } = require('./hh-negotiations');
 const { runProactiveSearch, scoreUnscoredProactiveCandidates } = require('./hh-proactive-search');
 const { receiveConnect } = require('./user-tokens');
 
@@ -236,7 +236,8 @@ let _secretsCache = null;
 
 // HH negotiations/messages/background-scoring — moved to src/hh-negotiations.js (issue #942 P0.3).
 // The HH HTTP client lives in hh-utils (single implementation, issue #942 P0.4).
-// refreshHhToken is still defined inline in this file (OAuth refresh, not an HTTP client).
+// refreshHhToken (OAuth refresh) also lives in hh-utils; readChatId stays inline
+// (used by many other handlers here).
 // readChatId is defined inline here too (used by many other handlers).
 const {
   fetchAllHhNegotiations, hhCacheFile, getHhNegotiationsWithCache,
@@ -4039,17 +4040,7 @@ function splitBuffer(buf, sep) {
 
 // True only when the vacancy's ats_config.interview_config has real, recruiter-provided
 // availability — gates whether the outgoing-message guard allows naming a specific time.
-function hhInterviewConfigAllowsTime(username) {
-  try {
-    const configFile = path.join(BASE_USERS_DIR, String(username), 'contexts', 'hh', 'ats_config.json');
-    if (!fs.existsSync(configFile)) return false;
-    let config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value || {};
-    if (typeof config === 'string') config = JSON.parse(config);
-    return hasRealAvailability(config.interview_config);
-  } catch {
-    return false;
-  }
-}
+// Implemented in hh-negotiations.js (issue #942 P0.6).
 
 function appendGuardBlock(username, negId, reason, checks, blocked = true) {
   try {
@@ -4272,49 +4263,7 @@ async function doSend(force) {
 // Refresh an expired HH OAuth access_token using the stored refresh_token.
 // Returns the new access_token on success, or null on failure (caller is expected
 // to surface "HH re-auth required" to the recruiter).
-// Token path comes from hh-utils (respects AGENT_TOKENS_DIR).
-async function refreshHhToken(username, secrets) {
-  if (!secrets?.HH_CLIENT_ID || !secrets?.HH_CLIENT_SECRET) {
-    console.warn('[hh-refresh] no HH_CLIENT_ID/SECRET in env — cannot refresh');
-    return null;
-  }
-  const file = hhTokenPath(username);
-  if (!fs.existsSync(file)) return null;
-  let stored;
-  try { stored = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
-  if (!stored.refresh_token) return null;
-
-  try {
-    const res = await fetch('https://hh.ru/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: secrets.HH_CLIENT_ID,
-        client_secret: secrets.HH_CLIENT_SECRET,
-        refresh_token: stored.refresh_token,
-      }).toString(),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const data = await res.json();
-    if (!data.access_token) {
-      console.warn(`[hh-refresh] HH refused refresh for ${username}: ${data.error || 'no access_token'}`);
-      return null;
-    }
-    const updated = {
-      ...stored,
-      access_token: data.access_token,
-      refresh_token: data.refresh_token || stored.refresh_token,
-      saved_at: new Date().toISOString(),
-    };
-    fs.writeFileSync(file, JSON.stringify(updated, null, 2), { mode: 0o600 });
-    console.log(`[hh-refresh] refreshed HH token for ${username}`);
-    return data.access_token;
-  } catch (e) {
-    console.error(`[hh-refresh] error for ${username}: ${e.message}`);
-    return null;
-  }
-}
+// Implemented in hh-utils.js (refreshHhToken), imported above (issue #942 P0.6).
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[unhandledRejection] at:', promise, 'reason:', reason);
