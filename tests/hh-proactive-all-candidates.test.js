@@ -24,6 +24,7 @@ const {
   saveAllCandidates,
   mergeSearchCandidatesIntoAll,
   addManualCandidate,
+  setCandidateReadState,
   parseResumeId,
   allCandidatesPath,
 } = require('../src/hh-proactive-search.js');
@@ -144,5 +145,47 @@ describe('addManualCandidate', () => {
     const record = addManualCandidate('alice', { id: 'res-9', title: 'Brand new' });
     expect(record.score).toBe(0);
     expect(record.tag).toBe('REVIEW');
+  });
+});
+
+describe('setCandidateReadState (#6 persistent viewed flag)', () => {
+  it('sets read:true and a read_at timestamp on an existing candidate', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
+    const rec = setCandidateReadState('alice', 'r1', true);
+    expect(rec.read).toBe(true);
+    expect(rec.read_at).toBeTruthy();
+    const store = loadAllCandidates('alice');
+    expect(store.r1.read).toBe(true);
+    expect(store.r1.read_at).toBeTruthy();
+  });
+
+  it('clears read and read_at when read=false', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
+    setCandidateReadState('alice', 'r1', true);
+    const rec = setCandidateReadState('alice', 'r1', false);
+    expect(rec.read).toBe(false);
+    expect(rec.read_at).toBeNull();
+  });
+
+  it('normalizes a numeric id to a string key (like saveCandidateComment)', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 42, title: 'X', score: 5 }], {});
+    const rec = setCandidateReadState('alice', 42, true);
+    expect(rec.read).toBe(true);
+  });
+
+  it('throws when the candidate id does not exist', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
+    expect(() => setCandidateReadState('alice', 'ghost', true)).toThrow(/not found/);
+  });
+
+  it('survives a later mergeSearchCandidatesIntoAll run (merge preserves read)', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
+    setCandidateReadState('alice', 'r1', true);
+    // Re-run of search with a fresh (read-less) candidate object must NOT clobber read.
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X re-found', score: 7 }], { r1: '2026-09-16T00:00:00.000Z' });
+    const store = loadAllCandidates('alice');
+    expect(store.r1.read).toBe(true);
+    expect(store.r1.read_at).toBeTruthy();
+    expect(store.r1.score).toBe(7);
   });
 });
