@@ -30,9 +30,9 @@ LOGFILE="$LOG_DIR/run-$(date +%Y%m%d-%H%M%S).log"
   echo "[cron] done $(date)"
 } >> "$LOGFILE" 2>&1
 
-# Summarize bug count
-LATEST_BUGS=$(ls -t "$HOME"/agent-data/mainstream-test-*/bugs.jsonl 2>/dev/null | head -1)
-if [[ -f "$LATEST_BUGS" ]]; then
-  BUG_COUNT=$(wc -l < "$LATEST_BUGS")
-  echo "[cron] bugs in last run: $BUG_COUNT → $LATEST_BUGS" >> "$LOGFILE"
+# Summarize accumulated bug count (durable cross-run log, not per-invocation dir)
+GLOBAL_BUGS="$HOME/agent-data/mainstream-test/bugs.jsonl"
+if [[ -f "$GLOBAL_BUGS" ]]; then
+  BUG_COUNT=$(wc -l < "$GLOBAL_BUGS")
+  echo "[cron] total accumulated bugs: $BUG_COUNT → $GLOBAL_BUGS" >> "$LOGFILE"
 fi
