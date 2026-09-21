@@ -53,16 +53,25 @@
 - [ ] Смержить PR, задеплоить (MCP-сервер, обычный рестарт assist-agent —
       аддитивное изменение, существующие тулы не трогает).
 
-## Phase 2 — общий слой знаний (NOT STARTED)
+## Phase 2 — общий слой знаний (IN PROGRESS)
 
-- [ ] Добавить `projects/<id>/agent-project-notes.md` в `src/projects.js`
-      scaffold (рядом с `PROFILE.md`) + инструмент для чтения/дозаписи (по
-      аналогии с `agent-notes.md` на профиле).
-- [ ] Hermes и обычные сессии (claude/codex/opencode) читают/пишут ОДИН и тот
-      же файл — никакого отдельного хранилища у Hermes.
+- [x] Добавить `projects/<id>/agent-project-notes.md` в `src/projects.js`
+      (`notesPath`/`notesText`, не сеется при создании проекта — как и
+      профильный `agent-notes.md`, файл появляется только когда в него
+      реально что-то пишут) + инъекция в промпт в `runner/index.js` сразу
+      после профильного `[AGENT NOTES]` блока (`test/projects-notes.test.cjs`).
+- [x] Hermes и обычные сессии (claude/codex/opencode) читают/пишут ОДИН и тот
+      же файл — никакого отдельного хранилища у Hermes. Технически это уже
+      верно и для codex/opencode: инъекция — это простой текст промпта
+      (`baseContext`, до ветвления по движку), а запись — обычный
+      Write/Edit-тул файла, не MCP. Для ЭТОГО слоя знаний MCP не нужен.
 - [ ] Явно зафиксировать: встроенная память Claude Code — disposable cache,
-      не source of truth (уже решено в `hermes-training-storage-architecture`,
-      здесь просто закрыть техдолг: MCP-паритет codex/opencode на этот файл).
+      не source of truth (уже решено в `hermes-training-storage-architecture`).
+- [ ] Отдельный, более крупный техдолг (НЕ блокирует Hermes): `claude-runner.js`
+      передаёт `--mcp-config` только на claude-ветке — `agent_store_artifact`
+      и другие MCP-тулы недоступны на codex/opencode. Не трогали в этом PR
+      (TOML-конфиг для codex + отдельный формат для opencode — самостоятельная
+      задача с собственным риском регресса).
 
 ## Phase 3 — Hermes Skills (NOT STARTED)
 
