@@ -218,9 +218,6 @@ function getPendingTasks() {
 // Map<laneKey(string), Promise> — the tail of each transcript lane. laneKey is
 // `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
 const chatLanes = new Map();
-// Per-chat serialization (layer 1) lives in runner-chat-queue.js so it is
-// unit-testable without pulling in the whole runner (same pattern as runner-lanes.js).
-const chatQueue = require('./runner-chat-queue');
 
 // Session serialization lane + per-profile cap primitives live in a pure module
 // (runner-lanes.js) so the REAL admission logic is vendorable/testable in staging
@@ -235,56 +232,16 @@ const {
   _releaseKeySlot,
 } = require('./runner-lanes');
 
-// Global concurrency cap on live `claude` processes (across all profiles).
-// RAM is cheap and monitored externally, so this is deliberately generous;
-// tune via env without a code change.
-const MAX_CONCURRENT_TASKS = Math.max(1, Number(process.env.MAX_CONCURRENT_TASKS) || 6);
-// Soft free-RAM floor (MB). Below this we hold off spawning new tasks.
-const MIN_FREE_RAM_MB = Math.max(0, Number(process.env.MIN_FREE_RAM_MB) || 512);
-const RAM_POLL_MS = 2000;
-const RAM_WAIT_MAX_MS = 60000; // never deadlock — proceed after this even if low
-
-let _runningTasks = 0;
-const _slotWaiters = [];
-
-function _acquireSlot() {
-  return new Promise(resolve => {
-    const grab = () => {
-      if (_runningTasks < MAX_CONCURRENT_TASKS) { _runningTasks++; resolve(); }
-      else _slotWaiters.push(grab);
-    };
-    grab();
-  });
-}
-
-function _releaseSlot() {
-  _runningTasks = Math.max(0, _runningTasks - 1);
-  const next = _slotWaiters.shift();
-  if (next) next();
-}
-
-// Per-profile ("repository") concurrency cap. A single profile can have at most
-// this many live `claude` processes at once — a 5th task for the same profile
-// queues until one of its own frees up. Sits UNDER the global cap as a fairness
-// bound so one profile can't monopolise every global slot and starve others.
-// With one active profile this is the effective ceiling (4 < global 6). Tune via
-// env without a code change.
-// Wait until free RAM is above the floor, or RAM_WAIT_MAX_MS elapses (backstop,
-// os.freemem() undercounts reclaimable page cache — this is a soft guard, not a
-// hard admission controller; external monitoring is the primary control).
-async function _waitForRam() {
-  if (MIN_FREE_RAM_MB <= 0) return;
-  const start = Date.now();
-  for (;;) {
-    const freeMb = os.freemem() / (1024 * 1024);
-    if (freeMb >= MIN_FREE_RAM_MB) return;
-    if (Date.now() - start >= RAM_WAIT_MAX_MS) {
-      console.warn(`[runner] RAM watchdog: proceeding after ${RAM_WAIT_MAX_MS}ms, free=${Math.round(freeMb)}MB < ${MIN_FREE_RAM_MB}MB`);
-      return;
-    }
-    await new Promise(r => setTimeout(r, RAM_POLL_MS));
-  }
-}
+// Per-chat serialization (layer 1) + the global RAM-aware concurrency
+// semaphore (layer 3) live in src/runner/task-queue.js so admission logic is
+// unit-testable without pulling in the whole runner (same pattern as
+// runner-lanes.js for layer 2). Per-profile cap stays in runner-lanes.js.
+const {
+  chatQueue,
+  _acquireSlot,
+  _releaseSlot,
+  _waitForRam,
+} = require('./runner/task-queue');
 
 // Active task timer state — allows Claude to extend its own session via MCP tool.
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
