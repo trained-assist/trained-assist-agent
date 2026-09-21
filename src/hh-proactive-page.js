@@ -16,6 +16,19 @@ function fmtDate(iso) {
   return iso.slice(0, 7).replace('-', '.');
 }
 
+// Russian dd.mm.yyyy date format for the "Найден: ДД.ММ.ГГГГ" discovery badge.
+// Returns null (not a placeholder string) for missing/invalid input so callers can
+// omit the badge entirely rather than render something broken.
+function fmtFoundAt(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}.${mm}.${yyyy}`;
+}
+
 function tagBadgeBg(tag) {
   if (tag === 'PASS') return '#16a34a';
   if (tag === 'REVIEW') return '#ca8a04';
@@ -61,8 +74,15 @@ function candidateCard(c, idx, existingComment) {
   const hasAi = Boolean(c.plus_tags || c.summary_why);
   const isNew = Boolean(c.is_new);
   const commentText = escHtml(existingComment || '');
+  // Discovery date badge (#1) — found_at is set for search-discovered candidates and
+  // for manually-added ones (added_at). Omit silently when absent/unparseable rather
+  // than showing a placeholder — e.g. legacy candidates from before this field existed.
+  const foundAtLabel = fmtFoundAt(c.found_at || c.added_at);
+  const source = c.source === 'manual' ? 'manual' : 'search';
+  const fullName = `${c.first_name || ''} ${c.last_name || ''}`.trim();
+  const searchBlob = escHtml(`${fullName} ${c.title || ''}`.trim());
 
-  return `<div class="card ${isNew ? 'card-new' : ''}" data-idx="${idx}" data-id="${escHtml(c.id)}">
+  return `<div class="card ${isNew ? 'card-new' : ''}" data-idx="${idx}" data-id="${escHtml(c.id)}" data-score="${Number(c.score || 0)}" data-tag="${escHtml(c.tag || '')}" data-source="${source}" data-search="${searchBlob.toLowerCase()}">
   <div class="card-header">
     <div class="card-left">
       <a class="card-title" href="${escHtml(c.hh_url)}" target="_blank" rel="noopener">${escHtml(c.title)}</a>
@@ -70,9 +90,13 @@ function candidateCard(c, idx, existingComment) {
         ${isNew ? '<span class="badge-new">NEW</span> ' : ''}${c.age ? `${c.age} лет · ` : ''}${c.total_exp_years} лет опыта · ${escHtml(c.area)}${salary ? ` · <span class="salary">${escHtml(salary)}</span>` : ''}
       </div>
       ${companies ? `<div class="card-companies">${escHtml(companies)}</div>` : ''}
+      <div class="card-badges-row">
+        ${foundAtLabel ? `<span class="badge-found">Найден: ${foundAtLabel}</span>` : ''}
+        ${source === 'manual' ? '<span class="badge-manual">Добавлен вручную</span>' : ''}
+      </div>
     </div>
     <div class="card-right">
-      <span class="badge" style="background:${tagBadgeBg(c.tag)}">${escHtml(c.tag)} ${c.score.toFixed(1)}</span>
+      <span class="badge" style="background:${tagBadgeBg(c.tag)}">${escHtml(c.tag)} ${(Number(c.score) || 0).toFixed(1)}</span>
     </div>
   </div>
 
@@ -101,8 +125,6 @@ function candidateCard(c, idx, existingComment) {
 function generateProactivePageHtml(results, username, callbackBase, token, existingComments) {
   const candidates = results.candidates || [];
   const comments = existingComments || {};
-  const PER_PAGE = 10;
-  const totalPages = Math.max(1, Math.ceil(candidates.length / PER_PAGE));
   const searchedAt = results.searched_at
     ? new Date(results.searched_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })
     : '—';
@@ -110,6 +132,13 @@ function generateProactivePageHtml(results, username, callbackBase, token, exist
   const reviewCount = candidates.filter(c => c.tag === 'REVIEW').length;
   const newCount = candidates.filter(c => c.is_new).length;
   const isEnriched = results.ai_enriched !== false && candidates.some(c => c.plus_tags || c.summary_why);
+
+  // Slider upper bound (#4): scores are roughly 0-10 but technically unbounded
+  // (baseScore + sum of criteria weights for this vacancy), so size the slider to
+  // whatever's actually in the data, with a sane floor so it isn't a degenerate 0-0
+  // range on a fresh/empty list.
+  const maxObservedScore = candidates.reduce((m, c) => Math.max(m, Number(c.score) || 0), 0);
+  const sliderMax = Math.max(10, Math.ceil(maxObservedScore * 10) / 10);
 
   const cardChunks = candidates.map((c, i) => candidateCard(c, i, comments[c.id]?.text));
   const cardsJson = JSON.stringify(cardChunks);
@@ -146,6 +175,9 @@ a:hover{text-decoration:underline}
 .card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:15px;margin-bottom:12px}
 .card-new{border-left:3px solid #2563eb}
 .badge-new{display:inline-block;background:#2563eb;color:#fff;border-radius:3px;padding:1px 5px;font-size:.68rem;font-weight:700;letter-spacing:.04em;vertical-align:middle;margin-right:3px}
+.card-badges-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+.badge-found{display:inline-block;font-size:.72rem;color:#64748b;background:#f1f5f9;border-radius:4px;padding:1px 7px}
+.badge-manual{display:inline-block;font-size:.72rem;color:#7c3aed;background:#f3e8ff;border-radius:4px;padding:1px 7px}
 
 /* Comment */
 .comment-row{display:flex;gap:6px;align-items:flex-start;margin:6px 0}
@@ -194,13 +226,26 @@ details[open] .exp-toggle::before{content:"▾ "}
 .import-row{margin-top:10px;padding-top:8px;border-top:1px solid #f1f5f9}
 .btn-import{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;color:#475569}
 .btn-import:hover{background:#f1f5f9}
+.btn-import.secondary{margin-left:6px}
 
-/* Pagination */
-.pagination{display:flex;align-items:center;justify-content:center;gap:12px;margin:20px 0}
-.btn-page{background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:7px 16px;font-size:.83rem;cursor:pointer;color:#1e293b}
-.btn-page:hover:not(:disabled){background:#f1f5f9}
-.btn-page:disabled{opacity:.35;cursor:not-allowed}
-.page-info{font-size:.82rem;color:#64748b}
+/* Manual-add form */
+.manual-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.manual-input{flex:1;min-width:220px;font-size:.78rem;border:1px solid #e2e8f0;border-radius:5px;padding:6px 8px;color:#1e293b;background:#fff;font-family:inherit}
+.manual-input:focus{outline:none;border-color:#6366f1}
+
+/* Filter bar */
+.filter-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid #f1f5f9}
+.search-input{flex:1;min-width:180px;font-size:.83rem;border:1px solid #e2e8f0;border-radius:6px;padding:7px 10px;color:#1e293b;background:#fff;font-family:inherit}
+.search-input:focus{outline:none;border-color:#6366f1}
+.score-filter{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.score-filter input[type=range]{width:140px}
+.score-filter-label{font-size:.78rem;color:#64748b;white-space:nowrap}
+.preset-btns{display:flex;gap:4px;flex-wrap:wrap}
+.btn-preset{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:5px;padding:4px 9px;font-size:.75rem;cursor:pointer;color:#475569}
+.btn-preset:hover{background:#e2e8f0}
+.btn-preset.active{background:#2563eb;color:#fff;border-color:#2563eb}
+.source-filter{font-size:.78rem;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px;color:#1e293b;background:#fff;font-family:inherit}
+.filter-count{font-size:.8rem;color:#64748b;white-space:nowrap;margin-left:auto}
 
 /* Modal */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;align-items:center;justify-content:center}
@@ -239,6 +284,15 @@ details[open] .exp-toggle::before{content:"▾ "}
   .modal-score{background:#0f172a;border-color:#334155}
   .exp-list{color:#94a3b8}
   .ai-badge{background:#1e1b4b;color:#a5b4fc}
+  .badge-found{background:#0f172a;color:#94a3b8}
+  .badge-manual{background:#2e1065;color:#c4b5fd}
+  .search-input,.manual-input{background:#0f172a;border-color:#334155;color:#e2e8f0}
+  .btn-preset{background:#1e293b;border-color:#334155;color:#94a3b8}
+  .btn-preset:hover{background:#334155}
+  .btn-preset.active{background:#2563eb;color:#fff;border-color:#2563eb}
+  .source-filter{background:#0f172a;border-color:#334155;color:#e2e8f0}
+  .filter-count,.score-filter-label{color:#94a3b8}
+  .filter-bar{border-color:#334155}
 }
 @media(max-width:600px){.card-header{flex-direction:column}.card-right{align-self:flex-end}.header-top{flex-direction:column}}
 </style>
@@ -265,21 +319,45 @@ details[open] .exp-toggle::before{content:"▾ "}
   </div>
   <div class="import-row">
     <button class="btn-import" onclick="toggleImport()">📥 Импорт просмотренных</button>
+    <button class="btn-import secondary" onclick="toggleManualAdd()">➕ Добавить кандидата вручную</button>
     <div id="importPanel" style="display:none;margin-top:8px">
       <textarea id="importIds" class="comment-box" style="width:100%;height:60px" placeholder="Вставьте ссылки HH или ID резюме (по одному на строку)"></textarea>
       <button class="btn-comment" style="margin-top:4px" onclick="importSeen()">Добавить в базу просмотренных</button>
       <span id="importStatus" style="margin-left:8px;font-size:.78rem;color:#64748b"></span>
     </div>
+    <div id="manualAddPanel" style="display:none;margin-top:8px">
+      <div class="manual-row">
+        <input id="manualInput" class="manual-input" type="text" placeholder="Ссылка на резюме HH или ID резюме">
+        <button class="btn-comment" onclick="addManualCandidate()">Добавить кандидата</button>
+      </div>
+      <span id="manualAddStatus" style="font-size:.78rem;color:#64748b"></span>
+    </div>
+  </div>
+  <div class="filter-bar">
+    <input id="nameSearch" class="search-input" type="text" placeholder="Поиск по имени / должности…">
+    <div class="score-filter">
+      <span class="score-filter-label">Score ≥</span>
+      <input id="scoreSlider" type="range" min="0" max="${sliderMax}" step="0.1" value="0">
+      <span class="score-filter-label" id="scoreSliderVal">0.0</span>
+    </div>
+    <div class="preset-btns" id="presetBtns">
+      <button class="btn-preset active" data-preset="all">Все</button>
+      <button class="btn-preset" data-preset="pass">PASS</button>
+      <button class="btn-preset" data-preset="review">REVIEW</button>
+      <button class="btn-preset" data-preset="top9">Топ ≥9</button>
+    </div>
+    <select id="sourceFilter" class="source-filter">
+      <option value="">Все источники</option>
+      <option value="search">Найдены поиском</option>
+      <option value="manual">Добавлены вручную</option>
+    </select>
+    <span class="filter-count" id="filterCount"></span>
   </div>
 </div>
 
 <div class="main">
   <div id="cards"></div>
-  <div class="pagination">
-    <button class="btn-page" id="prevBtn" onclick="changePage(-1)" disabled>← Назад</button>
-    <span class="page-info" id="pageInfo"></span>
-    <button class="btn-page" id="nextBtn" onclick="changePage(1)">Вперёд →</button>
-  </div>
+  <div class="empty" id="emptyState" style="display:none">Нет кандидатов, подходящих под фильтр</div>
 </div>
 
 <div class="modal-overlay" id="modal">
@@ -292,38 +370,83 @@ details[open] .exp-toggle::before{content:"▾ "}
 </div>
 
 <script>
+// Full unified candidate list (search + manual), rendered client-side. #2/#5: no
+// server pagination — this is an internal tool with realistically dozens to low
+// hundreds of candidates, so a plain continuous scroll over the filtered set is
+// simpler and fine.
 const CARDS = ${cardsJson};
-const PER_PAGE = 10;
 const TOTAL = CARDS.length;
-const TOTAL_PAGES = Math.max(1, Math.ceil(TOTAL / PER_PAGE));
 const USERNAME = ${JSON.stringify(username)};
 const TOKEN = ${JSON.stringify(token)};
 const CALLBACK_BASE = ${JSON.stringify(callbackBase)};
-let currentPage = 1;
+const SLIDER_MAX = ${JSON.stringify(sliderMax)};
 
-function renderPage() {
-  const start = (currentPage - 1) * PER_PAGE;
-  const slice = CARDS.slice(start, start + PER_PAGE);
-  document.getElementById('cards').innerHTML = slice.length
-    ? slice.join('')
-    : '<div class="empty">Нет кандидатов</div>';
-  document.getElementById('pageInfo').textContent = 'Страница ' + currentPage + ' из ' + TOTAL_PAGES + ' · ' + TOTAL + ' кандидатов';
-  document.getElementById('prevBtn').disabled = currentPage <= 1;
-  document.getElementById('nextBtn').disabled = currentPage >= TOTAL_PAGES;
-  window.scrollTo(0, 0);
+let activePreset = 'all';
+
+// Debounce helper (#3: ~150-200ms) shared by the name search input.
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-function changePage(delta) {
-  const next = currentPage + delta;
-  if (next < 1 || next > TOTAL_PAGES) return;
-  currentPage = next;
-  renderPage();
+// Composite client-side filter (#5): name/title search + score floor + quick preset
+// (all/PASS/REVIEW/top-score) + optional source, all combined with AND, no reload.
+function matchesFilters(el, nameQuery, minScore, preset, source) {
+  const score = parseFloat(el.dataset.score) || 0;
+  const tag = el.dataset.tag || '';
+  if (nameQuery) {
+    // Cyrillic-safe: toLowerCase() works correctly on Cyrillic in JS, and data-search
+    // is pre-lowercased server-side — just do a plain substring match, no regex.
+    const haystack = el.dataset.search || '';
+    if (!haystack.includes(nameQuery)) return false;
+  }
+  if (score < minScore) return false;
+  if (preset === 'pass' && tag !== 'PASS') return false;
+  if (preset === 'review' && tag !== 'REVIEW') return false;
+  if (preset === 'top9' && score < 9) return false;
+  if (source && el.dataset.source !== source) return false;
+  return true;
 }
 
-document.addEventListener('keydown', e => {
-  if (document.getElementById('modal').classList.contains('open')) return;
-  if (e.key === 'ArrowRight') changePage(1);
-  if (e.key === 'ArrowLeft') changePage(-1);
+function applyFilters() {
+  const nameQuery = document.getElementById('nameSearch').value.trim().toLowerCase();
+  const minScore = parseFloat(document.getElementById('scoreSlider').value) || 0;
+  const source = document.getElementById('sourceFilter').value;
+  const cards = document.querySelectorAll('#cards .card');
+  let shown = 0;
+  cards.forEach(el => {
+    const visible = matchesFilters(el, nameQuery, minScore, activePreset, source);
+    el.style.display = visible ? '' : 'none';
+    if (visible) shown++;
+  });
+  document.getElementById('filterCount').textContent = 'показано ' + shown + ' из ' + TOTAL;
+  document.getElementById('emptyState').style.display = (TOTAL > 0 && shown === 0) ? 'block' : 'none';
+}
+
+const applyFiltersDebounced = debounce(applyFilters, 180);
+
+function renderCards() {
+  document.getElementById('cards').innerHTML = CARDS.length
+    ? CARDS.join('')
+    : '';
+  document.getElementById('emptyState').style.display = CARDS.length ? 'none' : 'block';
+  if (!CARDS.length) document.getElementById('emptyState').textContent = 'Нет кандидатов';
+  applyFilters();
+}
+
+document.getElementById('nameSearch').addEventListener('input', applyFiltersDebounced);
+document.getElementById('sourceFilter').addEventListener('change', applyFilters);
+document.getElementById('scoreSlider').addEventListener('input', e => {
+  document.getElementById('scoreSliderVal').textContent = parseFloat(e.target.value).toFixed(1);
+  applyFiltersDebounced();
+});
+
+document.getElementById('presetBtns').addEventListener('click', e => {
+  const btn = e.target.closest('.btn-preset');
+  if (!btn) return;
+  activePreset = btn.dataset.preset;
+  document.querySelectorAll('#presetBtns .btn-preset').forEach(b => b.classList.toggle('active', b === btn));
+  applyFilters();
 });
 
 function openAiModal(candidateId, title) {
@@ -440,6 +563,35 @@ function toggleImport() {
   panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
 }
 
+function toggleManualAdd() {
+  const panel = document.getElementById('manualAddPanel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+// #2: real manual-add — creates a persisted candidate card (distinct from
+// import-seen, which only excludes an id from future search results).
+async function addManualCandidate() {
+  const input = document.getElementById('manualInput');
+  const status = document.getElementById('manualAddStatus');
+  const value = input.value.trim();
+  if (!value) { status.textContent = 'Вставьте ссылку на резюме или ID'; return; }
+  status.textContent = 'Добавляю…';
+  try {
+    const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/add-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, resume_url_or_id: value }),
+    });
+    const data = await res.json();
+    if (data.error) { status.textContent = 'Ошибка: ' + esc(data.error); return; }
+    status.textContent = 'Кандидат добавлен. Обновляем список…';
+    input.value = '';
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    status.textContent = 'Ошибка: ' + esc(e.message);
+  }
+}
+
 async function importSeen() {
   const raw = document.getElementById('importIds').value;
   const status = document.getElementById('importStatus');
@@ -465,7 +617,7 @@ async function importSeen() {
   }
 }
 
-renderPage();
+renderCards();
 </script>
 </body>
 </html>`;
