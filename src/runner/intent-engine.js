@@ -380,7 +380,9 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const engineLabel = eng === 'opencode' ? 'OpenCode' : eng === 'codex' ? 'Codex CLI' : 'Claude Code';
     const modelLine = eng === 'opencode'
       ? `🧠 Модель: \`${ocModel}\`\n📦 Профиль OC: ${ocProfile}`
-      : `🧠 Модель: \`${process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
+      : eng === 'codex'
+        ? `🧠 Модель: настроена в ~/.codex/config.toml (вне нашего профиля)`
+        : `🧠 Модель: \`${process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
     return `🤖 Агент: \`${user?.username || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
   }
 
