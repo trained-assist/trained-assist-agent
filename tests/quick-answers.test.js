@@ -261,6 +261,40 @@ describe('INN Enrichment capability questions', () => {
   });
 });
 
+describe('PDF capability questions', () => {
+  it.each([
+    'можешь преобразовать pdf?',
+    'умеешь превратить PDF в гугл док?',
+    'ты можешь вытащить данные из pdf?',
+    'можешь собрать данные с PDF файла',
+    'а можно pdf превратить в Google Doc?',
+    'есть инструмент для работы с pdf?',
+    'pdf в word ты можешь?',
+    'сможешь прочитать пдф?',
+  ])('PDF capability: "%s" → quick', (task) => {
+    const answer = qa(task);
+    expect(answer).not.toBeNull();
+    expect(answer).toContain('PDF');
+  });
+
+  it('mentions Drive setup when Google Drive is not connected', () => {
+    expect(qa('можешь превратить pdf в гугл док?', 'no-such-profile-xyz')).toContain('подключи гугл диск');
+  });
+
+  it.each([
+    'преобразуй этот pdf в google doc',
+    'вытащи данные из pdf и сложи в таблицу',
+    'прочитай contract.pdf',
+    '[Файл сохранён: /tmp/x/report.pdf (application/pdf)] можешь превратить это в гугл док?',
+  ])('PDF task NOT intercepted: "%s"', (task) => {
+    expect(qa(task)).toBeNull();
+  });
+
+  it('live session → NOT intercepted (question is about a file in context)', () => {
+    expect(getQuickAnswer('можешь преобразовать pdf?', null, null, true)).toBeNull();
+  });
+});
+
 // ── Google Drive SA email ─────────────────────────────────────────────────────
 
 describe('Google Drive — SA email quick answer', () => {
