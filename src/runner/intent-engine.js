@@ -392,7 +392,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       : eng === 'codex'
         ? `🧠 Модель: настроена в ~/.codex/config.toml (вне нашего профиля)`
         : `🧠 Модель: \`${process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
-    return `🤖 Агент: \`${user?.username || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
+    return `🤖 Агент: \`${userId || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
   }
 
   // /oc_value, /oc_quality, /oc_free, /oc_mimo, /oc_ru — switch OpenCode model profile for
