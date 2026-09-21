@@ -28,6 +28,7 @@ const profiles = require('../profiles');
 const { savePassword: saveWebPassword, generatePassword: genWebPassword } = require('../web-auth');
 const { getUsageTotals } = require('../usage-store');
 const { loadDomainIntents } = require('../domains/load-intents');
+const candidateReport = require('../candidate-report');
 
 // HH domain intent patterns — regexes live in src/domains/hh/intents.js (issue #942 P2.1).
 const {
