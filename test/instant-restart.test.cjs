@@ -36,6 +36,8 @@ test('SIGTERM handler flags the restart and exits without draining', () => {
   assert.doesNotMatch(body, /await|setTimeout/);
 });
 
+const { isTaskResumable } = require('../src/pending-task-resume');
+
 function resumeHarness({ pending, now = Date.now() }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
@@ -43,7 +45,7 @@ function resumeHarness({ pending, now = Date.now() }) {
   const sandbox = {
     path, console: { log() {}, error() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise, setTimeout: fn => { fn(); return 0; },
-    process: { env: {} },
+    process: { env: {} }, isTaskResumable,
     getPendingTasks: () => pending,
     clearPendingTask: id => cleared.push(id),
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
@@ -85,7 +87,7 @@ test('a resumed task that fails to start tells the user', async () => {
   const calls = [];
   const sandbox = {
     path, console: { log() {}, error() {} }, BASE_USERS_DIR: '/users', AbortSignal, Promise,
-    setTimeout: fn => { fn(); return 0; }, process: { env: {} },
+    setTimeout: fn => { fn(); return 0; }, process: { env: {} }, isTaskResumable,
     getPendingTasks: () => pending, clearPendingTask() {},
     fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return {}; },
     runTask: () => Promise.reject(new Error('boom')),
@@ -101,9 +103,9 @@ test('a resumed task that fails to start tells the user', async () => {
 
 test('stale entries are cleared; recent-but-expired ones notify, very old ones stay quiet', async () => {
   const h = resumeHarness({ pending: [
-    task({ taskId: 'recent-expired', startedAt: Date.now() - 40 * 60_000 }),
-    task({ taskId: 'ancient', startedAt: Date.now() - 5 * 3600_000 }),
-    task({ taskId: 'gtd', startedAt: Date.now() - 40 * 60_000, internalGtd: true }),
+    task({ taskId: 'recent-expired', startedAt: Date.now() - 3 * 3600_000 }),  // past 2h resume window, within 6h notice window
+    task({ taskId: 'ancient', startedAt: Date.now() - 7 * 3600_000 }),         // past 6h notice window
+    task({ taskId: 'gtd', startedAt: Date.now() - 3 * 3600_000, internalGtd: true }),
   ] });
   await h.resume();
   assert.equal(h.runs.length, 0);
