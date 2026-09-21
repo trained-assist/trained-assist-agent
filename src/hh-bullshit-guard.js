@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const GUARD_MODEL = 'google/gemini-2.0-flash';
+const GUARD_MODEL = 'google/gemini-2.5-flash';
 
 // ─── Regex checks ─────────────────────────────────────────────────────────────
 
