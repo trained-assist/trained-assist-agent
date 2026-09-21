@@ -8,6 +8,7 @@
 // Никакой памяти/инструментов/cron на этом этапе — см. Phase 1 в чеклисте.
 
 const { hermesRun } = require('../../hermes-run');
+const { hermesRunWithTools } = require('../../hermes-tools-run');
 
 const USER_ID = process.env.USER_ID || '';
 
@@ -85,6 +86,29 @@ module.exports = {
           model,
         });
         return { report };
+      },
+    },
+
+    hermes_research: {
+      description:
+        'Hermes (Phase 1.5) — как hermes_run, но с реальным доступом в интернет: Playwright-браузер, ' +
+        'встроенный веб-поиск, внутренние MCP-скилы (ru_browser_fetch, website_request и т.п.). ' +
+        'Используй, когда задаче нужно САМОЙ сходить в сеть (найти сайт, открыть страницу, свести ' +
+        'несколько источников) — не просто обработать текст, который ты уже дал в context. Медленнее и ' +
+        'дороже hermes_run (реальная CLI-сессия, не один LLM-вызов) — не гоняй его на задачах без реальной ' +
+        'потребности в интернете.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'Формулировка исследовательской задачи для Hermes.' },
+          context: { type: 'string', description: 'Известный контекст текстом (что уже есть, что не нужно искать заново).' },
+          output_schema: { type: 'object', description: 'JSON Schema ожидаемого ответа.' },
+        },
+        required: ['task', 'output_schema'],
+      },
+      handler: async ({ task, context, output_schema }) => {
+        const result = await hermesRunWithTools({ username: USER_ID, task, context, outputSchema: output_schema });
+        return { result };
       },
     },
   },
