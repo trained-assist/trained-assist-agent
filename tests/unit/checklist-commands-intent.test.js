@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { ACTIVE_CHECKLIST_INTENT, GTD_STOP_INTENT } = require('../../src/intent-engine.js');
+const { ACTIVE_CHECKLIST_INTENT, GTD_STOP_INTENT } = require('../../src/runner/intent-engine.js');
 
 describe('ACTIVE_CHECKLIST_INTENT', () => {
   it.each([
