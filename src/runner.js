@@ -2,6 +2,12 @@ const { maintenance, atomicJson } = require('./maintenance');
 const currentExecution = () => null;
 const intentRuns = new Map();
 let restartShutdown = false;
+// Set when the server begins stopping (SIGTERM). systemd signals the whole cgroup, so a
+// child still running at that moment is cut off mid-work even on a "graceful" deploy.
+let serverStopBeganAt = 0;
+// taskIds whose run was cut off by a restart: their pending journal must survive so
+// resumePendingTasks() can pick them up after boot.
+const restartDeferredTasks = new Set();
 let autoRestartPending = false;
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -190,6 +196,20 @@ function bindTaskActivity(taskId, user, sessionId) {
   const pending = JSON.parse(fs.readFileSync(file, 'utf8'));
   atomicJson(file, { ...pending, sessionId, activitySessionId: sessionId });
   if (Number.isFinite(pending.initiatedAt)) recordTaskActivity({ user, sessionId, threadId: pending.threadId }, pending.initiatedAt);
+}
+
+// Keep the journal of a run cut off by a restart and stamp when, so the resume window
+// counts from the interruption rather than from the (possibly much older) task start.
+function markPendingInterrupted(taskId) {
+  if (currentExecution()) return;
+  restartDeferredTasks.add(taskId);
+  const file = path.join(PENDING_DIR, `${taskId}.json`);
+  try { atomicJson(file, { ...JSON.parse(fs.readFileSync(file, 'utf8')), interruptedAt: Date.now() }); }
+  catch (e) { console.warn('[runner] markPendingInterrupted:', e.message); }
+}
+
+function noteServerStopping() {
+  if (!serverStopBeganAt) serverStopBeganAt = Date.now();
 }
 
 function clearPendingTask(taskId) {
@@ -758,7 +778,10 @@ function runTask(opts) {
         ? pending.activitySessionId : opts.activitySessionId });
     } catch (error) {
       console.error('[restart-activity] completion:', error.message);
-    } finally { clearPendingTask(opts.taskId); releaseAdmission?.(); intentRuns.delete(opts.taskId); }
+    } finally {
+      if (!restartDeferredTasks.delete(opts.taskId)) clearPendingTask(opts.taskId);
+      releaseAdmission?.(); intentRuns.delete(opts.taskId);
+    }
     // Only clear if no newer task was enqueued after us
     if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
   });
@@ -1725,6 +1748,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let claudeResult = null;  // text from result event
   let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
   let terminalSuccess = false; // explicit engine completion, never inferred from narration
+  let resultEventAt = 0; // when the engine emitted its completion event
   let processSignal = null;
   let processError = null;
   let claudeUsage = null;   // usage from result event (Claude Code / Codex)
@@ -1906,6 +1930,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           continue;
         }
         if (event.type === 'result') {
+          resultEventAt = Date.now();
           terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
           if (terminalSuccess && !restartShutdown) {
@@ -2096,9 +2121,16 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   }
 
   if (outputPersistenceError) throw outputPersistenceError;
+  // The server started stopping while this run was still alive and the engine had not
+  // finished before that: whatever it printed on SIGTERM is a partial, not an answer.
+  if (serverStopBeganAt && !sessionState.userStopped && !timedOut
+      && !(resultEventAt && resultEventAt < serverStopBeganAt)) {
+    sessionState.restartInterrupted = true;
+  }
   if (sessionState.restartInterrupted) {
     const partial = fullOutput.text.trim();
     if (activeSessionId && partial) sessions.appendReply(user.workDir, activeSessionId, `[прервано рестартом]\n${partial}`);
+    markPendingInterrupted(taskId);
     return { deferred: true };
   }
 
@@ -2472,7 +2504,7 @@ function interruptForRestart() {
 }
 
 module.exports = {
-  interruptForRestart,
+  interruptForRestart, noteServerStopping,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   waitForIdle, getActiveTaskCount, isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   clearPendingContinuation,

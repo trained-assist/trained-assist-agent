@@ -562,9 +562,9 @@ async function resumePendingTasks(secrets) {
   if (!secrets?.BOT_TOKEN) return;
 
   const pending = getPendingTasks();
-  const cutoff = Date.now() - 20 * 60 * 1000; // ignore tasks older than 20 min
+  const cutoff = Date.now() - 20 * 60 * 1000; // ignore tasks idle/interrupted longer than 20 min
   const toResume = pending.filter(p =>
-    p.startedAt && p.startedAt > cutoff && p.username && p.userId && p.task
+    p.startedAt && Math.max(p.startedAt, p.interruptedAt || 0) > cutoff && p.username && p.userId && p.task
   );
   // Clean up stale tasks that won't be resumed — they otherwise block GTD
   // indefinitely because isTaskRunning() checks getPendingTasks() from disk.
@@ -4220,6 +4220,7 @@ scheduleProactiveSearchRuns(secrets);
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    require('./runner').noteServerStopping(); // runs still alive now are cut off by the cgroup SIGTERM — keep them resumable
     server.close(); // stop accepting new HTTP connections; existing tasks keep running
     const forced = maintenance.status().forced === true;
     const deployDrainDone = maintenance.status().paused; // drain flag set by drain-for-deploy.py

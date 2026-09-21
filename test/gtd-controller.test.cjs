@@ -110,6 +110,8 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   global.fetch = realFetch;
   ok(scheduleErr === null, 'maybeSchedule with checklist.md does not throw');
   ok(scheduled && scheduled.maxIterations === 4, 'maybeSchedule scales maxIterations from checklist');
+  ok(scheduled && scheduled.etaMinutes === G.ETA_MIN_CLAMP && scheduled.dueAt - scheduled.createdAt === G.ETA_MIN_CLAMP * 60000,
+    'maybeSchedule: unchecked checklist overrides the intent-gate eta (30m mock) with the short step interval');
 
   // 11. scheduleFromChecklist: no LLM call, mode-independent — checklist alone is enough
   const wd4 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd4-'));

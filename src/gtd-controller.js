@@ -191,11 +191,14 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
   const now = Date.now();
   const checklist = readChecklist(projectDir);
   const maxIterations = computeMaxIterations(checklist);
+  // Unchecked checklist items = work done in steps across reopenings; the intent-gate's
+  // "come back in 3h" guess would leave the session idle between steps.
+  const etaMinutes = checklist && checklist.items.some(i => !i.done) ? ETA_MIN_CLAMP : intent.etaMinutes;
   const rec = {
     sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
     createdAt: now,
-    dueAt: now + intent.etaMinutes * 60 * 1000,
-    etaMinutes: intent.etaMinutes,
+    dueAt: now + etaMinutes * 60 * 1000,
+    etaMinutes,
     iterations: 0,
     maxIterations,
     status: 'open',
@@ -206,7 +209,7 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
     consecutiveNoProgress: 0,
   };
   writeGtd(workDir, rec);
-  console.log(`[gtd] scheduled session=${sessionId} user=${username} eta=${intent.etaMinutes}m maxIterations=${maxIterations}${checklist ? ' (checklist.md)' : ''} due=${new Date(rec.dueAt).toISOString()}`);
+  console.log(`[gtd] scheduled session=${sessionId} user=${username} eta=${etaMinutes}m maxIterations=${maxIterations}${checklist ? ' (checklist.md)' : ''} due=${new Date(rec.dueAt).toISOString()}`);
   return rec;
 }
 
