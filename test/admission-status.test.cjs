@@ -18,8 +18,8 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
   const sandbox = {
     require: name => { assert.equal(name, './admission-status'); return { createAdmissionStatus }; },
     recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
-    restartShutdown: false, currentExecution: () => null, intentRuns: new Map(),
-    console, Promise, Set, Date, maintenance: { paused: () => false },
+    restartShutdown: false,
+    console, Promise, Set, Date,
     _laneKey: s => s, chatLanes: lanes,
     STOP_TASK_INTENT: /$^/, GTD_STOP_INTENT: /$^/, WAKEUP_INTENT: /$^/, SKIP_TASK_INTENT: /$^/, ACTIVE_CHECKLIST_INTENT: /$^/,
     chatQueue: { enqueue: (_id, fn) => fn(), hasPending: () => false },

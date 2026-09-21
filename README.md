@@ -258,6 +258,8 @@ Set in repo **Settings → Secrets and variables → Actions**:
 2. GitHub → Actions → **Manual Deploy** → Run workflow → choose target (`gcp` / `ru` / `both`)
 3. Enter reason (optional, goes to deploy log)
 
+**Restart model — instant and silent** (details: [docs/instant-restart.md](docs/instant-restart.md)): a deploy or `/restart` never drains, pauses admission or messages users. SIGTERM → `interruptForRestart()` → exit; running tasks stay in `pending-tasks/` and the new process re-runs them via `resumePendingTasks` with no status messages. Users are told only when a task cannot come back. Do not reintroduce a drain gate, a "paused/restart planned" status, or a "restart finished" broadcast.
+
 **After a failed deploy:**
 ```bash
 # Check which VM is affected
