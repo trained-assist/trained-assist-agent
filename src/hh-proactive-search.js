@@ -39,6 +39,15 @@ function extractKeywords(name) {
 // from the vacancy title alone, and returns 30 "Аналитик данных" for a "Финансовый
 // советник" vacancy. Mirrors the same logic used in src/hh-scoring.js.
 function normalizeAtsConfig(raw) {
+  // context_set sometimes stores the config as a JSON *string* inside the
+  // value field (double serialization). Every other consumer (hh-scoring.js,
+  // 90-hh.js) already guards against this; without it here the proactive
+  // search reads empty criteria, generates off-topic queries ("Менеджер по
+  // продажам" for "Финансовый советник") and scores candidates against
+  // nothing. See #953 / #961.
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { return raw; }
+  }
   if (!raw || typeof raw !== 'object') return raw;
   const required = raw.required?.length
     ? raw.required.map(c => ({ name: c.name || c.skill || c.criterion || '', weight: Number(c.weight) || 0 }))
@@ -49,12 +58,19 @@ function normalizeAtsConfig(raw) {
   const knockout = (raw.knockout || [])
     .map(k => (typeof k === 'string' ? k : (k.criterion || k.name || k.skill || '')))
     .filter(Boolean);
+  // Experience threshold lives under different keys depending on who wrote the
+  // config (UI/LLM → filters.min_experience_years, older extract → experience_min_years).
+  // Unify into filters.min_experience_years so scoreCandidate never silently falls
+  // back to the 2-year default for a vacancy that requires 6.
+  const minExp = Number(raw.experience_min_years) || Number(raw.filters?.min_experience_years) || 2;
+  const filters = { min_experience_years: minExp, ...(raw.filters || {}) };
   return {
     ...raw,
     vacancy_title: raw.vacancy_title || raw.title || 'Вакансия',
     required,
     preferred,
     knockout,
+    filters,
   };
 }
 
@@ -822,6 +838,7 @@ module.exports = {
   scoreUnscoredProactiveCandidates,
   queriesLookSane,
   deriveFallbackQueries,
+  normalizeAtsConfig,
   loadSeenIds,
   saveSeenIds,
   mergeSeenIds,
