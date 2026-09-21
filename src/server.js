@@ -4,7 +4,7 @@ process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { sendRejection } = require('./hh-rejection');
 const { hydrateResume, buildResumeText, resumeNotice } = require('./hh-resume');
-const { hhFetch, hhPut, hhPostForm, hhTokenPath } = require('./hh-utils');
+const { hhFetch, hhPut, hhPostForm, hhTokenPath, readHhToken } = require('./hh-utils');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -2016,28 +2016,31 @@ async function main() {
       let results;
       try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
       const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-      const { loadCandidateComments } = require('./hh-proactive-search');
+      const { loadCandidateComments, loadAllCandidates } = require('./hh-proactive-search');
       const pageComments = loadCandidateComments(username);
+      // Render from the unified all-candidates store (search + manual, accumulated
+      // across runs) rather than only the latest search-results snapshot — keeps the
+      // rest of `results` (vacancy_title, stats, searched_at) from the snapshot.
+      const unified = Object.values(loadAllCandidates(username))
+        .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
+      results.candidates = unified.length ? unified : (results.candidates || []);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments));
     }
 
-    // GET /api/hh/proactive/candidates?username=X&token=Y&page=1&per_page=10
+    // GET /api/hh/proactive/candidates?username=X&token=Y
+    // Serves the unified all-candidates store (auto-discovered + manually-added,
+    // accumulated across runs). No server-side pagination — this is an internal
+    // recruiter tool with realistically dozens to low hundreds of candidates;
+    // the page does client-side search/filter over the full list.
     if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
       const username = url.searchParams.get('username') || '';
       const given = url.searchParams.get('token') || '';
       if (process.env.AGENT_SECRET && given !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
-      const file = latestProactiveFile(username);
-      if (!file) return json(res, 404, { error: 'no results yet' });
-      let results;
-      try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return json(res, 500, { error: 'read error' }); }
-      const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
-      const perPage = Math.min(50, Math.max(1, parseInt(url.searchParams.get('per_page') || '10', 10)));
-      const all = results.candidates || [];
-      const total = all.length;
-      const pages = Math.max(1, Math.ceil(total / perPage));
-      const start = (page - 1) * perPage;
-      return json(res, 200, { total, page, per_page: perPage, pages, candidates: all.slice(start, start + perPage) });
+      const { loadAllCandidates } = require('./hh-proactive-search');
+      const all = Object.values(loadAllCandidates(username))
+        .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
+      return json(res, 200, { total: all.length, candidates: all });
     }
 
     // POST /api/hh/proactive/ai-score {username, candidate_id, token}
@@ -2220,6 +2223,45 @@ ${expLines || '—'}
         seen[vacancyKey] = bucket;
         saveSeenIds(username, seen);
         return json(res, 200, { ok: true, imported, total: Object.keys(bucket).length });
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
+    // POST /api/hh/proactive/add-manual {username, token, resume_url_or_id}
+    // Manually adds a single candidate (pasted HH resume link or bare resume id) into
+    // the unified all-candidates store with source:'manual'. Distinct from import-seen:
+    // import-seen only excludes an id from future search results, this creates a real
+    // candidate card on the proactive page. Fetches full resume details from HH via the
+    // shared hh-utils hhFetch client (same one 90-hh.js / hh-resume.js use) so we don't
+    // duplicate HTTP logic.
+    if (req.method === 'POST' && url.pathname === '/api/hh/proactive/add-manual') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username = '', token: givenToken = '', resume_url_or_id = '' } = body || {};
+      if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+      if (!resume_url_or_id) return json(res, 400, { error: 'resume_url_or_id required' });
+      try {
+        const { parseResumeId, addManualCandidate } = require('./hh-proactive-search');
+        const resumeId = parseResumeId(resume_url_or_id);
+        if (!resumeId) return json(res, 400, { error: 'could not parse resume id from input' });
+        const hhToken = readHhToken(username);
+        if (!hhToken) return json(res, 403, { error: 'HH токен не найден' });
+        let resumeData;
+        try {
+          resumeData = await hhFetch(`/resumes/${encodeURIComponent(resumeId)}`, hhToken);
+        } catch (e) {
+          // One-shot refresh + retry on expired token, same pattern as proactive-search.
+          if (/40[13]/.test(String(e.message || ''))) {
+            const fresh = await refreshHhToken(username, _secretsCache);
+            if (fresh) resumeData = await hhFetch(`/resumes/${encodeURIComponent(resumeId)}`, { access_token: fresh });
+            else throw e;
+          } else {
+            throw e;
+          }
+        }
+        const record = addManualCandidate(username, resumeData);
+        return json(res, 200, { ok: true, candidate: record });
       } catch (e) {
         return json(res, 500, { error: e.message });
       }
