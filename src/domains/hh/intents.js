@@ -32,6 +32,10 @@ const HH_SCAN_INTENT         = /\/hh_scan|запусти скан|проскан
 // hhIntents (which gates on hhConnected) — otherwise disconnected users could
 // not type /hh_disconnect to clean up a stale token file.
 const HH_DISCONNECT_INTENT   = /\/hh_disconnect|отключи(?:ть)?\s*(?:hh|хх|headhunter)|удали(?:ть)?\s*(?:hh|хх|headhunter)|hh.{0,15}(?:отключи|удали|разъедин|сброс)|сброс.{0,15}(?:hh|хх|headhunter|авторизац)|выключи.{0,15}(?:hh|хх|headhunter)|reset.{0,15}hh/i;
+// /hh publish draft — publish an existing vacancy draft to HeadHunter as a draft
+const VACANCY_HH_PUBLISH_INTENT = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
+// /hh prep draft — "подготовь черновик вакансии на HH": fast-path push when draft_ready, else single-shot collect
+const VACANCY_PREP_DRAFT_INTENT = /подготов.{0,20}(?:черновик|драфт|вакансию).{0,30}(?:hh|хх|хэдхантер)|создай.{0,20}(?:черновик|драфт).{0,30}(?:hh|хх|хэдхантер)|(?:черновик|драфт).{0,30}(?:в|на)\s+(?:hh|хх|хэдхантер)|положи.{0,20}(?:вакансию|на).{0,20}(?:hh|хх|хэдхантер)|вакансию.{0,20}(?:на|в)\s+(?:hh|хх|хэдхантер)|подготов.{0,10}(?:вакансию|черновик)/i;
 
 module.exports = {
   HH_STATUS_INTENT,
@@ -52,4 +56,6 @@ module.exports = {
   HH_REJECT_CANCEL_INTENT,
   HH_SCAN_INTENT,
   HH_DISCONNECT_INTENT,
+  VACANCY_HH_PUBLISH_INTENT,
+  VACANCY_PREP_DRAFT_INTENT,
 };

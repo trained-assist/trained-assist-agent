@@ -35,6 +35,7 @@ const {
   HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, HH_WHERE_PROMPT_INTENT, HH_SHOW_ATS_CONFIG_INTENT,
   HH_STYLE_INTENT, HH_EVALUATE_INTENT, HH_SEND_INTENT, HH_SEND_CONFIRM_INTENT, HH_SEND_CANCEL_INTENT,
   HH_REJECT_INTENT, HH_REJECT_CONFIRM_INTENT, HH_REJECT_CANCEL_INTENT, HH_SCAN_INTENT, HH_DISCONNECT_INTENT,
+  VACANCY_HH_PUBLISH_INTENT, VACANCY_PREP_DRAFT_INTENT,
 } = loadDomainIntents('hh');
 
 // ── Quick answers — bypass Claude for known setup/secrets patterns ───────────
@@ -90,9 +91,6 @@ const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
 const VACANCY_CANCEL_INTENT     = /отмен.{0,20}вакансии|отмен.{0,20}созда|выйт.{0,15}режим|стоп.{0,10}вакансия|сброс.{0,15}вакансии|\/cancel_vacancy/i;
 const VACANCY_PUBLISH_PAGE_INTENT = /публику[йе].{0,20}страниц|опубликуй.{0,20}(?:страниц|лендинг)|создай.{0,20}(?:страниц.{0,20}вакансии|лендинг)|сгенерир.{0,20}страниц|сделай.{0,20}страниц.{0,20}вакансии|страниц.{0,30}(?:вакансии.{0,30})?(?:сгенерир|создай|опубликуй|сделай)|страниц.{0,20}готов/i;
-const VACANCY_HH_PUBLISH_INTENT   = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
-// "Подготовь черновик вакансии на HH" — fast-path when vacancy data already exists or is provided inline
-const VACANCY_PREP_DRAFT_INTENT   = /подготов.{0,20}(?:черновик|драфт|вакансию).{0,30}(?:hh|хх|хэдхантер)|создай.{0,20}(?:черновик|драфт).{0,30}(?:hh|хх|хэдхантер)|(?:черновик|драфт).{0,30}(?:в|на)\s+(?:hh|хх|хэдхантер)|положи.{0,20}(?:вакансию|на).{0,20}(?:hh|хх|хэдхантер)|вакансию.{0,20}(?:на|в)\s+(?:hh|хх|хэдхантер)|подготов.{0,10}(?:вакансию|черновик)/i;
 const USAGE_INTENT          = /^\/usage$|сколько.{0,20}потратил|токен.{0,20}статистик|использован.{0,20}токен|стоимость.{0,20}сессий|расход.{0,20}токен/i;
 // /usage klod, /usage codex — CLI subscription rate-limit check (Claude Code / Codex CLI
 // OAuth session on THIS VM: ~/.claude/.credentials.json, ~/.codex/auth.json). Distinct from
