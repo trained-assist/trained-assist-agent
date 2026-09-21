@@ -189,7 +189,10 @@ async function runEngineProcess(opts) {
   let progressStopped = false;
   function progressEdit(...args) {
     if (progressStopped) return Promise.resolve();
-    const pending = tgEdit(...args).catch(() => {});
+    // Progress/status edits are cosmetic: best-effort (drop on 429 — a missed
+    // "Думаю…" update is fine, a 5-44s block is not) and coalesced per chat so
+    // concurrent sessions sharing a bot token can't flood editMessageText.
+    const pending = tgEdit(...args, { bestEffort: true, coalesce: true }).catch(() => {});
     progressEdits.add(pending);
     pending.finally(() => progressEdits.delete(pending));
     return pending;
