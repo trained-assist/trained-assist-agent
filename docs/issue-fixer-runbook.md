@@ -26,6 +26,13 @@ All three stages accept `--dry-run` (no writes to GitHub, no `opencode`/model ca
 **No auto-merge anywhere in this pipeline** — execute only opens a PR; a human reviews and
 merges it, same as any other PR. This is explicit from the owner's original voice request.
 
+**F6 — grouping by area (flag, off by default):** set `ISSUE_FIXER_GROUP_BY_AREA=1` to make
+execute batch up to 3 executable issues sharing the same gate-classified `area` into one PR
+(one clone, one `opencode` run, one `Closes #A, Closes #B` PR) instead of one PR per issue.
+Issues with no area or `area:unknown` are never grouped. Off by default because `coherence`
+flags mixed-looking diffs, and one-issue-per-PR is the safer default until there's a backlog
+of genuinely related small issues to prove the grouped path out on.
+
 ## Cron
 
 `ops/cron/install.sh` installs `scripts/issue-fixer-cron.sh` hourly (`5 * * * *`), running

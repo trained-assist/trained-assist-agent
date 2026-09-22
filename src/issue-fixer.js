@@ -417,7 +417,12 @@ async function runGate({
 // ── Execute (F4) ─────────────────────────────────────────────────────────────
 const EXECUTE_MODEL = process.env.ISSUE_FIXER_EXECUTE_MODEL || 'deepseek/deepseek-chat';
 const WORK_ROOT = path.join(STATE_DIR, 'work');
-const MARKER = (number) => `<!-- issue-fixer:${number} -->`;
+// Accepts a single issue number (existing single-issue flow) or an array (F6
+// grouped flow) — MARKER(42) still returns exactly the old string.
+const MARKER = (numbers) => {
+  const list = (Array.isArray(numbers) ? numbers : [numbers]).slice().sort((a, b) => a - b);
+  return `<!-- issue-fixer:${list.join(',')} -->`;
+};
 
 // "Which gated issues are ready for an auto-PR right now?" — pure, no I/O.
 function isExecutable(issue) {
@@ -430,6 +435,36 @@ function isExecutable(issue) {
 
 function selectExecutable(issues) {
   return issues.filter(isExecutable).sort((a, b) => a.number - b.number);
+}
+
+// F6 (flag, off by default — ISSUE_FIXER_GROUP_BY_AREA=1): batch executable
+// issues that the gate (F3) classified under the same area into one PR, so
+// related fixes land together instead of N separate small PRs that trip
+// `coherence`'s mixed-changes check on unrelated-looking diffs. Issues with no
+// area or `area:unknown` always stay solo — grouping unrelated issues under a
+// fallback bucket would be worse than not grouping at all. Capped per group so
+// a bad gate run can't balloon one PR into a dozen issues.
+const GROUP_BY_AREA = process.env.ISSUE_FIXER_GROUP_BY_AREA === '1';
+const MAX_GROUP_SIZE = 3;
+
+function groupExecutable(executable, state, groupByArea = GROUP_BY_AREA) {
+  if (!groupByArea) return executable.map((issue) => [issue]);
+  const openBucketByKey = new Map(); // area key -> the group still below MAX_GROUP_SIZE
+  const groups = [];
+  for (const issue of executable) {
+    const entry = state.queued[String(issue.number)] || {};
+    const area = entry.gate && entry.gate.area;
+    const key = area && area !== 'unknown' ? area.trim().toLowerCase() : null;
+    if (!key) { groups.push([issue]); continue; }
+    let bucket = openBucketByKey.get(key);
+    if (!bucket || bucket.length >= MAX_GROUP_SIZE) {
+      bucket = [];
+      groups.push(bucket);
+      openBucketByKey.set(key, bucket);
+    }
+    bucket.push(issue);
+  }
+  return groups;
 }
 
 // Hard rules the engine must follow, independent of the issue content — kept out of
@@ -458,6 +493,30 @@ function buildExecutePrompt(issue, verdict, goalsContext) {
     '# Жёсткие правила',
     `- ${EXECUTE_HARD_RULES}`,
   ].join('\n');
+}
+
+// F6 — multi-issue variants. Reuse buildExecutePrompt/buildPrBody per-issue so
+// the singleton (flag-off) path is byte-identical to before; only the grouped
+// path (group.length > 1) ever calls these.
+function buildGroupExecutePrompt(issues, verdictByNumber, goalsContext) {
+  const area = (verdictByNumber[issues[0].number] || {}).area || 'unknown';
+  const header = `# Группа из ${issues.length} связанных issue (issue-fixer F6, область: ${area})\n\n` +
+    'Исправь их ВСЕ одним PR. Каждая секция ниже — самостоятельное issue со своим ' +
+    'вердиктом гейта; цели/сценарии и жёсткие правила одни на всю группу.';
+  const sections = issues.map((issue) => buildExecutePrompt(issue, verdictByNumber[issue.number], goalsContext));
+  return [header, '', sections.join('\n\n---\n\n')].join('\n');
+}
+
+function buildGroupPrBody(numbers, verdictByNumber) {
+  const sorted = numbers.slice().sort((a, b) => a - b);
+  const reasons = sorted.map((n) => (verdictByNumber[n] || {}).reason).filter(Boolean);
+  const lines = [
+    MARKER(sorted), '',
+    ...sorted.map((n) => `Closes #${n}`), '',
+    'Открыто автоматически issue-fixer (F4/F6, группировка by-area) — без авто-мержа.',
+  ];
+  if (reasons.length) lines.push('', 'Гейт:', ...reasons.map((r) => `- ${r}`));
+  return lines.join('\n');
 }
 
 function buildFailedComment(number, log) {
@@ -563,6 +622,7 @@ async function runExecute({
   model = EXECUTE_MODEL,
   maxAttempts = 3,
   workRoot = WORK_ROOT,
+  groupByArea = GROUP_BY_AREA,
   logger = console,
 } = {}) {
   const state = readState(statePath);
@@ -580,27 +640,34 @@ async function runExecute({
   result.total = issues.length;
   const executable = selectExecutable(issues);
   result.skipped = issues.length - executable.length;
+  // groupByArea=false (default) → every group is [issue], so numbers=[issue.number]
+  // everywhere below and this loop behaves exactly as the pre-F6 single-issue flow.
+  const groups = groupExecutable(executable, state, groupByArea);
 
-  for (const issue of executable) {
-    result.candidates.push({ number: issue.number, title: issue.title });
+  for (const group of groups) {
+    for (const issue of group) result.candidates.push({ number: issue.number, title: issue.title });
     if (dryRun) continue;
 
-    const entry = state.queued[String(issue.number)] || { at: now, title: issue.title };
-    if (entry.pr) { result.opened.push(issue.number); continue; } // already recorded, idempotent
+    const numbers = group.map((issue) => issue.number);
+    const entries = group.map((issue) => state.queued[String(issue.number)] || { at: now, title: issue.title });
+    if (entries.some((entry) => entry.pr)) { result.opened.push(...numbers); continue; } // already recorded, idempotent
 
     try {
       // state.json may have been lost — fall back to searching GitHub for the marker
       // before doing any clone/engine work, so a re-run never opens a second PR.
-      const existing = await findExistingPr(issue.number, token, repo);
+      const existing = await findExistingPr(numbers.length === 1 ? numbers[0] : numbers, token, repo);
       if (existing) {
-        state.queued[String(issue.number)] = { ...entry, pr: existing.number, at: now };
-        result.opened.push(issue.number);
+        group.forEach((issue, i) => { state.queued[String(issue.number)] = { ...entries[i], pr: existing.number, at: now }; });
+        result.opened.push(...numbers);
         continue;
       }
 
-      const verdict = (entry.gate) || null;
-      const prompt = buildExecutePrompt(issue, verdict, goalsContext);
-      const { cwd, branch } = await cloneAndBranch(issue.number, repo, token, workRoot);
+      const verdictByNumber = Object.fromEntries(group.map((issue, i) => [issue.number, entries[i].gate || null]));
+      const prompt = group.length === 1
+        ? buildExecutePrompt(group[0], verdictByNumber[group[0].number], goalsContext)
+        : buildGroupExecutePrompt(group, verdictByNumber, goalsContext);
+      const cloneId = numbers.length === 1 ? numbers[0] : numbers.join('-');
+      const { cwd, branch } = await cloneAndBranch(cloneId, repo, token, workRoot);
 
       let success = false;
       let lastLog = '';
@@ -617,22 +684,30 @@ async function runExecute({
         await push(cwd, branch);
         const pr = await createPr({
           repo, token, branch,
-          title: `fix: ${issue.title} (#${issue.number})`,
-          body: buildPrBody(issue.number, verdict),
+          title: group.length === 1
+            ? `fix: ${group[0].title} (#${group[0].number})`
+            : `fix: ${numbers.map((n) => `#${n}`).join(', ')} (${group.length} related issues)`,
+          body: group.length === 1
+            ? buildPrBody(group[0].number, verdictByNumber[group[0].number])
+            : buildGroupPrBody(numbers, verdictByNumber),
         });
-        await addLabel(issue.number, 'fixer:pr-opened', token, repo);
-        state.queued[String(issue.number)] = { ...entry, pr: pr.number, prUrl: pr.url, at: now };
-        result.opened.push(issue.number);
+        for (let i = 0; i < group.length; i++) {
+          await addLabel(group[i].number, 'fixer:pr-opened', token, repo);
+          state.queued[String(group[i].number)] = { ...entries[i], pr: pr.number, prUrl: pr.url, at: now };
+        }
+        result.opened.push(...numbers);
       } else {
-        await addLabel(issue.number, 'fixer:failed', token, repo);
-        await addComment(issue.number, buildFailedComment(issue.number, lastLog), token, repo);
-        state.queued[String(issue.number)] = { ...entry, failedAt: now };
-        result.failed.push(issue.number);
+        for (let i = 0; i < group.length; i++) {
+          await addLabel(group[i].number, 'fixer:failed', token, repo);
+          await addComment(group[i].number, buildFailedComment(group[i].number, lastLog), token, repo);
+          state.queued[String(group[i].number)] = { ...entries[i], failedAt: now };
+        }
+        result.failed.push(...numbers);
       }
       cleanup(cwd);
     } catch (e) {
-      result.errors.push(`${issue.number}: ${e.message}`);
-      logger.warn(`[issue-fixer] execute failed for #${issue.number}: ${e.message}`);
+      result.errors.push(`${numbers.join(',')}: ${e.message}`);
+      logger.warn(`[issue-fixer] execute failed for #${numbers.join(',')}: ${e.message}`);
     }
   }
 
@@ -685,4 +760,6 @@ module.exports = {
   isExecutable, selectExecutable, buildExecutePrompt, buildFailedComment, buildPrBody,
   ghSearchPrByMarker, ghCreatePr, defaultCloneAndBranch, defaultRunEngine, defaultVerify,
   defaultPush, defaultCleanup, runExecute, EXECUTE_MODEL, MARKER,
+  // F6 — grouping by area (flag, off by default)
+  groupExecutable, buildGroupExecutePrompt, buildGroupPrBody, GROUP_BY_AREA, MAX_GROUP_SIZE,
 };
