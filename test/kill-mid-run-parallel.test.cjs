@@ -1,0 +1,109 @@
+// ACD (§5 SESSION-CRASH-RETRY-SPEC.md): "убей сессию посреди работы, и несколько параллельно" —
+// several pending tasks cut off by a restart must each resume independently with the correct
+// backoff delay, and a restart that lands while an earlier resume is still waiting out its
+// backoff must never fire that resume a second time (journal must not fork/duplicate).
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+const serverSrc = read('src/server.js');
+const { isTaskResumable } = require('../src/pending-task-resume');
+
+const task = (over = {}) => ({ taskId: `t-${over.username || 'alice'}-1`, username: 'alice', userId: 42, task: 'work',
+  initialMsgId: 7, startedAt: Date.now() - 30_000, sessionId: 's1', ...over });
+
+// A harness whose setTimeout is DEFERRED (queued, not run) so tests can control exactly when a
+// backoff delay "elapses" relative to a second simulated restart — the real bug this guards
+// against only shows up when the delayed resume hasn't fired yet and another restart happens.
+function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50 }) {
+  const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
+  const end = serverSrc.indexOf('async function main()', start);
+  const calls = [], runs = [], cleared = [], timers = [];
+  const journal = pending.slice(); // mutable — mirrors the on-disk pending-tasks file
+  const sandbox = {
+    path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
+    BASE_USERS_DIR: '/users', AbortSignal, Promise,
+    // server.js staggers loop iterations with a fixed 200ms `await new Promise(setTimeout(...))`
+    // between resumes — that one must fire immediately so the loop doesn't hang the test; only
+    // the backoff delay for an actual resume (a different value) is deferred/controllable.
+    setTimeout: (fn, ms) => { if (ms === 200) { fn(); return 0; } const t = { fn, ms }; timers.push(t); return t; },
+    process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
+    getRetryDelayMs: attempt => retryDelayMs(attempt),
+    // A fresh snapshot per call, like the real fs-backed getPendingTasks() (server.js reads the
+    // journal once per resumePendingTasks() run) — clearPendingTask() must not mutate the array
+    // the current for-loop is iterating over, only what the *next* resumePendingTasks() call sees.
+    getPendingTasks: () => journal.slice(),
+    clearPendingTask: id => { cleared.push(id); const i = journal.findIndex(p => p.taskId === id); if (i >= 0) journal.splice(i, 1); },
+    fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
+    runTask: opts => { runs.push(opts); return Promise.resolve(); },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(`${serverSrc.slice(start, end)}; this.resume = resumePendingTasks;`, sandbox);
+  return {
+    resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }),
+    flushTimers: () => { const due = timers.splice(0); due.forEach(t => t.fn()); },
+    calls, runs, cleared, journal,
+  };
+}
+
+test('several sessions killed mid-run by the same restart each resume independently, own session/engine intact', async () => {
+  const seenDelays = [];
+  const h = deferredHarness({
+    pending: [
+      task({ taskId: 'a-1', username: 'alice', sessionId: 'sess-a', engine: 'claude', resumeAttempts: 0 }),
+      task({ taskId: 'b-1', username: 'bob', sessionId: 'sess-b', engine: 'opencode', resumeAttempts: 1 }),
+      task({ taskId: 'c-1', username: 'carol', sessionId: 'sess-c', engine: 'codex', resumeAttempts: 2 }),
+    ],
+    retryDelayMs: attempt => { seenDelays.push(attempt); return attempt * 1000; },
+  });
+  await h.resume();
+  h.flushTimers();
+
+  assert.equal(h.runs.length, 3, 'all three killed sessions get resumed');
+  const byUser = Object.fromEntries(h.runs.map(r => [r.user.username, r]));
+  assert.equal(byUser.alice.sessionId, 'sess-a');
+  assert.equal(byUser.alice.engine, 'claude');
+  assert.equal(byUser.bob.sessionId, 'sess-b');
+  assert.equal(byUser.bob.engine, 'opencode');
+  assert.equal(byUser.carol.sessionId, 'sess-c');
+  assert.equal(byUser.carol.engine, 'codex');
+  // Each session keeps its own attempt count — one session's crash history never bleeds into another's.
+  assert.deepEqual(seenDelays, [1, 2, 3], 'per-task attempt = own resumeAttempts + 1, in journal order');
+  assert.equal(h.cleared.length, 3, 'each old journal entry is dropped exactly once');
+  assert.deepEqual(new Set(h.cleared), new Set(['a-1', 'b-1', 'c-1']));
+});
+
+test('a restart that lands while an earlier resume is still waiting out backoff does not fire it twice', async () => {
+  const h = deferredHarness({
+    pending: [task({ taskId: 'a-1', resumeAttempts: 0 })],
+    retryDelayMs: () => 180_000, // 3-minute backoff, well outside a rapid-restart window
+  });
+
+  // Restart #1: schedules the delayed resume and — critically — clears the journal entry
+  // immediately (server.js:365-367), before the delay has actually elapsed.
+  await h.resume();
+  assert.equal(h.runs.length, 0, 'resume has not fired yet — it is still waiting out its backoff');
+  assert.deepEqual(h.cleared, ['a-1']);
+
+  // Restart #2 happens (e.g. another deploy) before the first backoff timer has fired.
+  // getPendingTasks() now reflects the already-cleared journal — nothing left to resume again.
+  await h.resume();
+  assert.equal(h.runs.length, 0, 'second restart must not schedule a duplicate resume for the same task');
+  assert.equal(h.cleared.length, 1, 'the entry is cleared exactly once, not once per restart');
+
+  // Only now does the original backoff timer elapse.
+  h.flushTimers();
+  assert.equal(h.runs.length, 1, 'the original delayed resume still fires exactly once');
+  assert.equal(h.runs[0].sessionId, 's1');
+});
+
+test('the backoff delay actually gates when a killed session comes back — nothing runs before flush', async () => {
+  const h = deferredHarness({ pending: [task()], retryDelayMs: () => 30_000 });
+  await h.resume();
+  assert.equal(h.runs.length, 0, 'a killed session must not be resumed synchronously — the delay must be honored');
+  h.flushTimers();
+  assert.equal(h.runs.length, 1);
+});
