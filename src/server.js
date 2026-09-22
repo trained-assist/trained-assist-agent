@@ -16,7 +16,7 @@ const { handleWebRoute } = require('./web-routes');
 const { handleHhPublic, handleHhAuthed } = require('./handlers/hh');
 const { handleConnect } = require('./handlers/connect');
 const { handleWeb } = require('./handlers/web');
-const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, interruptForRestart, reconcileSoftContinuations } = require('./runner');
+const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, interruptForRestart, reconcileSoftContinuations, MAX_RESUME_ATTEMPTS } = require('./runner');
 const { runMcpTool } = require('./mcp-action');
 const { getAuthFlag, getAllAuthFlags, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
@@ -317,13 +317,23 @@ async function resumePendingTasks(secrets) {
     }
 
     const engine = p.engine || 'claude';
-    console.log(`[resume] engine=${engine} user=${p.username} session=${p.sessionId} task="${String(p.task).slice(0, 60)}"`);
+    const attempt = (p.resumeAttempts || 0) + 1;
+    console.log(`[resume] engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(p.task).slice(0, 60)}"`);
 
     if (engine === 'codex' || engine === 'opencode') {
       // These engines have no resume capability — the user has to re-send.
       const label = engine === 'codex' ? 'Codex' : 'OpenCode';
       await notifyFailure(p, `⚠️ Задача прервана перезапуском сервера.\n${label} не поддерживает автоматическое продолжение — повтори запрос.`);
       clearPendingTask(p.taskId);
+      continue;
+    }
+
+    if (attempt > MAX_RESUME_ATTEMPTS) {
+      // The resume itself keeps failing across restarts (not just once) — this is a real,
+      // repeatable break, not restart noise. Stop retrying and say so plainly.
+      await notifyFailure(p, `⚠️ Не удалось восстановить сессию после ${MAX_RESUME_ATTEMPTS} попыток через перезапуски сервера. Это сбой сервера, не твоей задачи — напиши запрос заново.`);
+      clearPendingTask(p.taskId);
+      console.warn(`[resume] user=${p.username} session=${p.sessionId} gave up after ${MAX_RESUME_ATTEMPTS} attempts`);
       continue;
     }
 
@@ -340,6 +350,7 @@ async function resumePendingTasks(secrets) {
       contextFromSession: p.contextFromSession || null,
       forceClaude: true, projectId: p.projectId || null,
       initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
+      resumedAfterRestart: true, resumeAttempts: attempt,
       secrets, internalGtd: !!p.internalGtd,
     }).then(reply => {
       // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
