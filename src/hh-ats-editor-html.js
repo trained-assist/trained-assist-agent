@@ -134,7 +134,7 @@ const TEMPLATES = {
 };
 
 function atsEditorHtml(currentConfig, currentStages, opts = {}) {
-  const { callbackBase = '', username = '', agentSecret = '', vacancies = [], activeVacancyId = '' } = opts;
+  const { callbackBase = '', username = '', agentSecret = '', vacancies = [], activeVacancyId = '', isDraft = false } = opts;
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const vacancyToken = agentSecret ? require('crypto').createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16) : '';
   const templatesJson = JSON.stringify(TEMPLATES);
@@ -279,6 +279,8 @@ ${vacancies.length > 1 ? `<div class="vacancy-tabs">${vacancies.map(v => {
 </header>
 
 <main>
+
+  ${isDraft ? '<div style="background:rgba(240,180,41,.12);border:1px solid rgba(240,180,41,.35);color:var(--yellow);border-radius:var(--radius);padding:12px 16px;font-size:13px">Черновик, сформированный по тексту вакансии — фоновый скоринг его ещё не использует. Проверь критерии и веса и нажми «Save Funnel», чтобы включить.</div>' : ''}
 
   <!-- Stages -->
   <section>
