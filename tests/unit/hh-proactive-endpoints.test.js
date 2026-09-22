@@ -311,3 +311,54 @@ describe('multi-vacancy tagging + tab switcher (step 7/7)', () => {
     expect(r.body).not.toContain('data-id=\\"manualres2\\"');
   });
 });
+
+// Candidate triage lifecycle: POST /api/hh/proactive/set-status moves a candidate
+// between active/starred/archived, and GET /hh/proactive?list=... only shows
+// candidates currently in that state — reuses vac-A's manualres1 (still 'active'
+// from the block above) so this exercises a real end-to-end move.
+describe('POST /api/hh/proactive/set-status + list= tabs', () => {
+  it('moves a candidate into the starred tab and out of the active one', async () => {
+    const setRes = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/set-status`, {
+      username: MULTI_VAC_UID, token: multiVacToken(), candidate_id: 'manualres1', status: 'starred',
+    });
+    expect(setRes.status).toBe(200);
+    expect(setRes.body.ok).toBe(true);
+    expect(setRes.body.status).toBe('starred');
+    expect(setRes.body.status_changed_at).toBeTruthy();
+
+    const activeView = await get(`http://127.0.0.1:${serverPort}/hh/proactive?username=${MULTI_VAC_UID}&token=${multiVacToken()}&vacancy_id=vac-A&list=active`);
+    expect(activeView.body).not.toContain('data-id=\\"manualres1\\"');
+
+    const starredView = await get(`http://127.0.0.1:${serverPort}/hh/proactive?username=${MULTI_VAC_UID}&token=${multiVacToken()}&vacancy_id=vac-A&list=starred`);
+    expect(starredView.body).toContain('data-id=\\"manualres1\\"');
+  });
+
+  it('renders state tabs with counts reflecting the move above', async () => {
+    const r = await get(`http://127.0.0.1:${serverPort}/hh/proactive?username=${MULTI_VAC_UID}&token=${multiVacToken()}&vacancy_id=vac-A`);
+    expect(r.status).toBe(200);
+    expect(r.body).toContain('state-tabs');
+    expect(r.body).toContain('⭐ Выбрано (1)');
+  });
+
+  it('rejects an invalid status value with 400, not a crash', async () => {
+    const r = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/set-status`, {
+      username: MULTI_VAC_UID, token: multiVacToken(), candidate_id: 'manualres1', status: 'bogus',
+    });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/invalid status/);
+  });
+
+  it('wrong token → 403', async () => {
+    const r = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/set-status`, {
+      username: MULTI_VAC_UID, token: 'wrong', candidate_id: 'manualres1', status: 'archived',
+    });
+    expect(r.status).toBe(403);
+  });
+
+  it('unknown candidate_id → 400, not a crash', async () => {
+    const r = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/set-status`, {
+      username: MULTI_VAC_UID, token: multiVacToken(), candidate_id: 'does-not-exist', status: 'archived',
+    });
+    expect(r.status).toBe(400);
+  });
+});

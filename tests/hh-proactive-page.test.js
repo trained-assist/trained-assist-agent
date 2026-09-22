@@ -137,43 +137,65 @@ describe('header markup (#3, #4, #5)', () => {
   });
 });
 
-describe('persistent viewed flag (#6)', () => {
-  it('renders the read toggle with a checkbox on each card', () => {
-    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
-    expect(html).toContain('markRead(');
-    expect(html).toContain('☐ Просмотрено');
+// The "persistent viewed flag" (#6) — a checkbox that only dimmed the card in place —
+// was replaced by a three-state triage lifecycle (active/starred/archived): the owner
+// asked for candidates to actually move out of the main feed into their own list
+// (starred) or an out-of-the-way one (archived), with an explicit way back, rather
+// than staying in the same list just visually muted. These tests replace the old
+// read-toggle coverage above with the new state tabs + per-card move actions.
+describe('candidate status tabs + actions', () => {
+  it('renders state tabs with counts, marking the active tab', () => {
+    const html = generateProactivePageHtml(
+      baseResults([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]),
+      'testuser', 'http://localhost:3001', 'tok123', {},
+      { listView: 'active', stateCounts: { active: 3, starred: 1, archived: 2 } },
+    );
+    expect(html).toContain('state-tab active');
+    expect(html).toContain('Найдено (3)');
+    expect(html).toContain('⭐ Выбрано (1)');
+    expect(html).toContain('🗄 Архив (2)');
+    expect(html).toContain('list=starred');
+    expect(html).toContain('list=archived');
   });
 
-  it('checks the box and dims the card (card-read class, data-read=true) for read candidates', () => {
-    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', read: true, experience: [] }]);
-    expect(html).toContain('card  card-read');
-    expect(html).toContain('checked');
-    expect(html).toContain('☑ Просмотрено');
-    expect(html).toContain('data-read=\\"true\\"');
+  it('an active-status card offers star and archive actions', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
+    expect(html).toContain("setStatus('r1','starred',this)");
+    expect(html).toContain("setStatus('r1','archived',this)");
+    expect(html).not.toContain("setStatus('r1','active',this)");
   });
 
-  it('leaves unread candidates unchecked with data-read=false and no card-read class', () => {
-    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
-    expect(html).not.toContain('card  card-read');
-    expect(html).toContain('data-read=\\"false\\"');
-    expect(html).not.toContain('data-read=\\"true\\"');
+  it('a starred card offers unstar (back to active) and archive actions', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', status: 'starred', experience: [] }]);
+    expect(html).toContain("setStatus('r1','active',this)");
+    expect(html).toContain("setStatus('r1','archived',this)");
+    expect(html).toContain('Убрать из выбранных');
   });
 
-  it('posts to the mark-read endpoint from the client script', () => {
-    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
-    expect(html).toContain('/api/hh/proactive/mark-read');
-    expect(html).toContain('candidate_id: candidateId, read');
+  it('an archived card offers only a restore-to-active action', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', status: 'archived', experience: [] }]);
+    expect(html).toContain("setStatus('r1','active',this)");
+    expect(html).not.toContain("setStatus('r1','archived',this)");
+    expect(html).not.toContain("setStatus('r1','starred',this)");
+    expect(html).toContain('Вернуть в список');
   });
 
-  it('includes the "Скрыть просмотренные" filter toggle in the filter bar', () => {
+  it('treats a missing status as active (legacy candidates default in)', () => {
     const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
-    expect(html).toContain('id="hideRead"');
-    expect(html).toContain('Скрыть просмотренные');
+    expect(html).toContain('⭐ Выбрать');
   });
 
-  it('hides read candidates in the client filter (data-read check in matchesFilters)', () => {
+  it('posts to the set-status endpoint from the client script', () => {
     const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
-    expect(html).toContain("if (hideRead && el.dataset.read === 'true') return false;");
+    expect(html).toContain('/api/hh/proactive/set-status');
+    expect(html).toContain('candidate_id: candidateId, status');
+  });
+
+  it('no longer renders the retired read-toggle checkbox or hide-read filter', () => {
+    const html = render([{ id: 'r1', title: 'X', score: 5, tag: 'REVIEW', experience: [] }]);
+    expect(html).not.toContain('markRead(');
+    expect(html).not.toContain('id="hideRead"');
+    expect(html).not.toContain('/api/hh/proactive/mark-read');
   });
 });
 
