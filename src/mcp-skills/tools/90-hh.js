@@ -80,6 +80,35 @@ function readHhToken(userId) {
   return _readHhTokenUtil(userId || USER_ID);
 }
 
+// An expired/revoked HH access token and "no paid access to the resume database" both
+// surface as HTTP 401/403 — but they need opposite responses: a reconnect link vs HH's
+// own explanation. hhFetch's error text always carries HH's `description`, so we can
+// tell them apart by wording instead of guessing "no paid access" for every 403 (that
+// guess used to send recruiters to a billing dead-end when the real problem was just an
+// expired token — see hh_search_resumes: it lists anonymous profiles for free, no paid
+// package involved at all).
+function isHhAuthError(message) {
+  return /HH API 40[13]:.*(authoriz|invalid[-_ ]?token|token[-_ ]?(expired|invalid|revoked))/i.test(message || '');
+}
+
+// Drop-in replacement for `return { error: e.message }` in HH API catch blocks —
+// keeps HH's own wording for real errors, but swaps in a one-time reconnect link when
+// the token itself is the problem, so a live session doesn't have to notice and build
+// one by hand each time.
+function hhAuthAwareError(e, prefix = '') {
+  if (isHhAuthError(e.message)) {
+    const { generateLegacyConnectLink } = require('../../user-tokens');
+    const link = generateLegacyConnectLink(USER_ID, 'hh');
+    return {
+      error: 'Токен HH истёк или отозван.',
+      reauth_required: true,
+      reauth_link: link,
+      message: `Авторизуйся заново в HeadHunter (ссылка на 30 минут): ${link}\nПосле этого повтори запрос.`,
+    };
+  }
+  return { error: `${prefix}${e.message}` };
+}
+
 function readOrKey(userId) {
   const file = orKeyPath(userId);
   if (fs.existsSync(file)) {
@@ -505,7 +534,10 @@ module.exports = {
             token_prefix: token.access_token.slice(0, 8) + '...',
           };
         } catch (e) {
-          return { connected: false, error: e.message, message: 'Токен есть, но запрос не прошёл. Возможно токен истёк — обнови через hh_set_token.' };
+          const auth = hhAuthAwareError(e);
+          return auth.reauth_required
+            ? { connected: false, ...auth }
+            : { connected: false, error: e.message, message: 'Токен есть, но запрос не прошёл. Возможно токен истёк — обнови через hh_set_token.' };
         }
       },
     },
@@ -593,7 +625,7 @@ module.exports = {
               active_vacancies: active,
               vacancies: items,
             };
-          } catch (e) { return { error: e.message }; }
+          } catch (e) { return hhAuthAwareError(e); }
         }
 
         // Fetch vacancy name to store human-readable label
@@ -690,7 +722,7 @@ module.exports = {
           });
           return { total: data.found, vacancies: items };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -750,7 +782,7 @@ module.exports = {
             items,
           };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -809,7 +841,7 @@ module.exports = {
           // e.message now carries HH's own error detail (see hhFetch) — surface it
           // instead of guessing "no paid access" for every 403, which could also mean
           // a bad filter, missing scope, etc.
-          return { error: `Холодный поиск не выполнен: ${e.message}` };
+          return hhAuthAwareError(e, 'Холодный поиск не выполнен: ');
         }
       },
     },
@@ -857,7 +889,7 @@ module.exports = {
             knockout_failed: result.knockout_failed || [],
           };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -890,7 +922,7 @@ module.exports = {
           });
           return { ok: true, resume_id, vacancy_id, note: 'Приглашение отправлено. Дальше — hh_list_responses или hh_get_messages по этому кандидату.' };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -929,10 +961,17 @@ module.exports = {
           const stageResults = await Promise.all(
             STATES.map(st =>
               hhGet(`/negotiations/${st}?vacancy_id=${resolvedVacancyId}&per_page=1&page=0`, token)
-                .then(d => [st, d.found || 0])
-                .catch(() => [st, 0]),
+                .then(d => [st, d.found || 0, null])
+                .catch(e => [st, 0, e]),
             ),
           );
+          // A dead/expired token fails every stage call the same way — without this check
+          // the per-stage .catch above quietly turns that into "0 candidates everywhere",
+          // which is indistinguishable from a genuinely empty funnel. The unattended digest
+          // cron reads this tool directly, so a silent zero here means the recruiter never
+          // finds out they need to reauthorize.
+          const authFailure = stageResults.find(([, , e]) => e && isHhAuthError(e.message));
+          if (authFailure) return hhAuthAwareError(authFailure[2]);
           for (const [st, n] of stageResults) counts[st] = n;
 
           // Count unread applicant messages (with_applicant_new state)
@@ -996,7 +1035,7 @@ module.exports = {
 
           return result;
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1042,7 +1081,7 @@ module.exports = {
             note: `Черновик сохранён. Открой ${editorUrl} чтобы проверить критерии/веса и сохранить — фоновый скоринг начнёт использовать конфиг только после сохранения там.`,
           };
         } catch (e) {
-          return { error: `Не удалось извлечь конфиг: ${e.message}` };
+          return hhAuthAwareError(e, 'Не удалось извлечь конфиг: ');
         }
       },
     },
@@ -1084,7 +1123,7 @@ module.exports = {
             criteria: result.criteria,
           };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1162,7 +1201,7 @@ module.exports = {
             note: 'Проверь сообщение и отправь через hh_send_message если всё ок.',
           };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1211,7 +1250,7 @@ module.exports = {
           }));
           return { negotiation_id, total: items.length, messages: items };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1240,7 +1279,7 @@ module.exports = {
 
           return { ok: true, negotiation_id, message_sent: message.slice(0, 80) + (message.length > 80 ? '...' : '') };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1434,7 +1473,7 @@ module.exports = {
             note: 'Передай results в hh_draft_review_page чтобы сгенерировать страницу ревью.',
           };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1558,7 +1597,7 @@ module.exports = {
             note: 'Черновики обновлены. Ничего не отправлено — открой hh_draft_review_page или /hh/review чтобы проверить и отправить.',
           };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1676,7 +1715,7 @@ module.exports = {
           const result = await hhPut(`/negotiations/${negotiation_id}`, token, body);
           return { ok: true, negotiation_id, new_state: action };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
@@ -1832,7 +1871,7 @@ module.exports = {
 
           return { negotiation_id, name, profile_md: profile };
         } catch (e) {
-          return { error: e.message };
+          return hhAuthAwareError(e);
         }
       },
     },
