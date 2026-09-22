@@ -67,52 +67,7 @@ let GIT_COMMIT = 'unknown';
 try { RUNTIME_REVISION = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim(); GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
 
 const { classifyMessage, CLASSIFY_MAX_AGE_MS } = require('./classify-message');
-
-// ШАГ 1.2 — cheap completeness gate. Given a coalesced intake buffer, decide
-// whether it reads as a finished, actionable request or an obviously cut-off
-// fragment ("сделай так чтобы", "а можешь", trailing "и…"). STRONG bias toward
-// "complete": we only want to catch clearly truncated thoughts so a costly
-// session doesn't start on half an instruction and then redo the work. On any
-// doubt or error we return complete=true (fail open — never trap the user).
-async function checkCompleteness(text, openrouterKey) {
-  const trimmed = (text || '').trim();
-  if (!trimmed || !openrouterKey) return { complete: true };
-
-  const prompt = `Пользователь пишет ассистенту в Telegram. Реши, законченная ли это мысль/запрос, который можно начинать выполнять, или она ЯВНО оборвана на полуслове (человек не дописал).
-
-СООБЩЕНИЕ:
-"""
-${trimmed.slice(0, 1200)}
-"""
-
-Ответь ТОЛЬКО одним словом:
-- "complete" — если это осмысленный запрос/вопрос/утверждение, который можно выполнять (даже короткий, даже без деталей).
-- "incomplete" — ТОЛЬКО если мысль явно оборвана: обрывается на предлоге/союзе, "сделай так чтобы", "а можешь", "нужно чтобы…" без продолжения, висящее "и".
-
-Сильно склоняйся к "complete". Придирайся только к очевидно недописанному. Ничего лишнего, одно слово.`;
-
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${openrouterKey}`,
-    },
-    body: JSON.stringify({
-      model: 'openai/gpt-4o-mini',
-      max_tokens: 8,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    throw new Error(`OpenRouter API ${res.status}: ${errBody.slice(0, 300)}`);
-  }
-  const data = await res.json();
-  const answer = (data.choices?.[0]?.message?.content || '').toLowerCase();
-  // Default to complete unless the model explicitly said incomplete.
-  return { complete: !answer.includes('incomplete') };
-}
+const { checkCompleteness } = require('./intake-gate');
 
 function readChatId(username) {
   try { return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', String(username), '.chatid'), 'utf8').trim() || null; }
@@ -1687,7 +1642,7 @@ ${recent || '(пока нет)'}
         return json(res, 200, result);
       } catch (e) {
         console.error('[intake-gate] error:', e.message);
-        return json(res, 200, { complete: true }); // fail open — never trap the user
+        return json(res, 200, { level: 'clear', complete: true }); // fail open — never trap the user
       }
     }
 
