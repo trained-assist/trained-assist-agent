@@ -234,6 +234,81 @@ async function extractAtsConfig(vacancyText, apiKey) {
   return parseLlmJson(content);
 }
 
+// Saved ats_config files can predate the current schema — an older hh_extract_ats_config
+// output (required_skills/preferred_skills/thresholds), a hand-edited context file, or a
+// stale ats-editor save (plain-string required/preferred, out-of-range thresholds). Unlike
+// hh-scoring.js's background scorer (which already tolerates several shapes), this file's
+// computeScore is strict: an unrecognized shape means every required/preferred item drops
+// out silently, maxRaw stays 0, every candidate scores exactly 0 and gets auto-rejected —
+// with nothing in the output to say the *config*, not the candidate, was the problem. This
+// found a real live vacancy silently rejecting every cold-search candidate. Normalize known
+// legacy shapes so a schema change doesn't quietly zero out scoring again, and throw instead
+// of silently scoring everyone ОТКЛОНИТЬ when nothing usable survives normalization.
+function normalizeAtsConfig(raw) {
+  const config = { ...raw };
+  const warnings = [];
+
+  const toCriteriaList = (list, defaultWeight, legacyKey) => {
+    if (!Array.isArray(list)) return [];
+    return list
+      .map(item => {
+        if (typeof item === 'string') return { name: item, weight: defaultWeight };
+        if (item && typeof item === 'object') {
+          const name = item.name ?? item[legacyKey];
+          const weight = typeof item.weight === 'number' ? item.weight : defaultWeight;
+          return name ? { name, weight } : null;
+        }
+        return null;
+      })
+      .filter(Boolean);
+  };
+
+  if (!Array.isArray(config.required) && Array.isArray(config.required_skills)) {
+    config.required = toCriteriaList(config.required_skills, 2.0, 'skill');
+    warnings.push('required_skills → required (устаревшая схема)');
+  } else {
+    config.required = toCriteriaList(config.required, 2.0, 'name');
+  }
+
+  if (!Array.isArray(config.preferred) && Array.isArray(config.preferred_skills)) {
+    config.preferred = toCriteriaList(config.preferred_skills, 1.0, 'skill');
+    warnings.push('preferred_skills → preferred (устаревшая схема)');
+  } else {
+    config.preferred = toCriteriaList(config.preferred, 1.0, 'name');
+  }
+
+  config.knockout = Array.isArray(config.knockout)
+    ? config.knockout.map(k => (typeof k === 'string' ? k : k?.criterion)).filter(Boolean)
+    : [];
+
+  if ((config.pass_threshold == null || config.review_threshold == null) && config.thresholds) {
+    config.pass_threshold = config.pass_threshold ?? config.thresholds.strong;
+    config.review_threshold = config.review_threshold ?? config.thresholds.consider;
+    warnings.push('thresholds.{strong,consider} → pass_threshold/review_threshold (устаревшая схема)');
+  }
+
+  // computeScore caps finalScore at 10 — a threshold above that can never be reached,
+  // so every candidate silently falls through to ОТКЛОНИТЬ.
+  if (typeof config.pass_threshold !== 'number' || config.pass_threshold <= 0 || config.pass_threshold > 10) {
+    config.pass_threshold = 6.5;
+    warnings.push('pass_threshold отсутствовал/вне диапазона 0-10 → дефолт 6.5');
+  }
+  if (typeof config.review_threshold !== 'number' || config.review_threshold <= 0 || config.review_threshold > 10) {
+    config.review_threshold = 4.0;
+    warnings.push('review_threshold отсутствовал/вне диапазона 0-10 → дефолт 4.0');
+  }
+
+  if (config.required.length + config.preferred.length === 0) {
+    throw new Error(
+      'ATS-конфиг повреждён или устарел: после нормализации нет ни одного required/preferred критерия — ' +
+      'открой /hh/ats-editor и пересохрани конфиг для этой вакансии.',
+    );
+  }
+
+  if (warnings.length) console.warn(`[hh evaluateCandidate] normalized ats_config: ${warnings.join('; ')}`);
+  return config;
+}
+
 function buildAtsPrompt(config) {
   const knockoutList = (config.knockout || []).map(k => `  - ${k}`).join('\n') || '  (не задано)';
   const reqLines = (config.required || []).map(c => `  - "${c.name}" (вес ${c.weight})`).join('\n') || '  (не задано)';
@@ -1874,14 +1949,15 @@ module.exports = {
 // ── Internal helpers (called from handler closures) ─────────────────────────
 
 async function evaluateCandidate(candidateText, atsConfig, apiKey) {
-  const systemPrompt = buildAtsPrompt(atsConfig);
+  const config = normalizeAtsConfig(atsConfig);
+  const systemPrompt = buildAtsPrompt(config);
   const content = await llmCall(apiKey, FAST_MODEL, [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Оцени кандидата:\n\n${candidateText}` },
   ], 2000, 0.1);
 
   const llmResult = parseLlmJson(content);
-  return computeScore(llmResult, atsConfig);
+  return computeScore(llmResult, config);
 }
 
 async function generateMessage(candidateContext, atsResult, name, apiKey, messageType = 'initial', history = [], userId = null, atsConfig = null) {

@@ -222,6 +222,82 @@ describe('hh_evaluate_candidate', () => {
   });
 });
 
+// ── evaluateCandidate — legacy/malformed ats_config normalization ────────────
+// Regression coverage for a live bug found while validating PR #1099's cold-search
+// tools: a real recruiter's saved ats_config predated the current schema
+// (required_skills/preferred_skills/thresholds instead of required/preferred/
+// pass_threshold/review_threshold) → required/preferred silently evaluated to [],
+// every candidate scored exactly 0 and was auto-rejected, with no error surfaced.
+
+describe('hh_evaluate_candidate — legacy ats_config shapes get normalized, not silently zeroed', () => {
+  it('required_skills/preferred_skills/thresholds (pre-#1099 schema) still scores correctly', async () => {
+    const legacyConfig = {
+      vacancy_title: 'Backend Developer (Node.js)',
+      vacancy_context: 'Продуктовый стартап',
+      knockout: [{ criterion: 'нет опыта программирования', auto_reject: true }],
+      required_skills: [
+        { skill: 'Node.js', weight: 3.0 },
+        { skill: 'PostgreSQL', weight: 2.0 },
+      ],
+      preferred_skills: [{ skill: 'Docker', weight: 1.0 }],
+      thresholds: { strong: 6.5, consider: 4.0, reject: 2.0 },
+    };
+
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true },
+      criteria: [
+        { name: 'Node.js', score: 3, evidence: '5 лет Node.js' },
+        { name: 'PostgreSQL', score: 2, evidence: 'PostgreSQL в опыте' },
+        { name: 'Docker', score: 2, evidence: 'Docker в стеке' },
+      ],
+      reasoning: 'Отличный кандидат.',
+    }));
+
+    const r = await tools().hh_evaluate_candidate.handler({ negotiation_id: 'neg-001', ats_config: legacyConfig });
+
+    expect(r.verdict).toBe('ПРОПУСТИТЬ');
+    expect(r.score).toBeGreaterThanOrEqual(6.5);
+  });
+
+  it('plain-string required/preferred + out-of-range thresholds (stale ats-editor save) get normalized', async () => {
+    const legacyConfig = {
+      vacancy_title: 'Ведущий инженер-наладчик',
+      vacancy_context: 'ОРГРЭС',
+      knockout: [],
+      required: ['опыт пусконаладочных работ', 'высшее техническое образование'],
+      preferred: ['опыт на ТЭС'],
+      pass_threshold: 50,   // stale — current scale caps at 10
+      review_threshold: 30,
+    };
+
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: {},
+      criteria: [
+        { name: 'опыт пусконаладочных работ', score: 3, evidence: '10 лет' },
+        { name: 'высшее техническое образование', score: 3, evidence: 'МЭИ' },
+        { name: 'опыт на ТЭС', score: 2, evidence: 'Краснодарская ТЭЦ' },
+      ],
+      reasoning: 'Сильный кандидат.',
+    }));
+
+    const r = await tools().hh_evaluate_candidate.handler({ negotiation_id: 'neg-001', ats_config: legacyConfig });
+
+    // Before the fix: pass_threshold=50 was unreachable (max score is 10) → always ОТКЛОНИТЬ.
+    expect(r.verdict).toBe('ПРОПУСТИТЬ');
+    expect(r.score).toBeGreaterThan(0);
+  });
+
+  it('config with nothing usable after normalization → explicit error, not a silent score-0 ОТКЛОНИТЬ for every candidate', async () => {
+    const emptyConfig = { vacancy_title: 'X', vacancy_context: 'Y' };
+
+    const r = await tools().hh_evaluate_candidate.handler({ negotiation_id: 'neg-001', ats_config: emptyConfig });
+
+    expect(r.error).toMatch(/ATS-конфиг повреждён или устарел/);
+  });
+});
+
 // ── hh_generate_message ──────────────────────────────────────────────────────
 
 describe('hh_generate_message', () => {
