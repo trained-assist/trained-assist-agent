@@ -154,17 +154,41 @@ API), без единого инструмента. Он не может отк�
       (TOML-конфиг для codex + отдельный формат для opencode — самостоятельная
       задача с собственным риском регресса).
 
-## Phase 3 — Hermes Skills (NOT STARTED)
+## Phase 3 — Hermes Skills (NOT STARTED — grounded scoping done 2026-09-21)
 
-- [ ] Разделить knowledge (факты про клиента/вакансию → в
-      `agent-project-notes.md`) и procedure (как делать разбор → skill).
-- [ ] Три уровня: `system/` (в этом репо, версионируется), `users/{user}/skills/`,
-      `projects/{project}/skills/`. Приоритет override: system → profile → project.
-- [ ] Draft → approve → publish. Hermes не может молча менять system-skill —
-      только предлагать diff, публикация — ручное действие владельца.
-- [ ] Первый кандидат на system-skill: то, что уже дублировано в
-      `hh-scoring.evaluateCandidate` + `interview_analyze` → один
-      `candidate-analysis` skill поверх `hermesRun`.
+Сверено с кодом, не только с roadmap. Вывод: это **самостоятельная подсистема,
+не аддитивный патч** — в отличие от Phase 1/2, здесь ничего переиспользовать
+почти нечем.
+
+- Тулы грузятся `src/mcp-skills/registry.js:14` чистым file-scan одной
+  директории (`src/mcp-skills/tools/*.js`, сортировка по имени файла), без
+  манифеста. Коллизия имён тула = warn+skip (`registry.js:21-24`) — это
+  ПРОТИВОПОЛОЖНО нужной семантике override «system→profile→project» (там
+  последний уровень должен побеждать, а не молча теряться).
+  `TOOLS_DIR` — единственный существующий hook, но это «подменить всё»,
+  а не слой поверх слоя.
+- `users/{user}/skills/` и `projects/{project}/skills/` на диске **не
+  существуют вообще** — есть только `projects/<id>/` под заметки/профиль
+  (`src/projects.js`), директории под скилы придётся вводить с нуля.
+- Draft → approve → publish **не на что опереться**: в кодовой базе нет ни
+  одного существующего примитива ревью/версионирования контента (`gtd-controller.js`
+  "pending" — это только due-time для задач, не контент-ревью). Ближайший
+  реальный аналог — обычный GitHub PR (`60-github.js:github_create_pr`), но он
+  общий инструмент, не привязан к скилам/Hermes.
+- MCP-тулы (а значит и любой skill в виде MCP-тула) сейчас видны ТОЛЬКО
+  claude-движку (`claude-runner.js:69`, `--mcp-config` только там) — Phase 3
+  унаследует этот же codex/opencode-гап, если не закрыть его отдельно.
+
+**Решение оставлено на владельца (не блокирует Phase 1/2, но блокирует старт
+Phase 3):** строить ли custom три-tier merge+draft/approve с нуля, или сузить
+Phase 1 до одного варианта — обычный PR-ревью на `system/`-скил (готовый
+примитив) + просто "не даём Hermes писать в system/ автоматически" для
+profile/project уровней (без отдельного draft-стейта, т.к. эти файлы и так
+пишет только конкретный юзер/проект). Второе — на порядок дешевле и почти
+ничего нового не требует.
+- [ ] Первый кандидат на system-skill (после решения по дизайну выше): то, что
+      уже дублировано в `hh-scoring.evaluateCandidate` + `interview_analyze` →
+      один `candidate-analysis` skill поверх `hermesRun`.
 
 ## Phase 4 — durable long-running Hermes (NOT STARTED)
 
