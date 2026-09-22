@@ -55,6 +55,28 @@ const chatId = 'test-chat-1';
   // ── GitHub / network was never touched ───────────────────────────────────────
   ok(fetchCalls === 0, 'no network call (GitHub issue) was attempted');
 
+  // ── PR3 (Harness A): a fresh gateway-supplied sessionId is honored ───────────
+  // The gateway now forces a new session (fresh id, forceNew:true) for /bug_or_feature —
+  // the agent must create the bugs session under THAT exact id, or the gateway's
+  // lastSessionId points at an orphan and every buffered follow-up misroutes.
+  const gatewayId = `s-${Date.now()}-gw`;
+  const greeting3 = await runQuickAnswer('/bug_or_feature', 'testuser', workDir, null, false, chatId, null, gatewayId);
+  ok(/Bugs and Features/i.test(greeting3), 'honored-id invocation still greets');
+  const sess3 = sessions.getSession(workDir, gatewayId);
+  ok(!!sess3 && sess3.projectId === 'bugs-and-features', 'session was created under the gateway-supplied id');
+  const cur3 = sessions.getCurrentSessionId(workDir, chatId);
+  ok(cur3 === gatewayId, 'current-session pointer matches the gateway-supplied id');
+
+  // ── PR3 safety net: a sessionId that already exists (sessionExists=true) is never
+  // reused for the new bugs session — would silently overwrite a real conversation.
+  await new Promise(r => setTimeout(r, 5));
+  const existingId = gatewayId; // sess3 already exists on disk under this id
+  await runQuickAnswer('/bug_or_feature', 'testuser', workDir, null, true, chatId, null, existingId);
+  const cur4 = sessions.getCurrentSessionId(workDir, chatId);
+  ok(!!cur4 && cur4 !== existingId, 'sessionExists=true never overwrites the existing session id');
+  const sess3Untouched = sessions.getSession(workDir, existingId);
+  ok(sess3Untouched.messages.length === sess3.messages.length, 'the earlier session under that id is left untouched');
+
   fs.rmSync(workDir, { recursive: true, force: true });
   console.log(`\nbug-or-feature-session: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
