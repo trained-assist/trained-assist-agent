@@ -51,6 +51,7 @@ const {
   MODEL_INFO_INTENT,
   BUG_OR_FEATURE_INTENT,
   isPreQueueQuickIntent,
+  shouldAttemptQuickAnswer,
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,
   HH_RESPONSES_INTENT,
@@ -1463,9 +1464,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   } catch (e) { console.warn('[runner] persist chatId:', e.message); }
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
-  // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
+  // forceClaude=true skips quick answers for ambiguous prose (user explicitly wants Claude /
+  // restart-resume), but NOT for slash commands — a command is unambiguous and must never be
+  // replayed to the LLM. See shouldAttemptQuickAnswer (intent-engine).
   const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId, activeSessionId);
-  const quickReply = forceClaude ? null : await dispatchQuick();
+  const quickReply = shouldAttemptQuickAnswer(forceClaude, task) ? await dispatchQuick() : null;
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
     const isUtility = PING_INTENT.test(task) || HELP_INTENT.test(task) ||
@@ -2340,7 +2343,7 @@ async function reconcileSoftContinuations(secrets) {
 
 module.exports = {
   interruptForRestart, MAX_RESUME_ATTEMPTS,
-  runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
+  runTask, getQuickAnswer, runQuickAnswer, shouldAttemptQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   isTaskRunning, isSessionRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   clearPendingContinuation, reconcileSoftContinuations,
   // Exported for soft-continuation journal tests only
