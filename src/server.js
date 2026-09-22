@@ -18,7 +18,7 @@ const { handleConnect } = require('./handlers/connect');
 const { handleWeb } = require('./handlers/web');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, interruptForRestart, reconcileSoftContinuations } = require('./runner');
 const { runMcpTool } = require('./mcp-action');
-const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
+const { getAuthFlag, getAllAuthFlags, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
@@ -909,18 +909,24 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // GET /internal/auth-status — read/clear Claude Code auth flag (for repair system)
+    // GET /internal/auth-status — read/clear engine auth flags (for repair system).
+    // claude_auth_ok/reason/vm/... stay engine-agnostic-looking for back-compat with the existing
+    // repair system (always reflect the 'claude' engine, same as before per-engine tracking existed).
+    // `engines` is new: the full claude/codex/opencode breakdown, since Claude/Codex now auto-fall
+    // back to OpenCode on auth loss (issue #1061 Фаза 3) and the repair system needs to see all three.
     if (req.method === 'GET' && url.pathname === '/internal/auth-status') {
-      const flag = getAuthFlag();
+      const flag = getAuthFlag('claude');
       return json(res, 200, {
         claude_auth_ok: !flag.failed,
         ...(flag.failed ? { reason: flag.reason, vm: flag.vm, failed_at: flag.failed_at, error_text: flag.error_text } : {}),
+        engines: getAllAuthFlags(),
       });
     }
 
-    // POST /internal/auth-status/clear — mark repaired (called by repair system after fixing auth)
+    // POST /internal/auth-status/clear?engine=claude|codex|opencode — mark repaired (called by
+    // repair system after fixing auth). engine omitted → 'claude', same as before per-engine tracking.
     if (req.method === 'POST' && url.pathname === '/internal/auth-status/clear') {
-      clearAuthFailedFlag();
+      clearAuthFailedFlag(url.searchParams.get('engine'));
       return json(res, 200, { ok: true });
     }
 
