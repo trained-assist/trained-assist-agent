@@ -106,10 +106,10 @@ describe('hh_search_resumes', () => {
     expect(r.items.map(i => i.resume_id)).toContain(DEFAULT_COLD_RESUME.id);
   });
 
-  it('surfaces a clear message when the employer has no paid database access', async () => {
+  it('surfaces HH\'s own error detail on a 403, instead of guessing the cause', async () => {
     mockHh.state.resumeAccessDenied = true;
     const r = await tools().hh_search_resumes.handler({});
-    expect(r.error).toMatch(/платного доступа к базе резюме/);
+    expect(r.error).toMatch(/no resume database access/);
   });
 });
 
