@@ -1,7 +1,7 @@
 'use strict';
-// Issue-fixer — F2 (selection) + F3 (relevance-gate) slices of the "Фиксер"
-// pipeline stage (issue -> relevance-gate -> PR). See ISSUES-TO-PR-SPEC.md
-// §3.2/§3.3/§6 in the owner's working project.
+// Issue-fixer — F2 (selection) + F3 (relevance-gate) + F4 (execute) slices of the
+// "Фиксер" pipeline stage (issue -> relevance-gate -> PR). See ISSUES-TO-PR-SPEC.md
+// §3.2/§3.3/§3.5/§6 in the owner's working project.
 //
 // F2 (`run`) makes no model calls and creates no PRs — it only answers "which open
 // issues are structurally eligible right now" and remembers what it has already
@@ -13,10 +13,21 @@
 // the verdict as labels (`scope:in|out`, `fixability:auto|needs-human`) + a
 // comment. It still creates no PRs — that is F4.
 //
+// F4 (`runExecute`) picks up issues F3 gated `scope:in` + `fixability:auto` and not
+// yet `fixer:pr-opened`/`fixer:failed`: clones the repo in isolation (never the live
+// checkout), runs a coding engine against a prompt built from the issue + gate
+// verdict + GOALS.md, verifies (`npm ci && npm run check && npm test`), and on
+// success pushes + opens a PR with `Closes #N` (never auto-merges — explicit owner
+// requirement). On failure after `maxAttempts` it labels `fixer:failed` with a log
+// comment instead. All I/O (clone, engine, verify, push, PR create/search) is
+// injectable so tests run with fakes — no real git/network in test:cjs.
+//
 // Dedup / idempotency — a durable `state.json` under `~/agent-data/issue-fixer/`
 // (global, not per-profile: issues live in one repo, not per-user). GitHub labels
 // are the primary source of truth for "what stage is this issue at" (survives a
-// lost state.json); state.json additionally records the raw gate verdict.
+// lost state.json); state.json additionally records the raw gate verdict and (F4)
+// the resulting PR number. A hidden `<!-- issue-fixer:<N> -->` marker in the PR body
+// is the fallback if state.json is ever lost, mirroring bugs-collector.js's marker.
 
 const fs = require('fs');
 const path = require('path');
@@ -403,17 +414,248 @@ async function runGate({
   return result;
 }
 
+// ── Execute (F4) ─────────────────────────────────────────────────────────────
+const EXECUTE_MODEL = process.env.ISSUE_FIXER_EXECUTE_MODEL || 'deepseek/deepseek-chat';
+const WORK_ROOT = path.join(STATE_DIR, 'work');
+const MARKER = (number) => `<!-- issue-fixer:${number} -->`;
+
+// "Which gated issues are ready for an auto-PR right now?" — pure, no I/O.
+function isExecutable(issue) {
+  if (!issue || issue.state !== 'open' || issue.pull_request) return false;
+  const names = labelNames(issue);
+  if (!names.includes('scope:in') || !names.includes('fixability:auto')) return false;
+  if (names.includes('fixer:pr-opened') || names.includes('fixer:failed')) return false;
+  return true;
+}
+
+function selectExecutable(issues) {
+  return issues.filter(isExecutable).sort((a, b) => a.number - b.number);
+}
+
+// Hard rules the engine must follow, independent of the issue content — kept out of
+// the per-issue prompt body so they can't be diluted/overridden by issue text.
+const EXECUTE_HARD_RULES = [
+  'Не трогай файлы, не относящиеся к этому issue.',
+  'Не мержи PR сам и не проси мерж — только открой его.',
+  'Перед пушем обязаны пройти: npm ci && npm run check && npm test.',
+  'Если не можешь сделать безопасный, локальный фикс — останови работу и не пуш.',
+].join('\n- ');
+
+function buildExecutePrompt(issue, verdict, goalsContext) {
+  const gateLine = verdict
+    ? `Вердикт гейта релевантности: scope=${verdict.scope}, fixability=${verdict.fixability}, area=${verdict.area || 'unknown'}, reason: ${verdict.reason || '(нет)'}`
+    : 'Вердикт гейта релевантности недоступен.';
+  return [
+    `# Issue #${issue.number}: ${issue.title}`,
+    '',
+    issue.body || '(без описания)',
+    '',
+    `${gateLine}`,
+    '',
+    '# Цели и сценарии продукта (источник истины)',
+    goalsContext || '(GOALS.md пуст или отсутствует)',
+    '',
+    '# Жёсткие правила',
+    `- ${EXECUTE_HARD_RULES}`,
+  ].join('\n');
+}
+
+function buildFailedComment(number, log) {
+  const tail = (log || '(нет лога)').slice(-4000);
+  return `🛑 Авто-фикс не удался после нескольких попыток (issue-fixer F4).\n\n\`\`\`\n${tail}\n\`\`\`\n\nНужен человек — см. лейбл \`fixer:failed\`.`;
+}
+
+function buildPrBody(number, verdict) {
+  const lines = [MARKER(number), '', `Closes #${number}`, '', 'Открыто автоматически issue-fixer (F4) — без авто-мержа.'];
+  if (verdict && verdict.reason) lines.push('', `Гейт: ${verdict.reason}`);
+  return lines.join('\n');
+}
+
+// ── Execute — real I/O (each overridable for tests) ─────────────────────────────
+async function ghSearchPrByMarker(number, token, repo = REPO) {
+  const q = encodeURIComponent(`repo:${repo} is:pr in:body "${MARKER(number)}"`);
+  const res = await fetch(`https://api.github.com/search/issues?q=${q}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'trained-assist-agent' },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`GitHub search HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  const hit = (data.items || [])[0];
+  return hit ? { number: hit.number, url: hit.html_url } : null;
+}
+
+async function ghCreatePr({ repo = REPO, token, branch, base = 'main', title, body }) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'trained-assist-agent',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title, head: branch, base, body }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`GitHub create-PR HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  return { number: data.number, url: data.html_url };
+}
+
+// Isolated clone under ~/agent-data/issue-fixer/work/<N> — never the live checkout
+// running this process. Fresh directory each attempt (fixer re-runs are rare enough
+// that a stale half-built tree is a worse failure mode than a slower clone).
+function defaultCloneAndBranch(number, repo, token, workRoot = WORK_ROOT) {
+  const cwd = path.join(workRoot, String(number));
+  fs.rmSync(cwd, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(cwd), { recursive: true });
+  const url = `https://x-access-token:${token}@github.com/${repo}.git`;
+  execSync(`git clone --depth 1 "${url}" "${cwd}"`, { stdio: 'pipe' });
+  const branch = `fix/issue-${number}`;
+  execSync(`git checkout -b ${branch}`, { cwd, stdio: 'pipe' });
+  return { cwd, branch };
+}
+
+function defaultRunEngine({ cwd, prompt, model = EXECUTE_MODEL }) {
+  try {
+    const out = execSync(`${process.env.OPENCODE_BIN || 'opencode'} run --format json --auto -m ${model}`, {
+      cwd, input: prompt, stdio: ['pipe', 'pipe', 'pipe'], timeout: 15 * 60_000, maxBuffer: 20 * 1024 * 1024,
+    });
+    return { ok: true, log: out.toString() };
+  } catch (e) {
+    return { ok: false, log: `${e.message}\n${(e.stdout || '').toString()}\n${(e.stderr || '').toString()}` };
+  }
+}
+
+function defaultVerify(cwd) {
+  try {
+    const out = execSync('npm ci && npm run check && npm test', { cwd, stdio: 'pipe', timeout: 20 * 60_000, maxBuffer: 20 * 1024 * 1024 });
+    return { ok: true, log: out.toString() };
+  } catch (e) {
+    return { ok: false, log: `${e.message}\n${(e.stdout || '').toString()}\n${(e.stderr || '').toString()}` };
+  }
+}
+
+function defaultPush(cwd, branch) {
+  execSync(`git push -u origin ${branch}`, { cwd, stdio: 'pipe' });
+}
+
+function defaultCleanup(cwd) {
+  try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best-effort */ }
+}
+
+async function runExecute({
+  dryRun = false,
+  token = resolveToken(),
+  repo = REPO,
+  now = Date.now(),
+  statePath = STATE_PATH,
+  listIssues = ghListOpenIssues,
+  addLabel = ghAddLabel,
+  addComment = ghAddComment,
+  cloneAndBranch = defaultCloneAndBranch,
+  runEngine = defaultRunEngine,
+  verify = defaultVerify,
+  push = defaultPush,
+  createPr = ghCreatePr,
+  findExistingPr = ghSearchPrByMarker,
+  cleanup = defaultCleanup,
+  goalsContext = loadGoalsContext(),
+  model = EXECUTE_MODEL,
+  maxAttempts = 3,
+  workRoot = WORK_ROOT,
+  logger = console,
+} = {}) {
+  const state = readState(statePath);
+  const result = { repo, total: 0, candidates: [], opened: [], failed: [], skipped: 0, errors: [] };
+
+  let issues;
+  try {
+    if (!token) throw new Error('no GitHub token available');
+    issues = await listIssues(token, repo);
+  } catch (e) {
+    result.errors.push(`list: ${e.message}`);
+    return result;
+  }
+
+  result.total = issues.length;
+  const executable = selectExecutable(issues);
+  result.skipped = issues.length - executable.length;
+
+  for (const issue of executable) {
+    result.candidates.push({ number: issue.number, title: issue.title });
+    if (dryRun) continue;
+
+    const entry = state.queued[String(issue.number)] || { at: now, title: issue.title };
+    if (entry.pr) { result.opened.push(issue.number); continue; } // already recorded, idempotent
+
+    try {
+      // state.json may have been lost — fall back to searching GitHub for the marker
+      // before doing any clone/engine work, so a re-run never opens a second PR.
+      const existing = await findExistingPr(issue.number, token, repo);
+      if (existing) {
+        state.queued[String(issue.number)] = { ...entry, pr: existing.number, at: now };
+        result.opened.push(issue.number);
+        continue;
+      }
+
+      const verdict = (entry.gate) || null;
+      const prompt = buildExecutePrompt(issue, verdict, goalsContext);
+      const { cwd, branch } = await cloneAndBranch(issue.number, repo, token, workRoot);
+
+      let success = false;
+      let lastLog = '';
+      for (let attempt = 1; attempt <= maxAttempts && !success; attempt++) {
+        const engineRes = await runEngine({ cwd, prompt, model, attempt });
+        lastLog = engineRes.log || '';
+        if (!engineRes.ok) continue;
+        const verifyRes = await verify(cwd);
+        lastLog += `\n${verifyRes.log || ''}`;
+        if (verifyRes.ok) success = true;
+      }
+
+      if (success) {
+        await push(cwd, branch);
+        const pr = await createPr({
+          repo, token, branch,
+          title: `fix: ${issue.title} (#${issue.number})`,
+          body: buildPrBody(issue.number, verdict),
+        });
+        await addLabel(issue.number, 'fixer:pr-opened', token, repo);
+        state.queued[String(issue.number)] = { ...entry, pr: pr.number, prUrl: pr.url, at: now };
+        result.opened.push(issue.number);
+      } else {
+        await addLabel(issue.number, 'fixer:failed', token, repo);
+        await addComment(issue.number, buildFailedComment(issue.number, lastLog), token, repo);
+        state.queued[String(issue.number)] = { ...entry, failedAt: now };
+        result.failed.push(issue.number);
+      }
+      cleanup(cwd);
+    } catch (e) {
+      result.errors.push(`${issue.number}: ${e.message}`);
+      logger.warn(`[issue-fixer] execute failed for #${issue.number}: ${e.message}`);
+    }
+  }
+
+  if (!dryRun && (result.opened.length || result.failed.length)) writeState(state, statePath);
+  return result;
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 if (require.main === module) {
   const dryRun = process.argv.includes('--dry-run');
   const gate = process.argv.includes('--gate');
-  const task = gate ? runGate({ dryRun }) : run({ dryRun });
+  const execute = process.argv.includes('--execute');
+  const task = execute ? runExecute({ dryRun }) : gate ? runGate({ dryRun }) : run({ dryRun });
   task.then((r) => {
     if (r.errors.length && r.total === 0) {
       console.error(`[issue-fixer] fatal: ${r.errors.join('; ')}`);
       process.exit(1);
     }
-    if (gate) {
+    if (execute) {
+      console.log(`[issue-fixer:execute] repo=${r.repo} total=${r.total} executable=${r.candidates.length}` +
+        `${dryRun ? ' (dry-run)' : ''} opened=${r.opened.length} failed=${r.failed.length} skipped=${r.skipped} errors=${r.errors.length}`);
+      for (const c of r.candidates) console.log(`  * #${c.number} ${c.title}`);
+    } else if (gate) {
       console.log(`[issue-fixer:gate] repo=${r.repo} total=${r.total} pending=${r.candidates.length}` +
         `${dryRun ? ' (dry-run)' : ''} auto=${r.gatedAuto.length} human=${r.gatedHuman.length} skipped=${r.skipped} errors=${r.errors.length}`);
       for (const c of r.candidates) console.log(`  ~ #${c.number} ${c.title}`);
@@ -439,4 +681,8 @@ module.exports = {
   isPendingGate, selectPendingGate, loadGoalsContext, hasReproHeuristic,
   buildGateMessages, extractJson, openrouterClassify, validateClassification,
   applyConservativeDefault, buildGateComment, runGate, GATE_MODEL,
+  // F4 — execute
+  isExecutable, selectExecutable, buildExecutePrompt, buildFailedComment, buildPrBody,
+  ghSearchPrByMarker, ghCreatePr, defaultCloneAndBranch, defaultRunEngine, defaultVerify,
+  defaultPush, defaultCleanup, runExecute, EXECUTE_MODEL, MARKER,
 };
