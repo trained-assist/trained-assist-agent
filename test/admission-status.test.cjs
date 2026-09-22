@@ -22,6 +22,7 @@ function harness({ previous, capacity, run = async () => {} } = {}) {
     console, Promise, Set, Date,
     _laneKey: s => s, chatLanes: lanes,
     STOP_TASK_INTENT: /$^/, GTD_STOP_INTENT: /$^/, WAKEUP_INTENT: /$^/, SKIP_TASK_INTENT: /$^/, ACTIVE_CHECKLIST_INTENT: /$^/,
+    isPreQueueQuickIntent: () => false,
     chatQueue: { enqueue: (_id, fn) => fn(), hasPending: () => false },
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
     tgEdit: async (token, chat, id, text) => { assert.equal(token, 'canonical-token'); messages.push(text); return { ok: true }; },

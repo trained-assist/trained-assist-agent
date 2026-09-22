@@ -134,6 +134,18 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
 const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)\b/i;
 const AGENT_INFO_INTENT = /^\/(?:get_agent_info|agent_info|info)(?:@\S+)?(?=\s|$)/i;
+// Pure-info quick answers: no Claude, no session-transcript write, no external API call —
+// just a sync read of local state (env/profile/token files). Safe to answer BEFORE the
+// per-chat admission queue (see runner.js runTask()), so `/agent_info` etc. don't wait
+// behind a long-running task in the same chat. Deliberately excludes PERSONA_INTENT/
+// PROJECT_INTENT (they can mutate persona/project files) and SESSIONS_INTENT/
+// SESSION_DETAIL_INTENT (they may call out to an LLM to generate a summary) — those stay
+// on the queued path for now.
+function isPreQueueQuickIntent(task) {
+  return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
+    SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) || USAGE_INTENT.test(task) ||
+    CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task);
+}
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -1435,6 +1447,8 @@ module.exports = {
   CONTEXT_ON_INTENT,
   PERSONA_INTENT,
   PROJECT_INTENT,
+  AGENT_INFO_INTENT,
+  isPreQueueQuickIntent,
   // Constants for runner.js _intents export
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,
