@@ -27,6 +27,33 @@ sets the machine-wide baseline (first rung of each role) — actual per-task inv
 the full ladder via `src/opencode-ladder.js` and override this per-invocation. `/oc_<profile>`
 in Telegram switches per-profile instead (see `src/runner/intent-engine.js`).
 
+## `deepseek` — shared uniform profile + Go/OpenRouter toggle (issue #1096)
+
+`max`/`value`/`russian`/`free` are per-role ladders scoped to a single trained-assist profile
+(each is one VM user's own `ocProfile` choice). `deepseek` is different on both axes:
+
+- **Uniform, not laddered.** `deepseek-go.json` and `deepseek-openrouter.json` each set one flat
+  `model` — the same model on every role, deliberately, because the 3-person team sharing the
+  OpenCode Go subscription wanted one dead-simple daily driver, not a per-role waterfall.
+- **Global, not per-profile.** The team confirmed empirically that the Go subscription's rate
+  limit is account-wide, not per-model (heavy `grok-4.7` use exhausted a completely unrelated Go
+  model too) — so which gateway backs `deepseek` is ONE piece of state for the whole VM
+  (`src/opencode-go-toggle.js`, `~/.config/opencode/go-mode.json`), not per trained-assist
+  profile like `ocProfile` is. Every profile that has selected `deepseek` (`/oc_deepseek`) reads
+  the same toggle.
+
+| Command | Effect |
+|---------|--------|
+| `/oc_deepseek` | Select the shared `deepseek` logical profile for *your* trained-assist profile (like any other `/oc_*`) |
+| `/oc_go` | Manually point the VM-wide toggle at `opencode-go/deepseek-v4.1-flash` — sticks until changed again |
+| `/oc_openrouter` | Manually point it at `openrouter/deepseek/deepseek-v4-flash-0731` — sticks until changed again |
+
+On a Go usage-limit error (`opencode-ladder.js`'s `classifyError` catching e.g. "Go usage limit
+exceeded") while running on `opencode-go/*` under the `deepseek` profile, the toggle **auto**-flips
+to `openrouter` and the task retries immediately; an auto-flip reverts to `go` on its own after
+~5h (the Go console's reported reset window) unless a human already flipped it manually in the
+meantime. A manual `/oc_go`/`/oc_openrouter` never auto-reverts.
+
 ## OpenCode Go credential (max profile)
 
 `opencode/*` (Zen) and `opencode-go/*` (Go) are separate providers with separate billing —
