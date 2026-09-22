@@ -136,7 +136,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // \b doesn't fire after a Cyrillic letter in JS, so both alternatives end on
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
-const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)\b/i;
+const OC_PROFILE_INTENT = /^\/oc_(max|value|free|russian-recruiter|russian|recruiter|rr|ru|quality|mimo|lavish-luna|ll|q|x)(?:@\S+)?\b|^\/oc\s+(max|value|free|russian-recruiter|russian|recruiter|rr|ru|quality|mimo|lavish-luna|ll|q|x)\b/i;
 const AGENT_INFO_INTENT = /^\/(?:get_agent_info|agent_info|info)(?:@\S+)?(?=\s|$)/i;
 // Natural-language "what model/agent are you?" — «на какой модели ты сейчас работаешь?»,
 // «какая у тебя модель», «какой моделью пользуешься», «какой ты агент». Maps to the same
@@ -419,7 +419,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     return `🤖 Агент: \`${userId || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
   }
 
-  // /oc_value, /oc_quality, /oc_free, /oc_mimo, /oc_ru — switch OpenCode model profile for
+  // /oc_max, /oc_value, /oc_free, /oc_russian (aka /oc_ru) — switch OpenCode model profile for
   // THIS profile only (profiles.setOcProfile → profile.json ocProfile). Used to shell out to
   // opencode-switch-profile.sh, which overwrote one shared ~/.config/opencode/opencode.json
   // for every profile on the VM — fixed 2026-09-21: see writeOpencodeMcpConfig in
@@ -427,17 +427,24 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   // OPENCODE_CONFIG file instead.
   const ocProfileM = task.trim().match(OC_PROFILE_INTENT);
   if (ocProfileM && workDir) {
-    const raw = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase().replace(/^ru$/, 'russian-recruiter').replace(/^ll$/, 'lavish-luna');
+    const rawAlias = (ocProfileM[1] || ocProfileM[2] || '').toLowerCase();
+    // Same alias table as infra/opencode-switch-profile.sh — quality/mimo/lavish-luna were
+    // retired in #1061 Фаза 1 (folded into max/value's ladders as rungs, not standalone
+    // profiles anymore), so those names get a helpful redirect instead of a raw 404.
+    const RETIRED = new Set(['quality', 'mimo', 'lavish-luna', 'll', 'q']);
+    if (RETIRED.has(rawAlias)) {
+      return `⚠️ Профиль '${rawAlias}' упразднён в #1061 (стал ступенью лестницы max/value) — выбери max|value|free|russian.`;
+    }
+    const ALIASES = { ru: 'russian', recruiter: 'russian', rr: 'russian', 'russian-recruiter': 'russian', x: 'max' };
+    const raw = ALIASES[rawAlias] || rawAlias;
     const profileFile = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${raw}.json`);
     if (!fs.existsSync(profileFile)) return `⚠️ Профиль '${raw}' не найден (.opencode/profiles/${raw}.json)`;
     profiles.setOcProfile(workDir, raw);
     const PROFILE_LABELS = {
-      value:               'VALUE — DeepSeek V4 Flash :free (дефолт)',
-      quality:             'QUALITY — DeepSeek paid + GigaChat Ultra plan',
-      free:                'FREE — только бесплатный inference (Nemotron)',
-      mimo:                'MIMO — A/B-тест MiMo V2.5',
-      'russian-recruiter': 'RUSSIAN RECRUITER — GigaChat Pro/Ultra/Max',
-      'lavish-luna':       'LAVISH LUNA — GPT-5.6 Luna main + DeepSeek/Kimi/Qwen companions',
+      max:      'MAX — лестница GPT-5.6/6 Astra → DeepSeek (дефолт)',
+      value:    'VALUE — DeepSeek V4 Flash → GLM → Qwen',
+      free:     'FREE — только бесплатный inference (MiMo/Nemotron)',
+      russian:  'RUSSIAN — GigaChat Pro/Ultra/Max',
     };
     const label = PROFILE_LABELS[raw] || raw;
     return `✅ OpenCode профиль → ${label}\n\nПрименён только для твоего профиля (другие юзеры VM не затронуты). Следующая задача в OpenCode подхватит новые модели.`;

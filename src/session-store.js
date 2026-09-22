@@ -293,6 +293,27 @@ function setSummary(workDir, id, summary, atMsgCount) {
   }
 }
 
+// OpenCode model ladder can degrade between two turns of the same session (issue #1061
+// Фаза 4) — the resolved model for a role isn't part of the visible transcript, so track
+// it separately per session to detect a silent swap and tell the user explicitly.
+function getLastOcModel(workDir, id, role) {
+  const full = getSession(workDir, id);
+  return full?.ocModels?.[role] || null;
+}
+
+function setLastOcModel(workDir, id, role, model) {
+  try {
+    const fp = sessionFilePath(workDir, id);
+    if (!fs.existsSync(fp)) return;
+    const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    full.ocModels = full.ocModels || {};
+    full.ocModels[role] = model;
+    atomicWrite(fp, JSON.stringify(full, null, 2));
+  } catch (e) {
+    console.error('[session-store] setLastOcModel error:', e.message);
+  }
+}
+
 /** True when a session's stored summary is missing or stale (messages grew since). */
 function needsSummary(meta) {
   if (!meta) return false;
@@ -319,6 +340,7 @@ function archiveSessions(workDir, sessionIds) {
 module.exports = {
   createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
   getCurrentSessionId, setCurrentSessionId, claimLiveChatId, resolveChatSession, archiveSessions, setSummary, needsSummary,
+  getLastOcModel, setLastOcModel,
   // Back-compat alias for the pre-rename name (see PROFILE-RENAME-SPEC.md); remove once no caller uses it.
   claimOwnerChatId: claimLiveChatId,
 };
