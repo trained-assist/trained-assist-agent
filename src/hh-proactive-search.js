@@ -543,15 +543,32 @@ function saveCandidateComment(username, candidateId, commentData) {
   fs.renameSync(tmp, file);
 }
 
-// Set persistent "viewed/read" flag directly on the candidate record in the
-// unified all-candidates store. Because both the HTML page and the JSON API
-// read the same file, the flag is consistent everywhere without extra sync.
-function setCandidateReadState(username, candidateId, read) {
+// Candidate triage lifecycle, driven entirely by `status` on the unified
+// all-candidates record: 'active' (default — just showed up in search, still
+// in the main feed) -> 'starred' (recruiter picked it out) -> 'archived'
+// (recruiter is done with it; kept for error-recovery/debugging, not expected
+// to be revisited). A candidate can also go directly active -> archived, or
+// back from archived/starred to active. Missing status on legacy records
+// means 'active' (see candidateStatusOf below) so old data doesn't need a
+// backfill migration.
+const CANDIDATE_STATUSES = ['active', 'starred', 'archived'];
+
+function candidateStatusOf(candidate) {
+  return CANDIDATE_STATUSES.includes(candidate?.status) ? candidate.status : 'active';
+}
+
+// Persist a status transition on the unified store. `status_changed_at` drives
+// the starred/archived tab sort ("newest on top") — the main active tab sorts
+// by score instead (see handlers/hh.js).
+function setCandidateStatus(username, candidateId, status) {
+  if (!CANDIDATE_STATUSES.includes(status)) {
+    throw new Error(`invalid status "${status}" — must be one of ${CANDIDATE_STATUSES.join(', ')}`);
+  }
   const store = loadAllCandidates(username);
   const id = String(candidateId);
   if (!store[id]) throw new Error('candidate not found');
-  store[id].read = Boolean(read);
-  store[id].read_at = read ? new Date().toISOString() : null;
+  store[id].status = status;
+  store[id].status_changed_at = new Date().toISOString();
   saveAllCandidates(username, store);
   return store[id];
 }
@@ -684,7 +701,7 @@ ${prefStr}
 PASS/REVIEW считаются относительно суммы весов этой вакансии — точную оценку даёт следующий шаг.
 
 🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
-Топ-30 по предварительному скорингу + ВСЕ новые кандидаты этого прогона (даже если не попали в топ-30) прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест новые кандидаты попадают всегда, показ ограничен топ-10 на прогон.`;
+Топ-30 по предварительному скорингу + ВСЕ новые кандидаты этого прогона (даже если не попали в топ-30) прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест кандидаты по именам не попадают — только счётчик и ссылка на страницу со списком.`;
 }
 
 // HH resume search with optional one-shot refresh on token-expired (401/403).
@@ -1064,7 +1081,9 @@ module.exports = {
   seenIdsPath,
   loadCandidateComments,
   saveCandidateComment,
-  setCandidateReadState,
+  CANDIDATE_STATUSES,
+  candidateStatusOf,
+  setCandidateStatus,
   getSearchExclusions,
   // Unified all-candidates store (search + manual)
   allCandidatesPath,

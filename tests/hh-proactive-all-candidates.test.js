@@ -32,7 +32,8 @@ const {
   saveAllCandidates,
   mergeSearchCandidatesIntoAll,
   addManualCandidate,
-  setCandidateReadState,
+  setCandidateStatus,
+  candidateStatusOf,
   parseResumeId,
   allCandidatesPath,
   candidateMatchesVacancy,
@@ -157,45 +158,68 @@ describe('addManualCandidate', () => {
   });
 });
 
-describe('setCandidateReadState (#6 persistent viewed flag)', () => {
-  it('sets read:true and a read_at timestamp on an existing candidate', () => {
+// setCandidateReadState/read/read_at (#6 persistent viewed flag) was replaced by the
+// active/starred/archived triage lifecycle below — a plain "seen it" checkbox that only
+// dimmed the card didn't give the recruiter a way to actually stop seeing a candidate
+// in the main feed. Requirement change: candidates now move between three named states
+// instead of toggling a boolean, so these tests cover setCandidateStatus instead.
+describe('setCandidateStatus (candidate triage lifecycle)', () => {
+  it('sets status and a status_changed_at timestamp on an existing candidate', () => {
     mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
-    const rec = setCandidateReadState('alice', 'r1', true);
-    expect(rec.read).toBe(true);
-    expect(rec.read_at).toBeTruthy();
+    const rec = setCandidateStatus('alice', 'r1', 'starred');
+    expect(rec.status).toBe('starred');
+    expect(rec.status_changed_at).toBeTruthy();
     const store = loadAllCandidates('alice');
-    expect(store.r1.read).toBe(true);
-    expect(store.r1.read_at).toBeTruthy();
+    expect(store.r1.status).toBe('starred');
+    expect(store.r1.status_changed_at).toBeTruthy();
   });
 
-  it('clears read and read_at when read=false', () => {
+  it('moves a candidate through active -> starred -> archived -> active', () => {
     mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
-    setCandidateReadState('alice', 'r1', true);
-    const rec = setCandidateReadState('alice', 'r1', false);
-    expect(rec.read).toBe(false);
-    expect(rec.read_at).toBeNull();
+    expect(candidateStatusOf(loadAllCandidates('alice').r1)).toBe('active');
+    setCandidateStatus('alice', 'r1', 'starred');
+    expect(candidateStatusOf(loadAllCandidates('alice').r1)).toBe('starred');
+    setCandidateStatus('alice', 'r1', 'archived');
+    expect(candidateStatusOf(loadAllCandidates('alice').r1)).toBe('archived');
+    setCandidateStatus('alice', 'r1', 'active');
+    expect(candidateStatusOf(loadAllCandidates('alice').r1)).toBe('active');
   });
 
   it('normalizes a numeric id to a string key (like saveCandidateComment)', () => {
     mergeSearchCandidatesIntoAll('alice', [{ id: 42, title: 'X', score: 5 }], {});
-    const rec = setCandidateReadState('alice', 42, true);
-    expect(rec.read).toBe(true);
+    const rec = setCandidateStatus('alice', 42, 'starred');
+    expect(rec.status).toBe('starred');
   });
 
   it('throws when the candidate id does not exist', () => {
     mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
-    expect(() => setCandidateReadState('alice', 'ghost', true)).toThrow(/not found/);
+    expect(() => setCandidateStatus('alice', 'ghost', 'starred')).toThrow(/not found/);
   });
 
-  it('survives a later mergeSearchCandidatesIntoAll run (merge preserves read)', () => {
+  it('rejects an unknown status value', () => {
     mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
-    setCandidateReadState('alice', 'r1', true);
-    // Re-run of search with a fresh (read-less) candidate object must NOT clobber read.
+    expect(() => setCandidateStatus('alice', 'r1', 'bogus')).toThrow(/invalid status/);
+  });
+
+  it('survives a later mergeSearchCandidatesIntoAll run (merge preserves status)', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
+    setCandidateStatus('alice', 'r1', 'starred');
+    // Re-run of search with a fresh (status-less) candidate object must NOT clobber status.
     mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X re-found', score: 7 }], { r1: '2026-09-16T00:00:00.000Z' });
     const store = loadAllCandidates('alice');
-    expect(store.r1.read).toBe(true);
-    expect(store.r1.read_at).toBeTruthy();
+    expect(store.r1.status).toBe('starred');
+    expect(store.r1.status_changed_at).toBeTruthy();
     expect(store.r1.score).toBe(7);
+  });
+});
+
+describe('candidateStatusOf', () => {
+  it('defaults missing/legacy status to active', () => {
+    expect(candidateStatusOf({ id: 'r1' })).toBe('active');
+  });
+
+  it('falls back to active for a garbage status value', () => {
+    expect(candidateStatusOf({ id: 'r1', status: 'bogus' })).toBe('active');
   });
 });
 

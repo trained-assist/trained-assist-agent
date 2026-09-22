@@ -990,7 +990,7 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   let results;
   try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy } = require('../hh-proactive-search');
+  const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy, candidateStatusOf } = require('../hh-proactive-search');
   const pageComments = loadCandidateComments(username);
   // Multi-vacancy step 7/7: tab switcher, mirroring /hh/review's vacancy_id pattern.
   const workDir = path.join(BASE_USERS_DIR, username);
@@ -1004,12 +1004,28 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   // rest of `results` (vacancy_title, stats, searched_at) from the snapshot.
   // Records with no vacancy_ids (pre-step-7 data, or manually added with no active
   // vacancy resolvable) are a wildcard and show up under every tab.
-  const unified = Object.values(loadAllCandidates(username))
-    .filter(c => candidateMatchesVacancy(c, vacancyId))
-    .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
-  results.candidates = unified.length ? unified : (results.candidates || []);
+  const byVacancy = Object.values(loadAllCandidates(username)).filter(c => candidateMatchesVacancy(c, vacancyId));
+  // Triage state tabs: a candidate lives in exactly one of active/starred/archived
+  // (see hh-proactive-search.js candidateStatusOf) — starring or archiving moves it
+  // out of the other tabs entirely instead of just dimming it in place.
+  const requestedList = url.searchParams.get('list') || 'active';
+  const listView = ['active', 'starred', 'archived'].includes(requestedList) ? requestedList : 'active';
+  const stateCounts = { active: 0, starred: 0, archived: 0 };
+  for (const c of byVacancy) stateCounts[candidateStatusOf(c)]++;
+  let unified = byVacancy.filter(c => candidateStatusOf(c) === listView);
+  if (listView === 'active') {
+    // Main feed: rank by fit for the vacancy (score), not by recency.
+    unified.sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
+    // Fallback for the very first run, before anything has been merged into the
+    // unified store yet — show the freshly-computed (already score-sorted) results.
+    if (!byVacancy.length) unified = results.candidates || [];
+  } else {
+    // Starred/archived: most recently moved into this tab first.
+    unified.sort((a, b) => new Date(b.status_changed_at || 0) - new Date(a.status_changed_at || 0));
+  }
+  results.candidates = unified;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments, { activeVacancies, vacancyId }));
+  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments, { activeVacancies, vacancyId, listView, stateCounts }));
 }
 
 if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
@@ -1148,18 +1164,18 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/comment') {
   }
 }
 
-if (req.method === 'POST' && url.pathname === '/api/hh/proactive/mark-read') {
+if (req.method === 'POST' && url.pathname === '/api/hh/proactive/set-status') {
   let body;
   try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-  const { username = '', token: givenToken = '', candidate_id = '', read = false } = body || {};
+  const { username = '', token: givenToken = '', candidate_id = '', status = '' } = body || {};
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
   try {
-    const { setCandidateReadState } = require('../hh-proactive-search');
-    const rec = setCandidateReadState(username, candidate_id, Boolean(read));
-    return json(res, 200, { ok: true, read: Boolean(rec.read), read_at: rec.read_at });
+    const { setCandidateStatus } = require('../hh-proactive-search');
+    const rec = setCandidateStatus(username, candidate_id, status);
+    return json(res, 200, { ok: true, status: rec.status, status_changed_at: rec.status_changed_at });
   } catch (e) {
-    return json(res, 500, { error: e.message });
+    return json(res, 400, { error: e.message });
   }
 }
 
