@@ -62,7 +62,10 @@ function listProjects() {
 
 function makeProject(name, type, description) {
   return {
-    id: `proj-${Date.now().toString(36)}`,
+    // Date.now() alone collides when two projects are created in the same millisecond
+    // (e.g. two rapid tool calls) — a random suffix keeps every id unique so a
+    // collision never silently overwrites another project's file on disk.
+    id: `proj-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
     name, type, description,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -351,16 +354,40 @@ async function driveReq(method, apiPath, body, sa) {
   return data;
 }
 
+const QUOTA_ERROR_MARKER = 'storage quota';
+
+// Google Service Accounts can't create files in a regular (non-Shared Drive) folder —
+// a Google-side limitation, not a permissions issue. Surface the workaround instead of
+// a raw API error the user can't act on.
+function explainSheetError(e, sa) {
+  if (String(e.message || '').toLowerCase().includes(QUOTA_ERROR_MARKER)) {
+    const email = sa?.client_email || '(email сервисного аккаунта)';
+    return new Error(
+      `Google не даёт сервисному аккаунту создавать файлы в обычной папке — это ограничение ` +
+      `Google (Service Accounts do not have storage quota), а не прав доступа. ` +
+      `Обходной путь: создай в Google Drive пустой Google Sheet сам, пошарь именно ФАЙЛ ` +
+      `(не папку) с ${email} с правом Editor, затем передай его ID в spreadsheet_id ` +
+      `(outsource_new/outsource_assess) — таблица будет использована как есть, без попытки создать новую.`
+    );
+  }
+  return e;
+}
+
 async function createSpreadsheet(title, sa, folderId) {
-  const r = await sheetsReq('POST', '/spreadsheets', {
-    properties: { title },
-    sheets: [
-      { properties: { title: 'Итог',          sheetId: 0, index: 0 } },
-      { properties: { title: 'Риски',         sheetId: 1, index: 1 } },
-      { properties: { title: 'План проекта',  sheetId: 2, index: 2 } },
-      { properties: { title: 'Q&A',           sheetId: 3, index: 3 } },
-    ],
-  }, sa);
+  let r;
+  try {
+    r = await sheetsReq('POST', '/spreadsheets', {
+      properties: { title },
+      sheets: [
+        { properties: { title: 'Итог',          sheetId: 0, index: 0 } },
+        { properties: { title: 'Риски',         sheetId: 1, index: 1 } },
+        { properties: { title: 'План проекта',  sheetId: 2, index: 2 } },
+        { properties: { title: 'Q&A',           sheetId: 3, index: 3 } },
+      ],
+    }, sa);
+  } catch (e) {
+    throw explainSheetError(e, sa);
+  }
   const id = r.spreadsheetId;
 
   // Move to user's folder if provided
@@ -530,9 +557,32 @@ module.exports = {
           createSheet:             { type: 'boolean', description: 'Создать Google Sheet (по умолчанию true, нужен gdrive)' },
           folder_id:               { type: 'string',  description: 'ID папки в Google Drive куда помещать таблицу. Если не указан — берётся из контекста (сохранённая папка). Без папки таблица шарится по ссылке.' },
           spreadsheet_id:          { type: 'string',  description: 'Использовать существующую таблицу (ID) вместо создания новой. Обновит содержимое вкладок.' },
+          force_new:               { type: 'boolean', description: 'Создать новый проект, даже если проект с таким именем уже существует (по умолчанию false — см. защиту от дублей ниже).' },
         },
       },
       handler: async (args) => {
+        // Guard against accidental duplicates: re-running outsource_new for a client
+        // that already has a project (e.g. to "fix" a missing spreadsheet) used to
+        // silently create a second project and orphan all accumulated infoChunks/qaLog.
+        // Point the caller at outsource_assess (which can now attach/recreate a sheet
+        // on the EXISTING project) instead.
+        if (!args.force_new) {
+          const nameKey = String(args.name || '').trim().toLowerCase();
+          const dupe = nameKey && listProjects().find(p => String(p.name || '').trim().toLowerCase() === nameKey);
+          if (dupe) {
+            return {
+              duplicate:       true,
+              project_id:      dupe.id,
+              name:            dupe.name,
+              spreadsheet_url: dupe.spreadsheetUrl || null,
+              message: `⚠️ Проект «${dupe.name}» уже существует (${dupe.id}), новый не создан — иначе накопленные infoChunks/Q&A старого проекта потерялись бы.\n` +
+                `Если нужно дописать/пересчитать — используй outsource_add_info + outsource_assess с project_id=${dupe.id}.\n` +
+                `Если таблицы не хватает — вызови outsource_assess(project_id=${dupe.id}, folder_id=...) или с spreadsheet_id, она будет создана/прикреплена на СУЩЕСТВУЮЩИЙ проект.\n` +
+                `Если это осознанно другой проект — повтори вызов с force_new: true.`,
+            };
+          }
+        }
+
         const proj = makeProject(args.name, args.type || 'default', args.description);
 
         const SIGNAL_KEYS = Object.keys(proj.signals);
@@ -586,17 +636,42 @@ module.exports = {
         'Перезапустить оценку рисков проекта с текущими данными.',
         'Вызывай когда пришла новая информация от клиента — пересчитывает риски и обновляет все вкладки в Google Sheet.',
         'Это главный инструмент итеративной оценки: добавил инфо через outsource_add_info → перезапусти outsource_assess.',
+        'Если у проекта ещё нет таблицы (createSheet:false при создании, или ошибка при outsource_new) — передай folder_id',
+        'или spreadsheet_id здесь, и таблица будет создана/прикреплена на ЭТОТ ЖЕ project_id, без создания нового проекта.',
       ].join(' '),
       inputSchema: {
         type: 'object',
         required: ['project_id'],
         properties: {
-          project_id: { type: 'string', description: 'ID проекта из outsource_new или outsource_list' },
+          project_id:     { type: 'string', description: 'ID проекта из outsource_new или outsource_list' },
+          folder_id:      { type: 'string', description: 'Только если у проекта ещё нет таблицы: ID папки Google Drive для новой таблицы.' },
+          spreadsheet_id: { type: 'string', description: 'Только если у проекта ещё нет таблицы: использовать существующую таблицу (ID) вместо создания новой.' },
         },
       },
-      handler: async ({ project_id }) => {
-        const proj       = loadProject(project_id);
-        const sa         = readSa();
+      handler: async ({ project_id, folder_id, spreadsheet_id }) => {
+        const proj = loadProject(project_id);
+        const sa   = readSa();
+
+        // Attach a sheet to an existing project that doesn't have one yet — this is the
+        // "почини недостающую таблицу" path that used to require outsource_new (which
+        // created an unwanted duplicate project instead of fixing the existing one).
+        if (!proj.spreadsheetId && sa) {
+          if (spreadsheet_id) {
+            proj.spreadsheetId  = spreadsheet_id;
+            proj.spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheet_id}`;
+          } else {
+            const resolvedFolder = folder_id || readCtx('folder_id') || null;
+            if (folder_id) writeCtx('folder_id', folder_id);
+            try {
+              const s = await createSpreadsheet(`Оценка проекта: ${proj.name}`, sa, resolvedFolder);
+              proj.spreadsheetId  = s.id;
+              proj.spreadsheetUrl = s.url;
+            } catch (e) {
+              proj._sheetError = e.message;
+            }
+          }
+        }
+
         const assessment = await runAndSave(proj, sa);
 
         return {
@@ -609,7 +684,7 @@ module.exports = {
           open_questions:  assessment.openQuestions.slice(0, 5).map((q, i) => `${i + 1}. ${q.question}`),
           spreadsheet_url: proj.spreadsheetUrl,
           sheet_updated:   !!proj.spreadsheetId && !assessment._sheetWriteError,
-          message: `Вердикт: ${assessment.verdict}\nРиск: ${assessment.level} (${assessment.score}/10). Открытых вопросов: ${assessment.openQuestions.length}.${proj.spreadsheetUrl ? `\nТаблица: ${proj.spreadsheetUrl}` : ''}`,
+          message: `Вердикт: ${assessment.verdict}\nРиск: ${assessment.level} (${assessment.score}/10). Открытых вопросов: ${assessment.openQuestions.length}.${proj.spreadsheetUrl ? `\nТаблица: ${proj.spreadsheetUrl}` : proj._sheetError ? `\n⚠️ ${proj._sheetError}` : ''}`,
         };
       },
     },

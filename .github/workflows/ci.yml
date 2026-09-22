@@ -63,6 +63,18 @@ jobs:
             echo "❌ recruiter-quick-action MCP tools must call OpenRouter (DeepSeek/Gemini) via their own llmCall()-style helper, never open a Claude Code session — see README.md 'Recruiter/quick-action MCP tools must use cheap LLMs, never Claude Code'"
             exit 1
           fi
+      - name: HH intent regexes must live in src/domains/hh/intents.js, not runner/intent-engine.js
+        run: |
+          if grep -nE "^const\s+\S*HH_\S*_INTENT\s*=" src/runner/intent-engine.js; then
+            echo "❌ HH_*_INTENT definition found in src/runner/intent-engine.js — HH intents belong in src/domains/hh/intents.js, loaded via loadDomainIntents('hh') (issue #942 P2.1/P2.2)"
+            exit 1
+          fi
+      - name: server.js must not define inline HH functions (issue #942 P3.2)
+        run: |
+          if grep -nE '^\s*(async\s+)?function\s+\w*[Hh][Hh]\w*\s*\(' src/server.js | grep -vE '^[0-9]+:\s*(//|\*|/\*)'; then
+            echo "❌ Inline HH function definition found in src/server.js — HH logic belongs in src/handlers/hh.js, server.js is a router (issue #942 P3.1/P3.2)"
+            exit 1
+          fi
 
   coherence:
     needs: [ci]
@@ -131,7 +143,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: trained-assist/pr-autofix/.github/workflows/autofix-callable.yml@v1
+    uses: trained-assist/pr-autofix/.github/workflows/autofix-callable.yml@v1.2
     with:
       pr_number: ${{ github.event.pull_request.number }}
       original_branch: ${{ github.head_ref }}
@@ -160,13 +172,23 @@ jobs:
       - name: Squash-merge the PR
         id: merge
         run: |
-          OUTPUT=$(gh pr merge --squash --match-head-commit "${{ github.event.pull_request.head.sha }}" "${{ github.event.pull_request.html_url }}" 2>&1) && EXIT=0 || EXIT=$?
-          echo "$OUTPUT"
-          if [ $EXIT -ne 0 ] && echo "$OUTPUT" | grep -q "not up to date with the base branch"; then
-            echo "Branch is behind main — updating branch to trigger a fresh CI run..."
-            gh pr update-branch "${{ github.event.pull_request.html_url }}" && echo "Branch updated." || echo "update-branch failed (possible conflict — autofix will handle it)"
-            exit 0
-          fi
+          # Retry loop: GitHub branch-protection status checks can lag a few
+          # seconds behind job completion ("N of N required status checks are
+          # expected"). Regressed once already (silently lost between #965 and
+          # #943) — fix/ci-* branches are exempt from autofix re-trigger, so
+          # if this merge fails outright they hang forever with no recovery.
+          for i in 1 2 3 4 5; do
+            OUTPUT=$(gh pr merge --squash --match-head-commit "${{ github.event.pull_request.head.sha }}" "${{ github.event.pull_request.html_url }}" 2>&1) && EXIT=0 || EXIT=$?
+            echo "$OUTPUT"
+            [ $EXIT -eq 0 ] && break
+            if echo "$OUTPUT" | grep -q "not up to date with the base branch"; then
+              echo "Branch is behind main — updating branch to trigger a fresh CI run..."
+              gh pr update-branch "${{ github.event.pull_request.html_url }}" && echo "Branch updated." || echo "update-branch failed (possible conflict — autofix will handle it)"
+              exit 0
+            fi
+            echo "Merge attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
           [ $EXIT -eq 0 ] && echo "sha=$(gh pr view '${{ github.event.pull_request.html_url }}' --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
           exit $EXIT
         env:
@@ -181,7 +203,7 @@ jobs:
       needs.ci.result == 'success' &&
       needs.staging-gate.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
-      (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      (needs.merge.outputs.sha != '' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-gcp
@@ -206,11 +228,9 @@ jobs:
               git stash --include-untracked
             fi
             export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
-            git show FETCH_HEAD:scripts/drain-for-deploy.py > /tmp/assist-drain-for-deploy.py
-            python3 /tmp/assist-drain-for-deploy.py
             export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard FETCH_HEAD
-            printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nOPENCODE_MODEL=%s\nOPENCODE_PROFILE=%s\n' \
+            printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nCHECKLIST_API_KEY=%s\nOPENCODE_MODEL=%s\nOPENCODE_PROFILE=%s\nOPENCODE_GO_API_KEY=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
               '${{ secrets.INN_DADATA_SECRET }}' \
@@ -222,8 +242,10 @@ jobs:
               '${{ secrets.OPENROUTER_API_KEY }}' \
               '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
               '${{ secrets.GITHUB_ISSUES_TOKEN }}' \
+              '${{ secrets.CHECKLIST_API_KEY }}' \
               '' \
               '' \
+              '${{ secrets.OPENCODE_GO_API_KEY }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
@@ -236,7 +258,7 @@ jobs:
       needs.ci.result == 'success' &&
       needs.staging-gate.result == 'success' &&
       !contains(github.event.pull_request.title || github.event.head_commit.message, '[nginx-only]') &&
-      (needs.merge.result == 'success' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      (needs.merge.outputs.sha != '' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-ru
@@ -262,8 +284,6 @@ jobs:
               git stash --include-untracked
             fi
             export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
-            git show FETCH_HEAD:scripts/drain-for-deploy.py > /tmp/assist-drain-for-deploy.py
-            python3 /tmp/assist-drain-for-deploy.py
             export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard FETCH_HEAD
             printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nOPENCODE_MODEL=%s\nOPENCODE_PROFILE=%s\n' \

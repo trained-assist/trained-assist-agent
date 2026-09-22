@@ -14,7 +14,10 @@ function createAdmissionStatus(opts, { edit, send, intervalMs = 15000 }) {
     tail = tail.then(async () => {
       if (!token || !opts.initialMsgId) return;
       try {
-        const result = await edit(token, chatId, opts.initialMsgId, text);
+        // Best-effort + coalesced: admission status is cosmetic, and with several
+        // sessions on one bot token a retry storm on editMessageText 429 would
+        // only make the flood worse (retry_after escalates 5s->44s).
+        const result = await edit(token, chatId, opts.initialMsgId, text, {}, { bestEffort: true, coalesce: true });
         if (result?.ok === false && !/message is not modified/i.test(result.description || '')) {
           throw new Error(result.description || 'Telegram edit failed');
         }

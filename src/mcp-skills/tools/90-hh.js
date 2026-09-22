@@ -27,6 +27,41 @@ function writeContext(skill, key, value) {
   fs.writeFileSync(file, JSON.stringify({ value, updated_at: new Date().toISOString() }, null, 2));
 }
 
+// active_vacancies: array of {id, title, set_at} for profiles tracking several
+// vacancies at once. Kept separate from the legacy singleton 'active_vacancy'
+// key (still written on every set) so the ~10 existing call sites that read
+// active_vacancy.json directly keep working unchanged — 'active_vacancy' means
+// "primary/most-recently-set", 'active_vacancies' is the full tracked set.
+function readActiveVacancies() {
+  return readContext('hh', 'active_vacancies')?.value || [];
+}
+
+function addActiveVacancy(value) {
+  const list = readActiveVacancies().filter(v => v.id !== value.id);
+  list.push(value);
+  writeContext('hh', 'active_vacancies', list);
+  return list;
+}
+
+function removeActiveVacancy(vacancyId) {
+  const list = readActiveVacancies().filter(v => v.id !== vacancyId);
+  writeContext('hh', 'active_vacancies', list);
+  // Legacy singleton must keep pointing at a vacancy that's still tracked —
+  // reassign to whatever's left so old single-vacancy call sites don't dangle
+  // on a deactivated id. Delete rather than write {value: null}: existing call
+  // sites check `if (!ctx) return error`, which only holds for a missing file.
+  const current = readContext('hh', 'active_vacancy')?.value;
+  if (current && current.id === vacancyId) {
+    if (list.length) {
+      writeContext('hh', 'active_vacancy', list[list.length - 1]);
+    } else {
+      const file = contextPath('hh', 'active_vacancy');
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+  }
+  return list;
+}
+
 // ── Token storage ──────────────────────────────────────────────────────────
 
 const { readHhToken: _readHhTokenUtil, hhTokenPath, hhFetch: hhGet, hhPost, hhPut } = require('../../hh-utils');
@@ -458,8 +493,12 @@ module.exports = {
                 published_at: v.published_at?.slice(0, 10),
               };
             });
+            const active = readActiveVacancies();
             return {
-              message: 'Выбери вакансию и вызови hh_set_active_vacancy с её id. Поле manager — ответственный рекрутер.',
+              message: active.length
+                ? `Сейчас отслеживается ${active.length}: ${active.map(v => v.title).join(', ')}. Вызови hh_set_active_vacancy с id чтобы добавить ещё, или hh_deactivate_vacancy чтобы снять.`
+                : 'Выбери вакансию и вызови hh_set_active_vacancy с её id. Поле manager — ответственный рекрутер.',
+              active_vacancies: active,
               vacancies: items,
             };
           } catch (e) { return { error: e.message }; }
@@ -474,6 +513,7 @@ module.exports = {
 
         const value = { id: vacancy_id, title, set_at: new Date().toISOString() };
         writeContext('hh', 'active_vacancy', value);
+        const activeVacancies = addActiveVacancy(value);
 
         // Kick off background negotiations sync so /hh/review is instant on first open
         const agentBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/$/, '');
@@ -483,7 +523,42 @@ module.exports = {
           body: JSON.stringify({ username: USER_ID, vacancy_id }),
         }).catch(() => {}); // fire-and-forget
 
-        return { ok: true, active_vacancy: value, message: `Активная вакансия: «${title}» (${vacancy_id})` };
+        return {
+          ok: true,
+          active_vacancy: value,
+          active_vacancies: activeVacancies,
+          message: activeVacancies.length > 1
+            ? `Добавлена «${title}» (${vacancy_id}). Всего отслеживается: ${activeVacancies.length}.`
+            : `Активная вакансия: «${title}» (${vacancy_id})`,
+        };
+      },
+    },
+
+    hh_deactivate_vacancy: {
+      description:
+        'Stop tracking a vacancy (removes it from the active set used by web review tabs, proactive search and the pinned Telegram summary). ' +
+        'Does not touch the vacancy on hh.ru itself — only local tracking state.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          vacancy_id: { type: 'string', description: 'Vacancy ID to stop tracking.' },
+        },
+        required: ['vacancy_id'],
+      },
+      handler: async ({ vacancy_id }) => {
+        if (!vacancy_id) return { error: 'vacancy_id обязателен.' };
+        const before = readActiveVacancies();
+        if (!before.some(v => v.id === vacancy_id)) {
+          return { error: `Вакансия ${vacancy_id} и так не отслеживается.`, active_vacancies: before };
+        }
+        const active_vacancies = removeActiveVacancy(vacancy_id);
+        return {
+          ok: true,
+          active_vacancies,
+          message: active_vacancies.length
+            ? `Снята с отслеживания. Осталось: ${active_vacancies.map(v => v.title).join(', ')}.`
+            : 'Снята с отслеживания. Активных вакансий больше нет.',
+        };
       },
     },
 

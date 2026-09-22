@@ -331,13 +331,14 @@ describe('hhStatus — HH token expiry awareness', () => {
 });
 
 describe('HH_DISCONNECT_INTENT regex — /hh_disconnect + natural-language matches', () => {
-  // The regex may live in src/runner.js or src/intent-engine.js depending on refactor stage.
+  // The regex may live in src/runner/index.js, src/runner/intent-engine.js, or
+  // src/domains/hh/intents.js depending on refactor stage (issue #942).
   const fs = require('fs'), path = require('path');
-  const src = ['src/runner.js', 'src/intent-engine.js']
+  const src = ['src/runner/index.js', 'src/runner/intent-engine.js', 'src/domains/hh/intents.js']
     .map(f => { try { return fs.readFileSync(path.join(__dirname, '../..', f), 'utf8'); } catch { return ''; } })
     .join('\n');
   const m = src.match(/const HH_DISCONNECT_INTENT\s*=\s*(\/[^;]+\/[gimsuy]*);/);
-  if (!m) throw new Error('HH_DISCONNECT_INTENT not found in runner.js or intent-engine.js — update this test');
+  if (!m) throw new Error('HH_DISCONNECT_INTENT not found in src/runner/index.js, src/runner/intent-engine.js, or src/domains/hh/intents.js — update this test');
   const HH_DISCONNECT_INTENT = new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), m[1].slice(m[1].lastIndexOf('/') + 1));
 
   it('slash /hh_disconnect matches', () => {

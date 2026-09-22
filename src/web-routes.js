@@ -74,8 +74,6 @@ async function handleWebRoute(req, url, res, secrets) {
 
   if (!p.startsWith('/web/')) return false;
 
-  if (await require('./restart-confirmation-http').handleConfirmationRoute(req, url, res, secrets)) return true;
-
   // ── GET /web/sessions — list sessions for authenticated profile ──────────
   if (req.method === 'GET' && p === '/web/sessions') {
     const username = webAuth(req, secrets.WEB_JWT_SECRET);
