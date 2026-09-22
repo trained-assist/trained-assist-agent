@@ -740,6 +740,23 @@ function _relativeTime(ts) {
   return `через ${Math.round(mins / 60)} ч`;
 }
 
+// Search-results files are named by date (search-results-2026-09-22.json), not by
+// vacancy_id — each file's own content carries the vacancy_id it was searched for
+// (see hh-proactive-search.js runProactiveSearch). With one tracked vacancy that
+// distinction doesn't matter (vacancyId=null → any file counts, matching the old
+// singleton behavior); with several, showing the "Поиск" link for a vacancy that's
+// never been searched would send the recruiter to an empty page.
+function _hasProactiveResults(dataDir, username, vacancyId) {
+  const dir = path.join(dataDir, 'hh', String(username), 'proactive');
+  if (!fs.existsSync(dir)) return false;
+  const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json'));
+  if (!vacancyId) return files.length > 0;
+  return files.some(f => {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))?.vacancy_id === vacancyId; }
+    catch { return false; }
+  });
+}
+
 // Returns context card string, or null if no skills configured (no pin needed). Quick-answer
 // commands (/ping etc.) are contractually one-message-only (see runner-e2e.test.js) — this must
 // stay opt-in via connected services, never fire unconditionally on every task completion.
@@ -765,31 +782,50 @@ function buildContextCard(username, workDir, chatId) {
 
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
-  // HH: active vacancy + ATS config / scoring status
-  const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
-  if (fs.existsSync(hhVacFile)) {
-    try {
-      const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
-      if (vac?.title) {
-        const atsFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
-        const hasAts = fs.existsSync(atsFile);
-        lines.push(`💼 ${vac.title}`);
-        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
-        const agentSecret = process.env.AGENT_SECRET || '';
-        if (agentSecret && vac.id) {
-          const { createHmac } = require('crypto');
-          const tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
-          const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-          const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-          const proactiveDir = path.join(dataDir, 'hh', String(username), 'proactive');
-          const hasProactive = fs.existsSync(proactiveDir) &&
-            fs.readdirSync(proactiveDir).some(f => f.startsWith('search-results-') && f.endsWith('.json'));
-          const proactiveLink = hasProactive ? ` · [Поиск →](${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${tok})` : '';
-          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok})${proactiveLink}`);
-        }
+  // HH: active vacancy(ies) + ATS config / scoring status.
+  // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
+  // the legacy singleton active_vacancy.json is the fallback for profiles that never
+  // adopted the array. With >1 vacancy each gets its own block + vacancy_id-scoped
+  // links, so the recruiter switches vacancies via tabs on the web page, not Telegram.
+  try {
+    const hhVacsFile = path.join(workDir, 'contexts', 'hh', 'active_vacancies.json');
+    let vacancies = fs.existsSync(hhVacsFile)
+      ? (JSON.parse(fs.readFileSync(hhVacsFile, 'utf8'))?.value || [])
+      : [];
+    if (!vacancies.length) {
+      const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+      if (fs.existsSync(hhVacFile)) {
+        const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
+        if (vac?.title) vacancies = [vac];
       }
-    } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
-  }
+    }
+    if (vacancies.length) {
+      const multi = vacancies.length > 1;
+      const agentSecret = process.env.AGENT_SECRET || '';
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+      let tok = null;
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
+      }
+      if (multi) lines.push(`💼 Активные вакансии (${vacancies.length}):`);
+      vacancies.forEach((vac, i) => {
+        if (!vac?.title) return;
+        const perVacancyAts = vac.id ? path.join(workDir, 'contexts', 'hh', `ats_config:${vac.id}.json`) : null;
+        const legacyAts = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+        const hasAts = (perVacancyAts && fs.existsSync(perVacancyAts)) || (!multi && fs.existsSync(legacyAts));
+        lines.push(multi ? `${i + 1}. ${vac.title}` : `💼 ${vac.title}`);
+        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
+        if (tok && vac.id) {
+          const vacQs = multi ? `&vacancy_id=${encodeURIComponent(vac.id)}` : '';
+          const hasProactive = _hasProactiveResults(dataDir, username, multi ? vac.id : null);
+          const proactiveLink = hasProactive ? ` · [Поиск →](${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${tok}${vacQs})` : '';
+          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok}${vacQs})${proactiveLink}`);
+        }
+      });
+    }
+  } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
 
   const PINNED_CONTEXTS = [
     { skill: 'gdrive', key: 'pinned_folder', label: '📁' },
