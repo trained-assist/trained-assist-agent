@@ -120,6 +120,111 @@ async function handleWeb(req, url, res, ctx) {
     }
   }
 
+  // ── POST /web/reproject-preview — rebuild the project structure proposal ──
+  // Bearer twin of the MCP reproject_preview tool, exposed so the web UI can
+  // offer the "⟳ Переструктурировать проекты" button. POSTs {username, criteria?}
+  // + shared bearer; runs the CHEAP-model classification (gemini-2.5-flash default,
+  // never Claude) and returns the proposed structure + markdown report. NON-
+  // destructive; the plan is saved to projects/.reproject-state.json for the
+  // follow-up adjust/apply/revert endpoints. Long-running (~10-60s) — the caller
+  // waits on the HTTP response, no streaming.
+  if (req.method === 'POST' && url.pathname === '/web/reproject-preview') {
+    const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+    const auth = req.headers['authorization'] || '';
+    if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+    const { username, criteria } = body || {};
+    if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+    try {
+      const { userWorkDir } = require('../data-paths');
+      const reproject = require('../reproject');
+      const out = await reproject.preview(userWorkDir(username), { criteria, now: Date.now() });
+      if (out.error) return json(res, 200, { error: out.error });
+      return json(res, 200, {
+        plan: out.plan,
+        report: out.report,
+        totalSessions: out.plan.totalSessions,
+        projectCount: out.plan.projects.length,
+        unassigned: out.plan.unassigned.length,
+        warnings: out.plan.warnings,
+      });
+    } catch (e) {
+      return json(res, 500, { error: 'reproject preview failed', detail: String(e && e.message || e) });
+    }
+  }
+
+  // ── POST /web/reproject-adjust — edit the saved plan manually ─────────────
+  // Body: {username, moves?: [{sessionId,toCluster,name?,type?}], renames?:
+  // [{cluster,name?,type?}]}. Edits the saved plan in place (nothing moves on
+  // disk), re-renders the report. Returns the updated plan+report.
+  if (req.method === 'POST' && url.pathname === '/web/reproject-adjust') {
+    const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+    const auth = req.headers['authorization'] || '';
+    if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+    const { username, moves, renames } = body || {};
+    if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+    try {
+      const { userWorkDir } = require('../data-paths');
+      const reproject = require('../reproject');
+      const out = reproject.adjustPlan(userWorkDir(username), { moves: moves || [], renames: renames || [] }, { now: Date.now() });
+      if (out.error) return json(res, 200, { error: out.error });
+      return json(res, 200, { adjusted: true, plan: out.plan, report: out.report, warnings: out.plan.warnings });
+    } catch (e) {
+      return json(res, 500, { error: 'reproject adjust failed', detail: String(e && e.message || e) });
+    }
+  }
+
+  // ── POST /web/reproject-apply — apply the saved plan (reversible) ─────────
+  // Body: {username, confirm:boolean}. confirm=false → dry-run (actions preview),
+  // confirm=true → re-tag sessions to their planned projects, write the ledger.
+  if (req.method === 'POST' && url.pathname === '/web/reproject-apply') {
+    const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+    const auth = req.headers['authorization'] || '';
+    if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+    const { username, confirm } = body || {};
+    if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+    try {
+      const { userWorkDir } = require('../data-paths');
+      const reproject = require('../reproject');
+      const state = reproject.loadState(userWorkDir(username));
+      if (!state || !state.plan) return json(res, 200, { error: 'no saved plan — run preview first' });
+      const res_ = reproject.applyPlan(userWorkDir(username), state.plan, { dryRun: !confirm, now: Date.now() });
+      return json(res, 200, {
+        applied: !!confirm,
+        dryRun: res_.dryRun,
+        sessionsMoved: res_.moves,
+        projectsAffected: state.plan.projects.length,
+        ledgerWritten: res_.ledgerWritten,
+      });
+    } catch (e) {
+      return json(res, 500, { error: 'reproject apply failed', detail: String(e && e.message || e) });
+    }
+  }
+
+  // ── POST /web/reproject-revert — undo the last apply ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/web/reproject-revert') {
+    const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+    const auth = req.headers['authorization'] || '';
+    if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+    const { username } = body || {};
+    if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+    try {
+      const { userWorkDir } = require('../data-paths');
+      const reproject = require('../reproject');
+      const out = reproject.revertPlan(userWorkDir(username), { now: Date.now() });
+      return json(res, 200, out);
+    } catch (e) {
+      return json(res, 500, { error: 'reproject revert failed', detail: String(e && e.message || e) });
+    }
+  }
+
   // ── POST /web/sessions-list — authoritative session list for external UIs ─
   // Same delegation pattern as /web/verify & /web/projects. The Cloudflare
   // session-manager worker (app.trainedassist.store) POSTs {username, limit} +

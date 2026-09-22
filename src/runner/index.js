@@ -30,6 +30,7 @@ const {
   STOP_TASK_INTENT,
   GTD_STOP_INTENT,
   ACTIVE_CHECKLIST_INTENT,
+  CHECKLIST_EDIT_INTENT,
   WAKEUP_INTENT,
   SKIP_TASK_INTENT,
   PING_INTENT,
@@ -43,6 +44,9 @@ const {
   CONTEXT_ON_INTENT,
   PERSONA_INTENT,
   PROJECT_INTENT,
+  AGENT_INFO_INTENT,
+  MODEL_INFO_INTENT,
+  isPreQueueQuickIntent,
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,
   HH_RESPONSES_INTENT,
@@ -176,8 +180,16 @@ function clearPendingTask(taskId) {
 
 function getPendingTasks() {
   if (!fs.existsSync(PENDING_DIR)) return [];
+  // One malformed journal entry must not abort resume for every OTHER task —
+  // this runs once at boot (resumePendingTasks) and used to let a single bad
+  // JSON.parse throw out of the whole function, silently stranding every
+  // legitimately-resumable session (including GTD turns) behind it.
   return fs.readdirSync(PENDING_DIR).filter(f => f.endsWith('.json'))
-    .map(f => JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')));
+    .map(f => {
+      try { return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')); }
+      catch (e) { console.warn(`[runner] getPendingTasks: skipping malformed ${f}:`, e.message); return null; }
+    })
+    .filter(Boolean);
 }
 
 // ── Soft-continuation journal — survives process restart ─────────────────────
@@ -204,8 +216,14 @@ function clearSoftContinuationFile(username) {
 
 function listSoftContinuations() {
   if (!fs.existsSync(SOFT_CONT_DIR)) return [];
+  // Same defensive read as getPendingTasks: one malformed record must not
+  // abort reconciliation for every other user's soft-continuation.
   return fs.readdirSync(SOFT_CONT_DIR).filter(f => f.endsWith('.json'))
-    .map(f => JSON.parse(fs.readFileSync(path.join(SOFT_CONT_DIR, f), 'utf8')));
+    .map(f => {
+      try { return JSON.parse(fs.readFileSync(path.join(SOFT_CONT_DIR, f), 'utf8')); }
+      catch (e) { console.warn(`[runner] listSoftContinuations: skipping malformed ${f}:`, e.message); return null; }
+    })
+    .filter(Boolean);
 }
 
 
@@ -360,6 +378,29 @@ function isTaskRunning(username) {
   return false;
 }
 
+// True while this exact session is either spawned-and-streaming OR still queued
+// waiting for a turn — checks activeTimers (live process) AND chatLanes (accepted,
+// waiting on the per-chat lane / per-profile cap / RAM / global slot). Used by
+// gtd-controller's re-entrancy guard: the journal-based check it used before had a
+// 30-min TTL heuristic while real runs can legitimately take up to CLAUDE_TIMEOUT_MS
+// (40min) plus up to 8 extend-timeout calls (2h+), so a long-running GTD turn could
+// age out of the guard and get double-fired by the next tick — fixed by switching to
+// this live in-process check (#1062). But activeTimers only gets an entry once the
+// process actually spawns (claude-runner.js, after every admission wait), while
+// chatLanes.set() happens synchronously the instant runTask() is called and stays
+// until the queued work finishes. Under load (profile cap / RAM / global slot all
+// busy), a GTD turn can sit queued for minutes with activeTimers still empty — the
+// next 5-min tick would see "not running" and fire a duplicate queued turn for the
+// same session onto the same lane. Checking chatLanes too closes that window.
+function isSessionRunning(sessionId) {
+  if (!sessionId) return false;
+  for (const s of activeTimers.values()) {
+    if (s.sessionId === sessionId) return true;
+  }
+  if (chatLanes.has(_laneKey(sessionId, null))) return true;
+  return false;
+}
+
 /**
  * Kill any running Claude process for a given username.
  * Finds all entries in activeTimers whose taskId starts with `${username}-`
@@ -458,33 +499,57 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // /active_checklist — list all open GTD records for this user.
+  // /active_checklist — list all open GTD records for this user, plus a one-click
+  // link into checklist.trainedassist.store (no password needed, see checklistAutologinUrl).
   if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
-    const workDir = opts.user.workDir;
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
-    let msg;
-    if (!workDir) {
-      msg = '📋 Нет активных чек-листов.';
-    } else {
-      const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
-      if (!openRecs.length) {
+    return (async () => {
+      const workDir = opts.user.workDir;
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+      const chatId = opts.user.id;
+      let msg;
+      if (!workDir) {
         msg = '📋 Нет активных чек-листов.';
       } else {
-        const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
-        for (const r of openRecs) {
-          const task = (r.originalTask || '').slice(0, 80);
-          lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+        const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+        if (!openRecs.length) {
+          msg = '📋 Нет активных чек-листов.';
+        } else {
+          const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
+          for (const r of openRecs) {
+            const task = (r.originalTask || '').slice(0, 80);
+            lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+          }
+          msg = lines.join('\n');
         }
-        msg = lines.join('\n');
       }
-    }
-    if (botToken) {
-      const im = opts.initialMsgId;
-      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-      else     tgSend(botToken, chatId, msg).catch(() => {});
-    }
-    return Promise.resolve(msg);
+      const link = await require('../gtd-controller').checklistAutologinUrl().catch(() => null);
+      if (link) msg += `\n\n✏️ Править: ${link}`;
+      if (botToken) {
+        const im = opts.initialMsgId;
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+        else     await tgSend(botToken, chatId, msg).catch(() => {});
+      }
+      return msg;
+    })();
+  }
+
+  // Natural-language "хочу поправить чек-лист" — hand back a one-click autologin link
+  // instead of asking the user to type a password (checklist.trainedassist.store).
+  if (CHECKLIST_EDIT_INTENT.test((opts.task || '').trim())) {
+    return (async () => {
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+      const chatId = opts.user.id;
+      const link = await require('../gtd-controller').checklistAutologinUrl().catch(() => null);
+      const msg = link
+        ? `✏️ Правь чек-лист здесь — вход автоматический: ${link}`
+        : '⚠️ Не смог получить ссылку на чек-лист (сервис недоступен или не настроен пароль). Попробуй чуть позже.';
+      if (botToken) {
+        const im = opts.initialMsgId;
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+        else     await tgSend(botToken, chatId, msg).catch(() => {});
+      }
+      return msg;
+    })();
   }
 
   // Control commands bypass lanes and admission. Available to every authenticated profile.
@@ -540,6 +605,34 @@ function runTask(opts) {
       else     tgSend(botToken, chatId, msg).catch(() => {});
     }
     return Promise.resolve(msg);
+  }
+
+  // Pure-info quick answers (/agent_info, /secrets_list, /usage, ...) bypass the queue
+  // entirely, same as /stop above — they read local state synchronously and don't touch
+  // Claude or the session transcript, so there's no reason to make them wait behind
+  // whatever this chat's admission queue is currently running (issue: "/agent_info waits
+  // for the previous task to finish, but it doesn't need to call the agent at all").
+  // forceClaude means the user explicitly wants Claude (e.g. a "proработка" button tap on
+  // one of these commands' replies) — respect that and fall through to the normal path.
+  if (!opts.forceClaude && isPreQueueQuickIntent((opts.task || '').trim())) {
+    const quick = getQuickAnswer(opts.task, opts.user.username, opts.user.workDir, false, opts.user.id, opts.user.telegramUserId);
+    if (quick) {
+      const msg = `⚡ ${quick}`;
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
+      const chatId = opts.user.id;
+      return (async () => {
+        if (botToken) {
+          const im = opts.initialMsgId;
+          try {
+            if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg));
+            else     await tgSend(botToken, chatId, msg);
+          } catch (e) { console.warn('[runner] pre-queue quick-answer send:', e.message); }
+        }
+        return quick;
+      })();
+    }
+    // Matched the whitelist regex but getQuickAnswer returned nothing (shouldn't happen for
+    // this fixed set of intents) — fall through to the normal queued path as a safety net.
   }
 
   if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id) || null;
@@ -648,6 +741,23 @@ function _relativeTime(ts) {
   return `через ${Math.round(mins / 60)} ч`;
 }
 
+// Search-results files are named by date (search-results-2026-09-22.json), not by
+// vacancy_id — each file's own content carries the vacancy_id it was searched for
+// (see hh-proactive-search.js runProactiveSearch). With one tracked vacancy that
+// distinction doesn't matter (vacancyId=null → any file counts, matching the old
+// singleton behavior); with several, showing the "Поиск" link for a vacancy that's
+// never been searched would send the recruiter to an empty page.
+function _hasProactiveResults(dataDir, username, vacancyId) {
+  const dir = path.join(dataDir, 'hh', String(username), 'proactive');
+  if (!fs.existsSync(dir)) return false;
+  const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json'));
+  if (!vacancyId) return files.length > 0;
+  return files.some(f => {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))?.vacancy_id === vacancyId; }
+    catch { return false; }
+  });
+}
+
 // Returns context card string, or null if no skills configured (no pin needed). Quick-answer
 // commands (/ping etc.) are contractually one-message-only (see runner-e2e.test.js) — this must
 // stay opt-in via connected services, never fire unconditionally on every task completion.
@@ -673,31 +783,50 @@ function buildContextCard(username, workDir, chatId) {
 
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
-  // HH: active vacancy + ATS config / scoring status
-  const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
-  if (fs.existsSync(hhVacFile)) {
-    try {
-      const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
-      if (vac?.title) {
-        const atsFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
-        const hasAts = fs.existsSync(atsFile);
-        lines.push(`💼 ${vac.title}`);
-        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
-        const agentSecret = process.env.AGENT_SECRET || '';
-        if (agentSecret && vac.id) {
-          const { createHmac } = require('crypto');
-          const tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
-          const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-          const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-          const proactiveDir = path.join(dataDir, 'hh', String(username), 'proactive');
-          const hasProactive = fs.existsSync(proactiveDir) &&
-            fs.readdirSync(proactiveDir).some(f => f.startsWith('search-results-') && f.endsWith('.json'));
-          const proactiveLink = hasProactive ? ` · [Поиск →](${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${tok})` : '';
-          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok})${proactiveLink}`);
-        }
+  // HH: active vacancy(ies) + ATS config / scoring status.
+  // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
+  // the legacy singleton active_vacancy.json is the fallback for profiles that never
+  // adopted the array. With >1 vacancy each gets its own block + vacancy_id-scoped
+  // links, so the recruiter switches vacancies via tabs on the web page, not Telegram.
+  try {
+    const hhVacsFile = path.join(workDir, 'contexts', 'hh', 'active_vacancies.json');
+    let vacancies = fs.existsSync(hhVacsFile)
+      ? (JSON.parse(fs.readFileSync(hhVacsFile, 'utf8'))?.value || [])
+      : [];
+    if (!vacancies.length) {
+      const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+      if (fs.existsSync(hhVacFile)) {
+        const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
+        if (vac?.title) vacancies = [vac];
       }
-    } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
-  }
+    }
+    if (vacancies.length) {
+      const multi = vacancies.length > 1;
+      const agentSecret = process.env.AGENT_SECRET || '';
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+      let tok = null;
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
+      }
+      if (multi) lines.push(`💼 Активные вакансии (${vacancies.length}):`);
+      vacancies.forEach((vac, i) => {
+        if (!vac?.title) return;
+        const perVacancyAts = vac.id ? path.join(workDir, 'contexts', 'hh', `ats_config:${vac.id}.json`) : null;
+        const legacyAts = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+        const hasAts = (perVacancyAts && fs.existsSync(perVacancyAts)) || (!multi && fs.existsSync(legacyAts));
+        lines.push(multi ? `${i + 1}. ${vac.title}` : `💼 ${vac.title}`);
+        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
+        if (tok && vac.id) {
+          const vacQs = multi ? `&vacancy_id=${encodeURIComponent(vac.id)}` : '';
+          const hasProactive = _hasProactiveResults(dataDir, username, multi ? vac.id : null);
+          const proactiveLink = hasProactive ? ` · [Поиск →](${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${tok}${vacQs})` : '';
+          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok}${vacQs})${proactiveLink}`);
+        }
+      });
+    }
+  } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
 
   const PINNED_CONTEXTS = [
     { skill: 'gdrive', key: 'pinned_folder', label: '📁' },
@@ -1106,7 +1235,7 @@ function buildOcCapabilitiesBlock(secrets) {
   return lines.join('\n');
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1301,7 +1430,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       SESSIONS_INTENT.test(task) || SESSION_DETAIL_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
       CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
-      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task);
+      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
+      MODEL_INFO_INTENT.test(task);
 
     if (!isUtility) {
       if (sessionExists) {
@@ -1584,7 +1714,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // otherwise the post-processing below (retry, incomplete detection, usage).
   const engineResult = await runEngineProcess({
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
-    cleanEnv, userTokens, sessionFilePath,
+    cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
     engineBin, engineArgs, mcpConfig, ocProfileOverrides,
@@ -1739,12 +1869,41 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
   }
 
-  // Detect Claude Code auth failure — set flag and send clear message instead of raw error
+  // Detect an auth/quota failure for the current engine — set the per-engine flag so the
+  // operator repair loop sees it either way. Claude and Codex additionally get ONE automatic
+  // fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on repair;
+  // engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
   const authText = claudeResult || fullOutput.text || result;
   if (isAuthError(authText)) {
     const reason = detectReason(authText);
-    setAuthFailedFlag({ reason, error_text: authText });
-    const authMsg = '⚠️ Авторизация Claude Code истекла — оператор уже уведомлён, скоро починим.';
+    setAuthFailedFlag({ reason, error_text: authText, engine });
+    const engineLabel = engine === 'codex' ? 'Codex' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
+
+    if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
+      const fallbackMsg = `⚠️ ${engineLabel} потерял авторизацию — автоматически переключаюсь на OpenCode для этой задачи.`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg));
+      else await tgSend(BOT_TOKEN, chatId, fallbackMsg);
+      if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
+      const queuedRetry = runTask({
+        initiatedAt, threadId,
+        taskId: `${user.username}-${Date.now()}`,
+        user,
+        task,
+        context,
+        sessionId: activeSessionId,
+        forceClaude,
+        initialMsgId: msgId,
+        pinnedMsgId,
+        secrets,
+        retryCount,
+        continuationCount, mode, projectId, internalGtd,
+        engine: 'opencode',
+        engineFallbackDone: true,
+      });
+      return { queuedRetry };
+    }
+
+    const authMsg = `⚠️ Авторизация ${engineLabel} истекла — оператор уже уведомлён, скоро починим.`;
     if (msgId) {
       await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg));
     } else {
@@ -1975,7 +2134,7 @@ async function reconcileSoftContinuations(secrets) {
 module.exports = {
   interruptForRestart,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  isTaskRunning, isSessionRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   clearPendingContinuation, reconcileSoftContinuations,
   // Exported for soft-continuation journal tests only
   _softCont: { saveSoftContinuationFile, clearSoftContinuationFile, listSoftContinuations, SOFT_CONT_DIR },
@@ -1991,4 +2150,8 @@ module.exports = {
   _laneKey,
   // Exported for per-profile cap-isolation tests only (R7/S8a)
   _cap: { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY },
+  // Exported for isSessionRunning tests only — the real Map backing activeTimers
+  _activeTimers: activeTimers,
+  // Exported for isSessionRunning tests only — the real Map backing chatLanes
+  _chatLanes: chatLanes,
 };

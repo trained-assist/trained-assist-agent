@@ -14,7 +14,7 @@ const fs = require('fs');
 
 const { sendRejection } = require('../hh-rejection');
 const { hydrateResume, buildResumeText, resumeNotice } = require('../hh-resume');
-const { hhFetch, hhPut, hhPostForm, readHhToken, refreshHhToken } = require('../hh-utils');
+const { hhFetch, hhPut, hhPostForm, readHhToken, refreshHhToken, readActiveVacancies } = require('../hh-utils');
 const { bullshitGuard } = require('../hh-bullshit-guard');
 const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride, DEFAULT_MESSAGE_BASE } = require('../hh-message-prompts');
 const { hhInterviewConfigAllowsTime } = require('../hh-negotiations');
@@ -50,11 +50,16 @@ function proactiveHmac(uname) {
 
 // Signed URL to the recruiter's proactive results page. Was referenced in server.js
 // but never defined there — /api/hh/proactive/search always 500'd. Defined here
-// (same scheme as 92-hh-proactive.js / hh-autoscan.js proactiveUrlFor).
-function proactiveUrl(username) {
+// (same scheme as 92-hh-proactive.js / hh-autoscan.js proactiveUrlFor). `vacancyId`
+// is a plain, non-HMAC'd query param appended alongside the token — same pattern as
+// hhReviewUrl in hh-quick.js — so multi-vacancy step 7's tab switcher can deep-link
+// straight into the right tab. Omitted (falsy) → no param, unchanged for
+// single-vacancy callers.
+function proactiveUrl(username, vacancyId) {
   const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
   const token = proactiveHmac(username);
-  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
+  const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
+  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
 }
 
 function latestProactiveFile(username) {
@@ -330,9 +335,9 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
 
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
   const workDir = path.join(BASE_USERS_DIR, username);
-  const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
-  let vacancy = null;
-  try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
+  const activeVacancies = readActiveVacancies(workDir);
+  const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
+  const vacancy = activeVacancies.find(v => String(v.id) === requestedVacancyId) || activeVacancies[0] || null;
   if (!vacancy?.id) return errPage('Вакансия не выбрана. Скажи боту «мои вакансии» и выбери вакансию.');
 
   let negotiations = [], syncedAt = null;
@@ -355,7 +360,12 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
   } catch { /* non-critical */ }
 
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { syncedAt, vacancyId: vacancy.id, lastScoredAt });
+  const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, {
+    syncedAt,
+    vacancyId: vacancy.id,
+    lastScoredAt,
+    vacancies: activeVacancies,
+  });
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
   return;
@@ -480,15 +490,25 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
     }
   }
   const { atsEditorHtml } = require('../hh-ats-editor-html.js');
+  const { readAtsConfig, readAtsDraft } = require('../hh-scoring');
   // Must match BASE_USERS_DIR — Claude writes contexts here via cwd
   const workDir = path.join(BASE_USERS_DIR, username);
   const contextBase = path.join(workDir, 'contexts');
-  const configFile = path.join(contextBase, 'hh', 'ats_config.json');
   const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
-  let currentConfig = null;
+  const activeVacancies = readActiveVacancies(workDir);
+  const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
+  const activeVacancy = activeVacancies.find(v => String(v.id) === requestedVacancyId) || activeVacancies[0] || null;
+  let currentConfig = readAtsConfig(workDir, activeVacancy?.id || null);
+  // No live config yet — offer the LLM-extracted draft (hh_extract_ats_config) as the
+  // starting point instead. The draft never goes live on its own: it only reaches
+  // scoring once the recruiter reviews it here and clicks Save.
+  let isDraft = false;
+  if (!currentConfig) {
+    const draft = readAtsDraft(workDir, activeVacancy?.id || null);
+    if (draft) { currentConfig = draft; isDraft = true; }
+  }
   let currentStages = null;
   try {
-    if (fs.existsSync(configFile)) currentConfig = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
     if (fs.existsSync(stagesFile)) currentStages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
   } catch {}
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
@@ -496,6 +516,9 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
     callbackBase,
     username,
     agentSecret: agentSecret || '',
+    vacancies: activeVacancies,
+    activeVacancyId: activeVacancy?.id || '',
+    isDraft,
   });
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   return res.end(html);
@@ -967,16 +990,26 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   let results;
   try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const { loadCandidateComments, loadAllCandidates } = require('../hh-proactive-search');
+  const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy } = require('../hh-proactive-search');
   const pageComments = loadCandidateComments(username);
+  // Multi-vacancy step 7/7: tab switcher, mirroring /hh/review's vacancy_id pattern.
+  const workDir = path.join(BASE_USERS_DIR, username);
+  const activeVacancies = readActiveVacancies(workDir);
+  const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
+  const vacancyId = activeVacancies.find(v => String(v.id) === requestedVacancyId)
+    ? requestedVacancyId
+    : (requestedVacancyId || '');
   // Render from the unified all-candidates store (search + manual, accumulated
   // across runs) rather than only the latest search-results snapshot — keeps the
   // rest of `results` (vacancy_title, stats, searched_at) from the snapshot.
+  // Records with no vacancy_ids (pre-step-7 data, or manually added with no active
+  // vacancy resolvable) are a wildcard and show up under every tab.
   const unified = Object.values(loadAllCandidates(username))
+    .filter(c => candidateMatchesVacancy(c, vacancyId))
     .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
   results.candidates = unified.length ? unified : (results.candidates || []);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments));
+  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments, { activeVacancies, vacancyId }));
 }
 
 if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
@@ -1079,8 +1112,10 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/search') {
         const text = buildProactiveDigest({
           vacancyTitle: info.vacancyTitle,
           newCount: info.newCount,
+          totalNewCount: info.totalNewCount,
           totalSeen: info.totalSeen,
           newCandidates: info.newCandidates,
+          threshold: info.threshold,
           url: info.proactiveUrl,
         });
         const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
@@ -1184,7 +1219,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/import-seen') {
 if (req.method === 'POST' && url.pathname === '/api/hh/proactive/add-manual') {
   let body;
   try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-  const { username = '', token: givenToken = '', resume_url_or_id = '' } = body || {};
+  const { username = '', token: givenToken = '', resume_url_or_id = '', vacancy_id: requestedVacancyId = '' } = body || {};
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   if (!resume_url_or_id) return json(res, 400, { error: 'resume_url_or_id required' });
   try {
@@ -1206,7 +1241,15 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/add-manual') {
         throw e;
       }
     }
-    const record = addManualCandidate(username, resumeData);
+    // Tag with whichever vacancy is active for this profile — prefer the tab the
+    // recruiter was on (requestedVacancyId, sent by the page) and fall back to the
+    // profile's first active vacancy. If neither resolves, vacancy_ids stays []
+    // (wildcard — addManualCandidate's documented behavior for that case).
+    const activeVacancies = readActiveVacancies(path.join(BASE_USERS_DIR, username));
+    const vacancyId = (requestedVacancyId && activeVacancies.find(v => String(v.id) === String(requestedVacancyId)))
+      ? requestedVacancyId
+      : (activeVacancies[0]?.id || '');
+    const record = addManualCandidate(username, resumeData, vacancyId);
     return json(res, 200, { ok: true, candidate: record });
   } catch (e) {
     return json(res, 500, { error: e.message });
@@ -1225,16 +1268,14 @@ async function handleHhAuthed(req, url, res, ctx) {
 if (req.method === 'GET' && url.pathname === '/hh/ats-config') {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const username = url.searchParams.get('username') || '';
+  const vacancyId = url.searchParams.get('vacancy_id') || null;
   // Must match BASE_USERS_DIR so runHhScoringForUser can find the file
-  const contextBase = username
-    ? path.join(BASE_USERS_DIR, username, 'contexts')
-    : path.join(process.cwd(), 'contexts');
-  const configFile = path.join(contextBase, 'hh', 'ats_config.json');
-  const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
-  let config = null;
+  const workDir = username ? path.join(BASE_USERS_DIR, username) : process.cwd();
+  const stagesFile = path.join(workDir, 'contexts', 'hh', 'ats_stages.json');
+  const { readAtsConfig } = require('../hh-scoring');
+  const config = readAtsConfig(workDir, vacancyId);
   let stages = null;
   try {
-    if (fs.existsSync(configFile)) config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
     if (fs.existsSync(stagesFile)) stages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
   } catch {}
   return json(res, 200, { ok: true, config, stages });
@@ -1242,6 +1283,13 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-config') {
 
 if (req.method === 'POST' && url.pathname === '/hh/reset-ats-results') {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  // NOTE (multi-vacancy step 3/6, deliberately deferred): candidate history files
+  // (candidates/{neg_id}.json) don't record which vacancy they belong to, so this
+  // still resets ALL of a user's candidates across every tracked vacancy — "Re-run
+  // Funnel" on one vacancy's tab wipes another vacancy's scores too. Scoping this
+  // properly needs either stamping vacancy_id onto candidate history on write, or
+  // fetching the vacancy's negotiation ID set here before filtering. Out of scope for
+  // the tabs-only pass; flagging so it isn't mistaken for "already handled".
   const body = JSON.parse(await readBody(req));
   const { username } = body || {};
   if (!username) return json(res, 400, { error: 'username required' });
@@ -1273,7 +1321,7 @@ if (req.method === 'POST' && url.pathname === '/hh/reset-ats-results') {
 if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const body = JSON.parse(await readBody(req));
-  const { config, stages, username } = body || {};
+  const { config, stages, username, vacancy_id: vacancyId } = body || {};
   if (!config || typeof config !== 'object') return json(res, 400, { error: 'config required' });
   // Must match BASE_USERS_DIR so runHhScoringForUser can find the file
   const contextBase = username
@@ -1282,17 +1330,25 @@ if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
   const hhContextDir = path.join(contextBase, 'hh');
   fs.mkdirSync(hhContextDir, { recursive: true });
   const now = new Date().toISOString();
+  // Once the editor knows which vacancy it's editing (multi-vacancy tabs), save under
+  // the per-vacancy key only — writing to the legacy singleton too would let whichever
+  // vacancy tab saves last silently clobber the others' config (same class of bug
+  // step 2/6 fixed for the background scoring read path; see hh-scoring.js readAtsConfig).
+  const configName = vacancyId ? `ats_config:${vacancyId}` : 'ats_config';
   fs.writeFileSync(
-    path.join(hhContextDir, 'ats_config.json'),
-    JSON.stringify({ value: config, updated_at: now }, null, 2),
+    path.join(hhContextDir, `${configName}.json`),
+    JSON.stringify({ value: { ...config, vacancy_id: vacancyId || config.vacancy_id }, updated_at: now }, null, 2),
   );
+  // Funnel stages stay a single global blob for now (deliberately deferred, like
+  // hh_generate_message tone context in PR #1067 — different vacancies commonly share
+  // the same interview stages; per-vacancy stages can follow if that stops being true).
   if (Array.isArray(stages)) {
     fs.writeFileSync(
       path.join(hhContextDir, 'ats_stages.json'),
       JSON.stringify({ value: stages, updated_at: now }, null, 2),
     );
   }
-  console.log(`[hh/ats-config] saved vacancy="${config.vacancy_title}" stages=${stages?.length || 0} user=${username || 'default'}`);
+  console.log(`[hh/ats-config] saved vacancy="${config.vacancy_title}" vacancy_id=${vacancyId || 'legacy'} stages=${stages?.length || 0} user=${username || 'default'}`);
   return json(res, 200, { ok: true });
 }
   return false;

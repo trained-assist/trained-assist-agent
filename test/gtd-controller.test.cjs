@@ -211,6 +211,237 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   });
   ok(firedIds.length === 2 && new Set(firedIds).size === 2, 'runDue: concurrent sessions of one profile get distinct taskIds');
 
+  // 15. runDue pins engine:'claude' on every fire — forceClaude alone does NOT force
+  // the engine (it only widens context/skips quick-answers; engine selection falls
+  // back to the profile's default). A GTD record fired under codex/opencode can
+  // never resume after a server restart (those engines have no resume capability),
+  // permanently stranding the record open. Pinning engine explicitly closes that gap.
+  const wd7 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd7-'));
+  const userDir7 = path.join(wd7, 'u');
+  fs.mkdirSync(userDir7, { recursive: true });
+  G.writeGtd(userDir7, { ...rec, sessionId: 's-engine', dueAt: 100 });
+  let capturedEngine;
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd7, now: 200,
+    isTaskRunning: () => false,
+    getSession: () => ({ summary: {} }),
+    runTask: async o => { capturedEngine = o.engine; return 'x'; },
+  });
+  ok(capturedEngine === 'claude', 'runDue: fires with engine explicitly pinned to claude (not left to profile default)');
+
+  // 16. fairness: due records are fired oldest-dueAt-first, not in filesystem-listing
+  // order — otherwise the same early users/records win every tick's MAX_FIRES_PER_TICK
+  // slots while later ones starve indefinitely.
+  const wd8 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd8-'));
+  // Deliberately write users in an order whose directory listing would put the
+  // newest-due record first if unsorted (zzz sorts after aaa alphabetically on
+  // most filesystems, but readdirSync order isn't guaranteed either way — the
+  // point is dueAt must be what decides firing order, not listing order).
+  for (const [uname, sid, due] of [['zzz-newest', 's-new', 190], ['aaa-oldest', 's-old', 100], ['mmm-mid', 's-mid', 150]]) {
+    const ud = path.join(wd8, uname);
+    fs.mkdirSync(ud, { recursive: true });
+    G.writeGtd(ud, { ...rec, sessionId: sid, dueAt: due });
+  }
+  const fireOrder = [];
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd8, now: 200,
+    isTaskRunning: () => false,
+    getSession: () => ({ summary: {} }),
+    runTask: async o => { fireOrder.push(o.sessionId); return 'x'; },
+  });
+  ok(fireOrder.length === 3, 'fairness: all 3 due records fired (under the MAX_FIRES_PER_TICK cap)');
+  ok(JSON.stringify(fireOrder) === JSON.stringify(['s-old', 's-mid', 's-new']),
+    `fairness: fires oldest-dueAt-first regardless of directory order, got ${JSON.stringify(fireOrder)}`);
+
+  // 17. fairness under the cap: with MORE due records than MAX_FIRES_PER_TICK, the
+  // oldest-due ones win the slots this tick — a starved record isn't randomly dropped,
+  // it's simply the newest and gets its turn on a later tick.
+  const wd9 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd9-'));
+  const dues9 = [['u-d', 's-d', 400], ['u-a', 's-a2', 100], ['u-e', 's-e', 500], ['u-b', 's-b2', 200], ['u-c', 's-c', 300]];
+  for (const [uname, sid, due] of dues9) {
+    const ud = path.join(wd9, uname);
+    fs.mkdirSync(ud, { recursive: true });
+    G.writeGtd(ud, { ...rec, sessionId: sid, dueAt: due });
+  }
+  const fireOrder9 = [];
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd9, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ summary: {} }),
+    runTask: async o => { fireOrder9.push(o.sessionId); return 'x'; },
+  });
+  ok(JSON.stringify(fireOrder9) === JSON.stringify(['s-a2', 's-b2', 's-c']),
+    `fairness under cap: only the ${G.MAX_FIRES_PER_TICK} oldest-due records fire, got ${JSON.stringify(fireOrder9)}`);
+  ok(G.readGtd(path.join(wd9, 'u-d'), 's-d').status === 'open', 'fairness under cap: newer-due record stays open, not dropped');
+  ok(G.readGtd(path.join(wd9, 'u-e'), 's-e').status === 'open', 'fairness under cap: newest-due record stays open, not dropped');
+
+  // ── Round 3 reliability regressions ────────────────────────────────────────
+
+  // 18. Fire-lease: firing a session moves dueAt FORWARD (~FIRE_LEASE_MS) synchronously,
+  // BEFORE runTask's async completion callback runs. Without this the record keeps
+  // dueAt<=now for the whole (minutes-long) run and only isSessionRunning stops it
+  // being re-fired every tick — but isSessionRunning is false the instant the process
+  // is killed mid-run (systemd restart), so a lost run would hammer every tick. The
+  // lease makes a lost run retry after a bounded delay instead of immediately/forever.
+  const wd10 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd10-'));
+  const userDir10 = path.join(wd10, 'u');
+  fs.mkdirSync(userDir10, { recursive: true });
+  G.writeGtd(userDir10, { ...rec, sessionId: 's-lease', dueAt: 100 });
+  let resolveRun10;
+  const runGate10 = new Promise(r => { resolveRun10 = r; });
+  const tick10 = G.runDue({
+    secrets: {}, baseUsersDir: wd10, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '42', summary: {} }),
+    runTask: async () => { await runGate10; return 'still working'; }, // never resolves until we let it
+  });
+  // Let the tick fire + persist, but keep runTask pending (simulates a long/lost run).
+  await new Promise(r => setImmediate(r));
+  const leased = G.readGtd(userDir10, 's-lease');
+  ok(leased.dueAt >= 1000 + G.FIRE_LEASE_MS - 5000 && leased.iterations === 1,
+    `fire-lease: dueAt pushed ~FIRE_LEASE_MS forward at fire time (got dueAt=${leased.dueAt - 1000}ms after now, iter=${leased.iterations})`);
+  // A re-tick while the run is still in flight (isSessionRunning true) must NOT re-fire.
+  let refireCount = 0;
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd10, now: 1000,
+    isTaskRunning: () => true,
+    getSession: () => ({ ownerChatId: '42', summary: {} }),
+    runTask: async () => { refireCount++; return 'x'; },
+  });
+  ok(refireCount === 0 && G.readGtd(userDir10, 's-lease').iterations === 1, 'fire-lease: in-flight session not re-fired by a later tick');
+  resolveRun10();
+  await tick10;
+
+  // 19. Overlap guard: two runDue passes must not run concurrently (a slow GitHub
+  // precheck could make one tick outlast the 5-min interval → overlapping ticks
+  // both read the same due record, both see isSessionRunning=false, both fire →
+  // duplicate fire + doubled iteration). The second concurrent pass is a no-op.
+  // We suspend the first pass inside its awaited GitHub precheck (gated global.fetch)
+  // so it is genuinely "in flight" when we launch the second, concurrent pass.
+  const wd11 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd11-'));
+  const userDir11 = path.join(wd11, 'u');
+  fs.mkdirSync(userDir11, { recursive: true });
+  const proj11 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd11-proj-'));
+  fs.writeFileSync(path.join(proj11, 'checklist.md'), [
+    'Goal: ship (PR https://github.com/acme/w/pull/7)',
+    '- [ ] CI green https://github.com/acme/w/pull/7',
+    '- [ ] Deployed live',
+  ].join('\n'));
+  const tokRoot11 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd11-tok-'));
+  fs.mkdirSync(path.join(tokRoot11, 'u'), { recursive: true });
+  fs.writeFileSync(path.join(tokRoot11, 'u', 'github'), 'ghp_x');
+  const realTok11 = process.env.AGENT_TOKENS_ROOT;
+  process.env.AGENT_TOKENS_ROOT = tokRoot11;
+  delete require.cache[require.resolve('../src/gtd-controller.js')];
+  const G11 = require('../src/gtd-controller.js');
+  G11.writeGtd(userDir11, { ...rec, sessionId: 's-overlap', dueAt: 100, projectDir: proj11, username: 'u' });
+  let fires11 = 0;
+  let releaseFetch11;
+  const fetchGate11 = new Promise(r => { releaseFetch11 = r; });
+  const realFetch11 = global.fetch;
+  global.fetch = async () => { await fetchGate11; return { ok: false, json: async () => ({}) }; }; // precheck no-op after gate
+  const passA = G11.runDue({
+    secrets: {}, baseUsersDir: wd11, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '42', summary: {} }),
+    runTask: async () => { fires11++; return 'x'; },
+  });
+  await new Promise(r => setImmediate(r)); // let passA reach the gated fetch inside the precheck
+  const passB = G11.runDue({
+    secrets: {}, baseUsersDir: wd11, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '42', summary: {} }),
+    runTask: async () => { fires11++; return 'x'; },
+  });
+  await passB; // returns immediately — guarded no-op (previous tick still in flight)
+  releaseFetch11();
+  await passA;
+  await new Promise(r => setImmediate(r));
+  global.fetch = realFetch11;
+  if (realTok11 === undefined) delete process.env.AGENT_TOKENS_ROOT; else process.env.AGENT_TOKENS_ROOT = realTok11;
+  delete require.cache[require.resolve('../src/gtd-controller.js')];
+  ok(fires11 === 1 && G11.readGtd(userDir11, 's-overlap').iterations === 1,
+    `overlap guard: concurrent tick is a no-op, session fired exactly once (fires=${fires11}, iter=${G11.readGtd(userDir11, 's-overlap').iterations})`);
+
+  // 20. No-resurrection: if the record is deleted (session vanished / user-stop) WHILE
+  // a run is in flight, the completion callback must NOT recreate it from the stale
+  // in-memory snapshot.
+  const wd12 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd12-'));
+  const userDir12 = path.join(wd12, 'u');
+  fs.mkdirSync(userDir12, { recursive: true });
+  G.writeGtd(userDir12, { ...rec, sessionId: 's-gone', dueAt: 100 });
+  let resolveRun12;
+  const runGate12 = new Promise(r => { resolveRun12 = r; });
+  const tick12 = G.runDue({
+    secrets: {}, baseUsersDir: wd12, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '42', summary: {} }),
+    runTask: async () => { await runGate12; return 'сделал, всё готово. GTD: done'; },
+  });
+  await new Promise(r => setImmediate(r));
+  G.clearGtd(userDir12, 's-gone'); // user-stop / session vanished mid-run
+  resolveRun12();
+  await tick12;
+  await new Promise(r => setImmediate(r));
+  ok(G.readGtd(userDir12, 's-gone') === null, 'no-resurrection: deleted record stays deleted after run completes');
+
+  // 21. No-resurrection on error path too: a rejected runTask must not recreate a
+  // record that was deleted mid-run.
+  const wd13 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd13-'));
+  const userDir13 = path.join(wd13, 'u');
+  fs.mkdirSync(userDir13, { recursive: true });
+  G.writeGtd(userDir13, { ...rec, sessionId: 's-gone-err', dueAt: 100 });
+  let rejectRun13;
+  const runGate13 = new Promise((_, rej) => { rejectRun13 = rej; });
+  const tick13 = G.runDue({
+    secrets: {}, baseUsersDir: wd13, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '42', summary: {} }),
+    runTask: async () => { await runGate13; },
+  });
+  await new Promise(r => setImmediate(r));
+  G.clearGtd(userDir13, 's-gone-err');
+  rejectRun13(new Error('claude crashed'));
+  await tick13;
+  await new Promise(r => setImmediate(r));
+  ok(G.readGtd(userDir13, 's-gone-err') === null, 'no-resurrection (error path): deleted record stays deleted after run rejects');
+
+  // 22. Completion backoff is measured from run-completion time, not the stale fire-time
+  // `now` — otherwise a run that took longer than etaMinutes would schedule its next
+  // check in the past and re-fire on the very next tick (busy-loop). We resolve the run
+  // immediately, so the new dueAt must be ~etaMinutes into the future from real time.
+  const wd14 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd14-'));
+  const userDir14 = path.join(wd14, 'u');
+  fs.mkdirSync(userDir14, { recursive: true });
+  // fire-time now=1000 is far in the past relative to Date.now(); if backoff used it,
+  // dueAt would be ~1000+eta (still in the past). It must use real completion time.
+  G.writeGtd(userDir14, { ...rec, sessionId: 's-backoff', etaMinutes: 30, dueAt: 100 });
+  const beforeReal = Date.now();
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd14, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '42', summary: {} }),
+    runTask: async () => 'ещё не готово, продолжаю. GTD: continue',
+  });
+  await new Promise(r => setImmediate(r));
+  const backoff = G.readGtd(userDir14, 's-backoff');
+  ok(backoff.status === 'open' && backoff.dueAt >= beforeReal + 30 * 60 * 1000 - 5000,
+    `backoff: next dueAt measured from completion time, not stale fire-now (got ${backoff.dueAt}, expected >= ${beforeReal + 30 * 60 * 1000 - 5000})`);
+
+  // 23. Atomic write survives + cleans up: _atomicWrite leaves no leftover .tmp file
+  // and writes complete valid JSON (fsync'd tmp → rename). listGtd must ignore any
+  // tmp artifacts and only surface the real record.
+  const wd15 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd15-'));
+  const gtdSub15 = path.join(wd15, 'gtd');
+  fs.mkdirSync(gtdSub15, { recursive: true });
+  G.writeGtd(wd15, { ...rec, sessionId: 's-atomic', dueAt: 100 });
+  const leftovers = fs.readdirSync(gtdSub15).filter(f => f.includes('.tmp'));
+  ok(leftovers.length === 0, `atomic write: no leftover .tmp files (found ${JSON.stringify(leftovers)})`);
+  // A stray .tmp artifact must not be parsed as a record by listGtd.
+  fs.writeFileSync(path.join(gtdSub15, 's-atomic.json.tmp.999.0'), 'garbage-not-json');
+  ok(G.listGtd(wd15).length === 1 && G.listGtd(wd15)[0].sessionId === 's-atomic',
+    'atomic write: listGtd ignores .tmp artifacts, surfaces only the committed record');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

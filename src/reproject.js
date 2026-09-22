@@ -28,7 +28,11 @@ const projects = require('./projects');
 
 const STATE_FILE = '.reproject-state.json';
 const LEDGER_FILE = '.reproject-ledger.json';
-const DEFAULT_MODEL = process.env.REPROJECT_MODEL || 'deepseek/deepseek-chat';
+// gemini-2.5-flash: fast, accurate at Russian clustering, cheap. deepseek-chat was
+// the original default but it both UNDER-split (everything → one "file_management"
+// cluster) and ran 4× slower (49s vs 11s per 20 sessions) in live testing.
+// Free-tier slugs (:free) 404 on this OpenRouter account — so cheap+good wins.
+const DEFAULT_MODEL = process.env.REPROJECT_MODEL || 'google/gemini-2.5-flash';
 // Consolidation/naming can use an even cheaper tier; override independently if wanted.
 const CONSOLIDATE_MODEL = process.env.REPROJECT_CONSOLIDATE_MODEL || DEFAULT_MODEL;
 
@@ -244,8 +248,15 @@ function buildPlan(profileRoot, sessions, assignments, consolidation) {
 
   for (const s of sessions) {
     const a = assignments.find(x => x.id === s.id);
-    if (!a || !a.cluster) {
-      unassigned.push({ id: s.id, topic: s.topic, reason: a && a.reason ? a.reason : 'модель не отнесла сессию ни к одному проекту' });
+    // Literal cluster "unassigned" from the model is the unassigned bucket, not a
+    // real project — otherwise file-upload/empty sessions become a fake "Unassigned"
+    // folder (seen live: 7 sessions with undefined topic → a phantom project).
+    if (!a || !a.cluster || /^unassigned$/i.test(String(a.cluster))) {
+      unassigned.push({
+        id: s.id,
+        topic: s.topic,
+        reason: (a && a.reason) ? a.reason : 'модель не отнесла сессию ни к одному проекту',
+      });
       continue;
     }
     const canon = consolidation.map[a.cluster] || a.cluster;
@@ -288,11 +299,13 @@ function buildPlan(profileRoot, sessions, assignments, consolidation) {
     else clarity = 'weak';
     if (b.sessionIds.length === 1 && (avgConf == null || avgConf < 0.85)) clarity = 'weak';
     return {
+      cluster: b.cluster,
       name: b.name,
       type: b.type,
       existingProjectId: match ? match.id : null,
       sessionCount: b.sessionIds.length,
       sessionIds: b.sessionIds,
+      memberTopics: b.members.map(m => ({ id: m.id, topic: m.topic || m.id })),
       avgConfidence: avgConf == null ? null : Math.round(avgConf * 100) / 100,
       minConfidence: minConf == null ? null : Math.round(minConf * 100) / 100,
       clarity,
@@ -501,6 +514,76 @@ async function preview(profileRoot, { criteria, apiKey, model, now = Date.now() 
   return { plan, report: renderReport(plan) };
 }
 
+// ── Manual adjustment of a saved plan (the interactive edit step) ─────────────
+// The user looks at a preview and says "this session belongs to project X, that
+// project is misnamed". This edits the SAVED plan in place (durable, re-rendered,
+// still nothing moves on disk until apply). Moves re-point a session to another
+// cluster (creating it if needed); renames fix cluster name/type. After edits the
+// consolidation is identity (the user's clusters are canonical — no re-merging).
+function adjustPlan(profileRoot, { moves = [], renames = [] } = {}, { now = Date.now() } = {}) {
+  const state = loadState(profileRoot);
+  if (!state || !state.plan) return { error: 'no saved plan — run preview first' };
+  const sessions = gatherSessions(profileRoot);
+  const assignments = (state.assignments || []).map(a => ({ ...a }));
+  const byId = new Map(assignments.map(a => [a.id, a]));
+
+  // Apply renames first so moves to a renamed cluster inherit name/type.
+  const nameByCluster = new Map();
+  const typeByCluster = new Map();
+  for (const r of renames) {
+    if (!r || !r.cluster) continue;
+    if (r.name) nameByCluster.set(r.cluster, r.name);
+    if (r.type) typeByCluster.set(r.cluster, r.type);
+  }
+
+  // Apply moves: re-point a session to another (possibly new) cluster.
+  for (const m of moves) {
+    if (!m || !m.sessionId || !m.toCluster) continue;
+    let a = byId.get(m.sessionId);
+    if (!a) {
+      const s = sessions.find(x => x.id === m.sessionId);
+      if (!s) continue;
+      a = { id: s.id, topic: s.topic, cluster: m.toCluster, name: m.toCluster, type: 'generic', confidence: 1, reason: 'перенесено пользователем' };
+      assignments.push(a);
+      byId.set(a.id, a);
+    }
+    a.cluster = m.toCluster;
+    if (m.name) { a.name = m.name; nameByCluster.set(m.toCluster, m.name); }
+    if (m.type) { a.type = m.type; typeByCluster.set(m.toCluster, m.type); }
+    a.confidence = 1;
+    a.reason = 'перенесено пользователем';
+  }
+
+  // Apply renames to every assignment in the renamed cluster.
+  for (const a of assignments) {
+    if (nameByCluster.has(a.cluster)) a.name = nameByCluster.get(a.cluster);
+    if (typeByCluster.has(a.cluster)) a.type = typeByCluster.get(a.cluster);
+  }
+
+  // Identity consolidation — after manual edits the user's clusters are canonical.
+  const clusters = [];
+  const seen = new Set();
+  for (const a of assignments) {
+    if (!a.cluster || seen.has(a.cluster)) continue;
+    seen.add(a.cluster);
+    clusters.push({
+      cluster: a.cluster,
+      name: nameByCluster.get(a.cluster) || a.name || a.cluster,
+      type: typeByCluster.get(a.cluster) || a.type || 'generic',
+    });
+  }
+  const consolidation = {
+    map: Object.fromEntries(clusters.map(c => [c.cluster, c.cluster])),
+    projects: clusters,
+  };
+
+  const plan = buildPlan(profileRoot, sessions, assignments, consolidation);
+  plan.generatedAt = now;
+  const newState = { ...state, criteria: state.criteria || null, at: now, plan, assignments };
+  saveState(profileRoot, newState);
+  return { plan, report: renderReport(plan), adjusted: true };
+}
+
 module.exports = {
   DEFAULT_MODEL,
   gatherSessions,
@@ -512,6 +595,7 @@ module.exports = {
   applyPlan,
   revertPlan,
   preview,
+  adjustPlan,
   saveState,
   loadState,
   callModel,

@@ -3,7 +3,7 @@
 // OpenRouter calls → nock interception (https://openrouter.ai)
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createRequire } from 'module';
@@ -425,6 +425,83 @@ describe('hh_batch_evaluate — reads vacancy_id and ats_config from context', (
     expect(r.error).toMatch(/друг(ой|ую|ая) вакансии/i);
     expect(r.error).toContain('vac-OLD');
   });
+
+  it('per-vacancy ats_config:{vacancy_id} is used even when the legacy singleton is for a different vacancy (multi-vacancy tracking)', async () => {
+    // Legacy singleton still points at a stale/different vacancy (as above)...
+    writeFileSync(join(ctxDir, 'contexts', 'hh', 'ats_config.json'), JSON.stringify({
+      value: { ...ATS, vacancy_id: 'vac-OLD', vacancy_title: undefined },
+      updated_at: new Date().toISOString(),
+    }));
+    // ...but a config namespaced to the active vacancy exists — this is what a
+    // recruiter tracking several vacancies concurrently saves via hh_extract_ats_config.
+    writeFileSync(join(ctxDir, 'contexts', 'hh', 'ats_config:vac-001.json'), JSON.stringify({
+      value: ATS,
+      updated_at: new Date().toISOString(),
+    }));
+
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true },
+      criteria: [{ name: 'Node.js', score: 3, evidence: '5 лет' }],
+      reasoning: 'Сильный.',
+    }));
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true },
+      criteria: [{ name: 'Node.js', score: 1, evidence: 'Go' }],
+      reasoning: 'Частичное.',
+    }));
+
+    const r = await tools().hh_batch_evaluate.handler({});
+    expect(r.error).toBeUndefined();
+    expect(r.evaluated).toBe(2);
+  });
+});
+
+// ── hh_extract_ats_config — draft only, never live ───────────────────────────
+
+describe('hh_extract_ats_config — saves a draft, never writes the live config', () => {
+  let origCwd;
+  let ctxDir;
+
+  beforeEach(() => {
+    origCwd = process.cwd();
+    ctxDir = mkdtempSync(join(tmpdir(), 'hh-extract-ctx-'));
+    process.chdir(ctxDir);
+
+    const hhCtxDir = join(ctxDir, 'contexts', 'hh');
+    mkdirSync(hhCtxDir, { recursive: true });
+    writeFileSync(join(hhCtxDir, 'active_vacancy.json'), JSON.stringify({
+      value: { id: 'vac-001', title: 'Backend Developer (Node.js)', set_at: new Date().toISOString() },
+      updated_at: new Date().toISOString(),
+    }));
+  });
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    nock.cleanAll();
+    rmSync(ctxDir, { recursive: true, force: true });
+  });
+
+  it('writes ats_config_draft:{vacancy_id}, not ats_config:{vacancy_id}, and links to /hh/ats-editor', async () => {
+    mockOr(JSON.stringify(ATS));
+
+    const r = await tools().hh_extract_ats_config.handler({ vacancy_text: 'Node.js backend, PostgreSQL' });
+
+    expect(r.ok).toBe(true);
+    expect(r.review_url).toContain('/hh/ats-editor');
+    expect(r.review_url).toContain('vacancy_id=vac-001');
+    expect(r.note).not.toMatch(/context_set/);
+
+    const draftFile = join(ctxDir, 'contexts', 'hh', 'ats_config_draft:vac-001.json');
+    expect(existsSync(draftFile)).toBe(true);
+    const draft = JSON.parse(readFileSync(draftFile, 'utf8'));
+    expect(draft.value.vacancy_id).toBe('vac-001');
+
+    // Background scoring reads ats_config:{id}, never the draft namespace — must stay untouched.
+    const liveFile = join(ctxDir, 'contexts', 'hh', 'ats_config:vac-001.json');
+    expect(existsSync(liveFile)).toBe(false);
+  });
 });
 
 // ── hh_send_message — history persistence ────────────────────────────────────
@@ -761,5 +838,38 @@ describe('hh_funnel_stats', () => {
     expect(r.ok).toBe(true);
     expect(r.vacancy_id).toBe('vac-001');
     expect(r.new_responses).toBe(3);
+  });
+
+  it('notify_threshold: counts new responses above the score bar from cached ats_result, no LLM call', async () => {
+    // 3 mock 'response' negotiations: neg-001 (score 8 → 80%), neg-002 (score 5 → 50%), neg-003 (unscored → pending)
+    const dataDir = join(process.env.AGENT_DATA_DIR, 'hh', TEST_UID, 'candidates');
+    mkdirSync(dataDir, { recursive: true });
+    // Earlier tests in this file score these same negotiation IDs via hh_batch_evaluate and
+    // leave the cache behind — reset all 3 so this test's pending/above counts are isolated.
+    rmSync(join(dataDir, 'neg-001.json'), { force: true });
+    rmSync(join(dataDir, 'neg-002.json'), { force: true });
+    rmSync(join(dataDir, 'neg-003.json'), { force: true });
+    writeFileSync(join(dataDir, 'neg-001.json'), JSON.stringify({ messages: [], ats_result: { score: 8 } }));
+    writeFileSync(join(dataDir, 'neg-002.json'), JSON.stringify({ messages: [], ats_result: { score: 5 } }));
+
+    try {
+      const r = await tools().hh_funnel_stats.handler({ vacancy_id: 'vac-001', notify_threshold: 70 });
+      expect(r.ok).toBe(true);
+      expect(r.new_responses).toBe(3);
+      expect(r.notify_threshold).toBe(70);
+      expect(r.new_responses_above_threshold).toBe(1); // only neg-001 (80% >= 70%)
+      expect(r.new_responses_pending_score).toBe(1);    // neg-003 has no cached ats_result
+    } finally {
+      rmSync(join(dataDir, 'neg-001.json'), { force: true });
+      rmSync(join(dataDir, 'neg-002.json'), { force: true });
+    }
+  });
+
+  it('notify_threshold omitted/0 → no score breakdown fields (unchanged behavior)', async () => {
+    const r = await tools().hh_funnel_stats.handler({ vacancy_id: 'vac-001' });
+    expect(r.ok).toBe(true);
+    expect(r.notify_threshold).toBeUndefined();
+    expect(r.new_responses_above_threshold).toBeUndefined();
+    expect(r.new_responses_pending_score).toBeUndefined();
   });
 });

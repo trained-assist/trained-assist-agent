@@ -87,6 +87,10 @@ const NEW_JOB_INTENT            = /новая вакансия|new job post|\/ne
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
 const GTD_STOP_INTENT           = /^(?:\[Сообщение \d+\]\s*)?\/(?:gtd_stop|stop_gtd|checklist_turn_off)(?:@\w+)?$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
 const ACTIVE_CHECKLIST_INTENT   = /^(?:\[Сообщение \d+\]\s*)?\/active_checklist(?:@\w+)?$/i;
+// Natural-language "хочу поправить чек-лист" — hand back checklist.trainedassist.store
+// autologin link instead of asking for a password. Edit/view verbs + "чек-лист" in either
+// order; deliberately excludes GTD_STOP_INTENT's "стоп"/"выключи" and bare /active_checklist.
+const CHECKLIST_EDIT_INTENT     = /(?:поправ|исправ|отредактир|редактир|изменит|открыт|открой|посмотрет|погляд|зайт|обнов|дай\s+ссылк|пришли\s+ссылк|скинь\s+ссылк|ссылк.{0,10}на).{0,25}чек.?лист|чек.?лист.{0,25}(?:поправ|исправ|отредактир|редактир|изменит|открыт|открой|обнов|ссылк)/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
@@ -134,6 +138,25 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
 const OC_PROFILE_INTENT = /^\/oc_(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)(?:@\S+)?\b|^\/oc\s+(value|quality|free|mimo|ru(?:ssian-recruiter)?|lavish-luna|ll)\b/i;
 const AGENT_INFO_INTENT = /^\/(?:get_agent_info|agent_info|info)(?:@\S+)?(?=\s|$)/i;
+// Natural-language "what model/agent are you?" — «на какой модели ты сейчас работаешь?»,
+// «какая у тебя модель», «какой моделью пользуешься», «какой ты агент». Maps to the same
+// agent-info block as /agent_info (model/engine/version). Non-slash matches pass through the
+// cheap-LLM verify gate (verifyQuickAnswerIntent) before being sent, so a slightly loose
+// regex is safe: real tasks that merely mention "модель" get rejected by the gate and
+// still reach Claude.
+const MODEL_INFO_INTENT = /(?:на\s+какой\s+(?:модел|нейросет|llm)|какая\s+у\s+тебя\s+(?:модел|нейросет|llm)|какую\s+модел\S*\s+(?:ты\s+)?(?:используеш|юзаеш|ставиш)|какой\s+модел\S*\s+(?:ты\s+)?(?:работаеш|пользуеш|сидиш)|на\s+какой\s+нейросет|что\s+за\s+(?:модел|нейросет)|какой\s+ты\s+агент|какая\s+ты\s+нейросет)/i;
+// Pure-info quick answers: no Claude, no session-transcript write, no external API call —
+// just a sync read of local state (env/profile/token files). Safe to answer BEFORE the
+// per-chat admission queue (see runner.js runTask()), so `/agent_info` etc. don't wait
+// behind a long-running task in the same chat. Deliberately excludes PERSONA_INTENT/
+// PROJECT_INTENT (they can mutate persona/project files) and SESSIONS_INTENT/
+// SESSION_DETAIL_INTENT (they may call out to an LLM to generate a summary) — those stay
+// on the queued path for now.
+function isPreQueueQuickIntent(task) {
+  return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
+    MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
+    USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task);
+}
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -371,7 +394,8 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   }
 
   // /get_agent_info — show current engine, model, profile, VM, version
-  if (AGENT_INFO_INTENT.test(task)) {
+  // Also natural-language "what model/agent are you?" questions (MODEL_INFO_INTENT).
+  if (AGENT_INFO_INTENT.test(task) || MODEL_INFO_INTENT.test(task)) {
     const { execSync } = require('child_process');
     const eng = workDir ? profiles.getEngine(workDir, chatId) : 'claude';
     const vmName = process.env.VM_NAME || 'unknown';
@@ -1422,6 +1446,7 @@ module.exports = {
   STOP_TASK_INTENT,
   GTD_STOP_INTENT,
   ACTIVE_CHECKLIST_INTENT,
+  CHECKLIST_EDIT_INTENT,
   WAKEUP_INTENT,
   SKIP_TASK_INTENT,
   PING_INTENT,
@@ -1435,6 +1460,9 @@ module.exports = {
   CONTEXT_ON_INTENT,
   PERSONA_INTENT,
   PROJECT_INTENT,
+  AGENT_INFO_INTENT,
+  MODEL_INFO_INTENT,
+  isPreQueueQuickIntent,
   // Constants for runner.js _intents export
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,

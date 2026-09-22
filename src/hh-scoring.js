@@ -251,23 +251,47 @@ async function evaluateCandidate(candidateText, atsConfig, apiKey, gigachatKey) 
 
 // ─── Read tokens ──────────────────────────────────────────────────────────────
 
-function readAtsConfig(workDir, expectedVacancyId = null) {
-  const file = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+function readAtsConfigFile(file) {
   if (!fs.existsSync(file)) return null;
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     let value = data?.value || null;
     // Guard: context_set sometimes stores value as JSON string instead of object
     if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return null; } }
-    // Guard: config was extracted for a different vacancy and never regenerated after
-    // hh_set_active_vacancy switched — using it here would silently score the wrong
-    // vacancy's candidates against the wrong criteria.
-    if (value?.vacancy_id && expectedVacancyId && value.vacancy_id !== expectedVacancyId) {
-      console.warn(`[hh-scoring] skipping: ats_config is for vacancy ${value.vacancy_id}, active vacancy is ${expectedVacancyId} — regenerate via hh_extract_ats_config`);
-      return null;
-    }
     return value;
   } catch { return null; }
+}
+
+function readAtsConfig(workDir, expectedVacancyId = null) {
+  // Per-vacancy config (ats_config:{vacancy_id}.json) is the multi-vacancy path —
+  // recruiters tracking several vacancies at once (hh_set_active_vacancy) save one
+  // config per vacancy so the background loop can score each independently instead
+  // of sharing a single global config across whichever vacancy was set last.
+  if (expectedVacancyId) {
+    const perVacancy = readAtsConfigFile(path.join(workDir, 'contexts', 'hh', `ats_config:${expectedVacancyId}.json`));
+    if (perVacancy) return perVacancy;
+  }
+  // Legacy singleton — still the only config for profiles tracking one vacancy.
+  const value = readAtsConfigFile(path.join(workDir, 'contexts', 'hh', 'ats_config.json'));
+  if (!value) return null;
+  // Guard: config was extracted for a different vacancy and never regenerated after
+  // hh_set_active_vacancy switched — using it here would silently score the wrong
+  // vacancy's candidates against the wrong criteria.
+  if (value?.vacancy_id && expectedVacancyId && value.vacancy_id !== expectedVacancyId) {
+    console.warn(`[hh-scoring] skipping: ats_config is for vacancy ${value.vacancy_id}, active vacancy is ${expectedVacancyId} — regenerate via hh_extract_ats_config`);
+    return null;
+  }
+  return value;
+}
+
+// Draft extracted by hh_extract_ats_config, pending recruiter review in /hh/ats-editor.
+// Kept separate from the live ats_config:{id} file so an LLM-generated first pass never
+// goes live for background scoring before a human has looked at it in the editor.
+function readAtsDraft(workDir, vacancyId) {
+  const file = vacancyId
+    ? path.join(workDir, 'contexts', 'hh', `ats_config_draft:${vacancyId}.json`)
+    : path.join(workDir, 'contexts', 'hh', 'ats_config_draft.json');
+  return readAtsConfigFile(file);
 }
 
 function readOrKey(username) {
@@ -493,6 +517,7 @@ module.exports = {
   computeScore,
   evaluateCandidate,
   readAtsConfig,
+  readAtsDraft,
   readOrKey,
   readGigachatKey,
   readCandidateHistory,

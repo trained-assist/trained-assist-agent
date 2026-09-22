@@ -36,9 +36,82 @@ const CHECKLIST_MAX_ITERATIONS = 25; // hard ceiling даже для длинн�
 const INTENT_MODEL = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
 const MAX_FIRES_PER_TICK = 3;  // не будим весь профиль-парк разом
 
+// Fire-lease: когда tick стреляет сессию, runTask НЕ ожидается (loop идёт дальше),
+// а dueAt переносится в .then()/settleResumedGtd только ПОСЛЕ завершения run'а —
+// который легитимно длится десятки минут. Всё это время у записи dueAt<=now, и
+// единственное, что удерживает её от повторного выстрела на каждом 5-мин тике —
+// isSessionRunning. Но isSessionRunning возвращает false, если процесс убит между
+// выстрелом и завершением (systemd KillMode=control-group рестартит нас в любой
+// момент): исходный .then() умирает вместе с процессом, а pending-task journal мог
+// быть уже очищен (runTask чистит его в finally) — тогда запись с dueAt<=now
+// «хаммерится» каждый тик заново. Поэтому при выстреле СРАЗУ двигаем dueAt на
+// FIRE_LEASE_MS вперёд: живой run успеет отчитаться раньше (и перепишет dueAt по
+// факту), а потерянный — честно перезапустится через лизинг, не раньше и не позже.
+const FIRE_LEASE_MS = 45 * 60 * 1000; // > CLAUDE_TIMEOUT_MS (40м); переживший run перепишет dueAt сам
+
+// Guard против перекрытия тиков: runDue асинхронна и awaits GitHub-пречеки
+// (до ~20с на запись). Если сеть тормозит, тик может не успеть завершиться до
+// следующего setInterval-тика — два параллельных прохода прочитают один и тот же
+// due-набор, оба увидят isSessionRunning=false (никто ещё не выстрелил) и
+// продублируют выстрел. Модульный флаг сериализует проходы: пока один идёт,
+// следующий тик — no-op (лог), запись подождёт своей очереди на следующем тике.
+let _tickInFlight = false;
+
 const GTD_DIR = 'gtd';
 const CHECKLIST_FILE = 'checklist.md';
 const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'agent-tokens');
+
+// ── Mirror into checklist.trainedassist.store (2026-09-21) ─────────────────
+// checklist.md in projectDir stays the ONE source of truth the tick loop reads/writes —
+// this only pushes a read-only-for-the-loop copy so the human sees GTD auto-tracking
+// checklists in the SAME UI as their manual ones (was two unrelated things sharing the
+// word "checklist": this file's own /active_checklist list vs the standalone app).
+// Best-effort: unconfigured or unreachable → silently skipped, never blocks a GTD tick.
+const CHECKLIST_API_BASE = process.env.CHECKLIST_API_BASE || 'https://checklist.trainedassist.store';
+
+async function mirrorGtdChecklist({ username, sessionId, checklist, rec }) {
+  const apiKey = process.env.CHECKLIST_API_KEY;
+  if (!apiKey || !checklist || !checklist.items.length) return;
+  const externalKey = `gtd:${username}:${sessionId}`;
+  const name = (checklist.goal || rec?.originalTask || 'GTD чек-лист').slice(0, 200);
+  const headers = { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' };
+  const opts = { signal: AbortSignal.timeout(8000) };
+  try {
+    const createRes = await fetch(`${CHECKLIST_API_BASE}/api/checklists`, {
+      ...opts, method: 'POST', headers,
+      body: JSON.stringify({ name, external_key: externalKey, source: 'agent' }),
+    });
+    if (!createRes.ok) return;
+    const { id } = await createRes.json();
+    await fetch(`${CHECKLIST_API_BASE}/api/checklists/${id}/sync-items`, {
+      ...opts, method: 'POST', headers,
+      body: JSON.stringify({ items: checklist.items.map(i => ({ text: i.text, done: i.done })) }),
+    });
+  } catch (e) {
+    console.warn('[gtd] mirrorGtdChecklist:', e.message);
+  }
+}
+
+// Returns a one-click login URL for checklist.trainedassist.store (sets the same session
+// cookie /api/login would), or null if unreachable/unconfigured. The agent only ever holds
+// CHECKLIST_API_KEY (machine bearer) — the worker's /api/autologin-link mints the link
+// server-side so the human's CHECKLIST_PASSWORD never has to leave the worker.
+async function checklistAutologinUrl() {
+  const apiKey = process.env.CHECKLIST_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const res = await fetch(`${CHECKLIST_API_BASE}/api/autologin-link`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const { url } = await res.json();
+    return url || null;
+  } catch (e) {
+    console.warn('[gtd] checklistAutologinUrl:', e.message);
+    return null;
+  }
+}
 
 // Дешёвый pre-gate: без хотя бы одного из этих сигналов LLM не зовём —
 // ложный пинг дороже пропуска, а большинство задач контроля не просят.
@@ -47,10 +120,28 @@ const CONTROL_HINT = /(проконтролир|доведи|довед[её]ш�
 function _dir(workDir) { return path.join(workDir, GTD_DIR); }
 function _file(workDir, sessionId) { return path.join(_dir(workDir), `${sessionId}.json`); }
 
+// Атомарная запись: write-tmp → fsync → rename. Сервис живёт под systemd с
+// KillMode=control-group и рестартится в любой момент — без fsync rename может
+// стать видимым, а содержимое остаться неслитым (partial/zero-length файл после
+// краша). Уникальное имя tmp (pid+счётчик) не даёт двум параллельным писателям
+// в один и тот же fp затереть tmp друг друга на полпути.
+let _tmpCounter = 0;
 function _atomicWrite(fp, data) {
-  const tmp = `${fp}.tmp`;
-  fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, fp);
+  const tmp = `${fp}.tmp.${process.pid}.${_tmpCounter++}`;
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'w');
+    fs.writeSync(fd, data);
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  try {
+    fs.renameSync(tmp, fp);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+    throw e;
+  }
 }
 
 function readGtd(workDir, sessionId) {
@@ -254,6 +345,7 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
   };
   writeGtd(workDir, rec);
   console.log(`[gtd] scheduled(checklist) session=${sessionId} user=${username} eta=${ETA_MIN_CLAMP}m maxIterations=${maxIterations} due=${new Date(rec.dueAt).toISOString()}`);
+  mirrorGtdChecklist({ username, sessionId, checklist, rec }).catch(() => {});
   return rec;
 }
 
@@ -440,19 +532,39 @@ function clearGtdForChat(workDir, chatId) {
 
 // Серверный tick. Аргументы инжектятся из server.js, чтобы модуль не тянул
 // зависимости и был тестируем: { secrets, baseUsersDir, isTaskRunning, runTask, getSession }.
-async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSession, canRunSession = () => true, now = Date.now() }) {
+// Обёртка сериализует проходы (см. _tickInFlight): перекрывающийся тик — no-op.
+async function runDue(deps) {
+  if (_tickInFlight) { console.warn('[gtd] tick skipped: previous tick still in flight'); return; }
+  _tickInFlight = true;
+  try {
+    return await _runDueInner(deps);
+  } finally {
+    _tickInFlight = false;
+  }
+}
+
+async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, getSession, canRunSession = () => true, now = Date.now() }) {
   let users = [];
   try { users = fs.readdirSync(baseUsersDir).filter(u => /^[a-zA-Z0-9_-]+$/.test(u)); } catch { return; }
 
-  let fired = 0;
+  // Flatten + sort by dueAt (oldest-overdue-first) BEFORE applying MAX_FIRES_PER_TICK.
+  // fs.readdirSync order is filesystem-arbitrary but stable across ticks — without this
+  // sort, whichever users/records happen to list first would win every tick's fire slots
+  // while later ones starve indefinitely (checklists that silently never progress).
+  const due = [];
   for (const username of users) {
-    if (fired >= MAX_FIRES_PER_TICK) break;
     const workDir = path.join(baseUsersDir, username);
-    const recs = listGtd(workDir).filter(r => r && r.status === 'open' && r.dueAt <= now);
-    for (const rec of recs) {
-      if (fired >= MAX_FIRES_PER_TICK) break;
+    for (const rec of listGtd(workDir).filter(r => r && r.status === 'open' && r.dueAt <= now)) {
+      due.push({ username, workDir, rec });
+    }
+  }
+  due.sort((a, b) => a.rec.dueAt - b.rec.dueAt);
 
-      // Re-entrancy guard: тот же sessionId уже обрабатывается — не переоткрываем.
+  let fired = 0;
+  for (const { username, workDir, rec } of due) {
+    if (fired >= MAX_FIRES_PER_TICK) break;
+
+    // Re-entrancy guard: тот же sessionId уже обрабатывается — не переоткрываем.
       // Проверяем по sessionId, а не по username, чтобы разные GTD одного профиля
       // могли стрелять параллельно (разные чаты, разные задачи).
       if (isTaskRunning(username, rec.sessionId)) { console.log(`[gtd] skip ${rec.sessionId}: task running for this session`); continue; }
@@ -471,6 +583,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
           try { pre = await checklistCheapPrecheck(checklist, { username }); }
           catch (e) { console.warn(`[gtd] precheck ${rec.sessionId}:`, e.message); }
           if (pre.changed) writeChecklistDone(rec.projectDir, pre.items);
+          mirrorGtdChecklist({ username, sessionId: rec.sessionId, checklist: { ...checklist, items: pre.items }, rec }).catch(() => {});
           if (pre.items.every(i => i.done)) {
             rec.status = 'closed'; rec.closedReason = 'done-precheck';
             writeGtd(workDir, rec);
@@ -486,9 +599,19 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
 
       const chatId = rec.chatId || session.liveChatId || session.ownerChatId; // liveChatId (was ownerChatId); read-compat
 
+      if (!chatId) { // некому отвечать — не будим сессию вслепую (проверяем ДО инкремента)
+        rec.status = 'closed'; rec.closedReason = 'no-owner-chat';
+        writeGtd(workDir, rec);
+        continue;
+      }
+
       // Инкремент + persist ДО запуска — durable, переживает краш итерации.
       rec.iterations += 1;
       rec.lastFiredAt = now;
+      // Fire-lease: сразу двигаем dueAt вперёд (см. FIRE_LEASE_MS). Живой run
+      // перепишет dueAt по факту в .then(); потерянный (краш процесса) честно
+      // перезапустится через лизинг — не хаммерится каждый тик и не застревает.
+      rec.dueAt = now + FIRE_LEASE_MS;
       if (rec.iterations > rec.maxIterations) {
         rec.status = 'closed';
         rec.closedReason = 'max-iterations';
@@ -500,12 +623,6 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         continue;
       }
       writeGtd(workDir, rec);
-
-      if (!chatId) { // некому отвечать — не будим сессию вслепую
-        rec.status = 'closed'; rec.closedReason = 'no-owner-chat';
-        writeGtd(workDir, rec);
-        continue;
-      }
 
       const user = { id: chatId, name: username, username, workDir };
       // sessionId in the id: sessions fired in one tick share `now`, and taskId keys the pending
@@ -528,14 +645,22 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       const _recSnap = { ...rec };
       runTask({
         taskId, user, task: buildReopenMessage(_recSnap),
-        sessionId: _recSnap.sessionId, forceClaude: true,
+        sessionId: _recSnap.sessionId, forceClaude: true, engine: 'claude',
         secrets, internalGtd: true,
       }).then(reply => {
+        // backoff считаем от РЕАЛЬНОГО времени завершения, а не от stale-now момента
+        // выстрела: run легитимно длится десятки минут, иначе следующая проверка
+        // назначалась бы в прошлом и стреляла бы мгновенно на ближайшем тике.
+        const doneAt = Date.now();
         // Терминал: итерация сказала done/escalated, либо исчерпали cap.
         const said = typeof reply === 'string' ? reply : '';
-        const doneNow      = DONE_RE.test(said) || DONE_RE.test(session.summary?.ended || '');
+        const doneNow      = DONE_RE.test(said);
         const escalatedNow = ESCALATED_RE.test(said);
-        const fresh = readGtd(workDir, _recSnap.sessionId) || _recSnap;
+        // Запись исчезла (сессия удалена / user-stop → clearGtd) — НЕ воскрешаем её
+        // записью in-memory снапшота: намеренно закрытое должно остаться закрытым.
+        const fresh = readGtd(workDir, _recSnap.sessionId);
+        if (!fresh) { console.log(`[gtd] ${_recSnap.sessionId}: record gone at completion — not resurrecting`); return; }
+        if (fresh.status !== 'open') { console.log(`[gtd] ${_recSnap.sessionId}: already ${fresh.status} at completion — leaving as-is`); return; }
         if (doneNow) {
           fresh.status = 'closed'; fresh.closedReason = 'done';
           writeGtd(workDir, fresh);
@@ -557,6 +682,7 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
           // Progress-check: if checklist exists and no new items were checked off, track stall.
           if (_recSnap.projectDir && doneCountBefore >= 0) {
             const checklistAfter = readChecklist(_recSnap.projectDir);
+            mirrorGtdChecklist({ username, sessionId: _recSnap.sessionId, checklist: checklistAfter, rec: fresh }).catch(() => {});
             const doneCountAfter = checklistAfter ? checklistAfter.items.filter(i => i.done).length : doneCountBefore;
             if (doneCountAfter > doneCountBefore) {
               fresh.consecutiveNoProgress = 0;
@@ -573,17 +699,18 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
               }
             }
           }
-          fresh.dueAt = now + fresh.etaMinutes * 60 * 1000; // backoff до следующей проверки
+          fresh.dueAt = doneAt + fresh.etaMinutes * 60 * 1000; // backoff от времени завершения
           writeGtd(workDir, fresh);
         }
       }).catch(e => {
         console.error(`[gtd] runTask ${_recSnap.sessionId}:`, e.message);
         // Не закрываем — попробуем на следующем tick (в пределах maxIterations).
-        const r = readGtd(workDir, _recSnap.sessionId) || _recSnap;
-        r.dueAt = now + r.etaMinutes * 60 * 1000;
+        // Так же, как в .then(): не воскрешаем удалённую/закрытую запись.
+        const r = readGtd(workDir, _recSnap.sessionId);
+        if (!r || r.status !== 'open') return;
+        r.dueAt = Date.now() + r.etaMinutes * 60 * 1000;
         writeGtd(workDir, r);
       });
-    }
   }
 }
 
@@ -591,7 +718,8 @@ module.exports = {
   detectIntent, maybeSchedule, scheduleFromChecklist, runDue, buildReopenMessage,
   readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
-  checklistCheapPrecheck, writeChecklistDone,
+  checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE, checklistAutologinUrl,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
-  CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS,
+  CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS, MAX_FIRES_PER_TICK, FIRE_LEASE_MS,
+  _atomicWrite,
 };

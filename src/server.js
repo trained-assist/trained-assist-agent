@@ -18,7 +18,7 @@ const { handleConnect } = require('./handlers/connect');
 const { handleWeb } = require('./handlers/web');
 const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPendingTask, interruptForRestart, reconcileSoftContinuations } = require('./runner');
 const { runMcpTool } = require('./mcp-action');
-const { getAuthFlag, clearAuthFailedFlag } = require('./auth-flag');
+const { getAuthFlag, getAllAuthFlags, clearAuthFailedFlag } = require('./auth-flag');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
@@ -241,14 +241,23 @@ const hhCtx = {
 // inject deps.
 function scheduleGtdController(secrets) {
   const gtd = require('./gtd-controller');
-  const { isTaskRunning } = require('./runner');
+  const { isSessionRunning } = require('./runner');
   const { getSession } = require('./session-store');
   const run = () => {
-    // Pending tasks older than 30 min are stale (normally cleaned on startup);
-    // don't let them block GTD indefinitely in case cleanup was skipped.
-    const GTD_TASK_TTL_MS = 30 * 60 * 1000;
+    // isSessionRunning checks the live in-process activeTimers map — authoritative,
+    // no TTL guesswork. The previous guard used the pending-task journal with a
+    // 30-min TTL fallback, but real Claude runs can legitimately take up to
+    // CLAUDE_TIMEOUT_MS (40min) plus extend-timeout calls (up to 2h+): any GTD
+    // turn running past 30 min aged out of that guard and could get double-fired
+    // by the next tick, burning an extra iteration/notification/GitHub-precheck
+    // on redundant queued work (chatLanes still serializes actual execution per
+    // session, so this was never concurrent corruption — just wasted iterations,
+    // which could exhaust maxIterations before the checklist was actually done).
+    // Restart recovery is a separate concern already owned by resumePendingTasks
+    // (runs at boot, well before the first GTD tick 2 min later), so this guard
+    // doesn't need its own crash-orphan fallback.
     return gtd.runDue({
-    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: (_username, sessionId) => getPendingTasks().some(p => p.sessionId === sessionId && Date.now() - (p.startedAt || 0) < GTD_TASK_TTL_MS), runTask, getSession,
+    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: (_username, sessionId) => isSessionRunning(sessionId), runTask, getSession,
     canRunSession: (_username, _sessionId) => true,
   }).catch(err => console.error('[gtd] tick error:', err.message));
   };
@@ -521,7 +530,7 @@ async function main() {
 
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' && url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer') {
+    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/project-create' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' && url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer' && url.pathname !== '/web/reproject-preview' && url.pathname !== '/web/reproject-adjust' && url.pathname !== '/web/reproject-apply' && url.pathname !== '/web/reproject-revert') {
       if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
@@ -900,18 +909,24 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // GET /internal/auth-status — read/clear Claude Code auth flag (for repair system)
+    // GET /internal/auth-status — read/clear engine auth flags (for repair system).
+    // claude_auth_ok/reason/vm/... stay engine-agnostic-looking for back-compat with the existing
+    // repair system (always reflect the 'claude' engine, same as before per-engine tracking existed).
+    // `engines` is new: the full claude/codex/opencode breakdown, since Claude/Codex now auto-fall
+    // back to OpenCode on auth loss (issue #1061 Фаза 3) and the repair system needs to see all three.
     if (req.method === 'GET' && url.pathname === '/internal/auth-status') {
-      const flag = getAuthFlag();
+      const flag = getAuthFlag('claude');
       return json(res, 200, {
         claude_auth_ok: !flag.failed,
         ...(flag.failed ? { reason: flag.reason, vm: flag.vm, failed_at: flag.failed_at, error_text: flag.error_text } : {}),
+        engines: getAllAuthFlags(),
       });
     }
 
-    // POST /internal/auth-status/clear — mark repaired (called by repair system after fixing auth)
+    // POST /internal/auth-status/clear?engine=claude|codex|opencode — mark repaired (called by
+    // repair system after fixing auth). engine omitted → 'claude', same as before per-engine tracking.
     if (req.method === 'POST' && url.pathname === '/internal/auth-status/clear') {
-      clearAuthFailedFlag();
+      clearAuthFailedFlag(url.searchParams.get('engine'));
       return json(res, 200, { ok: true });
     }
 

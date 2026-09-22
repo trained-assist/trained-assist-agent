@@ -129,7 +129,8 @@ function candidateCard(c, idx, existingComment) {
 </div>`;
 }
 
-function generateProactivePageHtml(results, username, callbackBase, token, existingComments) {
+function generateProactivePageHtml(results, username, callbackBase, token, existingComments, opts = {}) {
+  const { activeVacancies = [], vacancyId = '' } = opts;
   const candidates = results.candidates || [];
   const comments = existingComments || {};
   const searchedAt = results.searched_at
@@ -165,6 +166,9 @@ a:hover{text-decoration:underline}
 /* Header */
 .header{background:#fff;border-bottom:1px solid #e2e8f0;padding:14px 24px;position:sticky;top:0;z-index:10}
 .header-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.vacancy-tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}
+.vacancy-tab{padding:6px 14px;border:1px solid #c7d2fe;border-radius:20px;font-size:13px;font-weight:600;text-decoration:none;color:#4f46e5;background:#eef2ff}
+.vacancy-tab.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
 .vacancy-title{font-size:1.05rem;font-weight:600;color:#1e293b}
 .searched-at{font-size:.78rem;color:#94a3b8;margin-top:2px}
 .ai-badge{display:inline-block;font-size:.72rem;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle}
@@ -314,6 +318,11 @@ details[open] .exp-toggle::before{content:"▾ "}
 </head>
 <body>
 <div class="header">
+${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(v => {
+  const href = `${escHtml(callbackBase)}/hh/proactive?username=${escHtml(username)}&token=${escHtml(token)}&vacancy_id=${escHtml(v.id)}`;
+  const isActive = String(v.id) === String(vacancyId);
+  return `<a class="vacancy-tab${isActive ? ' active' : ''}" href="${href}">${escHtml(v.title || v.id)}</a>`;
+}).join('')}</div>` : ''}
   <div class="header-top">
     <div>
       <div class="vacancy-title">
@@ -398,6 +407,7 @@ const USERNAME = ${JSON.stringify(username)};
 const TOKEN = ${JSON.stringify(token)};
 const CALLBACK_BASE = ${JSON.stringify(callbackBase)};
 const SLIDER_MAX = ${JSON.stringify(sliderMax)};
+const VACANCY_ID = ${JSON.stringify(vacancyId || '')};
 
 let activePreset = 'all';
 
@@ -632,7 +642,7 @@ async function addManualCandidate() {
     const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/add-manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN, resume_url_or_id: value }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, resume_url_or_id: value, vacancy_id: VACANCY_ID }),
     });
     const data = await res.json();
     if (data.error) { status.textContent = 'Ошибка: ' + esc(data.error); return; }

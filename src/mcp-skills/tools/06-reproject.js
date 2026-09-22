@@ -95,6 +95,53 @@ module.exports = {
       },
     },
 
+    reproject_adjust: {
+      description:
+        'Поправить ПОСЛЕДНИЙ предпросмотренный план (из reproject_preview) вручную: перенести ' +
+        'сессию в другой проект (moves: [{sessionId, toCluster, name?, type?}]) и/или переименовать ' +
+        'проект (renames: [{cluster, name?, type?}]). Ничего не двигает — только правит план ' +
+        'и перерисовывает отчёт. Затем reproject_apply({confirm:true}) применит исправленный план.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          moves: {
+            type: 'array',
+            description: 'Переносы сессий: [{sessionId, toCluster, name?, type?}]. toCluster — целевой ключ кластера (создастся, если нового).',
+            items: { type: 'object' },
+          },
+          renames: {
+            type: 'array',
+            description: 'Переименования проектов: [{cluster, name?, type?}].',
+            items: { type: 'object' },
+          },
+          profile: {
+            type: 'string',
+            description: 'Имя папки профиля в USERS_ROOT (тот же, что в reproject_preview). Без него — профиль текущей сессии.',
+          },
+        },
+      },
+      handler: async ({ moves, renames, profile } = {}) => {
+        let root;
+        try { root = resolveProfileRoot(profile); } catch (e) { return { error: String(e.message || e) }; }
+        try {
+          const out = reproject.adjustPlan(root, { moves: moves || [], renames: renames || [] }, { now: Date.now() });
+          if (out.error) return out;
+          return {
+            profileRoot: root,
+            adjusted: true,
+            totalSessions: out.plan.totalSessions,
+            projectCount: out.plan.projects.length,
+            unassigned: out.plan.unassigned.length,
+            warnings: out.plan.warnings,
+            report: out.report,
+            next: 'Покажи обновлённый отчёт пользователю. Если ок — reproject_apply({confirm:true}).',
+          };
+        } catch (e) {
+          return { error: String(e.message || e) };
+        }
+      },
+    },
+
     reproject_apply: {
       description:
         'Применить ПОСЛЕДНИЙ предпросмотренный план (из reproject_preview): пере-привязать ' +

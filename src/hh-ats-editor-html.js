@@ -134,7 +134,9 @@ const TEMPLATES = {
 };
 
 function atsEditorHtml(currentConfig, currentStages, opts = {}) {
-  const { callbackBase = '', username = '', agentSecret = '' } = opts;
+  const { callbackBase = '', username = '', agentSecret = '', vacancies = [], activeVacancyId = '', isDraft = false } = opts;
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const vacancyToken = agentSecret ? require('crypto').createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16) : '';
   const templatesJson = JSON.stringify(TEMPLATES);
   const initConfigJson = JSON.stringify(currentConfig || null);
   const initStagesJson = JSON.stringify(currentStages || null);
@@ -238,9 +240,20 @@ main{max-width:960px;margin:0 auto;padding:28px 20px;display:flex;flex-direction
 details summary{cursor:pointer;font-size:12px;color:var(--muted);padding:6px 0;user-select:none}
 details summary:hover{color:var(--accent)}
 pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:11px;overflow-x:auto;color:#a8b5d0;margin-top:8px;white-space:pre-wrap;word-break:break-word}
+
+/* Vacancy tabs */
+.vacancy-tabs{display:flex;gap:4px;padding:10px 24px;background:var(--bg);border-bottom:1px solid var(--border);flex-wrap:wrap}
+.vacancy-tab{padding:6px 14px;border:1px solid var(--border);border-radius:20px;font-size:13px;font-weight:600;text-decoration:none;color:var(--muted)}
+.vacancy-tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 </style>
 </head>
 <body>
+
+${vacancies.length > 1 ? `<div class="vacancy-tabs">${vacancies.map(v => {
+  const href = `${esc(callbackBase)}/hh/ats-editor?username=${esc(username)}&token=${vacancyToken}&vacancy_id=${esc(v.id)}`;
+  const isActive = String(v.id) === String(activeVacancyId);
+  return `<a class="vacancy-tab${isActive ? ' active' : ''}" href="${href}">${esc(v.title || v.id)}</a>`;
+}).join('')}</div>` : ''}
 
 <header>
   <span class="logo">Candidate Funnel</span>
@@ -266,6 +279,8 @@ pre.json-preview{background:var(--bg);border:1px solid var(--border);border-radi
 </header>
 
 <main>
+
+  ${isDraft ? '<div style="background:rgba(240,180,41,.12);border:1px solid rgba(240,180,41,.35);color:var(--yellow);border-radius:var(--radius);padding:12px 16px;font-size:13px">Черновик, сформированный по тексту вакансии — фоновый скоринг его ещё не использует. Проверь критерии и веса и нажми «Save Funnel», чтобы включить.</div>' : ''}
 
   <!-- Stages -->
   <section>
@@ -399,6 +414,7 @@ const TEMPLATES = ${templatesJson};
 const CALLBACK_BASE = '${callbackBase}';
 const HH_USER = '${username}';
 const HH_SECRET = '${agentSecret}';
+const VACANCY_ID = ${JSON.stringify(activeVacancyId || null)};
 
 let initConfig = ${initConfigJson};
 let initStages = ${initStagesJson};
@@ -702,7 +718,7 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = 'Сохраняю...';
   try {
-    const payload = { username: HH_USER, config: buildConfig(), stages };
+    const payload = { username: HH_USER, config: buildConfig(), stages, vacancy_id: VACANCY_ID };
     const r = await fetch(CALLBACK_BASE + '/hh/ats-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
@@ -734,7 +750,7 @@ document.getElementById('resetAtsBtn').addEventListener('click', async () => {
     const r = await fetch(CALLBACK_BASE + '/hh/reset-ats-results', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
-      body: JSON.stringify({ username: HH_USER }),
+      body: JSON.stringify({ username: HH_USER, vacancy_id: VACANCY_ID }),
     });
     const data = await r.json();
     if (r.ok && data.ok) {

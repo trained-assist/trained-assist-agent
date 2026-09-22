@@ -6,7 +6,7 @@
 // now backs it, so a restart can always re-derive what was pending.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createRequire } from 'module';
@@ -70,5 +70,16 @@ describe('soft-continuation journal', () => {
     const survived = R2._softCont.listSoftContinuations();
     expect(survived).toHaveLength(1);
     expect(survived[0].username).toBe('bob');
+  });
+
+  it('one malformed JSON file does not abort the whole list — good entries still reconcile', () => {
+    const R = freshRunner();
+    const { saveSoftContinuationFile, listSoftContinuations, SOFT_CONT_DIR } = R._softCont;
+    saveSoftContinuationFile('carol', { username: 'carol', dueAt: Date.now() + 60000 });
+    writeFileSync(join(SOFT_CONT_DIR, 'dave.json'), '{not valid json truncated mid-write');
+
+    const listed = listSoftContinuations();
+    expect(listed).toHaveLength(1);
+    expect(listed[0].username).toBe('carol');
   });
 });
