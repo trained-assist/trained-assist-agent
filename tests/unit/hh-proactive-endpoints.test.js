@@ -1,6 +1,7 @@
 // Integration tests for the new/updated HH proactive-search HTTP endpoints:
-//   - POST /api/hh/proactive/add-manual  (new — spec item #2)
+//   - POST /api/hh/proactive/add-manual  (new — spec item #2; step 7/7: vacancy tagging)
 //   - GET  /api/hh/proactive/candidates  (updated — unified store, no pagination)
+//   - GET  /hh/proactive                 (step 7/7: vacancy_id filter + tab switcher)
 // Spawns a real server.js process with mocked secrets in env, uses mock-hh-server
 // for the HH /resumes/{id} call, and verifies the unified all-candidates.json store.
 
@@ -17,7 +18,7 @@ import { createMockHhServer } from '../helpers/mock-hh-server.js';
 const TEST_UID = 'hh-proactive-ep-test-001';
 const SECRET = 'test-agent-secret-hh-proactive';
 
-let tokensDir, dataDir, mockHh, serverProc, serverPort;
+let tokensDir, dataDir, usersDir, mockHh, serverProc, serverPort;
 
 function post(url, body) {
   return new Promise((resolve, reject) => {
@@ -84,9 +85,19 @@ function startServer(env) {
   });
 }
 
+function writeActiveVacancies(vacancies) {
+  const dir = join(usersDir, TEST_UID, 'contexts', 'hh');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'active_vacancies.json'),
+    JSON.stringify({ value: vacancies, updated_at: new Date().toISOString() }),
+  );
+}
+
 beforeAll(async () => {
   tokensDir = mkdtempSync(join(tmpdir(), 'hh-proactive-ep-tokens-'));
   dataDir = mkdtempSync(join(tmpdir(), 'hh-proactive-ep-data-'));
+  usersDir = mkdtempSync(join(tmpdir(), 'hh-proactive-ep-users-'));
 
   const tokenDir = join(tokensDir, TEST_UID);
   mkdirSync(tokenDir, { recursive: true });
@@ -105,6 +116,17 @@ beforeAll(async () => {
         total_experience: { months: 84 },
         experience: [{ position: 'CFO', company: 'ООО Тест', start: '2019-01-01', end: null }],
       },
+      'manualres2': {
+        id: 'manualres2',
+        alternate_url: 'https://hh.ru/resume/manualres2',
+        title: 'Продуктовый менеджер',
+        first_name: 'Пётр',
+        last_name: 'Смирнов',
+        age: 30,
+        area: { name: 'Москва' },
+        total_experience: { months: 48 },
+        experience: [{ position: 'PM', company: 'ООО Продукт', start: '2021-01-01', end: null }],
+      },
     },
   });
   await mockHh.start();
@@ -116,6 +138,7 @@ beforeAll(async () => {
     AGENT_SECRET: SECRET,
     AGENT_TOKENS_DIR: tokensDir,
     AGENT_DATA_DIR: dataDir,
+    USERS_DIR: usersDir,
     HH_API_BASE_URL: mockHh.baseUrl,
     NODE_ENV: 'test',
   });
@@ -128,6 +151,7 @@ afterAll(async () => {
   if (mockHh) await mockHh.stop();
   try { rmSync(tokensDir, { recursive: true, force: true }); } catch {}
   try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
+  try { rmSync(usersDir, { recursive: true, force: true }); } catch {}
 });
 
 beforeEach(() => {
@@ -209,5 +233,81 @@ describe('GET /api/hh/proactive/candidates — unified, unpaginated', () => {
   it('wrong token → 403', async () => {
     const r = await get(`http://127.0.0.1:${serverPort}/api/hh/proactive/candidates?username=${TEST_UID}&token=wrong`);
     expect(r.status).toBe(403);
+  });
+});
+
+// Multi-vacancy step 7/7: a profile tracking 2+ active vacancies tags manually-added
+// candidates with whichever vacancy is active, and /hh/proactive filters + renders a
+// tab switcher once active_vacancies.length > 1. Separate username from TEST_UID so
+// this doesn't interact with the token-file state written above; token files are
+// keyed by username only, but active_vacancies is what actually drives this feature.
+const MULTI_VAC_UID = 'hh-proactive-ep-multivac-001';
+
+function multiVacToken() {
+  return createHmac('sha256', SECRET).update(MULTI_VAC_UID).digest('hex').slice(0, 16);
+}
+
+describe('multi-vacancy tagging + tab switcher (step 7/7)', () => {
+  beforeAll(() => {
+    const tokenDir = join(tokensDir, MULTI_VAC_UID);
+    mkdirSync(tokenDir, { recursive: true });
+    writeFileSync(join(tokenDir, 'hh'), JSON.stringify({ access_token: 'test-hh-access-token', refresh_token: null, employer_id: 'emp-001' }), { mode: 0o600 });
+    const dir = join(usersDir, MULTI_VAC_UID, 'contexts', 'hh');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'active_vacancies.json'),
+      JSON.stringify({ value: [{ id: 'vac-A', title: 'Vacancy A' }, { id: 'vac-B', title: 'Vacancy B' }], updated_at: new Date().toISOString() }),
+    );
+    // /hh/proactive 404s ("no data yet") unless at least one search-results-*.json
+    // snapshot exists — seed a minimal one; the route overlays the unified
+    // all-candidates store on top of it anyway (see handlers/hh.js).
+    const proactiveDir = join(dataDir, 'hh', MULTI_VAC_UID, 'proactive');
+    mkdirSync(proactiveDir, { recursive: true });
+    writeFileSync(
+      join(proactiveDir, 'search-results-2026-09-22.json'),
+      JSON.stringify({ vacancy_id: 'vac-A', vacancy_title: 'Vacancy A', searched_at: new Date().toISOString(), candidates: [] }),
+    );
+  });
+
+  it('add-manual tags the candidate with the profile\'s first active vacancy when no vacancy_id is given', async () => {
+    const r = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/add-manual`, {
+      username: MULTI_VAC_UID, token: multiVacToken(), resume_url_or_id: 'manualres1',
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.candidate.vacancy_ids).toEqual(['vac-A']);
+  });
+
+  it('add-manual tags with an explicit vacancy_id from the request body when given', async () => {
+    const r = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/add-manual`, {
+      username: MULTI_VAC_UID, token: multiVacToken(), resume_url_or_id: 'manualres2', vacancy_id: 'vac-B',
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.candidate.vacancy_ids).toEqual(['vac-B']);
+  });
+
+  it('GET /hh/proactive renders a tab per active vacancy, marking the requested one active', async () => {
+    const r = await get(`http://127.0.0.1:${serverPort}/hh/proactive?username=${MULTI_VAC_UID}&token=${multiVacToken()}&vacancy_id=vac-B`);
+    expect(r.status).toBe(200);
+    expect(r.body).toContain('vacancy-tabs');
+    expect(r.body).toContain('Vacancy A');
+    expect(r.body).toContain('Vacancy B');
+    expect(r.body).toContain('vacancy_id=vac-B');
+  });
+
+  // Candidate names only show up (lowercased) in each card's data-search attribute,
+  // not as visible text — match on data-id (unambiguous, matches the actual filtering
+  // contract) instead of relying on name substrings.
+  it('GET /hh/proactive?vacancy_id=vac-B only shows the candidate tagged for vac-B', async () => {
+    const r = await get(`http://127.0.0.1:${serverPort}/hh/proactive?username=${MULTI_VAC_UID}&token=${multiVacToken()}&vacancy_id=vac-B`);
+    expect(r.status).toBe(200);
+    expect(r.body).toContain('data-id=\\"manualres2\\"');
+    expect(r.body).not.toContain('data-id=\\"manualres1\\"');
+  });
+
+  it('GET /hh/proactive?vacancy_id=vac-A only shows the candidate tagged for vac-A', async () => {
+    const r = await get(`http://127.0.0.1:${serverPort}/hh/proactive?username=${MULTI_VAC_UID}&token=${multiVacToken()}&vacancy_id=vac-A`);
+    expect(r.status).toBe(200);
+    expect(r.body).toContain('data-id=\\"manualres1\\"');
+    expect(r.body).not.toContain('data-id=\\"manualres2\\"');
   });
 });

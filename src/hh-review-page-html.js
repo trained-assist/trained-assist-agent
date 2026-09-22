@@ -10,7 +10,7 @@ const BASE_USERS_DIR = process.env.USERS_DIR ||
 
 // Generates the HH candidates review page HTML (moved from server.js, see issue #942 Phase 0).
 function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir, opts = {}) {
-  const { syncedAt, vacancyId, lastScoredAt } = opts;
+  const { syncedAt, vacancyId, lastScoredAt, vacancies = [] } = opts;
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const candDir = path.join(dataDir || path.join(os.homedir(), 'agent-data'), 'hh', String(username), 'candidates');
@@ -20,12 +20,16 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { messages: [], ats_result: null }; }
   }
 
-  // Read ATS config version to validate cached drafts
+  // Read ATS config version to validate cached drafts — must resolve the same way the
+  // background scorer does (readAtsConfig: per-vacancy file first, legacy singleton
+  // fallback), or a 2nd tracked vacancy's page would compare against vacancy A's
+  // config version and wrongly invalidate every cached draft.
   let atsConfigVersion = null;
   try {
+    const { readAtsConfig } = require('./hh-scoring');
     const workDir = path.join(BASE_USERS_DIR, String(username));
-    const atsCfg = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'ats_config.json'), 'utf8'));
-    atsConfigVersion = atsCfg?.value?.updated_at || null;
+    const atsCfg = readAtsConfig(workDir, vacancyId);
+    atsConfigVersion = atsCfg?.updated_at || null;
   } catch {}
 
 
@@ -329,6 +333,9 @@ h1{font-size:18px}
 .sync-btn{background:none;border:none;color:#6366f1;font-size:13px;cursor:pointer;font-weight:500;padding:0;text-decoration:underline;text-underline-offset:2px}
 .sync-btn:hover{opacity:.75}
 .sync-btn:disabled{opacity:.5;cursor:not-allowed;text-decoration:none}
+.vacancy-tabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap}
+.vacancy-tab{padding:6px 14px;border:1px solid #c7d2fe;border-radius:20px;font-size:13px;font-weight:600;text-decoration:none;color:#4f46e5;background:#eef2ff}
+.vacancy-tab.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
 .tabs{display:flex;gap:4px;margin-bottom:20px}
 .tab-btn{padding:6px 16px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;background:#fff;color:#64748b;transition:all .15s}
 .tab-btn.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
@@ -341,6 +348,11 @@ h1{font-size:18px}
 </head>
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
+${vacancies.length > 1 ? `<div class="vacancy-tabs">${vacancies.map(v => {
+  const href = `${esc(callbackBase)}/hh/review?username=${esc(username)}&token=${pageToken}&vacancy_id=${esc(v.id)}`;
+  const isActive = String(v.id) === String(vacancyId);
+  return `<a class="vacancy-tab${isActive ? ' active' : ''}" href="${href}">${esc(v.title || v.id)}</a>`;
+}).join('')}</div>` : ''}
 <p class="subtitle">${sorted.length} откликов · ${waitingCandidates.length} ждут ответа${ageText ? ` · обновлено ${ageText}` : ''}${scoredText ? ` · ${scoredText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>

@@ -18,7 +18,7 @@ import { createMockHhServer } from '../helpers/mock-hh-server.js';
 const TEST_UID  = 'hh-srv-ep-test-001';
 const SECRET    = 'test-agent-secret-hh-endpoints';
 
-let tokensDir, dataDir, mockHh, serverProc, serverPort;
+let tokensDir, dataDir, usersDir, mockHh, serverProc, serverPort;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -131,6 +131,7 @@ beforeAll(async () => {
   // Temp dirs
   tokensDir = mkdtempSync(join(tmpdir(), 'hh-srv-tokens-'));
   dataDir   = mkdtempSync(join(tmpdir(), 'hh-srv-data-'));
+  usersDir  = mkdtempSync(join(tmpdir(), 'hh-srv-users-'));
 
   // Write HH token for test user
   const tokenDir = join(tokensDir, TEST_UID);
@@ -153,6 +154,7 @@ beforeAll(async () => {
     AGENT_SECRET: SECRET,
     AGENT_TOKENS_DIR: tokensDir,
     AGENT_DATA_DIR: dataDir,
+    USERS_DIR: usersDir,
     HH_API_BASE_URL: mockHh.baseUrl,
     NODE_ENV: 'test',
   });
@@ -165,6 +167,7 @@ afterAll(async () => {
   if (mockHh) await mockHh.stop();
   try { rmSync(tokensDir, { recursive: true, force: true }); } catch {}
   try { rmSync(dataDir,   { recursive: true, force: true }); } catch {}
+  try { rmSync(usersDir,  { recursive: true, force: true }); } catch {}
 });
 
 beforeEach(() => {
@@ -455,5 +458,57 @@ describe('POST /hh/send-and-reject', () => {
     expect((await post(url, body, authHeader())).body.ok).toBe(true);
     expect(mockHh.state.messages['neg-001']).toEqual([body.message]);
     expect(mockHh.state.discarded.has('neg-001')).toBe(true);
+  });
+});
+
+// ── /hh/ats-config — per-vacancy namespacing (multi-vacancy step 3/6) ──────────
+
+describe('POST/GET /hh/ats-config — per-vacancy', () => {
+  const ATS_USER = 'hh-srv-ep-ats-config-001';
+
+  function getAtsConfig(vacancyId) {
+    const qs = vacancyId ? `?username=${ATS_USER}&vacancy_id=${vacancyId}` : `?username=${ATS_USER}`;
+    return fetch(`http://127.0.0.1:${serverPort}/hh/ats-config${qs}`, { headers: authHeader() }).then(r => r.json());
+  }
+
+  it('saving with vacancy_id writes a per-vacancy file, not the legacy singleton', async () => {
+    const config = { vacancy_title: 'Backend Dev', knockout: [], required: [], preferred: [], pass_threshold: 7, review_threshold: 4 };
+    const r = await post(`http://127.0.0.1:${serverPort}/hh/ats-config`, { username: ATS_USER, config, vacancy_id: 'vac-A' }, authHeader());
+    expect(r.body.ok).toBe(true);
+
+    const perVacancyFile = join(usersDir, ATS_USER, 'contexts', 'hh', 'ats_config:vac-A.json');
+    expect(existsSync(perVacancyFile)).toBe(true);
+    const legacyFile = join(usersDir, ATS_USER, 'contexts', 'hh', 'ats_config.json');
+    expect(existsSync(legacyFile)).toBe(false);
+  });
+
+  it('GET with vacancy_id returns that vacancy config; a different vacancy_id sees nothing', async () => {
+    const configA = { vacancy_title: 'Vacancy A', knockout: [], required: [], preferred: [], pass_threshold: 7, review_threshold: 4 };
+    await post(`http://127.0.0.1:${serverPort}/hh/ats-config`, { username: ATS_USER, config: configA, vacancy_id: 'vac-only-a' }, authHeader());
+
+    const resA = await getAtsConfig('vac-only-a');
+    expect(resA.config?.vacancy_title).toBe('Vacancy A');
+
+    const resB = await getAtsConfig('vac-never-saved');
+    expect(resB.config).toBeNull();
+  });
+
+  it('two vacancies save independently without clobbering each other', async () => {
+    const configA = { vacancy_title: 'Marketing', knockout: [], required: [], preferred: [], pass_threshold: 6, review_threshold: 3 };
+    const configB = { vacancy_title: 'Backend', knockout: [], required: [], preferred: [], pass_threshold: 8, review_threshold: 5 };
+    await post(`http://127.0.0.1:${serverPort}/hh/ats-config`, { username: ATS_USER, config: configA, vacancy_id: 'vac-multi-a' }, authHeader());
+    await post(`http://127.0.0.1:${serverPort}/hh/ats-config`, { username: ATS_USER, config: configB, vacancy_id: 'vac-multi-b' }, authHeader());
+
+    expect((await getAtsConfig('vac-multi-a')).config?.vacancy_title).toBe('Marketing');
+    expect((await getAtsConfig('vac-multi-b')).config?.vacancy_title).toBe('Backend');
+  });
+
+  it('saving without vacancy_id keeps writing the legacy singleton (backward compat)', async () => {
+    const config = { vacancy_title: 'Legacy Vacancy', knockout: [], required: [], preferred: [], pass_threshold: 7, review_threshold: 4 };
+    await post(`http://127.0.0.1:${serverPort}/hh/ats-config`, { username: ATS_USER, config }, authHeader());
+
+    const legacyFile = join(usersDir, ATS_USER, 'contexts', 'hh', 'ats_config.json');
+    expect(existsSync(legacyFile)).toBe(true);
+    expect((await getAtsConfig(null)).config?.vacancy_title).toBe('Legacy Vacancy');
   });
 });

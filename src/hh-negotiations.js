@@ -58,12 +58,16 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     return hydrateResumes(results.flat(), { access_token: accessToken });
   }
 
-  function hhCacheFile(dataDir, username) {
-    return path.join(dataDir, 'hh', String(username), 'negotiations-cache.json');
+  // Keyed by vacancy_id — profiles tracking several vacancies (readActiveVacancies)
+  // switch between them via /hh/review tabs, and a single shared cache file would
+  // thrash on every switch (always a miss against whichever vacancy was cached last),
+  // doubling HH API calls for no reason.
+  function hhCacheFile(dataDir, username, vacancyId) {
+    return path.join(dataDir, 'hh', String(username), `negotiations-cache:${vacancyId}.json`);
   }
 
   async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessToken) {
-    const cacheFile = hhCacheFile(dataDir, username);
+    const cacheFile = hhCacheFile(dataDir, username, vacancyId);
     const CACHE_TTL_MS = 15 * 60 * 1000;
     try {
       const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
@@ -272,11 +276,16 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
   }
 
   // Compute the HMAC-signed proactive page URL for a user — same logic as inside the
-  // request handler but needed at module level for the scheduler.
-  function buildProactiveUrlForScheduler(username) {
+  // request handler but needed at module level for the scheduler. `vacancyId` is a
+  // plain, non-HMAC'd query param (same pattern as hhReviewUrl) — omitted here because
+  // the scheduler builds this URL before runProactiveSearch resolves which vacancy it's
+  // running for; runProactiveSearch itself appends vacancy_id once vacancyKey is known
+  // (see the notifyChat block in hh-proactive-search.js).
+  function buildProactiveUrlForScheduler(username, vacancyId) {
     const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
     const token = createHmac('sha256', process.env.AGENT_SECRET || '').update(username).digest('hex').slice(0, 16);
-    return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
+    const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
+    return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
   }
 
   // Periodic proactive HH search scheduler.
@@ -307,6 +316,7 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
           await runProactiveSearch(username, workDir, {
             refreshAccessToken: (u) => refreshHhToken(u, secrets),
             proactiveUrl: buildProactiveUrlForScheduler(username),
+            alwaysNotify: true,
             notifyChat: async (info) => {
               const chatId = readChatId(username);
               if (!chatId) return;
@@ -315,8 +325,10 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
               const text = buildProactiveDigest({
                 vacancyTitle: info.vacancyTitle,
                 newCount: info.newCount,
+                totalNewCount: info.totalNewCount,
                 totalSeen: info.totalSeen,
                 newCandidates: info.newCandidates,
+                threshold: info.threshold,
                 url: info.proactiveUrl,
               });
               const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');

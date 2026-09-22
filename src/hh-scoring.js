@@ -284,6 +284,16 @@ function readAtsConfig(workDir, expectedVacancyId = null) {
   return value;
 }
 
+// Draft extracted by hh_extract_ats_config, pending recruiter review in /hh/ats-editor.
+// Kept separate from the live ats_config:{id} file so an LLM-generated first pass never
+// goes live for background scoring before a human has looked at it in the editor.
+function readAtsDraft(workDir, vacancyId) {
+  const file = vacancyId
+    ? path.join(workDir, 'contexts', 'hh', `ats_config_draft:${vacancyId}.json`)
+    : path.join(workDir, 'contexts', 'hh', 'ats_config_draft.json');
+  return readAtsConfigFile(file);
+}
+
 function readOrKey(username) {
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const file = path.join(tokensBase, String(username), 'openrouter');
@@ -507,6 +517,7 @@ module.exports = {
   computeScore,
   evaluateCandidate,
   readAtsConfig,
+  readAtsDraft,
   readOrKey,
   readGigachatKey,
   readCandidateHistory,

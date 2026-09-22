@@ -166,16 +166,18 @@ describe('hhFunnelStats', () => {
 // ── hhNewResponses ────────────────────────────────────────────────────────────
 
 describe('hhNewResponses', () => {
-  it('lists new response candidates', async () => {
+  it('returns a one-line count + review-page link, never candidate names', async () => {
     writeActiveVacancy('vac-001', 'Backend Developer (Node.js)');
     const { hhNewResponses } = freshModule();
     const result = await hhNewResponses(TEST_UID, workDir);
 
     expect(result).toContain('Backend Developer');
-    expect(result).toContain('новые отклики');
-    // Mock returns 3 candidates in "response" state for vac-001
-    expect(result).toContain('Иванов');
-    expect(result).toContain('Петрова');
+    expect(result).toContain('новых откликов');
+    expect(result).toContain('/hh/review');
+    expect(result).toContain('vacancy_id=vac-001');
+    // Multi-vacancy step 4/6: never list candidate names in Telegram — link to web instead.
+    expect(result).not.toContain('Иванов');
+    expect(result).not.toContain('Петрова');
   });
 
   it('reports empty when no new responses', async () => {

@@ -38,15 +38,17 @@ function withFakeConnectedService(username) {
   withFakeConnectedService(username);
   const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'pin-card-'));
   profiles.setEngine(wd, 'opencode', 42);
-  profiles.setOcProfile(wd, 'mimo');
+  profiles.setOcProfile(wd, 'free');
 
   // Simulate stale shared state from a DIFFERENT profile/user on the same VM.
   const staleFile = path.join(os.tmpdir(), 'pin-card-stale-current-profile-' + Date.now());
-  fs.writeFileSync(staleFile, 'quality');
+  fs.writeFileSync(staleFile, 'value');
 
   const card = buildContextCard(username, wd, 42);
-  ok(/⚙️ OpenCode · mimo/.test(card), `pin shows this workDir's own oc profile (mimo), got: ${card}`);
-  ok(/mimo-v2\.5/.test(card), `pin shows mimo's actual model, got: ${card}`);
+  ok(/⚙️ OpenCode · free/.test(card), `pin shows this workDir's own oc profile (free), got: ${card}`);
+  // free's top rung is resolved through the ladder (issue #1061 Фаза 1-2), not a stale
+  // ocCfg.model read — profiles.json no longer has a top-level `model` field.
+  ok(/mimo-v2\.5/.test(card), `pin shows free's actual resolved model, got: ${card}`);
   fs.unlinkSync(staleFile);
 }
 
@@ -59,6 +61,52 @@ function withFakeConnectedService(username) {
   const card = buildContextCard(username, wd, 7);
   ok(/⚙️ Codex CLI/.test(card), 'codex engine line present');
   ok(!/⚙️ Claude/.test(card), 'no Claude model line for codex engine');
+}
+
+// 4. HH single vacancy (legacy singleton) — unchanged format, no numbering, no vacancy_id in links.
+{
+  const username = 'u-hh-single-' + Date.now();
+  withFakeConnectedService(username);
+  const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'pin-card-'));
+  process.env.AGENT_SECRET = 'test-secret';
+  const hhDir = path.join(wd, 'contexts', 'hh');
+  fs.mkdirSync(hhDir, { recursive: true });
+  fs.writeFileSync(path.join(hhDir, 'active_vacancy.json'), JSON.stringify({ value: { id: 'v1', title: 'Backend разработчик' } }));
+  fs.writeFileSync(path.join(hhDir, 'ats_config.json'), JSON.stringify({ value: { pass_threshold: 70 } }));
+
+  const card = buildContextCard(username, wd, 1);
+  ok(/💼 Backend разработчик/.test(card), `single vacancy title shown, got: ${card}`);
+  ok(/⚡ Скоринг активен/.test(card), 'single vacancy scoring-on line shown');
+  ok(!/vacancy_id=/.test(card), 'no vacancy_id query param when only 1 vacancy tracked');
+  ok(!/Активные вакансии/.test(card), 'no multi-vacancy header for a single tracked vacancy');
+}
+
+// 5. HH multiple vacancies — numbered blocks, per-vacancy scoring status, vacancy_id-scoped links.
+{
+  const username = 'u-hh-multi-' + Date.now();
+  withFakeConnectedService(username);
+  const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'pin-card-'));
+  process.env.AGENT_SECRET = 'test-secret';
+  const hhDir = path.join(wd, 'contexts', 'hh');
+  fs.mkdirSync(hhDir, { recursive: true });
+  fs.writeFileSync(path.join(hhDir, 'active_vacancies.json'), JSON.stringify({
+    value: [{ id: 'v1', title: 'Backend разработчик' }, { id: 'v2', title: 'Frontend разработчик' }],
+  }));
+  fs.writeFileSync(path.join(hhDir, 'ats_config:v1.json'), JSON.stringify({ value: { pass_threshold: 70 } }));
+  // v2 deliberately has no ats_config:v2.json → must show as scoring-off.
+
+  const card = buildContextCard(username, wd, 1);
+  ok(/Активные вакансии \(2\)/.test(card), `multi-vacancy header present, got: ${card}`);
+  ok(/1\. Backend разработчик/.test(card), 'vacancy 1 numbered');
+  ok(/2\. Frontend разработчик/.test(card), 'vacancy 2 numbered');
+  ok(/vacancy_id=v1/.test(card), 'vacancy 1 links carry its own vacancy_id');
+  ok(/vacancy_id=v2/.test(card), 'vacancy 2 links carry its own vacancy_id');
+  const v1Idx = card.indexOf('1. Backend');
+  const v2Idx = card.indexOf('2. Frontend');
+  const v1Block = card.slice(v1Idx, v2Idx);
+  ok(/⚡ Скоринг активен/.test(v1Block), 'vacancy 1 (has ats config) shows scoring-on');
+  const v2Block = card.slice(v2Idx);
+  ok(/⏸ Скоринг выключен/.test(v2Block), 'vacancy 2 (no ats config) shows scoring-off');
 }
 
 console.log(`\npin-context-card: ${pass} passed, ${fail} failed`);

@@ -42,8 +42,6 @@ afterEach(() => {
   fs.rmSync(tmpUserDir, { recursive: true, force: true });
 });
 
-const candidates = (n) => Array.from({ length: n }, (_, i) => ({ id: `hh-${String(i).padStart(4, '0')}`, first_name: 'X', last_name: String(i), tag: 'REVIEW', total_exp_years: 5, area: 'Москва' }));
-
 describe('mergeSeenIds — first run / backfill', () => {
   it('marks every collected ID as new when no seen file exists', () => {
     const result = mergeSeenIds('alice', 'vac-1', ['hh-0001', 'hh-0002', 'hh-0003']);
@@ -143,29 +141,58 @@ describe('mergeSeenIds — lossless contract (no candidate dropped between runs)
 });
 
 describe('buildProactiveDigest — Telegram message format', () => {
-  it('shows count, top-10 list with score glyphs, and link', () => {
+  // Multi-vacancy step 4/6 (owner directive): cold search results are never listed by
+  // name in Telegram — one line of counts + a link to the results page.
+  it('shows a one-line count summary and link, never candidate names', () => {
     const text = buildProactiveDigest({
       vacancyTitle: 'Финансовый советник',
       newCount: 3,
       totalSeen: 47,
-      newCandidates: candidates(3),
       url: 'https://example/hh/proactive',
     });
     expect(text).toContain('🧊 Холодный поиск: 3 новых');
     expect(text).toContain('«Финансовый советник»');
-    expect(text).toContain('Всего в базе по этой вакансии: 47');
+    expect(text).toContain('всего в базе: 47');
     expect(text).toContain('https://example/hh/proactive');
-    expect(text).toContain('🟡'); // REVIEW tag glyph
+    expect(text.split('\n').length).toBe(1);
   });
 
-  it('truncates the top list at 10 and adds an "and more" tail', () => {
+  it('omits the link line entirely when no url is given', () => {
     const text = buildProactiveDigest({
       vacancyTitle: 'X',
       newCount: 15,
       totalSeen: 100,
-      newCandidates: candidates(15),
       url: '',
     });
-    expect(text).toContain('…и ещё 5');
+    expect(text).not.toContain('http');
+    expect(text).toContain('15 новых');
+  });
+
+  // Owner report (2026-09-22): the background scheduler used to stay silent on a
+  // "nothing found" run, which looked identical to "the scheduler is broken". The
+  // fix makes the scheduler always send this digest, so its wording must read fine
+  // at zero — both "no new candidates at all" and "new ones, none above threshold".
+  it('reads as a clean confirmation when zero candidates are new', () => {
+    const text = buildProactiveDigest({
+      vacancyTitle: 'Private Banking Sales',
+      newCount: 0,
+      totalNewCount: 0,
+      totalSeen: 467,
+      url: 'https://example/hh/proactive',
+    });
+    expect(text).toContain('🧊 Холодный поиск: 0 новых кандидатов');
+    expect(text).toContain('всего в базе: 467');
+  });
+
+  it('reports "0 above threshold out of N new" when the threshold filters everyone out', () => {
+    const text = buildProactiveDigest({
+      vacancyTitle: 'Private Banking Sales',
+      newCount: 0,
+      totalNewCount: 3,
+      totalSeen: 467,
+      threshold: 82,
+      url: 'https://example/hh/proactive',
+    });
+    expect(text).toContain('0 сильных кандидатов (≥82%) из 3 новых');
   });
 });

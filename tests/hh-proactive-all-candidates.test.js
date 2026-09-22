@@ -10,6 +10,14 @@
  *   4. addManualCandidate is idempotent-ish: re-adding the same id preserves
  *      existing score/tag (from prior AI scoring) instead of resetting them
  *   5. parseResumeId extracts the id from a full HH resume URL or accepts a bare id
+ *
+ * Multi-vacancy step 7/7 additions:
+ *   6. mergeSearchCandidatesIntoAll tags records with vacancy_ids, dedup-appending
+ *      across runs rather than clobbering entries from other vacancies
+ *   7. addManualCandidate tags with a given vacancy_id, or leaves vacancy_ids: []
+ *      (wildcard) when no active vacancy is resolvable
+ *   8. candidateMatchesVacancy: wildcard (missing/empty vacancy_ids) matches any
+ *      requested vacancy_id; a tagged record only matches its own vacancy_ids
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -27,6 +35,7 @@ const {
   setCandidateReadState,
   parseResumeId,
   allCandidatesPath,
+  candidateMatchesVacancy,
 } = require('../src/hh-proactive-search.js');
 
 let tmpUserDir;
@@ -187,5 +196,81 @@ describe('setCandidateReadState (#6 persistent viewed flag)', () => {
     expect(store.r1.read).toBe(true);
     expect(store.r1.read_at).toBeTruthy();
     expect(store.r1.score).toBe(7);
+  });
+});
+
+describe('multi-vacancy tagging (step 7/7)', () => {
+  it('mergeSearchCandidatesIntoAll tags a fresh candidate with the given vacancy_id', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {}, 'vac-A');
+    const store = loadAllCandidates('alice');
+    expect(store.r1.vacancy_ids).toEqual(['vac-A']);
+  });
+
+  it('leaves vacancy_ids untouched (undefined) when no vacancyId is given — old callers unaffected', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {});
+    const store = loadAllCandidates('alice');
+    expect(store.r1.vacancy_ids).toEqual([]);
+  });
+
+  it('dedup-appends a second vacancy_id instead of clobbering the first', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {}, 'vac-A');
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X re-found', score: 6 }], {}, 'vac-B');
+    const store = loadAllCandidates('alice');
+    expect(store.r1.vacancy_ids.sort()).toEqual(['vac-A', 'vac-B']);
+  });
+
+  it('re-merging the same vacancy_id does not duplicate it', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {}, 'vac-A');
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X again', score: 6 }], {}, 'vac-A');
+    const store = loadAllCandidates('alice');
+    expect(store.r1.vacancy_ids).toEqual(['vac-A']);
+  });
+
+  it('addManualCandidate tags with the given vacancy_id', () => {
+    const record = addManualCandidate('alice', { id: 'res-1', title: 'Manual Guy' }, 'vac-A');
+    expect(record.vacancy_ids).toEqual(['vac-A']);
+    const store = loadAllCandidates('alice');
+    expect(store['res-1'].vacancy_ids).toEqual(['vac-A']);
+  });
+
+  it('addManualCandidate leaves vacancy_ids: [] (wildcard) when no vacancy is resolvable', () => {
+    const record = addManualCandidate('alice', { id: 'res-2', title: 'No active vacancy' });
+    expect(record.vacancy_ids).toEqual([]);
+  });
+
+  it('addManualCandidate dedup-appends a vacancy_id onto a candidate already found by search', () => {
+    mergeSearchCandidatesIntoAll('alice', [{ id: 'r1', title: 'X', score: 5 }], {}, 'vac-A');
+    const record = addManualCandidate('alice', { id: 'r1', title: 'X (also added manually)' }, 'vac-B');
+    expect(record.vacancy_ids.sort()).toEqual(['vac-A', 'vac-B']);
+  });
+});
+
+describe('candidateMatchesVacancy (step 7/7 filtering)', () => {
+  it('a wildcard record (missing vacancy_ids) matches any requested vacancy_id', () => {
+    expect(candidateMatchesVacancy({ id: 'r1' }, 'vac-A')).toBe(true);
+  });
+
+  it('a wildcard record (empty vacancy_ids array) matches any requested vacancy_id', () => {
+    expect(candidateMatchesVacancy({ id: 'r1', vacancy_ids: [] }, 'vac-A')).toBe(true);
+  });
+
+  it('a record tagged for vac-A matches when filtering by vac-A', () => {
+    expect(candidateMatchesVacancy({ id: 'r1', vacancy_ids: ['vac-A'] }, 'vac-A')).toBe(true);
+  });
+
+  it('a record tagged only for vac-B does NOT match when filtering by vac-A', () => {
+    expect(candidateMatchesVacancy({ id: 'r1', vacancy_ids: ['vac-B'] }, 'vac-A')).toBe(false);
+  });
+
+  it('a record tagged for both vac-A and vac-B matches either filter', () => {
+    const c = { id: 'r1', vacancy_ids: ['vac-A', 'vac-B'] };
+    expect(candidateMatchesVacancy(c, 'vac-A')).toBe(true);
+    expect(candidateMatchesVacancy(c, 'vac-B')).toBe(true);
+    expect(candidateMatchesVacancy(c, 'vac-C')).toBe(false);
+  });
+
+  it('no vacancyId requested (falsy) passes everything through unfiltered', () => {
+    expect(candidateMatchesVacancy({ id: 'r1', vacancy_ids: ['vac-A'] }, '')).toBe(true);
+    expect(candidateMatchesVacancy({ id: 'r1', vacancy_ids: ['vac-A'] }, undefined)).toBe(true);
   });
 });

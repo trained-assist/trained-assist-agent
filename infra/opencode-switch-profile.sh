@@ -2,10 +2,16 @@
 # opencode-switch-profile.sh — merge base + profile → ~/.config/opencode/opencode.json
 #
 # Usage:
-#   ./infra/opencode-switch-profile.sh [value|quality|free|mimo|russian-recruiter|lavish-luna]
+#   ./infra/opencode-switch-profile.sh [max|value|free|russian]
 #
 # Reads OPENCODE_PROFILE from secrets.env if no arg given.
 # Writes result to ~/.config/opencode/opencode.json on this machine.
+#
+# This sets the machine-wide BASELINE only (first rung of each role's ladder, no state/TTL
+# awareness) — real per-task invocations resolve the full ladder via src/opencode-ladder.js and
+# override this per-invocation (see writeOpencodeMcpConfig in claude-runner.js). This script still
+# matters for anything that talks to `opencode` outside the agent's task runner (e.g. manual
+# `opencode auth login` sanity checks on the VM).
 
 set -euo pipefail
 
@@ -23,17 +29,16 @@ else
   if [[ -f "$SECRETS" ]]; then
     PROFILE=$(grep '^OPENCODE_PROFILE=' "$SECRETS" 2>/dev/null | cut -d= -f2 | tr -d '"' || true)
   fi
-  PROFILE="${PROFILE:-value}"
+  PROFILE="${PROFILE:-max}"
 fi
 
 # Normalize aliases
 case "$PROFILE" in
-  ru|recruiter|rr) PROFILE="russian-recruiter" ;;
-  q)  PROFILE="quality" ;;
+  ru|recruiter|rr|russian-recruiter) PROFILE="russian" ;;
+  m|q|ll|mimo|quality|lavish-luna) echo "opencode-switch-profile: '$PROFILE' was retired in #1061 Фаза 1 (merged into max/value ladders) — pick max|value|free|russian" >&2; exit 1 ;;
   v)  PROFILE="value" ;;
   f)  PROFILE="free" ;;
-  m)  PROFILE="mimo" ;;
-  ll) PROFILE="lavish-luna" ;;
+  x)  PROFILE="max" ;;
 esac
 
 PROFILE_FILE="$PROFILES_DIR/$PROFILE.json"
@@ -44,7 +49,21 @@ if [[ ! -f "$PROFILE_FILE" ]]; then
 fi
 
 mkdir -p "$(dirname "$OUT")"
-jq -s '.[0] * .[1]' "$BASE" "$PROFILE_FILE" > "$OUT"
+# Profile files declare a `ladder` (per-role model preference list) instead of a flat model —
+# flatten to first rung per role for this machine-wide baseline. `rolePrompts.<role>` (e.g.
+# russian's strict-reviewer prompt) rides along unchanged, same as the old flat `agent.<role>.prompt`.
+jq -s '
+  (.[1]) as $p |
+  ($p.model // $p.ladder.build[0]) as $topModel |
+  (
+    $p.agent //
+    (($p.ladder // {}) | to_entries | map({
+      key: .key,
+      value: ({model: .value[0]} + (if $p.rolePrompts[.key] then {prompt: $p.rolePrompts[.key]} else {} end))
+    }) | from_entries)
+  ) as $agentCfg |
+  .[0] * {model: $topModel, agent: $agentCfg}
+' "$BASE" "$PROFILE_FILE" > "$OUT"
 
 echo "opencode profile → $PROFILE ($OUT)"
 

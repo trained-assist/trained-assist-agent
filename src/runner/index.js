@@ -8,6 +8,7 @@ const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('../auth-flag');
+const opencodeLadder = require('../opencode-ladder');
 const { recordUsage } = require('../usage-store');
 const {
   loadUserTokens,
@@ -30,6 +31,7 @@ const {
   STOP_TASK_INTENT,
   GTD_STOP_INTENT,
   ACTIVE_CHECKLIST_INTENT,
+  CHECKLIST_EDIT_INTENT,
   WAKEUP_INTENT,
   SKIP_TASK_INTENT,
   PING_INTENT,
@@ -44,6 +46,7 @@ const {
   PERSONA_INTENT,
   PROJECT_INTENT,
   AGENT_INFO_INTENT,
+  MODEL_INFO_INTENT,
   isPreQueueQuickIntent,
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,
@@ -497,33 +500,57 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // /active_checklist — list all open GTD records for this user.
+  // /active_checklist — list all open GTD records for this user, plus a one-click
+  // link into checklist.trainedassist.store (no password needed, see checklistAutologinUrl).
   if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
-    const workDir = opts.user.workDir;
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
-    let msg;
-    if (!workDir) {
-      msg = '📋 Нет активных чек-листов.';
-    } else {
-      const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
-      if (!openRecs.length) {
+    return (async () => {
+      const workDir = opts.user.workDir;
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+      const chatId = opts.user.id;
+      let msg;
+      if (!workDir) {
         msg = '📋 Нет активных чек-листов.';
       } else {
-        const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
-        for (const r of openRecs) {
-          const task = (r.originalTask || '').slice(0, 80);
-          lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+        const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+        if (!openRecs.length) {
+          msg = '📋 Нет активных чек-листов.';
+        } else {
+          const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
+          for (const r of openRecs) {
+            const task = (r.originalTask || '').slice(0, 80);
+            lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+          }
+          msg = lines.join('\n');
         }
-        msg = lines.join('\n');
       }
-    }
-    if (botToken) {
-      const im = opts.initialMsgId;
-      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-      else     tgSend(botToken, chatId, msg).catch(() => {});
-    }
-    return Promise.resolve(msg);
+      const link = await require('../gtd-controller').checklistAutologinUrl().catch(() => null);
+      if (link) msg += `\n\n✏️ Править: ${link}`;
+      if (botToken) {
+        const im = opts.initialMsgId;
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+        else     await tgSend(botToken, chatId, msg).catch(() => {});
+      }
+      return msg;
+    })();
+  }
+
+  // Natural-language "хочу поправить чек-лист" — hand back a one-click autologin link
+  // instead of asking the user to type a password (checklist.trainedassist.store).
+  if (CHECKLIST_EDIT_INTENT.test((opts.task || '').trim())) {
+    return (async () => {
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+      const chatId = opts.user.id;
+      const link = await require('../gtd-controller').checklistAutologinUrl().catch(() => null);
+      const msg = link
+        ? `✏️ Правь чек-лист здесь — вход автоматический: ${link}`
+        : '⚠️ Не смог получить ссылку на чек-лист (сервис недоступен или не настроен пароль). Попробуй чуть позже.';
+      if (botToken) {
+        const im = opts.initialMsgId;
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+        else     await tgSend(botToken, chatId, msg).catch(() => {});
+      }
+      return msg;
+    })();
   }
 
   // Control commands bypass lanes and admission. Available to every authenticated profile.
@@ -715,6 +742,23 @@ function _relativeTime(ts) {
   return `через ${Math.round(mins / 60)} ч`;
 }
 
+// Search-results files are named by date (search-results-2026-09-22.json), not by
+// vacancy_id — each file's own content carries the vacancy_id it was searched for
+// (see hh-proactive-search.js runProactiveSearch). With one tracked vacancy that
+// distinction doesn't matter (vacancyId=null → any file counts, matching the old
+// singleton behavior); with several, showing the "Поиск" link for a vacancy that's
+// never been searched would send the recruiter to an empty page.
+function _hasProactiveResults(dataDir, username, vacancyId) {
+  const dir = path.join(dataDir, 'hh', String(username), 'proactive');
+  if (!fs.existsSync(dir)) return false;
+  const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json'));
+  if (!vacancyId) return files.length > 0;
+  return files.some(f => {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))?.vacancy_id === vacancyId; }
+    catch { return false; }
+  });
+}
+
 // Returns context card string, or null if no skills configured (no pin needed). Quick-answer
 // commands (/ping etc.) are contractually one-message-only (see runner-e2e.test.js) — this must
 // stay opt-in via connected services, never fire unconditionally on every task completion.
@@ -740,31 +784,50 @@ function buildContextCard(username, workDir, chatId) {
 
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
-  // HH: active vacancy + ATS config / scoring status
-  const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
-  if (fs.existsSync(hhVacFile)) {
-    try {
-      const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
-      if (vac?.title) {
-        const atsFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
-        const hasAts = fs.existsSync(atsFile);
-        lines.push(`💼 ${vac.title}`);
-        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
-        const agentSecret = process.env.AGENT_SECRET || '';
-        if (agentSecret && vac.id) {
-          const { createHmac } = require('crypto');
-          const tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
-          const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
-          const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-          const proactiveDir = path.join(dataDir, 'hh', String(username), 'proactive');
-          const hasProactive = fs.existsSync(proactiveDir) &&
-            fs.readdirSync(proactiveDir).some(f => f.startsWith('search-results-') && f.endsWith('.json'));
-          const proactiveLink = hasProactive ? ` · [Поиск →](${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${tok})` : '';
-          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok})${proactiveLink}`);
-        }
+  // HH: active vacancy(ies) + ATS config / scoring status.
+  // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
+  // the legacy singleton active_vacancy.json is the fallback for profiles that never
+  // adopted the array. With >1 vacancy each gets its own block + vacancy_id-scoped
+  // links, so the recruiter switches vacancies via tabs on the web page, not Telegram.
+  try {
+    const hhVacsFile = path.join(workDir, 'contexts', 'hh', 'active_vacancies.json');
+    let vacancies = fs.existsSync(hhVacsFile)
+      ? (JSON.parse(fs.readFileSync(hhVacsFile, 'utf8'))?.value || [])
+      : [];
+    if (!vacancies.length) {
+      const hhVacFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
+      if (fs.existsSync(hhVacFile)) {
+        const vac = JSON.parse(fs.readFileSync(hhVacFile, 'utf8'))?.value;
+        if (vac?.title) vacancies = [vac];
       }
-    } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
-  }
+    }
+    if (vacancies.length) {
+      const multi = vacancies.length > 1;
+      const agentSecret = process.env.AGENT_SECRET || '';
+      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+      const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+      let tok = null;
+      if (agentSecret) {
+        const { createHmac } = require('crypto');
+        tok = createHmac('sha256', agentSecret).update(String(username)).digest('hex').slice(0, 16);
+      }
+      if (multi) lines.push(`💼 Активные вакансии (${vacancies.length}):`);
+      vacancies.forEach((vac, i) => {
+        if (!vac?.title) return;
+        const perVacancyAts = vac.id ? path.join(workDir, 'contexts', 'hh', `ats_config:${vac.id}.json`) : null;
+        const legacyAts = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
+        const hasAts = (perVacancyAts && fs.existsSync(perVacancyAts)) || (!multi && fs.existsSync(legacyAts));
+        lines.push(multi ? `${i + 1}. ${vac.title}` : `💼 ${vac.title}`);
+        lines.push(hasAts ? '⚡ Скоринг активен' : '⏸ Скоринг выключен — нет ATS конфига');
+        if (tok && vac.id) {
+          const vacQs = multi ? `&vacancy_id=${encodeURIComponent(vac.id)}` : '';
+          const hasProactive = _hasProactiveResults(dataDir, username, multi ? vac.id : null);
+          const proactiveLink = hasProactive ? ` · [Поиск →](${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${tok}${vacQs})` : '';
+          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok}${vacQs})${proactiveLink}`);
+        }
+      });
+    }
+  } catch (e) { console.warn('[runner] hh pin parse:', e.message); }
 
   const PINNED_CONTEXTS = [
     { skill: 'gdrive', key: 'pinned_folder', label: '📁' },
@@ -791,11 +854,11 @@ function buildContextCard(username, workDir, chatId) {
     const ocProfile = profiles.getOcProfile(workDir);
     let ocModel = process.env.OPENCODE_MODEL || null;
     try {
-      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfile}.json`);
-      if (fs.existsSync(ocProfilePath)) {
-        const ocCfg = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
-        if (ocCfg.model) ocModel = ocCfg.model;
-      }
+      // Resolve through the ladder (issue #1061 Фаза 1-2), not a raw ocCfg.model read —
+      // profiles migrated to the `ladder` shape have no top-level `model`, so reading it
+      // directly would silently blank the pin's model line for every non-legacy profile.
+      const resolved = opencodeLadder.buildOcProfileOverrides(ocProfile);
+      if (resolved.model) ocModel = resolved.model;
     } catch (e) { console.warn('[runner] oc pin model:', e.message); }
     lines.push(`⚙️ OpenCode · ${ocProfile}${ocModel ? ` (${ocModel})` : ''}`);
   } else if (eng === 'codex') {
@@ -1173,7 +1236,7 @@ function buildOcCapabilitiesBlock(secrets) {
   return lines.join('\n');
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0 }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1368,7 +1431,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       SESSIONS_INTENT.test(task) || SESSION_DETAIL_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
       CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
-      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task) || AGENT_INFO_INTENT.test(task);
+      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
+      MODEL_INFO_INTENT.test(task);
 
     if (!isUtility) {
       if (sessionExists) {
@@ -1632,15 +1696,31 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     mcpConfig, systemPromptFile, user,
   });
 
-  // Per-profile OpenCode model set (value|quality|free|mimo|...), folded into the per-invocation
-  // OPENCODE_CONFIG in runEngineProcess/writeOpencodeMcpConfig instead of the old shell script
-  // that overwrote one shared ~/.config/opencode/opencode.json for every profile on the VM.
+  // Per-profile OpenCode model ladder (max|value|free|russian), resolved to the flat
+  // {model, agent: {role: {model}}} shape and folded into the per-invocation OPENCODE_CONFIG in
+  // runEngineProcess/writeOpencodeMcpConfig — see src/opencode-ladder.js (issue #1061 Фаза 1-2).
+  // ocProfileName is also used below to report a quota/rate-limit failure back to the resolver
+  // so the next attempt degrades to the ladder's next rung instead of repeating the same model.
   let ocProfileOverrides = null;
+  let ocProfileName = null;
   if (engine === 'opencode') {
     try {
-      const ocProfileName = profiles.getOcProfile(user.workDir);
-      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfileName}.json`);
-      ocProfileOverrides = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
+      ocProfileName = profiles.getOcProfile(user.workDir);
+      ocProfileOverrides = opencodeLadder.buildOcProfileOverrides(ocProfileName);
+      // Фаза 4 (issue #1061): the ladder can degrade between two turns of the SAME
+      // session (a different task exhausted a rung in the meantime) — that's not the
+      // intra-task retry loop below (which already messages via degradeMsg), it's a
+      // silent swap the user would otherwise never see. Compare against the model
+      // recorded for this session's last turn and say so explicitly if it moved.
+      if (activeSessionId && ocProfileOverrides?.model) {
+        const prevModel = sessions.getLastOcModel(user.workDir, activeSessionId, 'build');
+        if (prevModel && prevModel !== ocProfileOverrides.model) {
+          const switchMsg = `ℹ️ Модель сменилась: ${prevModel} → ${ocProfileOverrides.model} (лестница профиля «${ocProfileName}» деградировала между сообщениями).`;
+          await tgSend(BOT_TOKEN, chatId, switchMsg).catch(() => {});
+          sessions.appendReply(user.workDir, activeSessionId, switchMsg);
+        }
+        sessions.setLastOcModel(user.workDir, activeSessionId, 'build', ocProfileOverrides.model);
+      }
     } catch (e) { console.warn('[runner] ocProfileOverrides:', e.message); }
   }
 
@@ -1804,6 +1884,60 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : 'нет подтверждённого финального ответа';
     result = `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
     console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
+  }
+
+  // OpenCode-only: a quota/rate-limit or one-time-config error on the CURRENT ladder rung
+  // (issue #1061 Фаза 2) — checked before isAuthError below, which would otherwise treat the
+  // same "rate limit"/"quota exceeded" text as a total auth loss and stop the engine instead of
+  // just moving to the next model. Quota-class errors mark the rung exhausted (with TTL) and
+  // retry this same task on OpenCode again, capped at MAX_LADDER_ATTEMPTS so a ladder that
+  // rate-limits all the way round doesn't loop forever. Config-class errors (one-time account
+  // setup, e.g. Go "Global regions" not enabled) mark the rung exhausted with no TTL and alert
+  // the operator immediately instead — retrying other rungs won't fix a config problem, and
+  // doing so anyway would burn through the whole ladder on every task until a human intervenes.
+  const preLadderText = claudeResult || fullOutput.text || result;
+  if (engine === 'opencode' && ocProfileName) {
+    const verdict = opencodeLadder.recordFailure(ocProfileName, 'build', ocProfileOverrides?.model, preLadderText);
+    if (verdict) {
+      if (verdict.class === 'config') {
+        setAuthFailedFlag({ reason: 'CONFIG_ONE_TIME', error_text: preLadderText, engine: 'opencode' });
+        const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg));
+        else await tgSend(BOT_TOKEN, chatId, configMsg);
+        if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, configMsg);
+        return configMsg;
+      }
+      if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
+        const degradeMsg = `⚠️ Модель «${verdict.model}» исчерпала лимит — пробую следующую ступень лестницы профиля «${ocProfileName}».`;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, degradeMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, degradeMsg));
+        else await tgSend(BOT_TOKEN, chatId, degradeMsg);
+        if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, degradeMsg);
+        const queuedRetry = runTask({
+          initiatedAt, threadId,
+          taskId: `${user.username}-${Date.now()}`,
+          user,
+          task,
+          context,
+          sessionId: activeSessionId,
+          forceClaude,
+          initialMsgId: msgId,
+          pinnedMsgId,
+          secrets,
+          retryCount,
+          continuationCount, mode, projectId, internalGtd,
+          engine: 'opencode',
+          engineFallbackDone,
+          ladderAttempt: ladderAttempt + 1,
+        });
+        return { queuedRetry };
+      }
+      const exhaustedMsg = `⛔ Вся лестница моделей профиля «${ocProfileName}» временно недоступна (лимиты) — оператор уведомлён.`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg));
+      else await tgSend(BOT_TOKEN, chatId, exhaustedMsg);
+      if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, exhaustedMsg);
+      setAuthFailedFlag({ reason: 'QUOTA_EXCEEDED', error_text: preLadderText, engine: 'opencode' });
+      return exhaustedMsg;
+    }
   }
 
   // Detect an auth/quota failure for the current engine — set the per-engine flag so the

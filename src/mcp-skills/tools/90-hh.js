@@ -174,6 +174,11 @@ function parseLlmJson(content) {
 
 // ── Telegram batch formatter ────────────────────────────────────────────────
 
+// Multi-vacancy step 4/6 (owner directive): Telegram never prints candidate names —
+// one line of aggregate counts, then a link to the review page (its vacancy tab
+// switcher from step 3 handles browsing). apiKey param kept for call-site compat but
+// no longer used — the old catch-path LLM fallback used to format a per-candidate
+// list from raw results, which would have re-introduced the exact thing this fixes.
 async function formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, apiKey) {
   try {
     const total = results.length;
@@ -181,42 +186,14 @@ async function formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, ap
     const review = results.filter(r => r.verdict === 'УТОЧНИТЬ').length;
     const reject = results.filter(r => r.verdict === 'ОТКЛОНИТЬ').length;
 
-    const topCandidates = results
-      .filter(r => r.verdict !== 'ОТКЛОНИТЬ' && r.score != null)
-      .sort((a, b) => (b.score || 0) - (a.score || 0))
-      .slice(0, 5);
-
-    const topLines = topCandidates.map(c => {
-      const skills = (c.matched || []).slice(0, 3).join(', ');
-      const scoreStr = c.score != null ? `${c.score}/10` : '—';
-      return `• *${c.name}* — ${scoreStr}${skills ? ` (${skills})` : ''}`;
-    }).join('\n');
-
     const title = (vacancyTitle || 'Вакансия').replace(/[*_`[\]]/g, '');
-    let text = `📋 *Ревью: ${title}* (${total} кандидатов)\n\n`;
-    text += `✅ Пропустить: ${pass}\n`;
-    text += `⚠️ Уточнить: ${review}\n`;
-    text += `❌ Отклонить: ${reject}\n`;
-    if (topLines) {
-      text += `\nТоп кандидаты:\n${topLines}\n`;
-    }
+    let text = `📋 *Ревью: ${title}* (${total} кандидатов) — ✅ ${pass} ⚠️ ${review} ❌ ${reject}`;
     if (reviewUrl) {
       text += `\n[Открыть страницу ревью →](${reviewUrl})`;
     }
     return text;
-  } catch (e) {
-    if (!apiKey) return `Ревью: ${results.length} кандидатов`;
-    try {
-      return await llmCall(
-        apiKey,
-        FAST_MODEL,
-        [{ role: 'user', content: 'Форматируй для Telegram: ' + JSON.stringify(results.slice(0, 5)) }],
-        500,
-        0.1,
-      );
-    } catch {
-      return `Ревью: ${results.length} кандидатов`;
-    }
+  } catch {
+    return `Ревью: ${results.length} кандидатов`;
   }
 }
 
@@ -667,14 +644,15 @@ module.exports = {
     // ── Funnel stats (fast, no LLM) ─────────────────────────────────────────
 
     hh_funnel_stats: {
-      description: 'Fast snapshot of the recruiting funnel for the active vacancy — counts candidates by stage, unread applicant messages, new responses. No LLM, sub-second. Use in digest crons and monitoring.',
+      description: 'Fast snapshot of the recruiting funnel for the active vacancy — counts candidates by stage, unread applicant messages, new responses. No LLM, sub-second (score breakdown reads cached ATS results from disk only, never triggers scoring). Use in digest crons and monitoring.',
       inputSchema: {
         type: 'object',
         properties: {
           vacancy_id: { type: 'string', description: 'Vacancy ID. Omit to read from context (active_vacancy).' },
+          notify_threshold: { type: 'number', description: 'Optional 0-100 ATS score cutoff. When set (>0), also returns new_responses_above_threshold / new_responses_pending_score by reading each new candidate\'s cached ats_result — no LLM call, unscored candidates just count as pending.' },
         },
       },
-      handler: async ({ vacancy_id } = {}) => {
+      handler: async ({ vacancy_id, notify_threshold } = {}) => {
         const token = readHhToken(USER_ID);
         if (!token) return { error: 'HH не подключён.' };
 
@@ -690,6 +668,7 @@ module.exports = {
         const STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer', 'hired', 'discard'];
         const counts = {};
         let unreadMessages = 0;
+        const threshold = Math.max(0, Math.min(100, Number(notify_threshold) || 0));
 
         try {
           // Count candidates per stage — parallel for speed
@@ -718,7 +697,7 @@ module.exports = {
             .filter(s => s !== 'discard')
             .reduce((sum, s) => sum + (counts[s] || 0), 0);
 
-          return {
+          const result = {
             ok: true,
             vacancy_id: resolvedVacancyId,
             vacancy_title: vacancyTitle,
@@ -736,6 +715,32 @@ module.exports = {
               discard: counts.discard,
             },
           };
+
+          // Score breakdown for "response" (new) candidates — reads cached ats_result only,
+          // never scores on the fly (background loop scores every ~5 min, digest just reads).
+          if (threshold > 0 && counts.response > 0) {
+            try {
+              const respData = await hhGet(
+                `/negotiations/response?vacancy_id=${resolvedVacancyId}&per_page=100&page=0`,
+                token,
+              );
+              let above = 0;
+              let pending = 0;
+              for (const neg of respData.items || []) {
+                const history = readCandidateHistory(USER_ID, neg.id);
+                const score = history.ats_result?.score;
+                if (score == null) { pending++; continue; }
+                if (Math.round(score * 10) >= threshold) above++;
+              }
+              result.notify_threshold = threshold;
+              result.new_responses_above_threshold = above;
+              result.new_responses_pending_score = pending;
+            } catch {
+              // score breakdown is best-effort; funnel counts above are unaffected
+            }
+          }
+
+          return result;
         } catch (e) {
           return { error: e.message };
         }
@@ -766,12 +771,21 @@ module.exports = {
             config.vacancy_id = activeVacancy.id;
             config.vacancy_title = activeVacancy.title;
           }
+          // Save as a draft only — never write to the live ats_config:{id} that background
+          // scoring reads. Criteria/weights are reviewed and finalized in /hh/ats-editor,
+          // not by the chat LLM re-writing context on the recruiter's behalf.
+          writeContext('hh', activeVacancy?.id ? `ats_config_draft:${activeVacancy.id}` : 'ats_config_draft', config);
+          const agentBase = (process.env.AGENT_PUBLIC_URL || 'http://localhost:3001').replace(/\/$/, '');
+          const agentSecret = process.env.AGENT_SECRET || '';
+          const editorToken = agentSecret
+            ? require('crypto').createHmac('sha256', agentSecret).update(USER_ID).digest('hex').slice(0, 16)
+            : '';
+          const editorUrl = `${agentBase}/hh/ats-editor?username=${encodeURIComponent(USER_ID)}&token=${editorToken}${activeVacancy?.id ? `&vacancy_id=${encodeURIComponent(activeVacancy.id)}` : ''}`;
           return {
             ok: true,
             config,
-            note: activeVacancy?.id
-              ? `Проверь конфиг и сохрани через context_set("hh","ats_config:${activeVacancy.id}", <config>) — привязан к вакансии «${activeVacancy.title}». Так конфиг не перепутается с конфигами других отслеживаемых вакансий. Можешь скорректировать веса и пороги.`
-              : 'Проверь конфиг и передай его в hh_evaluate_candidate. Активная вакансия не выбрана (hh_set_active_vacancy) — конфиг не будет привязан к вакансии, при переключении вакансий его не отличить от чужого.',
+            review_url: editorUrl,
+            note: `Черновик сохранён. Открой ${editorUrl} чтобы проверить критерии/веса и сохранить — фоновый скоринг начнёт использовать конфиг только после сохранения там.`,
           };
         } catch (e) {
           return { error: `Не удалось извлечь конфиг: ${e.message}` };
@@ -1024,9 +1038,9 @@ module.exports = {
           if (!ats_config) {
             const legacy = readContext('hh', 'ats_config')?.value;
             if (legacy?.vacancy_id && legacy.vacancy_id !== vacancy_id) {
-              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а оцениваем «${vacancy_id}». Сохрани конфиг для этой вакансии через context_set("hh","ats_config:${vacancy_id}", ...) или вызови hh_extract_ats_config заново.` };
+              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а оцениваем «${vacancy_id}». Вызови hh_extract_ats_config и сохрани для этой вакансии через /hh/ats-editor (hh_open_ats_editor).` };
             }
-            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config:${vacancy_id}",...).` };
+            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config, затем проверь и сохрани его в /hh/ats-editor (ссылка есть в ответе hh_extract_ats_config).` };
           }
         }
         // Guard: context_set sometimes stores value as JSON string instead of object
@@ -1151,7 +1165,7 @@ module.exports = {
           const reviewToken = agentSecret
             ? require('crypto').createHmac('sha256', agentSecret).update(USER_ID).digest('hex').slice(0, 16)
             : '';
-          const reviewUrl = `${agentBase}/hh/review?username=${encodeURIComponent(USER_ID)}&token=${reviewToken}`;
+          const reviewUrl = `${agentBase}/hh/review?username=${encodeURIComponent(USER_ID)}&token=${reviewToken}&vacancy_id=${encodeURIComponent(vacancy_id)}`;
 
           const telegram_summary = await formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, apiKey);
 
@@ -1210,9 +1224,9 @@ module.exports = {
           if (!ats_config) {
             const legacy = readContext('hh', 'ats_config')?.value;
             if (legacy?.vacancy_id && legacy.vacancy_id !== vacancy_id) {
-              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а обновляем сообщения для «${vacancy_id}». Сохрани конфиг для этой вакансии через context_set("hh","ats_config:${vacancy_id}", ...) или вызови hh_extract_ats_config заново.` };
+              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а обновляем сообщения для «${vacancy_id}». Вызови hh_extract_ats_config и сохрани для этой вакансии через /hh/ats-editor (hh_open_ats_editor).` };
             }
-            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config:${vacancy_id}",...).` };
+            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config, затем проверь и сохрани его в /hh/ats-editor (ссылка есть в ответе hh_extract_ats_config).` };
           }
         }
         if (typeof ats_config === 'string') {
@@ -1515,7 +1529,11 @@ module.exports = {
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
         const agentBase = (process.env.AGENT_PUBLIC_URL || 'http://localhost:3001').replace(/\/$/, '');
-        const url = `${agentBase}/hh/ats-editor?username=${encodeURIComponent(USER_ID)}`;
+        const agentSecret = process.env.AGENT_SECRET || '';
+        const editorToken = agentSecret
+          ? require('crypto').createHmac('sha256', agentSecret).update(USER_ID).digest('hex').slice(0, 16)
+          : '';
+        const url = `${agentBase}/hh/ats-editor?username=${encodeURIComponent(USER_ID)}&token=${editorToken}`;
         return {
           ok: true,
           url,
