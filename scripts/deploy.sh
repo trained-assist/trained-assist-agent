@@ -139,6 +139,18 @@ chown -R vova:vova "$DATA_DIR" 2>/dev/null || true
 # Leftovers of the retired drain gate — nothing reads them any more.
 rm -f "$DATA_DIR/maintenance.json.drain" "$DATA_DIR/maintenance.json.recipients" 2>/dev/null || true
 
+echo "==> Ensuring trained-assist-hh-skill sibling checkout exists (feeds the HH skill fallback in src/mcp-action.js)..."
+HH_SKILL_DIR="$(dirname "$REPO_DIR")/trained-assist-hh-skill"
+if [ ! -d "$HH_SKILL_DIR/.git" ]; then
+  HH_SKILL_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's#/trained-assist-agent\(\.git\)\?$#/trained-assist-hh-skill.git#')
+  echo "  Cloning $HH_SKILL_DIR..."
+  git clone --quiet "$HH_SKILL_URL" "$HH_SKILL_DIR" || echo "  ⚠️  clone failed — hh skill fallback will be unavailable until fixed"
+else
+  git -C "$HH_SKILL_DIR" fetch --quiet origin main 2>/dev/null &&
+    git -C "$HH_SKILL_DIR" reset --quiet --hard origin/main 2>/dev/null ||
+    echo "  ⚠️  update failed — keeping existing checkout"
+fi
+
 echo "==> Applying OpenCode profile..."
 bash "$REPO_DIR/infra/opencode-switch-profile.sh" || echo "opencode-switch-profile: skipped (jq missing or no profile set)"
 
@@ -188,6 +200,9 @@ if [ "$HEALTHY" = "0" ]; then
   false
 fi
 trap - ERR
+
+echo "==> HH skill extraction parity smoke test (informational, does not block deploy)..."
+node "$REPO_DIR/scripts/hh-extraction-parity-smoke.js" || echo "  ⚠️  parity smoke test failed — see output above; HH skill fallback may be degraded"
 
 echo "==> Installing disk-hygiene crons..."
 if [ -x "$REPO_DIR/ops/cron/install.sh" ]; then
