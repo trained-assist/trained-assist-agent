@@ -24,10 +24,14 @@ function proactiveHmac(username) {
   return createHmac('sha256', secret).update(username).digest('hex').slice(0, 16);
 }
 
-function proactiveUrl(username) {
+// `vacancyId` is a plain, non-HMAC'd query param appended alongside the token — same
+// pattern as hhReviewUrl (src/hh-quick.js) — so the tab switcher can deep-link into
+// the right tab. Omitted (falsy) → no param, unchanged for single-vacancy callers.
+function proactiveUrl(username, vacancyId) {
   const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
   const token = proactiveHmac(username);
-  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
+  const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
+  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
 }
 
 function latestProactiveFile(username) {
@@ -82,7 +86,9 @@ module.exports = {
             proactiveUrl: proactiveUrl(userId),
             notifyChat: buildNotifyChat(userId),
           });
-          const url = proactiveUrl(userId);
+          // vacancy_id is only known after runProactiveSearch resolves it — rebuild
+          // the URL with it so the chat-facing link opens directly on the right tab.
+          const url = proactiveUrl(userId, result.vacancy_id);
           const digest = (result.new_count > 0)
             ? `\n🆕 Из них новых (не показывались ранее): ${result.new_count}.`
             : (result.first_run ? `\n(первый прогон — все ${result.count} считаются новыми)` : `\nНовых с прошлого прогона: 0.`);

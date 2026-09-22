@@ -276,11 +276,16 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
   }
 
   // Compute the HMAC-signed proactive page URL for a user — same logic as inside the
-  // request handler but needed at module level for the scheduler.
-  function buildProactiveUrlForScheduler(username) {
+  // request handler but needed at module level for the scheduler. `vacancyId` is a
+  // plain, non-HMAC'd query param (same pattern as hhReviewUrl) — omitted here because
+  // the scheduler builds this URL before runProactiveSearch resolves which vacancy it's
+  // running for; runProactiveSearch itself appends vacancy_id once vacancyKey is known
+  // (see the notifyChat block in hh-proactive-search.js).
+  function buildProactiveUrlForScheduler(username, vacancyId) {
     const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
     const token = createHmac('sha256', process.env.AGENT_SECRET || '').update(username).digest('hex').slice(0, 16);
-    return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
+    const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
+    return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
   }
 
   // Periodic proactive HH search scheduler.

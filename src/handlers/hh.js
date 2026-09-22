@@ -50,11 +50,16 @@ function proactiveHmac(uname) {
 
 // Signed URL to the recruiter's proactive results page. Was referenced in server.js
 // but never defined there — /api/hh/proactive/search always 500'd. Defined here
-// (same scheme as 92-hh-proactive.js / hh-autoscan.js proactiveUrlFor).
-function proactiveUrl(username) {
+// (same scheme as 92-hh-proactive.js / hh-autoscan.js proactiveUrlFor). `vacancyId`
+// is a plain, non-HMAC'd query param appended alongside the token — same pattern as
+// hhReviewUrl in hh-quick.js — so multi-vacancy step 7's tab switcher can deep-link
+// straight into the right tab. Omitted (falsy) → no param, unchanged for
+// single-vacancy callers.
+function proactiveUrl(username, vacancyId) {
   const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
   const token = proactiveHmac(username);
-  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
+  const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
+  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
 }
 
 function latestProactiveFile(username) {
@@ -985,16 +990,26 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   let results;
   try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const { loadCandidateComments, loadAllCandidates } = require('../hh-proactive-search');
+  const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy } = require('../hh-proactive-search');
   const pageComments = loadCandidateComments(username);
+  // Multi-vacancy step 7/7: tab switcher, mirroring /hh/review's vacancy_id pattern.
+  const workDir = path.join(BASE_USERS_DIR, username);
+  const activeVacancies = readActiveVacancies(workDir);
+  const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
+  const vacancyId = activeVacancies.find(v => String(v.id) === requestedVacancyId)
+    ? requestedVacancyId
+    : (requestedVacancyId || '');
   // Render from the unified all-candidates store (search + manual, accumulated
   // across runs) rather than only the latest search-results snapshot — keeps the
   // rest of `results` (vacancy_title, stats, searched_at) from the snapshot.
+  // Records with no vacancy_ids (pre-step-7 data, or manually added with no active
+  // vacancy resolvable) are a wildcard and show up under every tab.
   const unified = Object.values(loadAllCandidates(username))
+    .filter(c => candidateMatchesVacancy(c, vacancyId))
     .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
   results.candidates = unified.length ? unified : (results.candidates || []);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments));
+  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments, { activeVacancies, vacancyId }));
 }
 
 if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
@@ -1202,7 +1217,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/import-seen') {
 if (req.method === 'POST' && url.pathname === '/api/hh/proactive/add-manual') {
   let body;
   try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-  const { username = '', token: givenToken = '', resume_url_or_id = '' } = body || {};
+  const { username = '', token: givenToken = '', resume_url_or_id = '', vacancy_id: requestedVacancyId = '' } = body || {};
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   if (!resume_url_or_id) return json(res, 400, { error: 'resume_url_or_id required' });
   try {
@@ -1224,7 +1239,15 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/add-manual') {
         throw e;
       }
     }
-    const record = addManualCandidate(username, resumeData);
+    // Tag with whichever vacancy is active for this profile — prefer the tab the
+    // recruiter was on (requestedVacancyId, sent by the page) and fall back to the
+    // profile's first active vacancy. If neither resolves, vacancy_ids stays []
+    // (wildcard — addManualCandidate's documented behavior for that case).
+    const activeVacancies = readActiveVacancies(path.join(BASE_USERS_DIR, username));
+    const vacancyId = (requestedVacancyId && activeVacancies.find(v => String(v.id) === String(requestedVacancyId)))
+      ? requestedVacancyId
+      : (activeVacancies[0]?.id || '');
+    const record = addManualCandidate(username, resumeData, vacancyId);
     return json(res, 200, { ok: true, candidate: record });
   } catch (e) {
     return json(res, 500, { error: e.message });
