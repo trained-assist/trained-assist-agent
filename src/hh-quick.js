@@ -118,6 +118,9 @@ async function hhFunnelStats(userId, workDir) {
 }
 
 // "новые отклики" / "кто откликнулся" / "покажи кандидатов"
+// Multi-vacancy step 4/6 (owner directive): Telegram never prints candidate names —
+// it's always a one-line count + a link to the /hh/review page (which has the vacancy
+// tab switcher from step 3). Only fetches the count (per_page=1), not full items.
 async function hhNewResponses(userId, workDir) {
   const token = readHhToken(userId);
   if (!token?.access_token) return null;
@@ -128,25 +131,14 @@ async function hhNewResponses(userId, workDir) {
   let data;
   try {
     data = await _cached(`responses:${userId}:${vacancy.id}`, () =>
-      hhFetch(`/negotiations/response?vacancy_id=${vacancy.id}&per_page=10&page=0`, token),
+      hhFetch(`/negotiations/response?vacancy_id=${vacancy.id}&per_page=1&page=0`, token),
     );
   } catch { return null; }
 
-  const items = data.items || [];
-  if (!items.length) return `💼 ${vacancy.title}\n\nНовых откликов нет.`;
+  const count = data.found || 0;
+  if (!count) return `💼 ${vacancy.title}\n\nНовых откликов нет.`;
 
-  const lines = items.map((neg, i) => {
-    const name = [neg.resume?.last_name, neg.resume?.first_name].filter(Boolean).join(' ') || 'Кандидат';
-    const title = neg.resume?.title ? ` — ${neg.resume.title}` : '';
-    const loc = neg.resume?.area?.name ? ` (${neg.resume.area.name})` : '';
-    return `${i + 1}. ${name}${title}${loc}`;
-  });
-
-  const more = data.found > items.length
-    ? `\n\n…ещё ${data.found - items.length}. Скажи «оцени кандидатов» — разберу всех.`
-    : '';
-
-  return `💼 ${vacancy.title} — новые отклики (${data.found}):\n\n${lines.join('\n')}${more}`;
+  return `💼 ${vacancy.title} — новых откликов: ${count}. Смотри и оценивай здесь: ${hhReviewUrl(userId, vacancy.id)}`;
 }
 
 // HH_PLATFORM_URL overrides AGENT_PUBLIC_URL for HH-specific pages (review, ATS editor).
@@ -172,11 +164,19 @@ function hhAtsEditor(userId) {
   return `🎯 Candidate Funnel Editor:\n${hhBase()}/hh/ats-editor?username=${encodeURIComponent(userId)}${tokenParam}`;
 }
 
-// "покажи страницу ревью кандидатов" — no API call
-function hhReviewPage(userId) {
+// Bare /hh/review URL, optionally scoped to a vacancy (step 3's tab switcher handles
+// the rest when a profile tracks more than one). Shared by hhReviewPage() and
+// hhNewResponses() so both point at the same link-building logic.
+function hhReviewUrl(userId, vacancyId) {
   const token = hhReviewToken(userId);
   const tokenParam = token ? `&token=${token}` : '';
-  return `📋 Страница ревью кандидатов:\n${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}`;
+  const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
+  return `${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}${vacancyParam}`;
+}
+
+// "покажи страницу ревью кандидатов" — no API call
+function hhReviewPage(userId, vacancyId) {
+  return `📋 Страница ревью кандидатов:\n${hhReviewUrl(userId, vacancyId)}`;
 }
 
 // "где промпт / конфиг / настройки ATS воронки"
@@ -527,7 +527,7 @@ async function hhBatchEvaluate(userId, workDir) { return null; }
 async function hhManualScan(userId, workDir) { return null; }
 
 module.exports = {
-  hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage,
+  hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhReviewUrl,
   hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus,
   hhSendPreview, hhSendConfirm, hhSendCancel,
   hhRejectDryRun, hhRejectConfirm, hhRejectCancel,

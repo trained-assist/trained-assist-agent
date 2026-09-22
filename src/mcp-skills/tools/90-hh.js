@@ -174,6 +174,11 @@ function parseLlmJson(content) {
 
 // ── Telegram batch formatter ────────────────────────────────────────────────
 
+// Multi-vacancy step 4/6 (owner directive): Telegram never prints candidate names —
+// one line of aggregate counts, then a link to the review page (its vacancy tab
+// switcher from step 3 handles browsing). apiKey param kept for call-site compat but
+// no longer used — the old catch-path LLM fallback used to format a per-candidate
+// list from raw results, which would have re-introduced the exact thing this fixes.
 async function formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, apiKey) {
   try {
     const total = results.length;
@@ -181,42 +186,14 @@ async function formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, ap
     const review = results.filter(r => r.verdict === 'УТОЧНИТЬ').length;
     const reject = results.filter(r => r.verdict === 'ОТКЛОНИТЬ').length;
 
-    const topCandidates = results
-      .filter(r => r.verdict !== 'ОТКЛОНИТЬ' && r.score != null)
-      .sort((a, b) => (b.score || 0) - (a.score || 0))
-      .slice(0, 5);
-
-    const topLines = topCandidates.map(c => {
-      const skills = (c.matched || []).slice(0, 3).join(', ');
-      const scoreStr = c.score != null ? `${c.score}/10` : '—';
-      return `• *${c.name}* — ${scoreStr}${skills ? ` (${skills})` : ''}`;
-    }).join('\n');
-
     const title = (vacancyTitle || 'Вакансия').replace(/[*_`[\]]/g, '');
-    let text = `📋 *Ревью: ${title}* (${total} кандидатов)\n\n`;
-    text += `✅ Пропустить: ${pass}\n`;
-    text += `⚠️ Уточнить: ${review}\n`;
-    text += `❌ Отклонить: ${reject}\n`;
-    if (topLines) {
-      text += `\nТоп кандидаты:\n${topLines}\n`;
-    }
+    let text = `📋 *Ревью: ${title}* (${total} кандидатов) — ✅ ${pass} ⚠️ ${review} ❌ ${reject}`;
     if (reviewUrl) {
       text += `\n[Открыть страницу ревью →](${reviewUrl})`;
     }
     return text;
-  } catch (e) {
-    if (!apiKey) return `Ревью: ${results.length} кандидатов`;
-    try {
-      return await llmCall(
-        apiKey,
-        FAST_MODEL,
-        [{ role: 'user', content: 'Форматируй для Telegram: ' + JSON.stringify(results.slice(0, 5)) }],
-        500,
-        0.1,
-      );
-    } catch {
-      return `Ревью: ${results.length} кандидатов`;
-    }
+  } catch {
+    return `Ревью: ${results.length} кандидатов`;
   }
 }
 
@@ -1151,7 +1128,7 @@ module.exports = {
           const reviewToken = agentSecret
             ? require('crypto').createHmac('sha256', agentSecret).update(USER_ID).digest('hex').slice(0, 16)
             : '';
-          const reviewUrl = `${agentBase}/hh/review?username=${encodeURIComponent(USER_ID)}&token=${reviewToken}`;
+          const reviewUrl = `${agentBase}/hh/review?username=${encodeURIComponent(USER_ID)}&token=${reviewToken}&vacancy_id=${encodeURIComponent(vacancy_id)}`;
 
           const telegram_summary = await formatBatchResultForTelegram(results, vacancyTitle, reviewUrl, apiKey);
 
