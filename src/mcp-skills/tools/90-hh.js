@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, loadBaseOverride } = require('../../hh-message-prompts');
+const { readAtsConfig: readAtsConfigForVacancy } = require('../../hh-scoring');
 
 const USER_ID = process.env.USER_ID || '';
 
@@ -769,7 +770,7 @@ module.exports = {
             ok: true,
             config,
             note: activeVacancy?.id
-              ? `Проверь конфиг и сохрани через context_set("hh","ats_config", <config>) — привязан к активной вакансии «${activeVacancy.title}». Можешь скорректировать веса и пороги.`
+              ? `Проверь конфиг и сохрани через context_set("hh","ats_config:${activeVacancy.id}", <config>) — привязан к вакансии «${activeVacancy.title}». Так конфиг не перепутается с конфигами других отслеживаемых вакансий. Можешь скорректировать веса и пороги.`
               : 'Проверь конфиг и передай его в hh_evaluate_candidate. Активная вакансия не выбрана (hh_set_active_vacancy) — конфиг не будет привязан к вакансии, при переключении вакансий его не отличить от чужого.',
           };
         } catch (e) {
@@ -1015,15 +1016,17 @@ module.exports = {
           vacancy_id = ctx.value.id;
         }
 
-        // Resolve ats_config from context if not provided
+        // Resolve ats_config from context if not provided — per-vacancy key first
+        // (ats_config:{vacancy_id}, set via hh_extract_ats_config), legacy singleton
+        // as fallback for profiles that only ever tracked one vacancy.
         if (!ats_config) {
-          const ctx = readContext('hh', 'ats_config');
-          if (!ctx?.value) {
-            return { error: 'ATS конфиг не задан. Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config",...).' };
-          }
-          ats_config = ctx.value;
-          if (ats_config?.vacancy_id && ats_config.vacancy_id !== vacancy_id) {
-            return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${ats_config.vacancy_title || ats_config.vacancy_id}»), а оцениваем «${vacancy_id}». Вызови hh_extract_ats_config заново для текущей вакансии.` };
+          ats_config = readAtsConfigForVacancy(process.cwd(), vacancy_id);
+          if (!ats_config) {
+            const legacy = readContext('hh', 'ats_config')?.value;
+            if (legacy?.vacancy_id && legacy.vacancy_id !== vacancy_id) {
+              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а оцениваем «${vacancy_id}». Сохрани конфиг для этой вакансии через context_set("hh","ats_config:${vacancy_id}", ...) или вызови hh_extract_ats_config заново.` };
+            }
+            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config:${vacancy_id}",...).` };
           }
         }
         // Guard: context_set sometimes stores value as JSON string instead of object
@@ -1203,13 +1206,13 @@ module.exports = {
           vacancy_id = ctx.value.id;
         }
         if (!ats_config) {
-          const ctx = readContext('hh', 'ats_config');
-          if (!ctx?.value) {
-            return { error: 'ATS конфиг не задан. Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config",...).' };
-          }
-          ats_config = ctx.value;
-          if (ats_config?.vacancy_id && ats_config.vacancy_id !== vacancy_id) {
-            return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${ats_config.vacancy_title || ats_config.vacancy_id}»), а обновляем сообщения для «${vacancy_id}». Вызови hh_extract_ats_config заново для текущей вакансии.` };
+          ats_config = readAtsConfigForVacancy(process.cwd(), vacancy_id);
+          if (!ats_config) {
+            const legacy = readContext('hh', 'ats_config')?.value;
+            if (legacy?.vacancy_id && legacy.vacancy_id !== vacancy_id) {
+              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а обновляем сообщения для «${vacancy_id}». Сохрани конфиг для этой вакансии через context_set("hh","ats_config:${vacancy_id}", ...) или вызови hh_extract_ats_config заново.` };
+            }
+            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config:${vacancy_id}",...).` };
           }
         }
         if (typeof ats_config === 'string') {
@@ -1301,15 +1304,18 @@ module.exports = {
             type: 'array',
             description: 'Candidates array from hh_batch_evaluate results',
           },
+          vacancy_id: { type: 'string', description: 'Vacancy ID — picks the right per-vacancy ATS config for draft caching. Omit to use the active vacancy from context.' },
           vacancy_name: { type: 'string', description: 'Vacancy name for the page title' },
           vacancy_context: { type: 'string', description: 'Brief vacancy description for message generation context' },
           output_path: { type: 'string', description: 'Where to save the HTML file (default: ~/agent-data/hh-review-{timestamp}.html)' },
         },
         required: ['candidates', 'vacancy_name'],
       },
-      handler: async ({ candidates, vacancy_name, vacancy_context, output_path }) => {
+      handler: async ({ candidates, vacancy_id, vacancy_name, vacancy_context, output_path }) => {
         const apiKey = readOrKey(USER_ID);
-        const atsConfigCtx = readContext('hh', 'ats_config');
+        const resolvedVacancyId = vacancy_id || readContext('hh', 'active_vacancy')?.value?.id || null;
+        const atsConfig = resolvedVacancyId ? readAtsConfigForVacancy(process.cwd(), resolvedVacancyId) : readContext('hh', 'ats_config')?.value;
+        const atsConfigCtx = atsConfig ? { value: atsConfig } : null;
 
         const enriched = [];
         for (const c of candidates) {
