@@ -4,22 +4,34 @@
 
 ## Profiles
 
+Consolidated from 6 to 4 in issue #1061 — each profile is now a **ladder** of models per agent
+role (`build`/`plan`/`explore`/`general`/`review`), not one fixed model. `src/opencode-ladder.js`
+resolves the ladder per invocation, degrading to the next rung on quota/rate-limit errors and
+skipping rungs that need one-time manual account setup (e.g. Go "Global regions"). See
+`MODEL-LADDER.md` for the current rung order and the reasoning behind it.
+
 | Profile | Use case |
 |---------|----------|
-| `value` | Default — cheap and fast |
-| `quality` | When accuracy matters |
-| `free` | Zero cost |
-| `mimo` | Multimodal |
-| `russian-recruiter` | Russian recruiting tasks |
-| `lavish-luna` | OpenCode Go models (GPT-5.6 Luna, Kimi K3, GLM, Qwen) — needs `OPENCODE_GO_API_KEY` (GCP only, see below) |
+| `max` | Default — top rung is OpenCode Go (GPT-5.6/6 Astra family), degrades down to paid DeepSeek. Needs `OPENCODE_GO_API_KEY` (GCP only, see below) for its top rungs. |
+| `value` | Economical but not free — DeepSeek/GLM/Qwen ladder |
+| `free` | Zero cost — only `:free`-tier models, cycles through several |
+| `russian` | Russian-language tasks (recruiting and beyond) — GigaChat Pro/Ultra/Max ladder |
 
-Switch: `./infra/opencode-switch-profile.sh <profile>` (or set `OPENCODE_PROFILE` in `secrets.env`).
+The old `quality`/`mimo`/`lavish-luna`/`russian-recruiter` profiles were folded into `max`/`value`/
+`russian`'s ladders as rungs rather than staying standalone profiles — `/oc_quality` etc. now
+returns a redirect message instead of switching (see `OC_PROFILE_INTENT` in
+`src/runner/intent-engine.js`).
 
-## OpenCode Go credential (lavish-luna profile)
+Switch: `./infra/opencode-switch-profile.sh <profile>` (or set `OPENCODE_PROFILE` in `secrets.env`)
+sets the machine-wide baseline (first rung of each role) — actual per-task invocations resolve
+the full ladder via `src/opencode-ladder.js` and override this per-invocation. `/oc_<profile>`
+in Telegram switches per-profile instead (see `src/runner/intent-engine.js`).
+
+## OpenCode Go credential (max profile)
 
 `opencode/*` (Zen) and `opencode-go/*` (Go) are separate providers with separate billing —
-a Zen API key does NOT unlock Go models and vice versa. `lavish-luna.json` uses `opencode-go/*`,
-which needs a Go subscription service-account key.
+a Zen API key does NOT unlock Go models and vice versa. `max.json`'s top rungs use
+`opencode-go/*`, which needs a Go subscription service-account key.
 
 OpenCode has no env-var auth for either of these providers — only `opencode auth login`
 (interactive, browser OAuth) writes `~/.local/share/opencode/auth.json`, which doesn't work
