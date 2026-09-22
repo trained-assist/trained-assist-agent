@@ -14,7 +14,7 @@ const fs = require('fs');
 
 const { sendRejection } = require('../hh-rejection');
 const { hydrateResume, buildResumeText, resumeNotice } = require('../hh-resume');
-const { hhFetch, hhPut, hhPostForm, readHhToken, refreshHhToken } = require('../hh-utils');
+const { hhFetch, hhPut, hhPostForm, readHhToken, refreshHhToken, readActiveVacancies } = require('../hh-utils');
 const { bullshitGuard } = require('../hh-bullshit-guard');
 const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride, DEFAULT_MESSAGE_BASE } = require('../hh-message-prompts');
 const { hhInterviewConfigAllowsTime } = require('../hh-negotiations');
@@ -330,9 +330,9 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
 
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
   const workDir = path.join(BASE_USERS_DIR, username);
-  const vacancyCtxFile = path.join(workDir, 'contexts', 'hh', 'active_vacancy.json');
-  let vacancy = null;
-  try { vacancy = JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value; } catch {}
+  const activeVacancies = readActiveVacancies(workDir);
+  const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
+  const vacancy = activeVacancies.find(v => String(v.id) === requestedVacancyId) || activeVacancies[0] || null;
   if (!vacancy?.id) return errPage('Вакансия не выбрана. Скажи боту «мои вакансии» и выбери вакансию.');
 
   let negotiations = [], syncedAt = null;
@@ -355,7 +355,12 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
   } catch { /* non-critical */ }
 
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, { syncedAt, vacancyId: vacancy.id, lastScoredAt });
+  const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, {
+    syncedAt,
+    vacancyId: vacancy.id,
+    lastScoredAt,
+    vacancies: activeVacancies,
+  });
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
   return;
@@ -480,15 +485,17 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
     }
   }
   const { atsEditorHtml } = require('../hh-ats-editor-html.js');
+  const { readAtsConfig } = require('../hh-scoring');
   // Must match BASE_USERS_DIR — Claude writes contexts here via cwd
   const workDir = path.join(BASE_USERS_DIR, username);
   const contextBase = path.join(workDir, 'contexts');
-  const configFile = path.join(contextBase, 'hh', 'ats_config.json');
   const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
-  let currentConfig = null;
+  const activeVacancies = readActiveVacancies(workDir);
+  const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
+  const activeVacancy = activeVacancies.find(v => String(v.id) === requestedVacancyId) || activeVacancies[0] || null;
+  const currentConfig = readAtsConfig(workDir, activeVacancy?.id || null);
   let currentStages = null;
   try {
-    if (fs.existsSync(configFile)) currentConfig = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
     if (fs.existsSync(stagesFile)) currentStages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
   } catch {}
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
@@ -496,6 +503,8 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
     callbackBase,
     username,
     agentSecret: agentSecret || '',
+    vacancies: activeVacancies,
+    activeVacancyId: activeVacancy?.id || '',
   });
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   return res.end(html);
@@ -1225,16 +1234,14 @@ async function handleHhAuthed(req, url, res, ctx) {
 if (req.method === 'GET' && url.pathname === '/hh/ats-config') {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const username = url.searchParams.get('username') || '';
+  const vacancyId = url.searchParams.get('vacancy_id') || null;
   // Must match BASE_USERS_DIR so runHhScoringForUser can find the file
-  const contextBase = username
-    ? path.join(BASE_USERS_DIR, username, 'contexts')
-    : path.join(process.cwd(), 'contexts');
-  const configFile = path.join(contextBase, 'hh', 'ats_config.json');
-  const stagesFile = path.join(contextBase, 'hh', 'ats_stages.json');
-  let config = null;
+  const workDir = username ? path.join(BASE_USERS_DIR, username) : process.cwd();
+  const stagesFile = path.join(workDir, 'contexts', 'hh', 'ats_stages.json');
+  const { readAtsConfig } = require('../hh-scoring');
+  const config = readAtsConfig(workDir, vacancyId);
   let stages = null;
   try {
-    if (fs.existsSync(configFile)) config = JSON.parse(fs.readFileSync(configFile, 'utf8')).value;
     if (fs.existsSync(stagesFile)) stages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
   } catch {}
   return json(res, 200, { ok: true, config, stages });
@@ -1242,6 +1249,13 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-config') {
 
 if (req.method === 'POST' && url.pathname === '/hh/reset-ats-results') {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  // NOTE (multi-vacancy step 3/6, deliberately deferred): candidate history files
+  // (candidates/{neg_id}.json) don't record which vacancy they belong to, so this
+  // still resets ALL of a user's candidates across every tracked vacancy — "Re-run
+  // Funnel" on one vacancy's tab wipes another vacancy's scores too. Scoping this
+  // properly needs either stamping vacancy_id onto candidate history on write, or
+  // fetching the vacancy's negotiation ID set here before filtering. Out of scope for
+  // the tabs-only pass; flagging so it isn't mistaken for "already handled".
   const body = JSON.parse(await readBody(req));
   const { username } = body || {};
   if (!username) return json(res, 400, { error: 'username required' });
@@ -1273,7 +1287,7 @@ if (req.method === 'POST' && url.pathname === '/hh/reset-ats-results') {
 if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const body = JSON.parse(await readBody(req));
-  const { config, stages, username } = body || {};
+  const { config, stages, username, vacancy_id: vacancyId } = body || {};
   if (!config || typeof config !== 'object') return json(res, 400, { error: 'config required' });
   // Must match BASE_USERS_DIR so runHhScoringForUser can find the file
   const contextBase = username
@@ -1282,17 +1296,25 @@ if (req.method === 'POST' && url.pathname === '/hh/ats-config') {
   const hhContextDir = path.join(contextBase, 'hh');
   fs.mkdirSync(hhContextDir, { recursive: true });
   const now = new Date().toISOString();
+  // Once the editor knows which vacancy it's editing (multi-vacancy tabs), save under
+  // the per-vacancy key only — writing to the legacy singleton too would let whichever
+  // vacancy tab saves last silently clobber the others' config (same class of bug
+  // step 2/6 fixed for the background scoring read path; see hh-scoring.js readAtsConfig).
+  const configName = vacancyId ? `ats_config:${vacancyId}` : 'ats_config';
   fs.writeFileSync(
-    path.join(hhContextDir, 'ats_config.json'),
-    JSON.stringify({ value: config, updated_at: now }, null, 2),
+    path.join(hhContextDir, `${configName}.json`),
+    JSON.stringify({ value: { ...config, vacancy_id: vacancyId || config.vacancy_id }, updated_at: now }, null, 2),
   );
+  // Funnel stages stay a single global blob for now (deliberately deferred, like
+  // hh_generate_message tone context in PR #1067 — different vacancies commonly share
+  // the same interview stages; per-vacancy stages can follow if that stops being true).
   if (Array.isArray(stages)) {
     fs.writeFileSync(
       path.join(hhContextDir, 'ats_stages.json'),
       JSON.stringify({ value: stages, updated_at: now }, null, 2),
     );
   }
-  console.log(`[hh/ats-config] saved vacancy="${config.vacancy_title}" stages=${stages?.length || 0} user=${username || 'default'}`);
+  console.log(`[hh/ats-config] saved vacancy="${config.vacancy_title}" vacancy_id=${vacancyId || 'legacy'} stages=${stages?.length || 0} user=${username || 'default'}`);
   return json(res, 200, { ok: true });
 }
   return false;
