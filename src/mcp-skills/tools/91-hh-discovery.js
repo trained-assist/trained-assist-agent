@@ -46,7 +46,7 @@ const HH_CAPABILITIES = {
       { method: 'GET',  path: '/resumes/mine',                    note: 'Мои резюме' },
       { method: 'GET',  path: '/resumes/{id}',                    note: 'Получить резюме' },
       { method: 'GET',  path: '/employer/applicants',             note: 'База кандидатов (платная)' },
-      { method: 'GET',  path: '/resumes',                         note: 'ХОЛОДНЫЙ ПОИСК по базе резюме (платный доступ). ЕСТЬ готовый тул hh_search_resumes в 90-hh.js — используй его, а не собирай этот запрос вручную. Готча: text/area/professional_role/skill принимают несколько значений ТОЛЬКО как повторяющиеся query-параметры (?professional_role=70&professional_role=96), а не через запятую — запятая уходит как один невалидный id и HH вернёт 400.' },
+      { method: 'GET',  path: '/resumes',                         note: 'ХОЛОДНЫЙ ПОИСК по базе резюме — список релевантных профилей БЕЗ открытия контактов (платный доступ нужен только на шаге приглашения, не здесь). ЕСТЬ готовый тул hh_search_resumes в 90-hh.js — используй его, а не собирай этот запрос вручную. Готча: text/area/professional_role/skill принимают несколько значений ТОЛЬКО как повторяющиеся query-параметры (?professional_role=70&professional_role=96), а не через запятую — запятая уходит как один невалидный id и HH вернёт 400.' },
       { method: 'POST', path: '/negotiations/phone_interview',    note: 'Пригласить кандидата из базы резюме на вакансию (form-urlencoded: resume_id, vacancy_id, message, send_sms). Готовый тул: hh_invite_resume.' },
     ],
   },
