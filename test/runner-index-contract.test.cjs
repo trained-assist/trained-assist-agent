@@ -16,6 +16,7 @@ const REQUIRED_EXPORTS = [
   'clearPendingTask',
   'ensureSkillDir',
   'isTaskRunning',
+  'isSessionRunning',
   'extendTaskTimeout',
   'stopTask',
   'stopUserTask',
@@ -33,6 +34,17 @@ const path = require('path');
 const resolved = require.resolve('../src/runner');
 ok(resolved === path.join(__dirname, '..', 'src', 'runner', 'index.js'),
   `require('../src/runner') must resolve to src/runner/index.js, got ${resolved}`);
+
+// isSessionRunning: real in-process activeTimers check used by gtd-controller's
+// re-entrancy guard (replaced a pending-task-journal TTL heuristic that could age
+// out — 30min TTL vs runs legitimately taking up to 40min+ — and double-fire a
+// GTD session while it was still genuinely running).
+ok(runner.isSessionRunning('s-not-running') === false, 'isSessionRunning: false when nothing active');
+runner._activeTimers.set('someuser-gtd-s-active-123', { sessionId: 's-active', proc: {} });
+ok(runner.isSessionRunning('s-active') === true, 'isSessionRunning: true once the session has an active timer entry');
+ok(runner.isSessionRunning('s-other') === false, 'isSessionRunning: does not match a different sessionId');
+runner._activeTimers.delete('someuser-gtd-s-active-123');
+ok(runner.isSessionRunning('s-active') === false, 'isSessionRunning: false again after the entry is cleared');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

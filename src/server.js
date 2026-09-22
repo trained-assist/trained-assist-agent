@@ -241,14 +241,23 @@ const hhCtx = {
 // inject deps.
 function scheduleGtdController(secrets) {
   const gtd = require('./gtd-controller');
-  const { isTaskRunning } = require('./runner');
+  const { isSessionRunning } = require('./runner');
   const { getSession } = require('./session-store');
   const run = () => {
-    // Pending tasks older than 30 min are stale (normally cleaned on startup);
-    // don't let them block GTD indefinitely in case cleanup was skipped.
-    const GTD_TASK_TTL_MS = 30 * 60 * 1000;
+    // isSessionRunning checks the live in-process activeTimers map — authoritative,
+    // no TTL guesswork. The previous guard used the pending-task journal with a
+    // 30-min TTL fallback, but real Claude runs can legitimately take up to
+    // CLAUDE_TIMEOUT_MS (40min) plus extend-timeout calls (up to 2h+): any GTD
+    // turn running past 30 min aged out of that guard and could get double-fired
+    // by the next tick, burning an extra iteration/notification/GitHub-precheck
+    // on redundant queued work (chatLanes still serializes actual execution per
+    // session, so this was never concurrent corruption — just wasted iterations,
+    // which could exhaust maxIterations before the checklist was actually done).
+    // Restart recovery is a separate concern already owned by resumePendingTasks
+    // (runs at boot, well before the first GTD tick 2 min later), so this guard
+    // doesn't need its own crash-orphan fallback.
     return gtd.runDue({
-    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: (_username, sessionId) => getPendingTasks().some(p => p.sessionId === sessionId && Date.now() - (p.startedAt || 0) < GTD_TASK_TTL_MS), runTask, getSession,
+    secrets, baseUsersDir: BASE_USERS_DIR, isTaskRunning: (_username, sessionId) => isSessionRunning(sessionId), runTask, getSession,
     canRunSession: (_username, _sessionId) => true,
   }).catch(err => console.error('[gtd] tick error:', err.message));
   };

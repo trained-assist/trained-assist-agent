@@ -169,6 +169,8 @@ function formatToolActivity(name, input = {}) {
  * opts (all fields required unless noted):
  *   engine, taskId, chatId, thinkingStart, msgId (may be null),
  *   BOT_TOKEN, secrets, user, cleanEnv, userTokens, sessionFilePath,
+ *   sessionId (may be null for a brand-new session — stored on sessionState so
+ *   runner.isSessionRunning(sessionId) can detect a live run for re-entrancy guards),
  *   restartShutdown: () => boolean,
  *   activeTimers: Map (register sessionState so /stop and /restart can reach the proc),
  *   tgEdit, tgSend, outputCallback,
@@ -188,7 +190,7 @@ function formatToolActivity(name, input = {}) {
 async function runEngineProcess(opts) {
   const {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
-    cleanEnv, userTokens, sessionFilePath, restartShutdown, activeTimers,
+    cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
     ocProfileOverrides,
   } = opts;
@@ -467,7 +469,7 @@ async function runEngineProcess(opts) {
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
   let timedOut = false;
-  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId };
+  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId, sessionId };
   activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {
