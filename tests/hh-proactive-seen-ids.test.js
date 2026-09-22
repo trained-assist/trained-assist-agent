@@ -167,4 +167,32 @@ describe('buildProactiveDigest — Telegram message format', () => {
     expect(text).not.toContain('http');
     expect(text).toContain('15 новых');
   });
+
+  // Owner report (2026-09-22): the background scheduler used to stay silent on a
+  // "nothing found" run, which looked identical to "the scheduler is broken". The
+  // fix makes the scheduler always send this digest, so its wording must read fine
+  // at zero — both "no new candidates at all" and "new ones, none above threshold".
+  it('reads as a clean confirmation when zero candidates are new', () => {
+    const text = buildProactiveDigest({
+      vacancyTitle: 'Private Banking Sales',
+      newCount: 0,
+      totalNewCount: 0,
+      totalSeen: 467,
+      url: 'https://example/hh/proactive',
+    });
+    expect(text).toContain('🧊 Холодный поиск: 0 новых кандидатов');
+    expect(text).toContain('всего в базе: 467');
+  });
+
+  it('reports "0 above threshold out of N new" when the threshold filters everyone out', () => {
+    const text = buildProactiveDigest({
+      vacancyTitle: 'Private Banking Sales',
+      newCount: 0,
+      totalNewCount: 3,
+      totalSeen: 467,
+      threshold: 82,
+      url: 'https://example/hh/proactive',
+    });
+    expect(text).toContain('0 сильных кандидатов (≥82%) из 3 новых');
+  });
 });
