@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { readHhToken, hhFetch, hhPost } = require('./hh-utils');
+const { gcCall, llmCall, readGigachatKey, FALLBACK_MODEL } = require('./hh-scoring');
 
 const STATE_SKILL = 'hh';
 const STATE_KEY = 'vacancy_draft';
@@ -77,32 +78,32 @@ const VACANCY_PROMPT = `Ты HR-эксперт. Получи материалы 
 
 Верни ТОЛЬКО валидный JSON без markdown-оберток и без пояснений.`;
 
-async function generateVacancyFromMessages(workDir, messages, openrouterKey) {
-  if (!openrouterKey) throw new Error('OPENROUTER_API_KEY not available');
+async function generateVacancyFromMessages(workDir, messages, openrouterKey, username) {
+  const gigachatKey = username ? readGigachatKey(username) : null;
+  if (!gigachatKey && !openrouterKey) throw new Error('Neither GIGACHAT nor OPENROUTER credentials available');
 
   const combined = messages.map((m, i) => `[Блок ${i + 1}]\n${m}`).join('\n\n---\n\n');
   const userMessage = `Вот материалы по вакансии:\n\n${combined}\n\nСгенерируй структурированную вакансию в JSON.`;
+  const chatMessages = [
+    { role: 'system', content: VACANCY_PROMPT },
+    { role: 'user', content: userMessage },
+  ];
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${openrouterKey}`,
-    },
-    body: JSON.stringify({
-      model: 'anthropic/claude-sonnet-4-5',
-      max_tokens: 4096,
-      messages: [
-        { role: 'system', content: VACANCY_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
-    }),
-    signal: AbortSignal.timeout(60000),
-  });
-
-  if (!res.ok) throw new Error(`OpenRouter API ${res.status}`);
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content?.trim() || '';
+  // Primary: GigaChat-Ultra (Sber, near-free on the recruiting plan).
+  // Fallback: cheap OpenRouter model — never the Claude/Sonnet tier, that's what made
+  // vacancy generation the single most expensive OpenRouter call site (see 2026-09-22 cost audit).
+  let text;
+  if (gigachatKey) {
+    try {
+      text = (await gcCall(gigachatKey, chatMessages, 4096, 0.2, 'GigaChat-Ultra') || '').trim();
+    } catch (e) {
+      console.warn(`[hh-vacancy] GigaChat-Ultra failed: ${e.message}, falling back to OpenRouter`);
+    }
+  }
+  if (!text) {
+    if (!openrouterKey) throw new Error('GigaChat-Ultra failed and no OPENROUTER_API_KEY fallback available');
+    text = (await llmCall(openrouterKey, FALLBACK_MODEL, chatMessages, 4096, 0.2) || '').trim();
+  }
 
   // Strip possible markdown fences
   const jsonText = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();

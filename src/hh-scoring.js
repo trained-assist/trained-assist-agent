@@ -105,10 +105,10 @@ function gcGetToken(credentials) {
   });
 }
 
-async function gcCall(credentials, messages, maxTokens = 2000, temperature = 0.1) {
+async function gcCall(credentials, messages, maxTokens = 2000, temperature = 0.1, model = 'GigaChat') {
   const token = await gcGetToken(credentials);
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: 'GigaChat', messages, temperature, max_tokens: maxTokens });
+    const body = JSON.stringify({ model, messages, temperature, max_tokens: maxTokens });
     const req = https.request({
       hostname: 'gigachat.devices.sberbank.ru',
       path: '/api/v1/chat/completions',
@@ -510,6 +510,7 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
 }
 
 module.exports = {
+  FALLBACK_MODEL,
   llmCall,
   gcCall,
   parseLlmJson,
