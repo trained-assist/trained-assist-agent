@@ -166,6 +166,20 @@ function isPreQueueQuickIntent(task) {
     MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
     USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task);
 }
+// A slash command is an unambiguous, registry-backed user command — never fuzzy prose.
+function isSlashCommand(task) {
+  return /^\//.test(String(task || '').trim());
+}
+// forceClaude suppresses quick answers so free-form prose can't misfire on one of the
+// ~40 fuzzy INTENT regexes and get silently eaten. A slash command can't misfire, so the
+// flag must NOT apply to it. This matters beyond the normal path: server.js
+// resumePendingTasks() re-runs a task interrupted by a restart with forceClaude=true, so an
+// interrupted `/switch2klod` used to be replayed as a raw engine prompt and the LLM answered
+// «не распознал команду» instead of switching the engine (2026-09-22). Commands always get
+// their quick answer; only ambiguous prose obeys forceClaude.
+function shouldAttemptQuickAnswer(forceClaude, task) {
+  return !forceClaude || isSlashCommand(task);
+}
 // /get_webpass — PURE SELF-SERVICE for every user. Generates + reveals a fresh web password
 // for the CALLER'S OWN profile, writing it to ~/agent-tokens/<user>/.webpasswd (the SAME
 // store the site verifies against via POST /web/verify). This is the single fix for "the
@@ -1294,7 +1308,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   if (workDir && openrouterKey) {
     const vs = readVacancyState(workDir);
     if (vs?.status === 'generating' && vs.messages?.length > 0) {
-      const r = await generateVacancyFromMessages(workDir, vs.messages, openrouterKey).catch(e => {
+      const r = await generateVacancyFromMessages(workDir, vs.messages, openrouterKey, userId).catch(e => {
         console.error('[vacancy] generation error:', e.message);
         writeVacancyState(workDir, { ...vs, status: 'collecting' }); // rollback so user can retry
         return '⚠️ Ошибка при генерации вакансии. Попробуй ещё раз — скажи «всё» когда будешь готов.';
@@ -1488,6 +1502,8 @@ module.exports = {
   MODEL_INFO_INTENT,
   BUG_OR_FEATURE_INTENT,
   isPreQueueQuickIntent,
+  isSlashCommand,
+  shouldAttemptQuickAnswer,
   // Constants for runner.js _intents export
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,
