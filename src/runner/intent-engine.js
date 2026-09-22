@@ -71,7 +71,9 @@ const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|спо
 const GDRIVE_NOTIF_OFF_INTENT  = /\/gdrive_notif_off|\/google_drive_sharing_notifications_switch_off|выключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|отключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|не.{0,10}уведомля.{0,30}(?:гугл|google|drive|шаринг|файл)|без.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const GDRIVE_NOTIF_ON_INTENT   = /\/gdrive_notif_on|\/google_drive_sharing_notifications_switch_on|включи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|верн.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
-// /bug_or_feature — FAST capture: last messages + logs + note → GitHub issue, no Claude session.
+// /bug_or_feature — Bugs & Features intake entry point (BUGS-AND-FEATURES-SPEC §3.4):
+// opens a fresh session in the reserved bugs-and-features project; the gateway
+// accumulator collects the rest, ▶️ runs deep in it. No GitHub, no one-message capture.
 // Distinct from the older free-text BUG_REPORT_INTENT (line ~67) which spawns a full session.
 const BUG_OR_FEATURE_INTENT = /^\/(?:bug_or_feature|bug|feature|баг|фича|report|репорт)(?=\s|$)/i;
 // "Подробнее N" / "/session N" / "подробнее о 3" — expand one session from the last /sessions list
@@ -1159,35 +1161,11 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 }
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null) {
-  // /bug_or_feature — second step: if a report is awaiting the user's comment, the NEXT
-  // message IS that comment. Capture it and file the issue. Guards: a slash command
-  // cancels capture (don't bury a command as a note); "отмена" cancels explicitly;
-  // a stale flag (>30 min) is ignored so an unrelated later message isn't swallowed.
-  if (workDir) {
-    const ofPending = path.join(workDir, 'contexts', 'bugreport', `or-feature-pending-${chatId || 'default'}.json`);
-    try {
-      if (fs.existsSync(ofPending)) {
-        const p = JSON.parse(fs.readFileSync(ofPending, 'utf8') || '{}');
-        const ageMs = Date.now() - new Date(p.started_at || 0).getTime();
-        const fresh = ageMs >= 0 && ageMs < 30 * 60 * 1000;
-        const trimmed = task.trim();
-        if (!fresh || trimmed.startsWith('/')) {
-          fs.unlinkSync(ofPending); // stale, or a real command follows — drop capture, process normally
-        } else if (/^(отмена|отменить|отмени|cancel|отбой|не надо)$/i.test(trimmed)) {
-          fs.unlinkSync(ofPending);
-          return '❌ Отменил. Отчёт не отправлен.';
-        } else {
-          fs.unlinkSync(ofPending);
-          const { createBugReport } = require('../bug-report');
-          return await createBugReport({ workDir, chatId, userId, note: task });
-        }
-      }
-    } catch (e) {
-      console.warn('[bug_or_feature] pending-consume error:', e.message);
-    }
-  }
-
+// sessionId: the id the caller (gateway, via /run) has already committed to for this
+// chat turn — e.g. after a forceNew dispatch. BUG_OR_FEATURE_INTENT honors it (PR3) so
+// the session it creates is the SAME one the gateway's lastSessionId now points at,
+// instead of an orphan the next buffered message can never find its way back to.
+async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null) {
   // Session summaries (durable artifact) — handled here (async) so we can generate
   // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
   if (workDir) {
@@ -1239,25 +1217,37 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     }
   }
 
-  // /bug_or_feature — bundle last messages + logs + note into a GitHub issue (async).
-  // Bare invocation (no inline note) → ask the user what's wrong first, then the next
-  // message becomes the note (consumed at the top of runQuickAnswer). Inline note
-  // (`/bug_or_feature текст`) fires immediately — the comment is already there.
+  // /bug_or_feature — Bugs & Features intake (BUGS-AND-FEATURES-SPEC §3.4). NO GitHub, NO
+  // one-message capture: ensure the reserved `bugs-and-features` project, make it active,
+  // and open a FRESH session bound to it. The user then piles on as many messages / voice /
+  // screenshots as they want — the gateway accumulator holds them and ▶️ launches one deep
+  // run in THIS session (gateway side: PR3 forces a fresh sessionId for the command so this
+  // session's id matches what the gateway's lastSessionId now points at — otherwise the
+  // buffered follow-ups launch into whatever unrelated session the chat had before).
+  // Structuring into reports/<item>/ + index.jsonl is driven declaratively by the
+  // project's PROFILE.md, not by branches in this code.
   if (BUG_OR_FEATURE_INTENT.test(task)) {
-    const note = task.replace(BUG_OR_FEATURE_INTENT, '').trim();
-    if (!note && workDir) {
-      const ofPending = path.join(workDir, 'contexts', 'bugreport', `or-feature-pending-${chatId || 'default'}.json`);
-      fs.mkdirSync(path.dirname(ofPending), { recursive: true });
-      fs.writeFileSync(ofPending, JSON.stringify({ started_at: new Date().toISOString() }));
-      return [
-        '📝 Опиши, что случилось или что хочешь улучшить — одним сообщением.',
-        'Приложу к отчёту последние сообщения этой сессии и хвост логов.',
-        '',
-        '(Чтобы отменить — напиши «отмена».)',
+    if (!workDir) return null;
+    try {
+      const proj = projects.bugsProject(workDir);
+      projects.setActiveProjectId(workDir, proj.id, chatId);
+      const firstMessage = task.trim() || '/bug_or_feature';
+      // Only adopt the caller's sessionId when it's actually fresh (sessionExists=false) —
+      // never overwrite a real, already-existing session file.
+      const reuseId = (!sessionExists && sessionId) ? sessionId : undefined;
+      const sid = sessions.createSession(workDir, { task: firstMessage, chatId, projectId: proj.id, id: reuseId });
+      const greeting = [
+        '🐞✨ Проект «Bugs and Features».',
+        'Кидай что случилось или что хочешь — можно несколько сообщений, голосом, скриншотами.',
+        'Как закончишь — жми ▶️ Запустить проработку.',
+        'Всё интересное сложу в папку отчёта, оттуда заберёт сборщик.',
       ].join('\n');
+      sessions.appendReply(workDir, sid, greeting);
+      return greeting;
+    } catch (e) {
+      console.error('[bug_or_feature] intake error:', e.message);
+      return `⚠️ Не удалось завести сессию Bugs and Features: ${e.message}`;
     }
-    const { createBugReport } = require('../bug-report');
-    return await createBugReport({ workDir, chatId, userId, note });
   }
 
   // /usage klod, /usage codex — see CLI_USAGE_INTENT above.
@@ -1505,6 +1495,7 @@ module.exports = {
   PROJECT_INTENT,
   AGENT_INFO_INTENT,
   MODEL_INFO_INTENT,
+  BUG_OR_FEATURE_INTENT,
   isPreQueueQuickIntent,
   // Constants for runner.js _intents export
   HH_MY_VACANCIES_INTENT,
