@@ -81,11 +81,21 @@ function candidateCard(c, idx, existingComment) {
   const source = c.source === 'manual' ? 'manual' : 'search';
   const fullName = `${c.first_name || ''} ${c.last_name || ''}`.trim();
   const searchBlob = escHtml(`${fullName} ${c.title || ''}`.trim());
-  // #6: persistent "viewed" flag lives on the candidate record (all-candidates.json),
-  // so the page renders it from the same source the API reads.
-  const read = Boolean(c.read);
+  // Triage status (active/starred/archived) lives on the candidate record — missing
+  // status (legacy data) defaults to 'active', mirroring candidateStatusOf() in
+  // hh-proactive-search.js. Each state gets its own set of move-to actions; moving
+  // a card out of the tab it's currently rendered in removes it from view client-side.
+  const status = c.status === 'starred' ? 'starred' : c.status === 'archived' ? 'archived' : 'active';
+  const idAttr = escHtml(c.id);
+  const statusActions = status === 'active'
+    ? `<button class="btn-star" onclick="setStatus('${idAttr}','starred',this)">⭐ Выбрать</button>
+    <button class="btn-archive" onclick="setStatus('${idAttr}','archived',this)">🗄 В архив</button>`
+    : status === 'starred'
+    ? `<button class="btn-star btn-star-active" onclick="setStatus('${idAttr}','active',this)">★ Убрать из выбранных</button>
+    <button class="btn-archive" onclick="setStatus('${idAttr}','archived',this)">🗄 В архив</button>`
+    : `<button class="btn-restore" onclick="setStatus('${idAttr}','active',this)">↩ Вернуть в список</button>`;
 
-  return `<div class="card ${isNew ? 'card-new' : ''}${read ? ' card-read' : ''}" data-idx="${idx}" data-id="${escHtml(c.id)}" data-score="${Number(c.score || 0)}" data-tag="${escHtml(c.tag || '')}" data-source="${source}" data-read="${read ? 'true' : 'false'}" data-search="${searchBlob.toLowerCase()}">
+  return `<div class="card ${isNew ? 'card-new' : ''}" data-idx="${idx}" data-id="${idAttr}" data-score="${Number(c.score || 0)}" data-tag="${escHtml(c.tag || '')}" data-source="${source}" data-search="${searchBlob.toLowerCase()}">
   <div class="card-header">
     <div class="card-left">
       <a class="card-title" href="${escHtml(c.hh_url)}" target="_blank" rel="noopener">${escHtml(c.title)}</a>
@@ -99,10 +109,6 @@ function candidateCard(c, idx, existingComment) {
       </div>
     </div>
     <div class="card-right">
-      <label class="read-toggle" title="Отметить как просмотренное">
-        <input type="checkbox" ${read ? 'checked' : ''} onclick="markRead('${escHtml(c.id)}', this)">
-        ${read ? '☑ Просмотрено' : '☐ Просмотрено'}
-      </label>
       <span class="badge" style="background:${tagBadgeBg(c.tag)}">${escHtml(c.tag)} ${(Number(c.score) || 0).toFixed(1)}</span>
     </div>
   </div>
@@ -118,19 +124,20 @@ function candidateCard(c, idx, existingComment) {
   ${expRows ? `<details class="exp-details"><summary class="exp-toggle">Карьера</summary><ul class="exp-list">${expRows}</ul></details>` : ''}
 
   <div class="comment-row">
-    <textarea class="comment-box" placeholder="Комментарий (например: не из Новосибирска, без банковского опыта…)" rows="2" data-id="${escHtml(c.id)}">${commentText}</textarea>
-    <button class="btn-comment" onclick="saveComment('${escHtml(c.id)}', this)">Сохранить</button>
+    <textarea class="comment-box" placeholder="Комментарий (например: не из Новосибирска, без банковского опыта…)" rows="2" data-id="${idAttr}">${commentText}</textarea>
+    <button class="btn-comment" onclick="saveComment('${idAttr}', this)">Сохранить</button>
   </div>
 
   <div class="card-footer">
     <a class="btn-hh" href="${escHtml(c.hh_url)}" target="_blank" rel="noopener">Открыть резюме ↗</a>
-    <button class="btn-ai ${hasAi ? 'btn-ai-secondary' : ''}" onclick="openAiModal('${escHtml(c.id)}','${escHtml(c.title)}')">${hasAi ? 'Обновить AI оценку' : 'AI оценить'}</button>
+    <button class="btn-ai ${hasAi ? 'btn-ai-secondary' : ''}" onclick="openAiModal('${idAttr}','${escHtml(c.title)}')">${hasAi ? 'Обновить AI оценку' : 'AI оценить'}</button>
+    ${statusActions}
   </div>
 </div>`;
 }
 
 function generateProactivePageHtml(results, username, callbackBase, token, existingComments, opts = {}) {
-  const { activeVacancies = [], vacancyId = '' } = opts;
+  const { activeVacancies = [], vacancyId = '', listView = 'active', stateCounts = { active: 0, starred: 0, archived: 0 } } = opts;
   const candidates = results.candidates || [];
   const comments = existingComments || {};
   const searchedAt = results.searched_at
@@ -169,6 +176,9 @@ a:hover{text-decoration:underline}
 .vacancy-tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}
 .vacancy-tab{padding:6px 14px;border:1px solid #c7d2fe;border-radius:20px;font-size:13px;font-weight:600;text-decoration:none;color:#4f46e5;background:#eef2ff}
 .vacancy-tab.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+.state-tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}
+.state-tab{padding:6px 14px;border:1px solid #e2e8f0;border-radius:20px;font-size:13px;font-weight:600;text-decoration:none;color:#475569;background:#f1f5f9}
+.state-tab.active{background:#1e293b;color:#fff;border-color:#1e293b}
 .vacancy-title{font-size:1.05rem;font-weight:600;color:#1e293b}
 .searched-at{font-size:.78rem;color:#94a3b8;margin-top:2px}
 .ai-badge{display:inline-block;font-size:.72rem;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle}
@@ -185,8 +195,6 @@ a:hover{text-decoration:underline}
 /* Card */
 .card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:15px;margin-bottom:12px}
 .card-new{border-left:3px solid #2563eb}
-.card-read{opacity:.68;background:#f8fafc;border-color:#e2e8f0}
-.card-read:hover{opacity:.9}
 .badge-new{display:inline-block;background:#2563eb;color:#fff;border-radius:3px;padding:1px 5px;font-size:.68rem;font-weight:700;letter-spacing:.04em;vertical-align:middle;margin-right:3px}
 .card-badges-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
 .badge-found{display:inline-block;font-size:.72rem;color:#64748b;background:#f1f5f9;border-radius:4px;padding:1px 7px}
@@ -206,8 +214,6 @@ a:hover{text-decoration:underline}
 .salary{color:#16a34a;font-weight:500}
 .card-companies{font-size:.78rem;color:#94a3b8}
 .card-right{flex-shrink:0;padding-top:1px;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
-.read-toggle{font-size:.72rem;color:#64748b;cursor:pointer;user-select:none;white-space:nowrap;display:inline-flex;align-items:center;gap:4px}
-.read-toggle input{cursor:pointer}
 .badge{display:inline-block;color:#fff;border-radius:5px;padding:3px 9px;font-size:.75rem;font-weight:700;letter-spacing:.03em}
 
 /* Tags */
@@ -236,6 +242,13 @@ details[open] .exp-toggle::before{content:"▾ "}
 .btn-ai:hover{background:#ddd6fe}
 .btn-ai-secondary{background:#f8fafc;border-color:#e2e8f0;color:#64748b}
 .btn-ai-secondary:hover{background:#f1f5f9}
+.btn-star{background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;color:#92400e;font-weight:500}
+.btn-star:hover{background:#fef3c7}
+.btn-star-active{background:#fef3c7;border-color:#fcd34d}
+.btn-archive{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;color:#64748b;font-weight:500}
+.btn-archive:hover{background:#f1f5f9}
+.btn-restore{background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;color:#0369a1;font-weight:500}
+.btn-restore:hover{background:#e0f2fe}
 
 /* Import row */
 .import-row{margin-top:10px;padding-top:8px;border-top:1px solid #f1f5f9}
@@ -260,8 +273,6 @@ details[open] .exp-toggle::before{content:"▾ "}
 .btn-preset:hover{background:#e2e8f0}
 .btn-preset.active{background:#2563eb;color:#fff;border-color:#2563eb}
 .source-filter{font-size:.78rem;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px;color:#1e293b;background:#fff;font-family:inherit}
-.hide-read{display:flex;align-items:center;gap:5px;font-size:.78rem;color:#64748b;cursor:pointer;user-select:none;white-space:nowrap}
-.hide-read input{cursor:pointer}
 .filter-count{font-size:.8rem;color:#64748b;white-space:nowrap;margin-left:auto}
 
 /* Modal */
@@ -284,7 +295,6 @@ details[open] .exp-toggle::before{content:"▾ "}
   .vacancy-title,.stat strong{color:#e2e8f0}
   .stat{background:#0f172a;color:#94a3b8}
   .card{background:#1e293b;border-color:#334155}
-  .card-read{opacity:.68;background:#0f172a;border-color:#1e293b}
   .card-meta,.page-info{color:#94a3b8}
   .summary{background:#1a1f2e;border-left-color:#818cf8}
   .summary-why{color:#e2e8f0}
@@ -309,9 +319,14 @@ details[open] .exp-toggle::before{content:"▾ "}
   .btn-preset:hover{background:#334155}
   .btn-preset.active{background:#2563eb;color:#fff;border-color:#2563eb}
   .source-filter{background:#0f172a;border-color:#334155;color:#e2e8f0}
-  .hide-read,.read-toggle{color:#94a3b8}
   .filter-count,.score-filter-label{color:#94a3b8}
   .filter-bar{border-color:#334155}
+  .state-tab{background:#1e293b;border-color:#334155;color:#94a3b8}
+  .state-tab.active{background:#e2e8f0;color:#0f172a;border-color:#e2e8f0}
+  .btn-star{background:#1e1b0a;border-color:#78350f;color:#fbbf24}
+  .btn-star-active{background:#451a03;border-color:#92400e}
+  .btn-archive{background:#1e293b;border-color:#334155;color:#94a3b8}
+  .btn-restore{background:#0c1a2e;border-color:#1e40af;color:#93c5fd}
 }
 @media(max-width:600px){.card-header{flex-direction:column}.card-right{align-self:flex-end}.header-top{flex-direction:column}}
 </style>
@@ -323,6 +338,15 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
   const isActive = String(v.id) === String(vacancyId);
   return `<a class="vacancy-tab${isActive ? ' active' : ''}" href="${href}">${escHtml(v.title || v.id)}</a>`;
 }).join('')}</div>` : ''}
+  <div class="state-tabs">${[
+    ['active', 'Найдено'],
+    ['starred', '⭐ Выбрано'],
+    ['archived', '🗄 Архив'],
+  ].map(([key, label]) => {
+    const href = `${escHtml(callbackBase)}/hh/proactive?username=${escHtml(username)}&token=${escHtml(token)}${vacancyId ? `&vacancy_id=${escHtml(vacancyId)}` : ''}&list=${key}`;
+    const isActive = key === listView;
+    return `<a class="state-tab${isActive ? ' active' : ''}" href="${href}">${label} (${stateCounts[key] || 0})</a>`;
+  }).join('')}</div>
   <div class="header-top">
     <div>
       <div class="vacancy-title">
@@ -339,7 +363,7 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
     <div class="stat">PASS: <strong style="color:#16a34a">${passCount}</strong></div>
     ${reviewCount ? `<div class="stat">REVIEW: <strong style="color:#ca8a04">${reviewCount}</strong></div>` : ''}
     ${newCount ? `<div class="stat">Новых: <strong style="color:#2563eb">${newCount}</strong></div>` : ''}
-    <div class="stat">Топ: <strong>${candidates.length}</strong></div>
+    <div class="stat">${listView === 'active' ? 'Топ' : 'Показано'}: <strong>${candidates.length}</strong></div>
   </div>
   <div class="import-row">
     <button class="btn-import" onclick="toggleImport()">📥 Импорт просмотренных</button>
@@ -375,9 +399,6 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
       <option value="search">Найдены поиском</option>
       <option value="manual">Добавлены вручную</option>
     </select>
-    <label class="hide-read" title="Показать только непросмотренные">
-      <input id="hideRead" type="checkbox"> Скрыть просмотренные
-    </label>
     <span class="filter-count" id="filterCount"></span>
   </div>
 </div>
@@ -402,7 +423,10 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
 // hundreds of candidates, so a plain continuous scroll over the filtered set is
 // simpler and fine.
 const CARDS = ${cardsJson};
-const TOTAL = CARDS.length;
+// let, not const: setStatus() decrements this when a card moves out of the
+// current tab (starred/archived), so the "показано N из M" counter stays accurate
+// without a full page reload.
+let TOTAL = CARDS.length;
 const USERNAME = ${JSON.stringify(username)};
 const TOKEN = ${JSON.stringify(token)};
 const CALLBACK_BASE = ${JSON.stringify(callbackBase)};
@@ -418,9 +442,8 @@ function debounce(fn, ms) {
 }
 
 // Composite client-side filter (#5): name/title search + score floor + quick preset
-// (all/PASS/REVIEW/top-score) + optional source + hide-read (#6), all combined with
-// AND, no reload.
-function matchesFilters(el, nameQuery, minScore, preset, source, hideRead) {
+// (all/PASS/REVIEW/top-score) + optional source, all combined with AND, no reload.
+function matchesFilters(el, nameQuery, minScore, preset, source) {
   const score = parseFloat(el.dataset.score) || 0;
   const tag = el.dataset.tag || '';
   if (nameQuery) {
@@ -434,7 +457,6 @@ function matchesFilters(el, nameQuery, minScore, preset, source, hideRead) {
   if (preset === 'review' && tag !== 'REVIEW') return false;
   if (preset === 'top9' && score < 9) return false;
   if (source && el.dataset.source !== source) return false;
-  if (hideRead && el.dataset.read === 'true') return false;
   return true;
 }
 
@@ -442,11 +464,10 @@ function applyFilters() {
   const nameQuery = document.getElementById('nameSearch').value.trim().toLowerCase();
   const minScore = parseFloat(document.getElementById('scoreSlider').value) || 0;
   const source = document.getElementById('sourceFilter').value;
-  const hideRead = document.getElementById('hideRead').checked;
   const cards = document.querySelectorAll('#cards .card');
   let shown = 0;
   cards.forEach(el => {
-    const visible = matchesFilters(el, nameQuery, minScore, activePreset, source, hideRead);
+    const visible = matchesFilters(el, nameQuery, minScore, activePreset, source);
     el.style.display = visible ? '' : 'none';
     if (visible) shown++;
   });
@@ -467,7 +488,6 @@ function renderCards() {
 
 document.getElementById('nameSearch').addEventListener('input', applyFiltersDebounced);
 document.getElementById('sourceFilter').addEventListener('change', applyFilters);
-document.getElementById('hideRead').addEventListener('change', applyFilters);
 document.getElementById('scoreSlider').addEventListener('input', e => {
   document.getElementById('scoreSliderVal').textContent = parseFloat(e.target.value).toFixed(1);
   applyFiltersDebounced();
@@ -600,32 +620,33 @@ function toggleManualAdd() {
   panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
 }
 
-// #6: persistent "viewed" toggle. Visual feedback immediately (checkbox + label +
-// card dimming), then persist via the API; on error roll the checkbox back and show
-// the failure — no silent fail.
-async function markRead(candidateId, checkbox) {
-  const card = checkbox.closest('.card');
-  const label = checkbox.closest('.read-toggle');
-  const read = checkbox.checked;
-  const apply = (r) => {
-    checkbox.checked = r;
-    label.innerHTML = r ? '☑ Просмотрено' : '☐ Просмотрено';
-    card.classList.toggle('card-read', r);
-    card.dataset.read = r ? 'true' : 'false';
-  };
-  apply(read);
+// Move a candidate between active/starred/archived. Each tab only shows candidates
+// in its own state, so a successful transition means this card no longer belongs on
+// the current page — remove it from the DOM (and the live counter) instead of just
+// toggling a class. On failure, leave the card in place and surface the error.
+async function setStatus(candidateId, status, btn) {
+  const card = btn.closest('.card');
+  card.style.opacity = '.4';
+  btn.disabled = true;
   try {
-    const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/mark-read', {
+    const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/set-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, read }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, status }),
     });
     const data = await res.json();
-    if (data.error) { apply(!read); alert('Ошибка: ' + data.error); return; }
-    apply(data.read);
-    if (document.getElementById('hideRead').checked) applyFilters();
+    if (data.error) {
+      card.style.opacity = '';
+      btn.disabled = false;
+      alert('Ошибка: ' + data.error);
+      return;
+    }
+    card.remove();
+    TOTAL--;
+    applyFilters();
   } catch (e) {
-    apply(!read);
+    card.style.opacity = '';
+    btn.disabled = false;
     alert('Ошибка: ' + e.message);
   }
 }
