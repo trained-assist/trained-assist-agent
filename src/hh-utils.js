@@ -70,7 +70,11 @@ async function hhFetch(apiPath, token) {
       'HH-User-Agent': `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`,
     },
   });
-  if (!res.ok) throw new Error(`HH API ${res.status}: ${apiPath}`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail = data.description || data.errors?.map(e => e.value || e.type).join(', ') || '';
+    throw new Error(`HH API ${res.status}: ${apiPath}${detail ? ` — ${detail}` : ''}`);
+  }
   return res.json();
 }
 

@@ -803,10 +803,10 @@ module.exports = {
               : 'Пусто. Если ожидал результаты — проверь area/professional_role (id из /areas, /professional_roles через hh_discover) или ослабь фильтры.',
           };
         } catch (e) {
-          const msg = /403/.test(e.message)
-            ? 'Нет платного доступа к базе резюме на hh.ru (услуга не подключена или закончилась) — холодный поиск недоступен для этого аккаунта.'
-            : e.message;
-          return { error: msg };
+          // e.message now carries HH's own error detail (see hhFetch) — surface it
+          // instead of guessing "no paid access" for every 403, which could also mean
+          // a bad filter, missing scope, etc.
+          return { error: `Холодный поиск не выполнен: ${e.message}` };
         }
       },
     },
