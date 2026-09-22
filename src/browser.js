@@ -125,35 +125,49 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath
     '--storage-state', stateFile,
   ];
 
+  const mcpToolEnv = {
+    USER_ID: String(userId || ''),
+    WORK_DIR: workDir,
+    HOME: os.homedir(),
+    PATH: process.env.PATH || '',
+    // INN enrichment credentials — pass-through from process env (loaded via secrets.env)
+    ...(process.env.INN_DADATA_TOKEN  ? { INN_DADATA_TOKEN:       process.env.INN_DADATA_TOKEN }  : {}),
+    ...(process.env.INN_DADATA_SECRET ? { INN_DADATA_SECRET:      process.env.INN_DADATA_SECRET } : {}),
+    ...(process.env.INN_CHECKO_KEY    ? { INN_CHECKO_KEY:         process.env.INN_CHECKO_KEY }    : {}),
+    ...(process.env.INN_RUSPROFILE_COOKIE ? { INN_RUSPROFILE_COOKIE: process.env.INN_RUSPROFILE_COOKIE } : {}),
+    ...(process.env.GOOGLE_OAUTH_CLIENT_ID     ? { GOOGLE_OAUTH_CLIENT_ID:     process.env.GOOGLE_OAUTH_CLIENT_ID }     : {}),
+    ...(process.env.GOOGLE_OAUTH_CLIENT_SECRET ? { GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET } : {}),
+    ...(process.env.AGENT_PUBLIC_URL ? { AGENT_PUBLIC_URL: process.env.AGENT_PUBLIC_URL } : {}),
+    ...(process.env.AGENT_SECRET    ? { AGENT_SECRET:    process.env.AGENT_SECRET }    : {}),
+    ...(process.env.GCP_PROJECT     ? { GCP_PROJECT:     process.env.GCP_PROJECT }     : {}),
+    ...(process.env.GCP_REGION      ? { GCP_REGION:      process.env.GCP_REGION }      : {}),
+    ...(userName       ? { AGENT_USER_NAME:    userName }       : {}),
+    ...(userHandle     ? { AGENT_USER_HANDLE: userHandle }     : {}),
+    ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
+  };
+
   const config = {
     mcpServers: {
       playwright: { command: 'npx', args: playwrightArgs },
       'trained-skills': {
         command: 'node',
         args: [path.join(__dirname, 'mcp-skills', 'index.js')],
-        env: {
-          USER_ID: String(userId || ''),
-          WORK_DIR: workDir,
-          HOME: os.homedir(),
-          PATH: process.env.PATH || '',
-          // INN enrichment credentials — pass-through from process env (loaded via secrets.env)
-          ...(process.env.INN_DADATA_TOKEN  ? { INN_DADATA_TOKEN:       process.env.INN_DADATA_TOKEN }  : {}),
-          ...(process.env.INN_DADATA_SECRET ? { INN_DADATA_SECRET:      process.env.INN_DADATA_SECRET } : {}),
-          ...(process.env.INN_CHECKO_KEY    ? { INN_CHECKO_KEY:         process.env.INN_CHECKO_KEY }    : {}),
-          ...(process.env.INN_RUSPROFILE_COOKIE ? { INN_RUSPROFILE_COOKIE: process.env.INN_RUSPROFILE_COOKIE } : {}),
-          ...(process.env.GOOGLE_OAUTH_CLIENT_ID     ? { GOOGLE_OAUTH_CLIENT_ID:     process.env.GOOGLE_OAUTH_CLIENT_ID }     : {}),
-          ...(process.env.GOOGLE_OAUTH_CLIENT_SECRET ? { GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET } : {}),
-          ...(process.env.AGENT_PUBLIC_URL ? { AGENT_PUBLIC_URL: process.env.AGENT_PUBLIC_URL } : {}),
-          ...(process.env.AGENT_SECRET    ? { AGENT_SECRET:    process.env.AGENT_SECRET }    : {}),
-          ...(process.env.GCP_PROJECT     ? { GCP_PROJECT:     process.env.GCP_PROJECT }     : {}),
-          ...(process.env.GCP_REGION      ? { GCP_REGION:      process.env.GCP_REGION }      : {}),
-          ...(userName       ? { AGENT_USER_NAME:    userName }       : {}),
-          ...(userHandle     ? { AGENT_USER_HANDLE: userHandle }     : {}),
-          ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
-        },
+        env: mcpToolEnv,
       },
     },
   };
+
+  // HH skill was extracted into its own repo (issue #942) — its MCP server lives
+  // in a sibling checkout. Register it only when that checkout is present, so
+  // environments without the hh-skill repo cloned keep working unchanged.
+  const hhSkillIndex = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
+  if (fs.existsSync(hhSkillIndex)) {
+    config.mcpServers['hh-skills'] = {
+      command: 'node',
+      args: [hhSkillIndex],
+      env: mcpToolEnv,
+    };
+  }
 
   const configPath = path.join(workDir, '.mcp.json');
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
