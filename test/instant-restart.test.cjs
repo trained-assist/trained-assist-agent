@@ -38,14 +38,16 @@ test('SIGTERM handler flags the restart and exits without draining', () => {
 
 const { isTaskResumable } = require('../src/pending-task-resume');
 
-function resumeHarness({ pending, now = Date.now() }) {
+function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0 }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
-  const calls = [], runs = [], cleared = [];
+  const calls = [], runs = [], cleared = [], delays = [];
   const sandbox = {
     path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
-    BASE_USERS_DIR: '/users', AbortSignal, Promise, setTimeout: fn => { fn(); return 0; },
+    BASE_USERS_DIR: '/users', AbortSignal, Promise,
+    setTimeout: (fn, ms) => { delays.push(ms); fn(); return 0; },
     process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
+    getRetryDelayMs: attempt => retryDelayMs(attempt),
     getPendingTasks: () => pending,
     clearPendingTask: id => cleared.push(id),
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
@@ -53,7 +55,7 @@ function resumeHarness({ pending, now = Date.now() }) {
   };
   vm.createContext(sandbox);
   vm.runInContext(`${serverSrc.slice(start, end)}; this.resume = resumePendingTasks;`, sandbox);
-  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, now };
+  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, delays, now };
 }
 
 const task = (over = {}) => ({ taskId: 'alice-1', username: 'alice', userId: 42, task: 'work', initialMsgId: 7,
@@ -80,14 +82,32 @@ test('a task that already exhausted MAX_RESUME_ATTEMPTS across restarts is not r
   assert.match(h.calls[0].body.text, /сбой сервера/);
 });
 
-test('codex/opencode tasks cannot resume: user is told, entry cleared', async () => {
+test('codex/opencode tasks resume the same way claude does, on their own engine', async () => {
   const h = resumeHarness({ pending: [task({ engine: 'codex' })] });
   await h.resume();
-  assert.equal(h.runs.length, 0);
-  assert.equal(h.calls.length, 1);
-  assert.match(h.calls[0].url, /editMessageText/);
-  assert.match(h.calls[0].body.text, /повтори запрос/);
+  assert.equal(h.runs.length, 1, 'codex must resume, not dead-end on "no resume capability"');
+  assert.equal(h.runs[0].engine, 'codex', 'resume must keep the original engine, not fall back to claude');
+  assert.equal(h.runs[0].resumedAfterRestart, true);
+  assert.deepEqual(h.calls, [], 'no Telegram message on a successful resume');
   assert.deepEqual(h.cleared, ['alice-1']);
+});
+
+test('opencode resume also exhausts MAX_RESUME_ATTEMPTS like claude (no special-cased dead-end)', async () => {
+  const h = resumeHarness({ pending: [task({ engine: 'opencode', resumeAttempts: 3 })] });
+  await h.resume();
+  assert.equal(h.runs.length, 0, 'must not fire a 4th resume attempt');
+  assert.deepEqual(h.cleared, ['alice-1']);
+  assert.equal(h.calls.length, 1);
+  assert.match(h.calls[0].body.text, /сбой сервера/);
+});
+
+test('resume waits out the shared backoff schedule before firing, per attempt number', async () => {
+  const seen = [];
+  const h = resumeHarness({ pending: [task({ resumeAttempts: 1 })], retryDelayMs: attempt => { seen.push(attempt); return 180_000; } });
+  await h.resume();
+  assert.deepEqual(seen, [2], 'attempt is resumeAttempts+1');
+  assert.ok(h.delays.includes(180_000), 'the computed backoff delay is actually passed to setTimeout');
+  assert.equal(h.runs.length, 1, 'fake setTimeout still runs the callback synchronously in tests');
 });
 
 test('a resumed task that fails to start tells the user', async () => {
@@ -99,6 +119,7 @@ test('a resumed task that fails to start tells the user', async () => {
   const sandbox = {
     path, console: { log() {}, error() {}, warn() {} }, BASE_USERS_DIR: '/users', AbortSignal, Promise,
     setTimeout: fn => { fn(); return 0; }, process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
+    getRetryDelayMs: () => 0,
     getPendingTasks: () => pending, clearPendingTask() {},
     fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return {}; },
     runTask: () => Promise.reject(new Error('boom')),

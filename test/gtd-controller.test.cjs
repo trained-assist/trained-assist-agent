@@ -213,9 +213,11 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
 
   // 15. runDue pins engine:'claude' on every fire — forceClaude alone does NOT force
   // the engine (it only widens context/skips quick-answers; engine selection falls
-  // back to the profile's default). A GTD record fired under codex/opencode can
-  // never resume after a server restart (those engines have no resume capability),
-  // permanently stranding the record open. Pinning engine explicitly closes that gap.
+  // back to the profile's default). GTD is unattended background work — pinning it to
+  // claude keeps it on the one engine whose behavior under a mid-run server restart is
+  // best understood, rather than inheriting whatever the user last picked interactively
+  // (server.js resumePendingTasks can now resume codex/opencode too, but that doesn't
+  // by itself make them the right default for an autonomous checklist loop).
   const wd7 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd7-'));
   const userDir7 = path.join(wd7, 'u');
   fs.mkdirSync(userDir7, { recursive: true });
