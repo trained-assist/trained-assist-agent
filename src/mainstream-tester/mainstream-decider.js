@@ -73,7 +73,7 @@ ${modeNote}
       Authorization: `Bearer ${openrouterKey}`,
     },
     body: JSON.stringify({
-      model: 'deepseek/deepseek-chat',
+      model: 'z-ai/glm-5.3-flash',
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 120,
 temperature: 0.4,
