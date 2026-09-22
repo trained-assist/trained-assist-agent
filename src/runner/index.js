@@ -48,6 +48,7 @@ const {
   PROJECT_INTENT,
   AGENT_INFO_INTENT,
   MODEL_INFO_INTENT,
+  BUG_OR_FEATURE_INTENT,
   isPreQueueQuickIntent,
   HH_MY_VACANCIES_INTENT,
   HH_FUNNEL_INTENT,
@@ -1441,7 +1442,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
       CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
       PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
-      MODEL_INFO_INTENT.test(task);
+      MODEL_INFO_INTENT.test(task) || BUG_OR_FEATURE_INTENT.test(task);
 
     if (!isUtility) {
       if (sessionExists) {
