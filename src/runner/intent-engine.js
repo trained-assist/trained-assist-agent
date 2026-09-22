@@ -1086,7 +1086,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
 }
 
 // Classify whether user wants to publish/generate the vacancy landing page.
-// Only called when regex misses AND a vacancy draft exists. Fast DeepSeek call.
+// Only called when regex misses AND a vacancy draft exists. Fast cheap-model call.
 async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
   const orKey = openrouterKey || process.env.OPENROUTER_API_KEY;
   if (!orKey) return false;
@@ -1095,7 +1095,7 @@ async function classifyVacancyPublishIntent(task, workDir, openrouterKey) {
 
   try {
     const body = JSON.stringify({
-      model: 'deepseek/deepseek-v4-flash-0731',
+      model: 'z-ai/glm-5.3-flash',
       messages: [
         {
           role: 'system',
@@ -1136,7 +1136,7 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
   if (!orKey || !answerPreview) return true;
   try {
     const body = JSON.stringify({
-      model: 'deepseek/deepseek-v4-flash-0731',
+      model: 'z-ai/glm-5.3-flash',
       messages: [
         {
           role: 'system',

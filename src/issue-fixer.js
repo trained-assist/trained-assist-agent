@@ -39,7 +39,7 @@ const REPO = process.env.ISSUE_FIXER_REPO || 'trained-assist/trained-assist-agen
 const AGENT_DATA_DIR = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
 const STATE_DIR = path.join(AGENT_DATA_DIR, 'issue-fixer');
 const STATE_PATH = path.join(STATE_DIR, 'state.json');
-const GATE_MODEL = process.env.ISSUE_FIXER_GATE_MODEL || 'deepseek/deepseek-chat';
+const GATE_MODEL = process.env.ISSUE_FIXER_GATE_MODEL || 'z-ai/glm-5.3-flash';
 
 // Labels this module creates and expects to already have a color the first time
 // it adds them to an issue (GitHub's "add labels" endpoint 404s on an unknown
