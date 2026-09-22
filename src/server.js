@@ -3,6 +3,7 @@ const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(r
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { isTaskResumable } = require('./pending-task-resume');
+const { getRetryDelayMs } = require('./retry-policy');
 const { refreshHhToken } = require('./hh-utils');
 const http = require('http');
 const https = require('https');
@@ -321,14 +322,6 @@ async function resumePendingTasks(secrets) {
     const attempt = (p.resumeAttempts || 0) + 1;
     console.log(`[resume] engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(p.task).slice(0, 60)}"`);
 
-    if (engine === 'codex' || engine === 'opencode') {
-      // These engines have no resume capability — the user has to re-send.
-      const label = engine === 'codex' ? 'Codex' : 'OpenCode';
-      await notifyFailure(p, `⚠️ Задача прервана перезапуском сервера.\n${label} не поддерживает автоматическое продолжение — повтори запрос.`);
-      clearPendingTask(p.taskId);
-      continue;
-    }
-
     if (attempt > MAX_RESUME_ATTEMPTS) {
       // The resume itself keeps failing across restarts (not just once) — this is a real,
       // repeatable break, not restart noise. Stop retrying and say so plainly.
@@ -338,16 +331,22 @@ async function resumePendingTasks(secrets) {
       continue;
     }
 
-    // Claude: silently re-run with the original session context.
+    // Silently re-run with the original session context, on the same engine the task was
+    // running on (claude/opencode/codex all take the same path — none of the three CLIs use a
+    // native --resume flag here, buildEngineCommand always sends a single --print/exec prompt,
+    // so "resume" just means re-invoking runTask with the same task/session, which every engine
+    // handles identically). Delayed via retry-policy's shared backoff schedule so a deploy
+    // flurry (several restarts in quick succession) gets a chance to settle before we retry,
+    // instead of hammering the same failure immediately on every restart.
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
       profileId: p.profileId, telegramUserId: p.telegramUserId,
     };
-    runTask({
+    const fireResume = () => runTask({
       taskId: `${p.username}-resume-${Date.now()}`,
       user, task: p.task, context: p.context || null,
-      engine: 'claude', sessionId: p.sessionId || null,
+      engine, sessionId: p.sessionId || null,
       contextFromSession: p.contextFromSession || null,
       forceClaude: true, projectId: p.projectId || null,
       initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
@@ -360,8 +359,12 @@ async function resumePendingTasks(secrets) {
       console.error(`[resume] user=${p.username} error:`, err.message);
       if (!p.internalGtd) notifyFailure(p, '⚠️ Не удалось продолжить задачу после перезапуска. Повтори запрос.');
     });
-    // runTask journals the new task id synchronously; drop the old entry now, otherwise
-    // the next restart within the window would re-run this task a second time.
+    const delayMs = getRetryDelayMs(attempt) || 0;
+    if (delayMs > 0) setTimeout(fireResume, delayMs);
+    else fireResume();
+    // runTask journals the new task id once fireResume() actually runs; drop the old entry
+    // now regardless, otherwise the next restart within the window would re-run this task
+    // a second time while the delayed attempt is still pending.
     clearPendingTask(p.taskId);
     await new Promise(r => setTimeout(r, 200)); // stagger multiple resumes
   }
