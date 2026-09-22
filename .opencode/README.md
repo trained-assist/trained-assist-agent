@@ -11,8 +11,24 @@
 | `free` | Zero cost |
 | `mimo` | Multimodal |
 | `russian-recruiter` | Russian recruiting tasks |
+| `lavish-luna` | OpenCode Go models (GPT-5.6 Luna, Kimi K3, GLM, Qwen) — needs `OPENCODE_GO_API_KEY` (GCP only, see below) |
 
 Switch: `./infra/opencode-switch-profile.sh <profile>` (or set `OPENCODE_PROFILE` in `secrets.env`).
+
+## OpenCode Go credential (lavish-luna profile)
+
+`opencode/*` (Zen) and `opencode-go/*` (Go) are separate providers with separate billing —
+a Zen API key does NOT unlock Go models and vice versa. `lavish-luna.json` uses `opencode-go/*`,
+which needs a Go subscription service-account key.
+
+OpenCode has no env-var auth for either of these providers — only `opencode auth login`
+(interactive, browser OAuth) writes `~/.local/share/opencode/auth.json`, which doesn't work
+on a headless VM. Instead, `infra/opencode-switch-profile.sh` writes that file directly from
+the `OPENCODE_GO_API_KEY` secret (see `infra/env-manifest.json`) on every deploy, merging it
+with whatever auth.json already has so other providers' credentials survive.
+
+Get the key from opencode.ai → Go-Subscription → create a service account (not the personal
+OAuth key — that one is tied to interactive login and isn't meant for automation).
 
 ## MCP in OpenCode
 
