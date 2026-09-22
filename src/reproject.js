@@ -405,11 +405,96 @@ function renderReport(plan) {
 
 // ── Apply / revert (reversible) ───────────────────────────────────────────────
 
+// Top-level files that belong to the PROJECT ITSELF (identity/config), never to an
+// individual session — these stay put when a project's artifacts are merged elsewhere.
+const PROJECT_META_FILES = new Set(['project.json', 'PROFILE.md', 'agent-project-notes.md']);
+
+function listFilesRecursive(dir, base = dir) {
+  let out = [];
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    if (dir === base && PROJECT_META_FILES.has(e.name)) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) out = out.concat(listFilesRecursive(full, base));
+    else out.push(full);
+  }
+  return out;
+}
+
+function pruneEmptyDirs(dir, base = dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.isDirectory()) pruneEmptyDirs(path.join(dir, e.name), base);
+  }
+  if (dir === base) return;
+  try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* ignore */ }
+}
+
+// A project's artifacts (interviews/, applylink/, site/, data/, criteria.md, …) live
+// under its own projects/<id>/ folder, keyed by cwd — not by session. So relocating a
+// SESSION only makes sense without breaking links when the project it's leaving is
+// fully vacated (every one of its sessions moved) to exactly one destination: only then
+// do we know the whole artifact tree should follow. Partial moves / fan-out to several
+// destinations are left untouched and reported as a warning — merging file trees blind
+// risks silently scattering a shared artifact folder across unrelated projects.
+function planFolderMoves(profileRoot, index, sessionMoves) {
+  const moveTo = new Map(sessionMoves.map(mv => [mv.id, mv.to]));
+  const finalProjectId = new Map(index.map(m => [m.id, moveTo.has(m.id) ? moveTo.get(m.id) : (m.projectId || null)]));
+  const remaining = new Map();
+  for (const pid of finalProjectId.values()) if (pid) remaining.set(pid, (remaining.get(pid) || 0) + 1);
+
+  const destsByFrom = new Map();
+  for (const mv of sessionMoves) {
+    if (!mv.from || mv.from === mv.to) continue;
+    if (!destsByFrom.has(mv.from)) destsByFrom.set(mv.from, new Set());
+    destsByFrom.get(mv.from).add(mv.to);
+  }
+
+  const folderMoves = [];
+  const warnings = [];
+  for (const [from, dests] of destsByFrom) {
+    if (remaining.get(from)) {
+      warnings.push(`Проект «${from}» не опустел (остались другие сессии) — артефакты (папки) остаются на месте, сессии просто перепривязаны.`);
+      continue;
+    }
+    if (dests.size > 1) {
+      warnings.push(`Сессии проекта «${from}» разъехались по ${dests.size} новым проектам — артефакты НЕ перенесены автоматически (неясно, куда), перенеси вручную при необходимости.`);
+      continue;
+    }
+    folderMoves.push({ from, to: [...dests][0] });
+  }
+  return { folderMoves, warnings };
+}
+
+// Physically merge one project's artifact files into another's, file-by-file (so a
+// partially-populated destination doesn't get clobbered). Conflicts (same relative path
+// already exists at destination) are left in place at the source and reported, never
+// overwritten. Returns the ledger entries needed to revert.
+function mergeProjectFolder(profileRoot, fromId, toId) {
+  const fromDir = projects.projectDir(profileRoot, fromId);
+  const toDir = projects.projectDir(profileRoot, toId);
+  const moved = [];
+  const conflicts = [];
+  for (const srcPath of listFilesRecursive(fromDir)) {
+    const rel = path.relative(fromDir, srcPath);
+    const destPath = path.join(toDir, rel);
+    if (fs.existsSync(destPath)) {
+      conflicts.push(rel);
+      continue;
+    }
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.renameSync(srcPath, destPath);
+    moved.push({ from: srcPath, to: destPath });
+  }
+  pruneEmptyDirs(fromDir);
+  return { moved, conflicts };
+}
+
 // Re-tag sessions to their planned projects. Creates new projects as needed.
-// Writes a ledger of prior projectId per session so revertPlan() can undo.
-// NOTE: this re-tags projectId in the session index + session files. Moving
-// cwd-relative artifacts (interviews/ etc.) is a separate backfill step, left out
-// here on purpose — re-tagging is the reversible core; artifact moves come later.
+// Writes a ledger of prior projectId per session (and any physical folder moves) so
+// revertPlan() can undo everything — including moving artifact files back.
 function applyPlan(profileRoot, plan, { dryRun = true, now = Date.now() } = {}) {
   const index = readIndex(profileRoot);
   const byId = new Map(index.map(m => [m.id, m]));
@@ -455,12 +540,30 @@ function applyPlan(profileRoot, plan, { dryRun = true, now = Date.now() } = {}) 
     }
   }
 
+  // A vacated project's artifact folder (interviews/, applylink/, site/, data/, …)
+  // follows its sessions IF AND ONLY IF the whole project emptied out into one single
+  // destination — see planFolderMoves() for why partial/fan-out cases are skipped.
+  const { folderMoves: plannedFolderMoves, warnings: folderWarnings } = planFolderMoves(profileRoot, index, ledger.moves);
+  ledger.folderMoves = [];
+  for (const fm of plannedFolderMoves) {
+    if (dryRun) {
+      actions.push({ kind: 'merge-folder', from: fm.from, to: fm.to, dryRun: true });
+      continue;
+    }
+    const { moved, conflicts } = mergeProjectFolder(profileRoot, fm.from, fm.to);
+    ledger.folderMoves.push(...moved);
+    actions.push({ kind: 'merge-folder', from: fm.from, to: fm.to, filesMoved: moved.length, conflicts });
+    if (conflicts.length) {
+      folderWarnings.push(`Проект «${fm.from}» → «${fm.to}»: ${conflicts.length} файл(ов) не перенесены — уже есть в «${fm.to}» с тем же именем (оставлены в «${fm.from}»).`);
+    }
+  }
+
   if (!dryRun) {
     atomicWrite(sessionIndexPath(profileRoot), JSON.stringify(index, null, 2));
     atomicWrite(ledgerPath(profileRoot), JSON.stringify(ledger, null, 2));
   }
 
-  return { dryRun, actions, moves: ledger.moves.length, ledgerWritten: !dryRun };
+  return { dryRun, actions, moves: ledger.moves.length, ledgerWritten: !dryRun, warnings: folderWarnings };
 }
 
 function revertPlan(profileRoot, { now = Date.now() } = {}) {
@@ -486,9 +589,22 @@ function revertPlan(profileRoot, { now = Date.now() } = {}) {
     } catch { /* best-effort */ }
   }
   atomicWrite(sessionIndexPath(profileRoot), JSON.stringify(index, null, 2));
+
+  // Move artifact files back to their original project folder.
+  let foldersReverted = 0;
+  for (const fm of (ledger.folderMoves || [])) {
+    try {
+      if (fs.existsSync(fm.to) && !fs.existsSync(fm.from)) {
+        fs.mkdirSync(path.dirname(fm.from), { recursive: true });
+        fs.renameSync(fm.to, fm.from);
+        foldersReverted++;
+      }
+    } catch { /* best-effort */ }
+  }
+
   // Consume the ledger so a double-revert can't re-apply.
   try { fs.renameSync(ledgerPath(profileRoot), `${ledgerPath(profileRoot)}.reverted-${now}`); } catch { /* ignore */ }
-  return { reverted: n };
+  return { reverted: n, foldersReverted };
 }
 
 // ── State persistence (iterative refinement across cycles/crashes) ────────────

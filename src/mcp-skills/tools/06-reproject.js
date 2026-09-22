@@ -145,7 +145,9 @@ module.exports = {
     reproject_apply: {
       description:
         'Применить ПОСЛЕДНИЙ предпросмотренный план (из reproject_preview): пере-привязать ' +
-        'сессии к проектам, создать новые проекты. Обратимо (пишет ledger). ' +
+        'сессии к проектам, создать новые проекты. Если старый проект целиком опустел в ОДИН ' +
+        'новый — переносит и его артефакты (interviews/, applylink/, site/, data/ и т.п.), ' +
+        'чтобы не потерять связи. Обратимо (пишет ledger, включая перенесённые файлы). ' +
         'Требует confirm:true. Без confirm возвращает сухой прогон (что будет сделано).',
       inputSchema: {
         type: 'object',
@@ -166,14 +168,17 @@ module.exports = {
         }
         try {
           const res = reproject.applyPlan(root, state.plan, { dryRun: !confirm, now: Date.now() });
+          const folderActions = res.actions.filter(a => a.kind === 'merge-folder');
           return {
             applied: !!confirm,
             dryRun: res.dryRun,
             sessionsMoved: res.moves,
             projectsAffected: state.plan.projects.length,
+            foldersMerged: folderActions,
+            warnings: res.warnings,
             ledgerWritten: res.ledgerWritten,
             hint: confirm
-              ? 'Готово и обратимо: reproject_revert() откатит.'
+              ? 'Готово и обратимо: reproject_revert() откатит (включая перенесённые файлы).'
               : 'Это сухой прогон. Вызови reproject_apply({confirm:true}) чтобы применить.',
           };
         } catch (e) {
