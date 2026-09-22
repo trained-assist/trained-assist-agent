@@ -75,6 +75,44 @@ const TYPES = {
       '- Классификация target/near-target и revenue-фильтры — через expo_* инструменты.\n' +
       '- Деплой: npx wrangler pages deploy deploy/<slug> --project-name <slug>.\n',
   },
+  bugs: {
+    label: 'Баги и фичи',
+    // Canonical id — one reserved project per profile (owner's voice: "создаётся сессия
+    // в папке Bugs and Features"), never a fresh id-<n> per report like other types.
+    id: 'bugs-and-features',
+    prefixes: [
+      'bugs', 'bug', 'баги', 'баг', 'фичи', 'фича', 'features', 'feature',
+      'bugs and features', 'bug and features',
+    ],
+    dirs: ['reports', '_processed', 'collector'],
+    seedFiles: {
+      'reports/README.md':
+        '# Контракт: reports/\n\n' +
+        'Одна папка на один инцидент/фичу: `reports/<YYYY-MM-DD>-<slug>/`.\n\n' +
+        '- `report.json` — `{id, kind:"bug"|"feature", title, summary, status:"open", severity, area, createdAt, sessionId, attachments:[]}`\n' +
+        '- `transcript.md` — сырые сообщения пользователя (текст + транскрипты голоса)\n' +
+        '- `attachments/` — скопированные скриншоты/фото/файлы\n' +
+        '- `evidence/` — логи/сниппеты\n\n' +
+        'На каждый отчёт обязательна одна строка в `../index.jsonl` (главный фид сборщика).\n',
+      'collector/README.md':
+        '# Контракт: как сборщик читает этот проект\n\n' +
+        'Сборщик — отдельный сервис (вне этого проекта), который:\n\n' +
+        '1. Читает `../index.jsonl` (append-only, 1 строка = 1 отчёт) с курсором.\n' +
+        '2. Берёт записи со `status:"open"`.\n' +
+        '3. Делает своё дело (дедуп/группировка/триаж/фикс-сессия).\n' +
+        '4. Помечает `status:"processed"` и/или переносит папку отчёта в `../_processed/`.\n\n' +
+        'Формат строки индекса: `{id, kind, title, dir, status, createdAt, sessionId}`.\n',
+    },
+    profile:
+      '# Домен проекта: Приём баг/фич\n\n' +
+      '- Ты — приёмщик багов и предложений. Вход — сессия из нескольких сообщений (текст, голос,\n' +
+      '  скриншоты), накопленных пользователем.\n' +
+      '- Классифицируй: баг или фича.\n' +
+      '- Для КАЖДОГО инцидента создай `reports/<дата>-<slug>/`: `report.json` (см. reports/README.md),\n' +
+      '  `transcript.md` (сырые сообщения), `attachments/` (скопируй вложения), `evidence/`.\n' +
+      '- Допиши одну строку в `index.jsonl` — это фид сборщика. Не создавай GitHub issues.\n' +
+      '- Ничего не удаляй; структурируй как считаешь полезным, «от души».\n',
+  },
   generic: {
     label: 'Проект',
     prefixes: ['project', 'проект'],
@@ -188,12 +226,20 @@ function createProject(workDir, input, { now = Date.now() } = {}) {
     : { type: input.type || 'generic', name: input.name || 'project' };
   const def = typeOf(parsed.type);
 
-  // Unique id: <type>-<slug>[-n]
-  const base = `${parsed.type}-${slugify(parsed.name)}`;
-  let id = base;
-  let n = 2;
-  // If a real project already lives at `id`, make a fresh sibling instead of colliding.
-  while (getProject(workDir, id)) id = `${base}-${n++}`;
+  // Singleton types (e.g. bugs -> bugs-and-features) declare a fixed canonical id: reuse
+  // the existing project instead of minting a sibling. Other types: <type>-<slug>[-n].
+  let id;
+  if (def.id) {
+    id = def.id;
+    const existing = getProject(workDir, id);
+    if (existing) return existing;
+  } else {
+    const base = `${parsed.type}-${slugify(parsed.name)}`;
+    id = base;
+    let n = 2;
+    // If a real project already lives at `id`, make a fresh sibling instead of colliding.
+    while (getProject(workDir, id)) id = `${base}-${n++}`;
+  }
 
   const dir = projectDir(workDir, id);
   fs.mkdirSync(dir, { recursive: true });
@@ -265,6 +311,15 @@ function archiveProject(workDir, id) {
   while (fs.existsSync(dest)) dest = path.join(archiveRoot, `${id}-${n++}`);
   fs.renameSync(dir, dest);
   return dest;
+}
+
+// Canonical "Bugs and Features" reserved project — finds the existing bugs-type project,
+// or creates the singleton if none exists yet. Idempotent; safe to call on every
+// /bug_or_feature invocation.
+function bugsProject(workDir, { now = Date.now() } = {}) {
+  const existing = listProjects(workDir).find(p => p.type === 'bugs');
+  if (existing) return existing;
+  return createProject(workDir, { type: 'bugs', name: TYPES.bugs.label }, { now });
 }
 
 // ── Active project per chat ─────────────────────────────────────────────────
@@ -339,6 +394,7 @@ module.exports = {
   listProjects,
   sortByUsage,
   createProject,
+  bugsProject,
   touchProject,
   getActiveProjectId,
   setActiveProjectId,
