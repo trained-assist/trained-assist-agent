@@ -425,6 +425,37 @@ describe('hh_batch_evaluate — reads vacancy_id and ats_config from context', (
     expect(r.error).toMatch(/друг(ой|ую|ая) вакансии/i);
     expect(r.error).toContain('vac-OLD');
   });
+
+  it('per-vacancy ats_config:{vacancy_id} is used even when the legacy singleton is for a different vacancy (multi-vacancy tracking)', async () => {
+    // Legacy singleton still points at a stale/different vacancy (as above)...
+    writeFileSync(join(ctxDir, 'contexts', 'hh', 'ats_config.json'), JSON.stringify({
+      value: { ...ATS, vacancy_id: 'vac-OLD', vacancy_title: undefined },
+      updated_at: new Date().toISOString(),
+    }));
+    // ...but a config namespaced to the active vacancy exists — this is what a
+    // recruiter tracking several vacancies concurrently saves via hh_extract_ats_config.
+    writeFileSync(join(ctxDir, 'contexts', 'hh', 'ats_config:vac-001.json'), JSON.stringify({
+      value: ATS,
+      updated_at: new Date().toISOString(),
+    }));
+
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true },
+      criteria: [{ name: 'Node.js', score: 3, evidence: '5 лет' }],
+      reasoning: 'Сильный.',
+    }));
+    mockOr(JSON.stringify({
+      knockout_failed: [],
+      filters_ok: { experience_years_ok: true },
+      criteria: [{ name: 'Node.js', score: 1, evidence: 'Go' }],
+      reasoning: 'Частичное.',
+    }));
+
+    const r = await tools().hh_batch_evaluate.handler({});
+    expect(r.error).toBeUndefined();
+    expect(r.evaluated).toBe(2);
+  });
 });
 
 // ── hh_send_message — history persistence ────────────────────────────────────

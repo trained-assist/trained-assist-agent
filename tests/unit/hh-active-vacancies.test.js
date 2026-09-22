@@ -156,3 +156,33 @@ describe('hh_deactivate_vacancy', () => {
     expect(r.error).toBeTruthy();
   });
 });
+
+describe('hh-utils.readActiveVacancies — shared resolver used by the background scoring loop', () => {
+  const { readActiveVacancies } = require('../../src/hh-utils.js');
+
+  it('returns active_vacancies[] when the profile has migrated to multi-vacancy tracking', async () => {
+    await tools.hh_set_active_vacancy.handler({ vacancy_id: DEFAULT_VACANCIES[0].id });
+    await tools.hh_set_active_vacancy.handler({ vacancy_id: DEFAULT_VACANCIES[1].id });
+
+    const list = readActiveVacancies(workDir);
+    expect(list).toHaveLength(2);
+    expect(list.map(v => v.id)).toEqual(expect.arrayContaining([DEFAULT_VACANCIES[0].id, DEFAULT_VACANCIES[1].id]));
+  });
+
+  it('falls back to the legacy singleton for profiles that never tracked a second vacancy', () => {
+    const hhCtxDir = join(workDir, 'contexts', 'hh');
+    mkdirSync(hhCtxDir, { recursive: true });
+    writeFileSync(join(hhCtxDir, 'active_vacancy.json'), JSON.stringify({
+      value: { id: 'vac-legacy-only', title: 'Legacy Vacancy' },
+      updated_at: new Date().toISOString(),
+    }));
+
+    const list = readActiveVacancies(workDir);
+    expect(list).toHaveLength(1);
+    expect(list[0].id).toBe('vac-legacy-only');
+  });
+
+  it('returns an empty array when no vacancy has ever been set', () => {
+    expect(readActiveVacancies(workDir)).toEqual([]);
+  });
+});
