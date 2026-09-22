@@ -1058,7 +1058,9 @@ ${recent || '(пока нет)'}
       return json(res, 200, { running: isTaskRunning(username) });
     }
 
-    // GET /projects?username=xxx — TYPED project list (projects.js), most-recent first.
+    // GET /projects?username=xxx — TYPED project list (projects.js), most-used first
+    // (session count desc, recency as tiebreaker — matches /project-decision's ordering
+    // so index-based lookups like tg-bot's pp:<i> stay in sync between the two endpoints).
     // Single source of truth: the on-disk projects/ folder. Replaces the old raw-subdir
     // listing (issue #517 convergence — no more folder-name picker).
     if (req.method === 'GET' && url.pathname === '/projects') {
@@ -1068,8 +1070,13 @@ ${recent || '(пока нет)'}
 
       const workDir = path.join(BASE_USERS_DIR, username);
       try {
-        const { listProjects } = require('./projects');
-        const projects = listProjects(workDir).map(p => ({
+        const { listProjects, sortByUsage } = require('./projects');
+        const sessions = require('./session-store');
+        const countByProject = {};
+        for (const s of sessions.listSessions(workDir, 1000)) {
+          if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
+        }
+        const projects = sortByUsage(listProjects(workDir), countByProject).map(p => ({
           id: p.id, name: p.name, type: p.type, label: p.label || p.name, lastAt: p.lastAt || 0,
         }));
         return json(res, 200, { projects });
@@ -1101,13 +1108,16 @@ ${recent || '(пока нет)'}
       try {
         const projects = require('./projects');
         const sessions = require('./session-store');
-        const d = projects.decideNewSessionProject(workDir, chatId);
-        const out = { action: d.action, active: d.active || null };
 
-        // Session counts per project (metadata read, cheap) — shown in the picker.
-        const allSess = (d.action === 'create') ? [] : sessions.listSessions(workDir, 1000);
+        // Session counts per project (metadata read, cheap) — computed up front so
+        // decideNewSessionProject can order choices by usage (most-used first), not
+        // just by recency.
+        const allSess = sessions.listSessions(workDir, 1000);
         const countByProject = {};
         for (const s of allSess) if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
+
+        const d = projects.decideNewSessionProject(workDir, chatId, countByProject);
+        const out = { action: d.action, active: d.active || null };
 
         // Data gap fix: a project's 3-sense summary used to be generated ONLY in the
         // sessions-list intent for the ACTIVE project, so at picker time most projects
