@@ -924,7 +924,14 @@ async function runProactiveSearch(username, workDir, options = {}) {
   // module stays Telegram-free — easier to test, and the same mergeSeenIds works
   // for cron-driven and ad-hoc runs alike.
   const notifyChat = typeof options.notifyChat === 'function' ? options.notifyChat : null;
-  if (notifyChat && seenInfo.newCount > 0) {
+  // options.alwaysNotify (set by the 30-min background scheduler in hh-negotiations.js,
+  // NOT by the on-demand hh_proactive_search tool) means: send a confirmation even when
+  // zero candidates qualify. The scheduler is the recruiter's only signal that an
+  // unattended run happened at all — going silent on "0 new" or "all below threshold"
+  // looked identical to "the scheduler is broken" (owner report, 2026-09-22). The
+  // on-demand tool already reports 0-results in its own chat reply, so it keeps the
+  // old skip-when-nothing-qualifies behavior to avoid a duplicate message.
+  if (notifyChat && (options.alwaysNotify || seenInfo.newCount > 0)) {
     const allNewCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
     // Recruiter-configurable noise filter (schedule.notify_threshold, 0-100, default 0 =
     // no filter, set via hh_proactive_schedule action=enable). Without it every run pings
@@ -938,7 +945,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
     const newCandidates = notifyThreshold > 0
       ? allNewCandidates.filter(c => (c.score_pct ?? 0) >= notifyThreshold)
       : allNewCandidates;
-    if (newCandidates.length > 0) {
+    if (newCandidates.length > 0 || options.alwaysNotify) {
       // options.proactiveUrl is built by the caller BEFORE vacancyKey is resolved here
       // (it doesn't know which vacancy will run yet), so append vacancy_id at this end
       // instead of asking every caller to guess it in advance.
