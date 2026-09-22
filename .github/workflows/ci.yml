@@ -192,7 +192,12 @@ jobs:
           [ $EXIT -eq 0 ] && echo "sha=$(gh pr view '${{ github.event.pull_request.html_url }}' --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
           exit $EXIT
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A commit pushed with the default GITHUB_TOKEN can't trigger a new
+          # workflow run (GitHub's recursion guard) — the synchronize event it
+          # fires lands stuck in "action_required" with zero jobs, so the
+          # update-branch recovery above never gets a fresh CI run and the PR
+          # hangs forever. Use a real PAT so the resulting run executes normally.
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT || secrets.GITHUB_TOKEN }}
 
   # Runs after PR auto-merge OR on direct push to main (e.g. GitHub UI squash-merge).
   # always() lets the job run even when `merge` was skipped (merge only runs on PRs).
