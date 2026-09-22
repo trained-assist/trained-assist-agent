@@ -364,52 +364,9 @@ describe('POST /hh/reject', () => {
   });
 });
 
-// ── generateReviewHtml — callback URL in page source ────────────────────────
-// Verify hh_draft_review_page writes a file with callback URLs embedded.
-// We do this by reading the 90-hh.js source and checking the template strings.
-
-describe('generateReviewHtml source — callback embedding', () => {
-  it('90-hh.js source embeds callbackBase/username/agentSecret template vars', async () => {
-    const { readFileSync } = await import('fs');
-    const { join: pathJoin } = await import('path');
-    const src = readFileSync(
-      pathJoin(fileURLToPath(import.meta.url), '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
-      'utf8',
-    );
-
-    // The JS in the generated page must embed these three variables
-    expect(src).toContain("const CALLBACK_BASE = '${callbackBase}';");
-    expect(src).toContain("const HH_USER = '${username}';");
-    expect(src).toContain("const HH_SECRET = '${agentSecret}';");
-  });
-
-  it('90-hh.js source calls /hh/send and /hh/reject endpoints', async () => {
-    const { readFileSync } = await import('fs');
-    const { join: pathJoin } = await import('path');
-    const src = readFileSync(
-      pathJoin(fileURLToPath(import.meta.url), '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
-      'utf8',
-    );
-
-    expect(src).toContain("'/hh/send'");
-    expect(src).toContain("'/hh/reject'");
-    expect(src).toContain("'Authorization': 'Bearer ' + HH_SECRET");
-  });
-
-  it('hh_draft_review_page passes callbackBase from AGENT_PUBLIC_URL', async () => {
-    const { readFileSync } = await import('fs');
-    const { join: pathJoin } = await import('path');
-    const src = readFileSync(
-      pathJoin(fileURLToPath(import.meta.url), '..', '..', '..', 'src', 'mcp-skills', 'tools', '90-hh.js'),
-      'utf8',
-    );
-
-    // The handler must use AGENT_PUBLIC_URL to build callbackBase
-    expect(src).toContain('AGENT_PUBLIC_URL');
-    expect(src).toContain('callbackBase');
-  });
-});
-
+// generateReviewHtml source — callback URL embedding: this coverage now lives in
+// trained-assist-hh-skill/tests/unit/review-page-html-source.test.js (#942 step 11a —
+// 90-hh.js itself was extracted, so the file this test reads no longer exists here).
 
 describe('first-contact stage synchronization', () => {
   async function sendFirst({ prior = false, fail = false, id = 'neg-002' } = {}) {
