@@ -47,3 +47,22 @@ mkdir -p "$(dirname "$OUT")"
 jq -s '.[0] * .[1]' "$BASE" "$PROFILE_FILE" > "$OUT"
 
 echo "opencode profile → $PROFILE ($OUT)"
+
+# OpenCode has no env-var auth for its own Zen/Go providers (opencode/*, opencode-go/*) —
+# only `opencode auth login` (interactive, browser OAuth) writes ~/.local/share/opencode/auth.json.
+# For a headless VM, write the Go service-account key there directly instead, merging with
+# whatever auth.json already has so we never drop other providers' credentials.
+SECRETS="${SECRETS_ENV:-$HOME/secrets.env}"
+if [[ -f "$SECRETS" ]]; then
+  GO_KEY=$(grep '^OPENCODE_GO_API_KEY=' "$SECRETS" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+  if [[ -n "${GO_KEY:-}" ]]; then
+    AUTH_FILE="$HOME/.local/share/opencode/auth.json"
+    mkdir -p "$(dirname "$AUTH_FILE")"
+    EXISTING="{}"
+    [[ -f "$AUTH_FILE" ]] && EXISTING=$(cat "$AUTH_FILE")
+    echo "$EXISTING" | jq --arg key "$GO_KEY" '. * {"opencode-go": {"type": "api", "key": $key}}' > "$AUTH_FILE.tmp"
+    mv "$AUTH_FILE.tmp" "$AUTH_FILE"
+    chmod 600 "$AUTH_FILE"
+    echo "opencode-go credential written ($AUTH_FILE)"
+  fi
+fi
