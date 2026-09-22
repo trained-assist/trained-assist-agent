@@ -46,6 +46,18 @@ async function writeHhContext(workDir, skill, key, value) {
   );
 }
 
+// active_vacancies[]: profiles tracking several vacancies at once (see 90-hh.js
+// hh_set_active_vacancy). Falls back to the legacy singleton active_vacancy.json
+// for profiles that have never tracked a second vacancy — this is the single
+// source of truth for "which vacancies does this profile track", reused by both
+// the MCP tools and the background scoring loop so they can't drift apart.
+function readActiveVacancies(workDir) {
+  const list = readHhContext(workDir, 'hh', 'active_vacancies')?.value;
+  if (Array.isArray(list) && list.length) return list;
+  const legacy = readHhContext(workDir, 'hh', 'active_vacancy')?.value;
+  return legacy?.id ? [legacy] : [];
+}
+
 const HH_FETCH_TIMEOUT_MS = 15_000;
 
 // HH API via fetch (Node 18+). Respects HH_API_BASE_URL for test mocking.
@@ -161,4 +173,4 @@ async function hhPostForm(apiPath, token, fields) {
   return data;
 }
 
-module.exports = { readHhToken, readHhContext, writeHhContext, hhFetch, hhPost, hhPut, hhPostForm, hhTokenPath, refreshHhToken };
+module.exports = { readHhToken, readHhContext, writeHhContext, readActiveVacancies, hhFetch, hhPost, hhPut, hhPostForm, hhTokenPath, refreshHhToken };
