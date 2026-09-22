@@ -1707,6 +1707,20 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     try {
       ocProfileName = profiles.getOcProfile(user.workDir);
       ocProfileOverrides = opencodeLadder.buildOcProfileOverrides(ocProfileName);
+      // Фаза 4 (issue #1061): the ladder can degrade between two turns of the SAME
+      // session (a different task exhausted a rung in the meantime) — that's not the
+      // intra-task retry loop below (which already messages via degradeMsg), it's a
+      // silent swap the user would otherwise never see. Compare against the model
+      // recorded for this session's last turn and say so explicitly if it moved.
+      if (activeSessionId && ocProfileOverrides?.model) {
+        const prevModel = sessions.getLastOcModel(user.workDir, activeSessionId, 'build');
+        if (prevModel && prevModel !== ocProfileOverrides.model) {
+          const switchMsg = `ℹ️ Модель сменилась: ${prevModel} → ${ocProfileOverrides.model} (лестница профиля «${ocProfileName}» деградировала между сообщениями).`;
+          await tgSend(BOT_TOKEN, chatId, switchMsg).catch(() => {});
+          sessions.appendReply(user.workDir, activeSessionId, switchMsg);
+        }
+        sessions.setLastOcModel(user.workDir, activeSessionId, 'build', ocProfileOverrides.model);
+      }
     } catch (e) { console.warn('[runner] ocProfileOverrides:', e.message); }
   }
 

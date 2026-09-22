@@ -60,6 +60,27 @@ return a message pointing at `max`/`value`/`free`/`russian` instead
 (`src/runner/intent-engine.js: OC_PROFILE_INTENT`). `infra/opencode-switch-profile.sh` does the
 same for the shell-level equivalents (`m`/`q`/`ll` aliases).
 
+## Фаза 4 — mid-session model changes (issue #1061)
+
+The epic's item 11 asked to confirm, not assume, that OpenCode's `-s <session-id>` resume is
+unaffected by a ladder degradation between two turns of the same conversation. Checked by
+reading the invocation path (`buildEngineCommand` / `runEngineProcess` in
+`src/runner/claude-runner.js`): this codebase never passes `-s`/`--session` to `opencode run` for
+any engine (Claude, Codex, or OpenCode) — every turn is a fresh, stateless CLI invocation, and
+continuity across turns comes entirely from re-injecting the prior conversation into the prompt
+text (`sessions.buildContext` folded into `baseContext`/`sessionContext` in
+`src/runner/index.js`). There is no OpenCode-native session to desync, so the concern in item 11
+doesn't apply to how this system actually works — no further spike needed there.
+
+What *was* a real gap: the ladder resolver (`opencodeLadder.buildOcProfileOverrides`) re-resolves
+the `build`-role model fresh on every turn, so if a rung became exhausted between two messages of
+the same Telegram conversation (a different task burned it in the meantime), the model would
+silently change with no trace — unlike the intra-task retry loop below, which already sends a
+"pробую следующую ступень" message. Fixed: `session-store.js` now records the resolved `build`
+model per session (`getLastOcModel`/`setLastOcModel`), and `runner/index.js` compares it against
+the newly resolved model each turn, sending an explicit "ℹ️ Модель сменилась: X → Y" message (and
+logging it into the session transcript) when it differs.
+
 ## Updating this file
 
 Whenever a rung's order changes in `.opencode/profiles/*.json`, add or edit the relevant section
