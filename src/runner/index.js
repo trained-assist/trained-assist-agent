@@ -1925,7 +1925,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // setup, e.g. Go "Global regions" not enabled) mark the rung exhausted with no TTL and alert
   // the operator immediately instead — retrying other rungs won't fix a config problem, and
   // doing so anyway would burn through the whole ladder on every task until a human intervenes.
-  const preLadderText = claudeResult || fullOutput.text || result;
+  // codexErrorMsg (the turn.failed/error event's own message) is the most reliable source of
+  // the real provider error text — e.g. a 429/rate-limit body. Without it here, a crash that
+  // misses the quick-crash branch above falls back to our own generic "Работа прервана" text,
+  // which never mentions "rate limit"/"429"/"quota" — so classifyError() below always misses and
+  // the ladder never degrades, even though the raw error was a clean quota hit.
+  const preLadderText = codexErrorMsg || claudeResult || fullOutput.text || result;
   if (engine === 'opencode' && ocProfileName) {
     const verdict = opencodeLadder.recordFailure(ocProfileName, 'build', ocProfileOverrides?.model, preLadderText);
     if (verdict) {
@@ -1974,7 +1979,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // operator repair loop sees it either way. Claude and Codex additionally get ONE automatic
   // fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on repair;
   // engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
-  const authText = claudeResult || fullOutput.text || result;
+  // codexErrorMsg first for the same reason as preLadderText above: it's the real provider
+  // error text, not our own generic incomplete-task message, which never matches auth patterns.
+  const authText = codexErrorMsg || claudeResult || fullOutput.text || result;
   if (isAuthError(authText)) {
     const reason = detectReason(authText);
     setAuthFailedFlag({ reason, error_text: authText, engine });
