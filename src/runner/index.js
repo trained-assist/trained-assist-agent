@@ -1598,29 +1598,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   ].join('\n');
   const timeoutSection = `[Системное ограничение: у тебя 40 минут на задачу. На 38-й минуте ты получишь SIGTERM — это сигнал «заверши текущий шаг и выведи итоги». При длинных задачах сохраняй промежуточные результаты в файлы, чтобы можно было продолжить позже.]`;
 
-  // Bug report mode — inject instructions when user triggered /bugreport (flag persists until Claude clears it)
-  let bugReportSection = '';
-  if (user.workDir) {
-    const bugPendingPath = path.join(user.workDir, 'contexts', 'bugreport', 'pending.json');
-    if (fs.existsSync(bugPendingPath)) {
-      bugReportSection = [
-        '[РЕЖИМ БАГ-РЕПОРТ]',
-        'Пользователь хочет сообщить о баге или проблеме в боте-агенте.',
-        'Алгоритм:',
-        '1. Если описание проблемы уже есть (в текущем сообщении или в истории сессии выше) — сразу создай GitHub issue:',
-        `   gh issue create --repo trained-assist/trained-assist-agent --title "Bug: <краткое описание>" --body "<подробности + последние сообщения из истории как контекст>"`,
-        '   Добавь label: gh issue edit <номер> --add-label bug',
-        `   После создания issue: удали файл ${bugPendingPath} (это выключит режим баг-репорта)`,
-        '   Ответь пользователю только ссылкой на issue + одно предложение что там.',
-        '2. Если описания ещё нет — спроси: "Что случилось? Опиши проблему как можно подробнее — что делал, что ожидал, что получил."',
-        '   Не создавай issue пока нет описания.',
-        '',
-        'В body issue включи: описание проблемы, username пользователя, последние сообщения из истории сессии как контекст бага.',
-      ].join('\n');
-    }
-  }
+  // (Legacy /bugreport mode removed — bug reports now go through the `bugs-and-features`
+  //  project + cross-profile collector; no in-session GitHub issue creation. See intent-engine
+  //  BUG_OR_FEATURE_INTENT and src/bugs-collector.js.)
 
-  let baseContext = [timeoutSection, notesSection, projectNotesSection, reqLogSection, vacancyApiErrorSection, bugReportSection, artifactsSection].filter(Boolean).join('\n\n');
+  let baseContext = [timeoutSection, notesSection, projectNotesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   let prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;

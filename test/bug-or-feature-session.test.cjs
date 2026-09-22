@@ -46,6 +46,18 @@ const chatId = 'test-chat-1';
   const after = cur ? sessions.getSession(workDir, cur).messages.length : -1;
   ok(after === before, 'the follow-up does not append anything to the intake session on its own');
 
+  // ── Legacy alias: /bugreport resolves to the SAME intake, not the old pending flag ──
+  // The retired path armed contexts/bugreport/pending.json and let Claude file a GitHub
+  // issue from inside the user's session; it must be gone.
+  await new Promise(r => setTimeout(r, 5));
+  const legacyGreeting = await runQuickAnswer('/bugreport', 'testuser', workDir, null, true, chatId);
+  ok(/Bugs and Features/i.test(legacyGreeting), '/bugreport opens the Bugs and Features intake');
+  const legacyPending = path.join(workDir, 'contexts', 'bugreport', 'pending.json');
+  ok(!fs.existsSync(legacyPending), '/bugreport does NOT arm the legacy GitHub pending flag');
+  const curLegacy = sessions.getCurrentSessionId(workDir, chatId);
+  const sessLegacy = curLegacy ? sessions.getSession(workDir, curLegacy) : null;
+  ok(!!sessLegacy && sessLegacy.projectId === 'bugs-and-features', '/bugreport session is bound to the bugs project');
+
   // ── A second invocation starts a FRESH session (not the old one) ─────────────
   await new Promise(r => setTimeout(r, 5)); // createSession ids are ms-stamped
   await runQuickAnswer('/bug_or_feature', 'testuser', workDir, null, true, chatId);
