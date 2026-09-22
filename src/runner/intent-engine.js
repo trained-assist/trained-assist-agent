@@ -43,7 +43,6 @@ const {
 // Returns a string if the task matches, null otherwise.
 
 const STALE_PR_ALARM_INTENT = /Проверь PR #\d+: CI статус, конфликты/;
-const BUG_REPORT_INTENT     = /^\/bugreport\b|баг.{0,15}репорт|bug.{0,10}report|сообщи.{0,15}о.{0,10}(баг|проблем|ошибк)|создай.{0,15}issue|репорт.{0,10}бага|пожаловаться.{0,20}(бот|агент|баг)/i;
 const SETUP_INTENT          = /подключ|connect|настро|интегр|привяз|как.*добав|могу.*отправ|зайт|авториз|setup|подрубить/i;
 const INN_CAPABILITY_INTENT  = /(?:скил|skill|умееш|можешь|есть.{0,30}возможн|есть.{0,30}функц|есть.{0,30}инструм|что.{0,20}умееш).{0,80}(?:инн|огрн|компани|директор|выручк|реквизит)/i;
 // Only capability/question words, NOT action verbs (собери/собрать/найди → those are tasks, go to Claude)
@@ -74,8 +73,9 @@ const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,
 // /bug_or_feature — Bugs & Features intake entry point (BUGS-AND-FEATURES-SPEC §3.4):
 // opens a fresh session in the reserved bugs-and-features project; the gateway
 // accumulator collects the rest, ▶️ runs deep in it. No GitHub, no one-message capture.
-// Distinct from the older free-text BUG_REPORT_INTENT (line ~67) which spawns a full session.
-const BUG_OR_FEATURE_INTENT = /^\/(?:bug_or_feature|bug|feature|баг|фича|report|репорт)(?=\s|$)/i;
+// `/bugreport` (+ `/bug_report`) are legacy aliases and resolve to the SAME intake — the
+// old "arm a pending flag, let Claude file a GitHub issue in the user session" path is gone.
+const BUG_OR_FEATURE_INTENT = /^\/(?:bug_or_feature|bugreport|bug_report|bug|feature|баг|фича|report|репорт)(?=\s|$)/i;
 // "Подробнее N" / "/session N" / "подробнее о 3" — expand one session from the last /sessions list
 const SESSION_DETAIL_INTENT = /^\/(?:sessions?|диалог)\s*(\d{1,2})\b|^подробнее(?:\s+(?:о|про|по))?\s*(?:диалог[ае]?\s*|сесси[июя]\s*|№\s*)?(\d{1,2})\b|^(\d{1,2})\s*подробнее/i;
 const ILLUSTRATE_CAPABILITY_INTENT = /(?:умееш|можешь|есть.{0,30}(?:скил|инструм|возможн|функц)|что.{0,20}умееш).{0,80}(?:иллюстр|нарисова|рисовать|картинк|изображен|illustrat|draw|image.gen)/i;
@@ -608,15 +608,6 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       '',
       'Когда всё скинешь — скажи «всё».',
     ].join('\n');
-  }
-
-  // /bugreport — collect bug description and create GitHub issue
-  if (BUG_REPORT_INTENT.test(task)) {
-    if (!workDir) return null;
-    const bugPendingPath = path.join(workDir, 'contexts', 'bugreport', 'pending.json');
-    fs.mkdirSync(path.dirname(bugPendingPath), { recursive: true });
-    fs.writeFileSync(bugPendingPath, JSON.stringify({ started_at: new Date().toISOString() }));
-    return null; // let Claude handle with bug report context injected below
   }
 
   // /ping — liveness check
