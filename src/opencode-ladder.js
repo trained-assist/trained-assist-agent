@@ -137,8 +137,22 @@ function buildOcProfileOverrides(profileName, profilesDir) {
   };
 }
 
+// Forces the ladder to skip (profile, role, model) on the NEXT resolve, for a bounded window —
+// used by the unified crash-retry in runner/index.js to try a different model even when the
+// failure wasn't classified as quota/config (a bare crash tells us nothing about which provider
+// is at fault, so "try the other one" is a reasonable blind guess — the owner's own framing was
+// "если один то второй и наоборот"). Short TTL vs. the hours/days quota TTLs above, because this
+// isn't asserting the model IS actually rate-limited — just that this task's own retry schedule
+// (max ~13.5min: 30s+3min+10min) shouldn't hammer the same rung on every attempt.
+const RETRY_FORCE_TTL_MS = 15 * 60 * 1000;
+
+function forceAdvance(profile, role, model) {
+  if (!profile || !model) return;
+  markExhausted(profile, role, model, RETRY_FORCE_TTL_MS);
+}
+
 module.exports = {
-  ROLES, MAX_LADDER_ATTEMPTS, STATE_FILE,
+  ROLES, MAX_LADDER_ATTEMPTS, STATE_FILE, RETRY_FORCE_TTL_MS,
   classifyError, resolveModel, buildOcProfileOverrides,
-  markExhausted, clearExhausted, recordFailure,
+  markExhausted, clearExhausted, recordFailure, forceAdvance,
 };

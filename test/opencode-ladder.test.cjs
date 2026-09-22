@@ -141,3 +141,25 @@ test('MAX_LADDER_ATTEMPTS caps how many rungs a single task may burn through', (
   assert.equal(typeof mod.MAX_LADDER_ATTEMPTS, 'number');
   assert.ok(mod.MAX_LADDER_ATTEMPTS > 0 && mod.MAX_LADDER_ATTEMPTS < 20);
 });
+
+test('forceAdvance degrades to the next rung without any error classification (blind crash-retry alternation)', () => {
+  const { mod } = freshModule();
+  const ladder = { build: ['m1', 'm2'] };
+  assert.equal(mod.resolveModel({ ladder }, 'p', 'build'), 'm1');
+  mod.forceAdvance('p', 'build', 'm1');
+  assert.equal(mod.resolveModel({ ladder }, 'p', 'build'), 'm2', 'forceAdvance marks m1 exhausted even though no error text was classified');
+});
+
+test('forceAdvance is a bounded-TTL exhaustion (RETRY_FORCE_TTL_MS), not permanent', () => {
+  const { mod } = freshModule();
+  assert.equal(typeof mod.RETRY_FORCE_TTL_MS, 'number');
+  assert.ok(mod.RETRY_FORCE_TTL_MS > 0);
+});
+
+test('forceAdvance is a no-op when profile or model is missing', () => {
+  const { mod } = freshModule();
+  const ladder = { build: ['m1'] };
+  mod.forceAdvance(null, 'build', 'm1');
+  mod.forceAdvance('p', 'build', null);
+  assert.equal(mod.resolveModel({ ladder }, 'p', 'build'), 'm1', 'neither malformed call should have marked anything exhausted');
+});

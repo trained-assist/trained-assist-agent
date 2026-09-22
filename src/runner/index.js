@@ -1254,6 +1254,29 @@ function buildOcCapabilitiesBlock(secrets) {
   return lines.join('\n');
 }
 
+// Provider alternation for the unified crash-retry paths below (resume-after-restart and the
+// generic mid-task incomplete retry) — issue: owner asked for "another LLM provider on retry,
+// alternating" in addition to the plain backoff, not just on the existing quota/config-classified
+// path (opencodeLadder.recordFailure / opencodeGoToggle.noteFailure further down, which only
+// fire when the error text matches a known quota/rate-limit pattern). A bare crash mid-task tells
+// us nothing about which provider is at fault, so this alternates blind on every unified retry
+// attempt, reusing the same ladder/toggle state the classified path already writes to — no new
+// state file. claude/codex have no alternative provider today (real scope boundary, not an
+// oversight — see SESSION-CRASH-RETRY-SPEC.md §2.4), so this is a no-op for those engines.
+function forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek }) {
+  if (engine !== 'opencode' || !ocProfileName) return null;
+  if (ocProfileIsDeepseek) {
+    const from = opencodeGoToggle.getMode();
+    const to = opencodeGoToggle.forceFlip();
+    return to !== from ? `провайдер OpenCode переключён ${from}→${to}` : null;
+  }
+  if (ocProfileOverrides?.model) {
+    opencodeLadder.forceAdvance(ocProfileName, 'build', ocProfileOverrides.model);
+    return `модель «${ocProfileOverrides.model}» отложена — пробую следующую ступень лестницы`;
+  }
+  return null;
+}
+
 async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0 }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
@@ -1900,7 +1923,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // that can re-fire it — bounded by MAX_RESUME_ATTEMPTS so a genuinely broken resume
     // can't loop forever across restarts.
     if (resumedAfterRestart && resumeAttempts < MAX_RESUME_ATTEMPTS && !restartShutdown) {
-      const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})…`;
+      const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek });
+      const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})${altNote ? `, ${altNote}` : ''}…`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
       const queuedRetry = runTask({
@@ -2076,7 +2100,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (incomplete && !resumedAfterRestart && !restartShutdown && incompleteRetryAttempts < MAX_INCOMPLETE_RETRIES) {
     const nextAttempt = incompleteRetryAttempts + 1;
     const delayMs = getRetryDelayMs(nextAttempt) || 0;
-    const retryMsg = `🔄 Работа прервана (${incompleteReason}) — пробую ещё раз (${nextAttempt}/${MAX_INCOMPLETE_RETRIES})…`;
+    const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek });
+    const retryMsg = `🔄 Работа прервана (${incompleteReason}) — пробую ещё раз (${nextAttempt}/${MAX_INCOMPLETE_RETRIES})${altNote ? `, ${altNote}` : ''}…`;
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
     else await tgSend(BOT_TOKEN, chatId, retryMsg);
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
@@ -2336,4 +2361,6 @@ module.exports = {
   _activeTimers: activeTimers,
   // Exported for isSessionRunning tests only — the real Map backing chatLanes
   _chatLanes: chatLanes,
+  // Exported for provider-alternation wiring tests only (unified crash-retry, issue #1132 follow-up)
+  _forceOpencodeAlternation: forceOpencodeAlternation,
 };
