@@ -110,7 +110,7 @@ function scoreCandidate(r, atsConfig) {
   const reviewThreshold = totalPossible * 0.32;
   const tag = score >= passThreshold ? 'PASS' : score >= reviewThreshold ? 'REVIEW' : 'WEAK';
 
-  return { score, signals, tag };
+  return { score, signals, tag, totalPossible };
 }
 
 // AI enrichment: plus/yellow/red tags + 2-para summary for one candidate
@@ -503,8 +503,14 @@ function saveStoredQueries(username, vacancyId, queries, configHash) {
 // cold search either ("мы в телеге не отвечаем холодный поиск, вот тебе ссылка") —
 // one line with counts, then a link to the results page. `newCandidates` is no longer
 // rendered here; callers may keep passing it (e.g. for other consumers), it's ignored.
-function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, url }) {
-  const head = `🧊 Холодный поиск: ${newCount} новых кандидатов для «${vacancyTitle || 'вакансии'}» (всего в базе: ${totalSeen}).`;
+function buildProactiveDigest({ vacancyTitle, newCount, totalNewCount, totalSeen, url, threshold }) {
+  const total = Number.isFinite(totalNewCount) ? totalNewCount : newCount;
+  // threshold>0 and some candidates got filtered out → say so, otherwise keep the
+  // original unqualified "N новых кандидатов" wording unchanged.
+  const countLine = (threshold > 0 && total !== newCount)
+    ? `${newCount} сильных кандидатов (≥${threshold}%) из ${total} новых`
+    : `${newCount} новых кандидатов`;
+  const head = `🧊 Холодный поиск: ${countLine} для «${vacancyTitle || 'вакансии'}» (всего в базе: ${totalSeen}).`;
   const link = url ? ` Смотри здесь: ${url}` : '';
   return `${head}${link}`;
 }
@@ -794,7 +800,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
   for (const r of allCandidates.values()) {
     const result = scoreCandidate(r, atsConfig);
     if (!result) continue;
-    const { score, signals, tag } = result;
+    const { score, signals, tag, totalPossible } = result;
     const expMonths = r.total_experience?.months ?? 0;
     const companies = (r.experience || []).slice(0, 3).map(e => e.company || '').filter(Boolean);
     scored.push({
@@ -808,6 +814,10 @@ async function runProactiveSearch(username, workDir, options = {}) {
       total_exp_months: expMonths,
       total_exp_years: Math.round(expMonths / 12 * 10) / 10,
       score,
+      // Normalized 0-100 score, relative to this vacancy's own criteria weights —
+      // lets a recruiter set one Telegram notify threshold (e.g. "≥80") that means
+      // the same thing across vacancies with very different raw weight totals.
+      score_pct: totalPossible > 0 ? Math.round((score / totalPossible) * 100) : 0,
       tag,
       score_signals: signals,
       salary: r.salary || null,
@@ -915,25 +925,41 @@ async function runProactiveSearch(username, workDir, options = {}) {
   // for cron-driven and ad-hoc runs alike.
   const notifyChat = typeof options.notifyChat === 'function' ? options.notifyChat : null;
   if (notifyChat && seenInfo.newCount > 0) {
-    const newCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
-    // options.proactiveUrl is built by the caller BEFORE vacancyKey is resolved here
-    // (it doesn't know which vacancy will run yet), so append vacancy_id at this end
-    // instead of asking every caller to guess it in advance.
-    const baseUrl = typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '';
-    const proactiveUrlWithVacancy = baseUrl
-      ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}vacancy_id=${encodeURIComponent(vacancyKey)}`
-      : '';
-    Promise.resolve()
-      .then(() => notifyChat({
-        username,
-        vacancyTitle: output.vacancy_title,
-        newCount: seenInfo.newCount,
-        totalSeen: seenInfo.totalSeenAfter,
-        firstRun: seenInfo.firstRun,
-        newCandidates,
-        proactiveUrl: proactiveUrlWithVacancy,
-      }))
-      .catch(e => console.error('[proactive-search] notify failed:', e.message));
+    const allNewCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
+    // Recruiter-configurable noise filter (schedule.notify_threshold, 0-100, default 0 =
+    // no filter, set via hh_proactive_schedule action=enable). Without it every run pings
+    // Telegram with the raw new-candidate count even when none of them are actually
+    // relevant ("4 новых", "10 новых" — owner ask: filter to only the strong ones).
+    // options.notifyThreshold lets a caller override per-run; otherwise read from schedule.
+    const schedule = loadSchedule(username) || {};
+    const notifyThreshold = options.notifyThreshold !== undefined
+      ? Number(options.notifyThreshold) || 0
+      : Number(schedule.notify_threshold) || 0;
+    const newCandidates = notifyThreshold > 0
+      ? allNewCandidates.filter(c => (c.score_pct ?? 0) >= notifyThreshold)
+      : allNewCandidates;
+    if (newCandidates.length > 0) {
+      // options.proactiveUrl is built by the caller BEFORE vacancyKey is resolved here
+      // (it doesn't know which vacancy will run yet), so append vacancy_id at this end
+      // instead of asking every caller to guess it in advance.
+      const baseUrl = typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '';
+      const proactiveUrlWithVacancy = baseUrl
+        ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}vacancy_id=${encodeURIComponent(vacancyKey)}`
+        : '';
+      Promise.resolve()
+        .then(() => notifyChat({
+          username,
+          vacancyTitle: output.vacancy_title,
+          newCount: newCandidates.length,
+          totalNewCount: seenInfo.newCount,
+          totalSeen: seenInfo.totalSeenAfter,
+          firstRun: seenInfo.firstRun,
+          newCandidates,
+          threshold: notifyThreshold,
+          proactiveUrl: proactiveUrlWithVacancy,
+        }))
+        .catch(e => console.error('[proactive-search] notify failed:', e.message));
+    }
   }
 
   return {

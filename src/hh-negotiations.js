@@ -324,8 +324,10 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
               const text = buildProactiveDigest({
                 vacancyTitle: info.vacancyTitle,
                 newCount: info.newCount,
+                totalNewCount: info.totalNewCount,
                 totalSeen: info.totalSeen,
                 newCandidates: info.newCandidates,
+                threshold: info.threshold,
                 url: info.proactiveUrl,
               });
               const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
