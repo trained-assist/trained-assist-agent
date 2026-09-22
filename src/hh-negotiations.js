@@ -58,12 +58,16 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     return hydrateResumes(results.flat(), { access_token: accessToken });
   }
 
-  function hhCacheFile(dataDir, username) {
-    return path.join(dataDir, 'hh', String(username), 'negotiations-cache.json');
+  // Keyed by vacancy_id — profiles tracking several vacancies (readActiveVacancies)
+  // switch between them via /hh/review tabs, and a single shared cache file would
+  // thrash on every switch (always a miss against whichever vacancy was cached last),
+  // doubling HH API calls for no reason.
+  function hhCacheFile(dataDir, username, vacancyId) {
+    return path.join(dataDir, 'hh', String(username), `negotiations-cache:${vacancyId}.json`);
   }
 
   async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessToken) {
-    const cacheFile = hhCacheFile(dataDir, username);
+    const cacheFile = hhCacheFile(dataDir, username, vacancyId);
     const CACHE_TTL_MS = 15 * 60 * 1000;
     try {
       const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
