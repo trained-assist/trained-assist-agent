@@ -92,6 +92,27 @@ async function mirrorGtdChecklist({ username, sessionId, checklist, rec }) {
   }
 }
 
+// Returns a one-click login URL for checklist.trainedassist.store (sets the same session
+// cookie /api/login would), or null if unreachable/unconfigured. The agent only ever holds
+// CHECKLIST_API_KEY (machine bearer) — the worker's /api/autologin-link mints the link
+// server-side so the human's CHECKLIST_PASSWORD never has to leave the worker.
+async function checklistAutologinUrl() {
+  const apiKey = process.env.CHECKLIST_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const res = await fetch(`${CHECKLIST_API_BASE}/api/autologin-link`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const { url } = await res.json();
+    return url || null;
+  } catch (e) {
+    console.warn('[gtd] checklistAutologinUrl:', e.message);
+    return null;
+  }
+}
+
 // Дешёвый pre-gate: без хотя бы одного из этих сигналов LLM не зовём —
 // ложный пинг дороже пропуска, а большинство задач контроля не просят.
 const CONTROL_HINT = /(проконтролир|доведи|довед[её]шь|до конца|убедись|удостовер|проследи|проверь(?:\s+(?:потом|позже|через|что))|перепровер|дойд[её]т ли|доехал|на\s+прод|в\s+прод|задеплой|раскат|не\s+забуд|напомни(?:\s+(?:проверить|мне))|follow.?up|make sure|double.?check|verify later|check (?:back|later|it landed))/i;
@@ -697,7 +718,7 @@ module.exports = {
   detectIntent, maybeSchedule, scheduleFromChecklist, runDue, buildReopenMessage,
   readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
-  checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE,
+  checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE, checklistAutologinUrl,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
   CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS, MAX_FIRES_PER_TICK, FIRE_LEASE_MS,
   _atomicWrite,

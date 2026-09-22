@@ -87,6 +87,10 @@ const NEW_JOB_INTENT            = /новая вакансия|new job post|\/ne
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
 const GTD_STOP_INTENT           = /^(?:\[Сообщение \d+\]\s*)?\/(?:gtd_stop|stop_gtd|checklist_turn_off)(?:@\w+)?$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
 const ACTIVE_CHECKLIST_INTENT   = /^(?:\[Сообщение \d+\]\s*)?\/active_checklist(?:@\w+)?$/i;
+// Natural-language "хочу поправить чек-лист" — hand back checklist.trainedassist.store
+// autologin link instead of asking for a password. Edit/view verbs + "чек-лист" in either
+// order; deliberately excludes GTD_STOP_INTENT's "стоп"/"выключи" and bare /active_checklist.
+const CHECKLIST_EDIT_INTENT     = /(?:поправ|исправ|отредактир|редактир|изменит|открыт|открой|посмотрет|погляд|зайт|обнов|дай\s+ссылк|пришли\s+ссылк|скинь\s+ссылк|ссылк.{0,10}на).{0,25}чек.?лист|чек.?лист.{0,25}(?:поправ|исправ|отредактир|редактир|изменит|открыт|открой|обнов|ссылк)/i;
 const WAKEUP_INTENT             = /^\/wakeup$|^wakeup[!.?]?$|^разморозь[!.?]?$|^размораживай[!.?]?$|^очнись[!.?]?$|^просн[иись]+[!.?]?$|^завис[!.?]?$|^зависло[!.?]?$|разбуди.{0,10}бот|рестарт.{0,10}бот|перезапуст.{0,10}бот|бот.{0,10}завис|агент.{0,10}завис/i;
 const SKIP_TASK_INTENT          = /^\/skip(?:@\w+)?$/i;
 const VACANCY_DONE_INTENT       = /^всё$|^все$|^готово$|^хватит$|^достаточно$|^запускай$|^стоп, всё$|^всё, запускай$|^ок, всё$/i;
@@ -1434,6 +1438,7 @@ module.exports = {
   STOP_TASK_INTENT,
   GTD_STOP_INTENT,
   ACTIVE_CHECKLIST_INTENT,
+  CHECKLIST_EDIT_INTENT,
   WAKEUP_INTENT,
   SKIP_TASK_INTENT,
   PING_INTENT,
