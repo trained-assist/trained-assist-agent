@@ -168,6 +168,18 @@ function listProjects(workDir) {
     .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
 }
 
+// Re-sort a project list by usage (session count) descending, most-recent as tiebreaker.
+// `countByProject` ({id: count}) lives in session-store, not here, so callers that have
+// it (server.js) pass it in; without it we keep the recency-only order from listProjects.
+function sortByUsage(list, countByProject) {
+  if (!countByProject) return list;
+  return [...list].sort((a, b) => {
+    const ca = countByProject[a.id] || 0, cb = countByProject[b.id] || 0;
+    if (cb !== ca) return cb - ca;
+    return (b.lastAt || 0) - (a.lastAt || 0);
+  });
+}
+
 // Create a project from a raw "type: name" string (or explicit {name,type}).
 // Rolls out the type scaffold + PROFILE.md. Idempotent by id: existing project is returned.
 function createProject(workDir, input, { now = Date.now() } = {}) {
@@ -284,8 +296,8 @@ function setActiveProjectId(workDir, id, chatId, { now = Date.now() } = {}) {
 //   { action:'ask',    choices, active }      several projects   -> ask which / offer new
 //   { action:'create', suggestType }          no projects yet    -> create the first one
 // A CONTINUING session never calls this — it keeps the project stored on the session.
-function decideNewSessionProject(workDir, chatId) {
-  const projects = listProjects(workDir);
+function decideNewSessionProject(workDir, chatId, countByProject) {
+  const projects = sortByUsage(listProjects(workDir), countByProject);
   if (projects.length === 0) return { action: 'create', suggestType: 'generic' };
   if (projects.length === 1) return { action: 'auto', project: projects[0] };
   return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId) };
@@ -325,6 +337,7 @@ module.exports = {
   notesPath,
   getProject,
   listProjects,
+  sortByUsage,
   createProject,
   touchProject,
   getActiveProjectId,
