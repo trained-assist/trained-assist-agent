@@ -79,11 +79,16 @@ function shouldRun(state, nowMs) {
 }
 
 // Signed URL to the recruiter's proactive results page (same HMAC scheme as
-// 92-hh-proactive.js so the digest link opens the right page).
-function proactiveUrlFor(username) {
+// 92-hh-proactive.js so the digest link opens the right page). `vacancyId` is a
+// plain, non-HMAC'd query param appended alongside the token — same pattern as
+// hhReviewUrl in hh-quick.js — so multi-vacancy step 7's tab switcher can deep-link
+// straight into the right tab. Omitted (falsy) → no param, unchanged for
+// single-vacancy callers.
+function proactiveUrlFor(username, vacancyId) {
   const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
   const token = createHmac('sha256', process.env.AGENT_SECRET || '').update(String(username)).digest('hex').slice(0, 16);
-  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}`;
+  const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
+  return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
 }
 
 module.exports = {

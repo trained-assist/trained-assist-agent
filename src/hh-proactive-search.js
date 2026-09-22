@@ -337,12 +337,39 @@ function saveAllCandidates(username, data) {
   fs.renameSync(tmp, file);
 }
 
+// Dedup-merge a vacancy id into an existing vacancy_ids[] array without dropping
+// entries from other vacancies. Returns a new array (never mutates the input).
+// Missing/empty vacancy_ids means "wildcard — belongs to all vacancies" (see
+// candidateMatchesVacancy below); we only start populating the array once a
+// vacancy_id is actually known for this record.
+function mergeVacancyId(existingIds, vacancyId) {
+  const ids = Array.isArray(existingIds) ? existingIds.map(String) : [];
+  if (!vacancyId) return ids;
+  const vid = String(vacancyId);
+  return ids.includes(vid) ? ids : [...ids, vid];
+}
+
+// Multi-vacancy step 7/7: does `candidate` belong to the given vacancy?
+// A missing/empty vacancy_ids field is a wildcard — it means the record predates
+// this field (backfill case) or was manually added with no active vacancy resolvable,
+// and should show up under every vacancy tab rather than silently disappearing.
+// No vacancyId filter requested (falsy) → everything passes through unfiltered.
+function candidateMatchesVacancy(candidate, vacancyId) {
+  if (!vacancyId) return true;
+  const ids = candidate?.vacancy_ids;
+  if (!Array.isArray(ids) || ids.length === 0) return true; // wildcard
+  return ids.map(String).includes(String(vacancyId));
+}
+
 // Merge a batch of freshly-scored/enriched search candidates into the unified store.
 // Existing records (e.g. manually-added, or already found+annotated) are NOT clobbered
 // wholesale — we merge new fields in while preserving the original found_at/source so
 // re-running search doesn't reset "when we first found this person" or flip a manual
-// candidate back to source:'search'.
-function mergeSearchCandidatesIntoAll(username, candidates, foundAtById) {
+// candidate back to source:'search'. `vacancyId` (optional — omitted callers keep the
+// pre-step-7 behavior of leaving vacancy_ids untouched) is dedup-appended into each
+// record's vacancy_ids so a candidate re-found under a different vacancy's search
+// later keeps showing up under both tabs instead of one clobbering the other.
+function mergeSearchCandidatesIntoAll(username, candidates, foundAtById, vacancyId) {
   const store = loadAllCandidates(username);
   const now = new Date().toISOString();
   for (const c of candidates || []) {
@@ -355,6 +382,7 @@ function mergeSearchCandidatesIntoAll(username, candidates, foundAtById) {
       ...c,
       source: existing?.source === 'manual' ? 'manual' : 'search',
       found_at: foundAt,
+      vacancy_ids: mergeVacancyId(existing?.vacancy_ids, vacancyId),
     };
   }
   saveAllCandidates(username, store);
@@ -364,8 +392,10 @@ function mergeSearchCandidatesIntoAll(username, candidates, foundAtById) {
 // Add a single manually-added candidate (from a pasted HH resume URL/id) to the
 // unified store. `resumeData` is the raw HH /resumes/{id} response, shaped through
 // the same field mapping runProactiveSearch uses for search results so the card
-// renderer doesn't need to special-case manual entries.
-function addManualCandidate(username, resumeData) {
+// renderer doesn't need to special-case manual entries. `vacancyId` tags the record
+// with whichever vacancy was active when it was added; if no active vacancy can be
+// resolved, vacancy_ids stays [] (wildcard — shows under every tab).
+function addManualCandidate(username, resumeData, vacancyId) {
   if (!resumeData || !resumeData.id) throw new Error('resumeData.id required');
   const id = String(resumeData.id);
   const expMonths = resumeData.total_experience?.months ?? 0;
@@ -398,6 +428,7 @@ function addManualCandidate(username, resumeData) {
     source: 'manual',
     added_at: existing?.added_at || now,
     found_at: existing?.found_at || now,
+    vacancy_ids: mergeVacancyId(existing?.vacancy_ids, vacancyId),
   };
   store[id] = record;
   saveAllCandidates(username, store);
@@ -856,7 +887,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
     for (const c of markedCandidates) {
       if (c.id && seenBucket[c.id]) foundAtById[c.id] = new Date(seenBucket[c.id]).toISOString();
     }
-    mergeSearchCandidatesIntoAll(username, markedCandidates, foundAtById);
+    mergeSearchCandidatesIntoAll(username, markedCandidates, foundAtById, vacancyKey);
   } catch (e) {
     console.error('[proactive-search] all-candidates merge failed:', e.message);
   }
@@ -885,6 +916,13 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const notifyChat = typeof options.notifyChat === 'function' ? options.notifyChat : null;
   if (notifyChat && seenInfo.newCount > 0) {
     const newCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
+    // options.proactiveUrl is built by the caller BEFORE vacancyKey is resolved here
+    // (it doesn't know which vacancy will run yet), so append vacancy_id at this end
+    // instead of asking every caller to guess it in advance.
+    const baseUrl = typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '';
+    const proactiveUrlWithVacancy = baseUrl
+      ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}vacancy_id=${encodeURIComponent(vacancyKey)}`
+      : '';
     Promise.resolve()
       .then(() => notifyChat({
         username,
@@ -893,7 +931,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
         totalSeen: seenInfo.totalSeenAfter,
         firstRun: seenInfo.firstRun,
         newCandidates,
-        proactiveUrl: typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '',
+        proactiveUrl: proactiveUrlWithVacancy,
       }))
       .catch(e => console.error('[proactive-search] notify failed:', e.message));
   }
@@ -904,6 +942,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
     pass_count,
     review_count,
     searched_at: now.toISOString(),
+    vacancy_id: vacancyKey,
     vacancy_title: output.vacancy_title,
     ai_enriched: output.ai_enriched,
     new_count: seenInfo.newCount,
@@ -1000,6 +1039,7 @@ module.exports = {
   saveAllCandidates,
   mergeSearchCandidatesIntoAll,
   addManualCandidate,
+  candidateMatchesVacancy,
   parseResumeId,
 // Per-vacancy query store
   atsConfigHash,
