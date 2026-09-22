@@ -467,21 +467,15 @@ function saveStoredQueries(username, vacancyId, queries, configHash) {
   fs.renameSync(tmp, file);
 }
 
-// Build a short Telegram digest for a successful proactive run with new candidates.
-// Caller passes the already-enriched slice of `newCandidates` (typically ≤10 shown).
-function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, newCandidates, url }) {
-  const head = `🧊 Холодный поиск: ${newCount} новых кандидатов для «${vacancyTitle || 'вакансии'}»`;
-  const stats = `Всего в базе по этой вакансии: ${totalSeen}.`;
-  const top = (newCandidates || []).slice(0, 10).map((c, i) => {
-    const name = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
-    const yrs = c.total_exp_years ? `${c.total_exp_years} лет опыта` : '';
-    const city = c.area || '';
-    const tag = c.tag === 'PASS' ? '✅' : c.tag === 'REVIEW' ? '🟡' : '⚪️';
-    return `${i + 1}. ${tag} ${name} — ${yrs}${city ? ', ' + city : ''}`;
-  });
-  const tail = newCandidates && newCandidates.length > 10 ? `\n…и ещё ${newCandidates.length - 10}` : '';
-  const link = url ? `\nПолный список: ${url}` : '';
-  return [head, stats, ...top, tail, link].filter(Boolean).join('\n');
+// Build a short Telegram digest for a successful proactive run.
+// Multi-vacancy step 4/6 (owner directive): Telegram never lists candidate names for
+// cold search either ("мы в телеге не отвечаем холодный поиск, вот тебе ссылка") —
+// one line with counts, then a link to the results page. `newCandidates` is no longer
+// rendered here; callers may keep passing it (e.g. for other consumers), it's ignored.
+function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, url }) {
+  const head = `🧊 Холодный поиск: ${newCount} новых кандидатов для «${vacancyTitle || 'вакансии'}» (всего в базе: ${totalSeen}).`;
+  const link = url ? ` Смотри здесь: ${url}` : '';
+  return `${head}${link}`;
 }
 
 // --- Candidate comments (for search refinement) ---
