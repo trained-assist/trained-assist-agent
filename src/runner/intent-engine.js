@@ -1308,7 +1308,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   if (workDir && openrouterKey) {
     const vs = readVacancyState(workDir);
     if (vs?.status === 'generating' && vs.messages?.length > 0) {
-      const r = await generateVacancyFromMessages(workDir, vs.messages, openrouterKey).catch(e => {
+      const r = await generateVacancyFromMessages(workDir, vs.messages, openrouterKey, userId).catch(e => {
         console.error('[vacancy] generation error:', e.message);
         writeVacancyState(workDir, { ...vs, status: 'collecting' }); // rollback so user can retry
         return '⚠️ Ошибка при генерации вакансии. Попробуй ещё раз — скажи «всё» когда будешь готов.';
