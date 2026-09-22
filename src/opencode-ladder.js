@@ -1,0 +1,144 @@
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+// Model-ladder resolver for OpenCode profiles (issue #1061 Фаза 1-2).
+//
+// A profile (.opencode/profiles/<name>.json) declares, per agent role, a ladder of models in
+// preference order instead of one fixed model. Before each OpenCode invocation the runner asks
+// this module to resolve the ladder into the flat {model, agent: {role: {model}}} shape OpenCode
+// actually consumes (same shape the old static profiles already had — writeOpencodeMcpConfig in
+// claude-runner.js doesn't change). After a failed invocation the runner reports the error back
+// here; a quota/rate-limit-class error marks that (profile, role, model) exhausted with a TTL so
+// the next resolve skips it, a config-class error (one-time account setup, e.g. "Global regions"
+// not enabled) marks it exhausted with no TTL and is NOT meant to be retried automatically — the
+// caller is expected to alert an operator instead of burning through the rest of the ladder.
+//
+// State file default matches issue #1061 spec: ~/.config/opencode/ladder-state.json. Override via
+// OPENCODE_LADDER_STATE_FILE for tests (resolved at require time, same pattern as auth-flag.js's
+// AGENT_DATA_DIR so tests can point it at a tmpdir without touching the real file).
+const STATE_FILE = process.env.OPENCODE_LADDER_STATE_FILE ||
+  path.join(os.homedir(), '.config', 'opencode', 'ladder-state.json');
+
+const ROLES = ['build', 'plan', 'explore', 'general', 'review'];
+
+// Not more than this many rungs burned per task — a ladder where every rung rate-limits in a
+// circle must fail loudly instead of looping forever (issue #1061 testing item 2).
+const MAX_LADDER_ATTEMPTS = 5;
+
+// error text -> { class, ttlMs }. 'quota' auto-clears after ttlMs and is safe to burn through
+// automatically; 'config' means a human has to fix something account-side (subscription/region
+// not enabled, pay-as-you-go balance empty) — never auto-clears, and the caller should alert
+// rather than silently keep retrying other rungs on every task.
+const CLASSIFIERS = [
+  { class: 'config', ttlMs: null, pattern: /subscription required/i },
+  { class: 'config', ttlMs: null, pattern: /requires global regions/i },
+  { class: 'config', ttlMs: null, pattern: /insufficient account funds/i },
+  { class: 'quota', ttlMs: 60 * 60 * 1000, pattern: /rate[_\s-]{0,5}limit/i },
+  { class: 'quota', ttlMs: 60 * 60 * 1000, pattern: /\b429\b/ },
+  { class: 'quota', ttlMs: 24 * 60 * 60 * 1000, pattern: /usage limit/i },
+  { class: 'quota', ttlMs: 24 * 60 * 60 * 1000, pattern: /quota[^.]{0,20}exceeded/i },
+];
+
+function classifyError(text) {
+  const hit = CLASSIFIERS.find(c => c.pattern.test(text || ''));
+  return hit ? { class: hit.class, ttlMs: hit.ttlMs } : null;
+}
+
+function _readState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function _writeState(state) {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+function _isExhausted(state, profile, role, model) {
+  const resetsAt = state?.[profile]?.[role]?.exhausted?.[model];
+  if (resetsAt === undefined) return false;
+  if (resetsAt === null) return true; // config-class: never auto-clears
+  return Date.parse(resetsAt) > Date.now(); // still within TTL
+}
+
+// Marks (profile, role, model) exhausted. ttlMs null => never auto-clears (config-class).
+function markExhausted(profile, role, model, ttlMs) {
+  const state = _readState();
+  state[profile] = state[profile] || {};
+  state[profile][role] = state[profile][role] || { exhausted: {} };
+  state[profile][role].exhausted = state[profile][role].exhausted || {};
+  state[profile][role].exhausted[model] = ttlMs == null ? null : new Date(Date.now() + ttlMs).toISOString();
+  _writeState(state);
+}
+
+function clearExhausted(profile, role, model) {
+  const state = _readState();
+  if (model) {
+    delete state?.[profile]?.[role]?.exhausted?.[model];
+  } else if (role) {
+    delete state?.[profile]?.[role];
+  } else {
+    delete state?.[profile];
+  }
+  _writeState(state);
+}
+
+// Classifies an engine error and, if it's ladder-relevant, marks the model exhausted.
+// Returns null if the error isn't a ladder-degradation case (caller should handle it as before —
+// e.g. the existing isAuthError/cross-engine fallback path for a total auth loss).
+function recordFailure(profile, role, model, errorText) {
+  const verdict = classifyError(errorText);
+  if (!verdict) return null;
+  markExhausted(profile, role, model, verdict.ttlMs);
+  return { class: verdict.class, model, alertNeeded: verdict.class === 'config' };
+}
+
+// Ladder for one role, oldest/legacy-compatible: a profile with `ladder.<role>` uses that; a
+// profile with only the old flat `agent.<role>.model` (or top-level `model`) is a single-rung
+// ladder — so profiles that haven't been migrated to `ladder` yet keep working unchanged.
+function _roleLadder(profileRaw, role) {
+  if (profileRaw.ladder?.[role]?.length) return profileRaw.ladder[role];
+  const flat = profileRaw.agent?.[role]?.model || profileRaw.model;
+  return flat ? [flat] : [];
+}
+
+// First non-exhausted model in the role's ladder. Never returns undefined for a non-empty
+// ladder — if every rung is currently exhausted, degrades to the last rung rather than failing
+// resolution outright (some model beats none; the caller's retry-count cap is what prevents an
+// infinite loop, not this function refusing to pick anything).
+function resolveModel(profileRaw, profileName, role) {
+  const ladder = _roleLadder(profileRaw, role);
+  if (!ladder.length) return null;
+  const state = _readState();
+  const usable = ladder.find(m => !_isExhausted(state, profileName, role, m));
+  return usable || ladder[ladder.length - 1];
+}
+
+// Resolves every role's ladder for a profile into the flat {model, agent: {role: {model, ...}}}
+// shape writeOpencodeMcpConfig spreads into the per-invocation OPENCODE_CONFIG. `rolePrompts` in
+// the raw profile (e.g. russian's strict-reviewer prompt for `review`) survives ladder
+// degradation unchanged — it's about the role, not which model is currently filling it.
+function buildOcProfileOverrides(profileName, profilesDir) {
+  const dir = profilesDir || path.join(__dirname, '..', '.opencode', 'profiles');
+  const profileRaw = JSON.parse(fs.readFileSync(path.join(dir, `${profileName}.json`), 'utf8'));
+  const agent = {};
+  for (const role of ROLES) {
+    const model = resolveModel(profileRaw, profileName, role);
+    if (!model) continue;
+    agent[role] = { model, ...(profileRaw.rolePrompts?.[role] ? { prompt: profileRaw.rolePrompts[role] } : {}) };
+  }
+  return {
+    model: agent.build?.model || resolveModel(profileRaw, profileName, 'build') || profileRaw.model,
+    agent,
+  };
+}
+
+module.exports = {
+  ROLES, MAX_LADDER_ATTEMPTS, STATE_FILE,
+  classifyError, resolveModel, buildOcProfileOverrides,
+  markExhausted, clearExhausted, recordFailure,
+};
