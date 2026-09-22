@@ -743,12 +743,21 @@ module.exports = {
             config.vacancy_id = activeVacancy.id;
             config.vacancy_title = activeVacancy.title;
           }
+          // Save as a draft only — never write to the live ats_config:{id} that background
+          // scoring reads. Criteria/weights are reviewed and finalized in /hh/ats-editor,
+          // not by the chat LLM re-writing context on the recruiter's behalf.
+          writeContext('hh', activeVacancy?.id ? `ats_config_draft:${activeVacancy.id}` : 'ats_config_draft', config);
+          const agentBase = (process.env.AGENT_PUBLIC_URL || 'http://localhost:3001').replace(/\/$/, '');
+          const agentSecret = process.env.AGENT_SECRET || '';
+          const editorToken = agentSecret
+            ? require('crypto').createHmac('sha256', agentSecret).update(USER_ID).digest('hex').slice(0, 16)
+            : '';
+          const editorUrl = `${agentBase}/hh/ats-editor?username=${encodeURIComponent(USER_ID)}&token=${editorToken}${activeVacancy?.id ? `&vacancy_id=${encodeURIComponent(activeVacancy.id)}` : ''}`;
           return {
             ok: true,
             config,
-            note: activeVacancy?.id
-              ? `Проверь конфиг и сохрани через context_set("hh","ats_config:${activeVacancy.id}", <config>) — привязан к вакансии «${activeVacancy.title}». Так конфиг не перепутается с конфигами других отслеживаемых вакансий. Можешь скорректировать веса и пороги.`
-              : 'Проверь конфиг и передай его в hh_evaluate_candidate. Активная вакансия не выбрана (hh_set_active_vacancy) — конфиг не будет привязан к вакансии, при переключении вакансий его не отличить от чужого.',
+            review_url: editorUrl,
+            note: `Черновик сохранён. Открой ${editorUrl} чтобы проверить критерии/веса и сохранить — фоновый скоринг начнёт использовать конфиг только после сохранения там.`,
           };
         } catch (e) {
           return { error: `Не удалось извлечь конфиг: ${e.message}` };
@@ -1001,9 +1010,9 @@ module.exports = {
           if (!ats_config) {
             const legacy = readContext('hh', 'ats_config')?.value;
             if (legacy?.vacancy_id && legacy.vacancy_id !== vacancy_id) {
-              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а оцениваем «${vacancy_id}». Сохрани конфиг для этой вакансии через context_set("hh","ats_config:${vacancy_id}", ...) или вызови hh_extract_ats_config заново.` };
+              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а оцениваем «${vacancy_id}». Вызови hh_extract_ats_config и сохрани для этой вакансии через /hh/ats-editor (hh_open_ats_editor).` };
             }
-            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config:${vacancy_id}",...).` };
+            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config, затем проверь и сохрани его в /hh/ats-editor (ссылка есть в ответе hh_extract_ats_config).` };
           }
         }
         // Guard: context_set sometimes stores value as JSON string instead of object
@@ -1187,9 +1196,9 @@ module.exports = {
           if (!ats_config) {
             const legacy = readContext('hh', 'ats_config')?.value;
             if (legacy?.vacancy_id && legacy.vacancy_id !== vacancy_id) {
-              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а обновляем сообщения для «${vacancy_id}». Сохрани конфиг для этой вакансии через context_set("hh","ats_config:${vacancy_id}", ...) или вызови hh_extract_ats_config заново.` };
+              return { error: `Сохранённый ATS конфиг настроен для другой вакансии («${legacy.vacancy_title || legacy.vacancy_id}»), а обновляем сообщения для «${vacancy_id}». Вызови hh_extract_ats_config и сохрани для этой вакансии через /hh/ats-editor (hh_open_ats_editor).` };
             }
-            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config и сохрани результат через context_set("hh","ats_config:${vacancy_id}",...).` };
+            return { error: `ATS конфиг не задан для вакансии «${vacancy_id}». Используй hh_extract_ats_config, затем проверь и сохрани его в /hh/ats-editor (ссылка есть в ответе hh_extract_ats_config).` };
           }
         }
         if (typeof ats_config === 'string') {
@@ -1492,7 +1501,11 @@ module.exports = {
       inputSchema: { type: 'object', properties: {} },
       handler: async () => {
         const agentBase = (process.env.AGENT_PUBLIC_URL || 'http://localhost:3001').replace(/\/$/, '');
-        const url = `${agentBase}/hh/ats-editor?username=${encodeURIComponent(USER_ID)}`;
+        const agentSecret = process.env.AGENT_SECRET || '';
+        const editorToken = agentSecret
+          ? require('crypto').createHmac('sha256', agentSecret).update(USER_ID).digest('hex').slice(0, 16)
+          : '';
+        const url = `${agentBase}/hh/ats-editor?username=${encodeURIComponent(USER_ID)}&token=${editorToken}`;
         return {
           ok: true,
           url,

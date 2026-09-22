@@ -3,7 +3,7 @@
 // OpenRouter calls → nock interception (https://openrouter.ai)
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createRequire } from 'module';
@@ -455,6 +455,52 @@ describe('hh_batch_evaluate — reads vacancy_id and ats_config from context', (
     const r = await tools().hh_batch_evaluate.handler({});
     expect(r.error).toBeUndefined();
     expect(r.evaluated).toBe(2);
+  });
+});
+
+// ── hh_extract_ats_config — draft only, never live ───────────────────────────
+
+describe('hh_extract_ats_config — saves a draft, never writes the live config', () => {
+  let origCwd;
+  let ctxDir;
+
+  beforeEach(() => {
+    origCwd = process.cwd();
+    ctxDir = mkdtempSync(join(tmpdir(), 'hh-extract-ctx-'));
+    process.chdir(ctxDir);
+
+    const hhCtxDir = join(ctxDir, 'contexts', 'hh');
+    mkdirSync(hhCtxDir, { recursive: true });
+    writeFileSync(join(hhCtxDir, 'active_vacancy.json'), JSON.stringify({
+      value: { id: 'vac-001', title: 'Backend Developer (Node.js)', set_at: new Date().toISOString() },
+      updated_at: new Date().toISOString(),
+    }));
+  });
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    nock.cleanAll();
+    rmSync(ctxDir, { recursive: true, force: true });
+  });
+
+  it('writes ats_config_draft:{vacancy_id}, not ats_config:{vacancy_id}, and links to /hh/ats-editor', async () => {
+    mockOr(JSON.stringify(ATS));
+
+    const r = await tools().hh_extract_ats_config.handler({ vacancy_text: 'Node.js backend, PostgreSQL' });
+
+    expect(r.ok).toBe(true);
+    expect(r.review_url).toContain('/hh/ats-editor');
+    expect(r.review_url).toContain('vacancy_id=vac-001');
+    expect(r.note).not.toMatch(/context_set/);
+
+    const draftFile = join(ctxDir, 'contexts', 'hh', 'ats_config_draft:vac-001.json');
+    expect(existsSync(draftFile)).toBe(true);
+    const draft = JSON.parse(readFileSync(draftFile, 'utf8'));
+    expect(draft.value.vacancy_id).toBe('vac-001');
+
+    // Background scoring reads ats_config:{id}, never the draft namespace — must stay untouched.
+    const liveFile = join(ctxDir, 'contexts', 'hh', 'ats_config:vac-001.json');
+    expect(existsSync(liveFile)).toBe(false);
   });
 });
 

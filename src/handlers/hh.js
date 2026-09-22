@@ -485,7 +485,7 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
     }
   }
   const { atsEditorHtml } = require('../hh-ats-editor-html.js');
-  const { readAtsConfig } = require('../hh-scoring');
+  const { readAtsConfig, readAtsDraft } = require('../hh-scoring');
   // Must match BASE_USERS_DIR — Claude writes contexts here via cwd
   const workDir = path.join(BASE_USERS_DIR, username);
   const contextBase = path.join(workDir, 'contexts');
@@ -493,7 +493,15 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
   const activeVacancies = readActiveVacancies(workDir);
   const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
   const activeVacancy = activeVacancies.find(v => String(v.id) === requestedVacancyId) || activeVacancies[0] || null;
-  const currentConfig = readAtsConfig(workDir, activeVacancy?.id || null);
+  let currentConfig = readAtsConfig(workDir, activeVacancy?.id || null);
+  // No live config yet — offer the LLM-extracted draft (hh_extract_ats_config) as the
+  // starting point instead. The draft never goes live on its own: it only reaches
+  // scoring once the recruiter reviews it here and clicks Save.
+  let isDraft = false;
+  if (!currentConfig) {
+    const draft = readAtsDraft(workDir, activeVacancy?.id || null);
+    if (draft) { currentConfig = draft; isDraft = true; }
+  }
   let currentStages = null;
   try {
     if (fs.existsSync(stagesFile)) currentStages = JSON.parse(fs.readFileSync(stagesFile, 'utf8')).value;
@@ -505,6 +513,7 @@ if (req.method === 'GET' && url.pathname === '/hh/ats-editor') {
     agentSecret: agentSecret || '',
     vacancies: activeVacancies,
     activeVacancyId: activeVacancy?.id || '',
+    isDraft,
   });
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   return res.end(html);
