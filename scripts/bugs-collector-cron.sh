@@ -7,8 +7,8 @@ set -euo pipefail
 LOG_DIR="$HOME/agent-data/bugs-collector-logs"
 mkdir -p "$LOG_DIR"
 
-# Keep only last 30 log files
-ls -t "$LOG_DIR"/run-*.log 2>/dev/null | tail -n +31 | xargs -r rm --
+# Keep only last 30 log files (best-effort: empty dir must not abort the run under set -e)
+ls -t "$LOG_DIR"/run-*.log 2>/dev/null | tail -n +31 | xargs -r rm -- || true
 
 LOGFILE="$LOG_DIR/run-$(date +%Y%m%d-%H%M%S).log"
 
