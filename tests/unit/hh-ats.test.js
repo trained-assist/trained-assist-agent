@@ -839,4 +839,37 @@ describe('hh_funnel_stats', () => {
     expect(r.vacancy_id).toBe('vac-001');
     expect(r.new_responses).toBe(3);
   });
+
+  it('notify_threshold: counts new responses above the score bar from cached ats_result, no LLM call', async () => {
+    // 3 mock 'response' negotiations: neg-001 (score 8 → 80%), neg-002 (score 5 → 50%), neg-003 (unscored → pending)
+    const dataDir = join(process.env.AGENT_DATA_DIR, 'hh', TEST_UID, 'candidates');
+    mkdirSync(dataDir, { recursive: true });
+    // Earlier tests in this file score these same negotiation IDs via hh_batch_evaluate and
+    // leave the cache behind — reset all 3 so this test's pending/above counts are isolated.
+    rmSync(join(dataDir, 'neg-001.json'), { force: true });
+    rmSync(join(dataDir, 'neg-002.json'), { force: true });
+    rmSync(join(dataDir, 'neg-003.json'), { force: true });
+    writeFileSync(join(dataDir, 'neg-001.json'), JSON.stringify({ messages: [], ats_result: { score: 8 } }));
+    writeFileSync(join(dataDir, 'neg-002.json'), JSON.stringify({ messages: [], ats_result: { score: 5 } }));
+
+    try {
+      const r = await tools().hh_funnel_stats.handler({ vacancy_id: 'vac-001', notify_threshold: 70 });
+      expect(r.ok).toBe(true);
+      expect(r.new_responses).toBe(3);
+      expect(r.notify_threshold).toBe(70);
+      expect(r.new_responses_above_threshold).toBe(1); // only neg-001 (80% >= 70%)
+      expect(r.new_responses_pending_score).toBe(1);    // neg-003 has no cached ats_result
+    } finally {
+      rmSync(join(dataDir, 'neg-001.json'), { force: true });
+      rmSync(join(dataDir, 'neg-002.json'), { force: true });
+    }
+  });
+
+  it('notify_threshold omitted/0 → no score breakdown fields (unchanged behavior)', async () => {
+    const r = await tools().hh_funnel_stats.handler({ vacancy_id: 'vac-001' });
+    expect(r.ok).toBe(true);
+    expect(r.notify_threshold).toBeUndefined();
+    expect(r.new_responses_above_threshold).toBeUndefined();
+    expect(r.new_responses_pending_score).toBeUndefined();
+  });
 });
