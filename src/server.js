@@ -530,7 +530,7 @@ async function main() {
 
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' && url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer') {
+    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/project-create' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' && url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer' && url.pathname !== '/web/reproject-preview' && url.pathname !== '/web/reproject-adjust' && url.pathname !== '/web/reproject-apply' && url.pathname !== '/web/reproject-revert') {
       if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
