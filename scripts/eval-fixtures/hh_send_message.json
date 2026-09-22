@@ -1,0 +1,26 @@
+{
+  "target_tool": "hh_send_message",
+  "catalog": [
+    { "name": "hh_send_message", "description": "Send a message to a candidate in a negotiation thread on hh.ru. Always show the message to recruiter for confirmation before calling this." },
+    { "name": "hh_list_responses", "description": "List candidate responses (negotiations) for a vacancy. Returns candidate names, states, and negotiation IDs for further processing." },
+    { "name": "hh_bulk_reject", "description": "Reject all active candidates on one or more vacancies using \"discard_vacancy_closed\" (вакансия закрыта). Use for healthy HH account hygiene — run daily or when closing a vacancy. Returns summary of what was rejected." },
+    { "name": "tg_send_file", "description": "Send a local file (image, PDF, CSV, any format) to the user's Telegram chat. Use for screenshots, QR codes, generated reports — anything the user should receive in chat. Images are sent as photos by default (use as_document=true to force file mode)." },
+    { "name": "jd_generate", "description": "Сгенерировать полное описание вакансии (JD) из краткого брифа. Подходит для HH, Хабр Карьера, лендинга." },
+    { "name": "salary_benchmark", "description": "Получить зарплатный бенчмарк для роли по рынку РФ. Данные на основе знаний модели + здравого смысла." },
+    { "name": "interview_analyze", "description": "Разобрать транскрипт интервью против критериев заказчика: портрет кандидата, скорректированные вопросы рекрутёру, чек-лист оценки и взвешенный скоринг 0-5 с вердиктом advance/maybe/reject." },
+    { "name": "cron_hh_digest", "description": "Convenience: create an HH recruiting digest cron — sends a Telegram summary of new responses/funnel per tracked vacancy." },
+    { "name": "weeek_status", "description": "Check Weeek API connection status. Returns whether token is set and valid." },
+    { "name": "context_get", "description": "Read a persistent context value saved by context_set. Use to recall state between sessions: active vacancy, ATS config, current project, user preferences." }
+  ],
+  "should_trigger": [
+    "напиши кандидату Ивану на hh, что мы рассмотрим его резюме на след неделе",
+    "ответь соискателю в переписке на hh.ru",
+    "отправь сообщение кандидату в отклике"
+  ],
+  "should_not_trigger": [
+    "скинь мне в телеграм скрин этой вакансии",
+    "сгенерируй описание вакансии для hh",
+    "какая рыночная зарплата у python-разработчика",
+    "покажи список откликов по вакансии"
+  ]
+}
