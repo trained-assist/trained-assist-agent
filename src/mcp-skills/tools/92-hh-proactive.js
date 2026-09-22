@@ -56,8 +56,10 @@ function buildNotifyChat(username) {
     const text = buildProactiveDigest({
       vacancyTitle: info.vacancyTitle,
       newCount: info.newCount,
+      totalNewCount: info.totalNewCount,
       totalSeen: info.totalSeen,
       newCandidates: info.newCandidates,
+      threshold: info.threshold,
       url: info.proactiveUrl,
     });
     const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
@@ -228,16 +230,17 @@ module.exports = {
     },
 
     hh_proactive_schedule: {
-      description: 'Настройка автоматического (периодического) проактивного поиска с Telegram-уведомлениями. action=status — текущие настройки; action=enable — включить (можно задать interval_hours, по умолчанию 24); action=disable — выключить.',
+      description: 'Настройка автоматического (периодического) проактивного поиска с Telegram-уведомлениями. action=status — текущие настройки; action=enable — включить (можно задать interval_hours, по умолчанию 24, и notify_threshold); action=disable — выключить. Чтобы просто поменять порог уведомлений без изменения интервала — вызови action=enable и передай только notify_threshold.',
       inputSchema: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: ['status', 'enable', 'disable'], description: 'status | enable | disable' },
           interval_hours: { type: 'number', description: 'Интервал запуска в часах (для action=enable, по умолчанию 24)' },
+          notify_threshold: { type: 'number', description: 'Минимальная оценка кандидата (0-100%, нормализовано под критерии вакансии) для попадания в Telegram-уведомление о новых кандидатах. 0 (по умолчанию) — уведомлять обо всех новых, без фильтра. Задаётся вместе с action=enable.' },
         },
         required: ['action'],
       },
-      handler: async ({ action, interval_hours }) => {
+      handler: async ({ action, interval_hours, notify_threshold }) => {
         const userId = process.env.USER_ID || process.env.AGENT_USER_ID || '';
         if (!userId) return { error: 'USER_ID не задан' };
 
@@ -251,28 +254,35 @@ module.exports = {
             };
           }
           const hours = schedule.interval_hours || 24;
+          const threshold = schedule.notify_threshold || 0;
           const nextRunTs = schedule.last_run
             ? new Date(new Date(schedule.last_run).getTime() + hours * 3600000).toISOString()
             : '~10 мин после старта сервера';
           return {
             enabled: true,
             interval_hours: hours,
+            notify_threshold: threshold,
             last_run: schedule.last_run || null,
             next_run: nextRunTs,
-            message: `Автопоиск включён. Интервал: каждые ${hours} ч.\nПоследний запуск: ${schedule.last_run || 'ещё не было'}.\nСледующий: ${nextRunTs}.`,
+            message: `Автопоиск включён. Интервал: каждые ${hours} ч.\n${threshold > 0 ? `Порог уведомлений: ≥${threshold}% — слабее не присылаем.` : 'Порог уведомлений не задан — уведомляем обо всех новых кандидатах.'}\nПоследний запуск: ${schedule.last_run || 'ещё не было'}.\nСледующий: ${nextRunTs}.`,
           };
         }
 
         if (action === 'enable') {
           const hours = interval_hours && interval_hours > 0 ? interval_hours : (schedule.interval_hours || 24);
+          const threshold = (notify_threshold !== undefined && notify_threshold !== null)
+            ? Math.max(0, Math.min(100, Number(notify_threshold) || 0))
+            : (schedule.notify_threshold || 0);
           schedule.enabled = true;
           schedule.interval_hours = hours;
+          schedule.notify_threshold = threshold;
           saveSchedule(userId, schedule);
           return {
             ok: true,
             enabled: true,
             interval_hours: hours,
-            message: `✅ Автопоиск включён — каждые ${hours} ч агент будет искать новых кандидатов и присылать уведомления в Telegram. Первый запуск в течение 30 мин.\n\n⚠️ Это встроенный планировщик агента — он НЕ появится в списке cron_list (там только внешние Cloud Scheduler задачи). Проверить статус: hh_proactive_schedule action=status.`,
+            notify_threshold: threshold,
+            message: `✅ Автопоиск включён — каждые ${hours} ч агент будет искать новых кандидатов и присылать уведомления в Telegram.${threshold > 0 ? ` В уведомление попадут только кандидаты с оценкой ≥${threshold}%.` : ''} Первый запуск в течение 30 мин.\n\n⚠️ Это встроенный планировщик агента — он НЕ появится в списке cron_list (там только внешние Cloud Scheduler задачи). Проверить статус: hh_proactive_schedule action=status.`,
           };
         }
 
