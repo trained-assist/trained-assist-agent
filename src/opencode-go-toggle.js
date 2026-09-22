@@ -77,4 +77,14 @@ function noteFailure(model, errorText) {
   return true;
 }
 
-module.exports = { STATE_FILE, AUTO_REVERT_MS, getMode, setMode, resolveProfileName, noteFailure };
+// Unconditional flip for the unified crash-retry in runner/index.js — same "if one fails, try
+// the other, and vice versa" policy as opencode-ladder.js's forceAdvance, but for the deepseek
+// go/openrouter pair, which has no ladder rungs to degrade through. Unlike noteFailure() this
+// does NOT require the error to classify as quota — a bare crash retry alternates blind, on
+// every unified retry attempt, so three retries toggle go→openrouter→go.
+function forceFlip() {
+  const next = getMode() === 'go' ? 'openrouter' : 'go';
+  return setMode(next, { auto: true });
+}
+
+module.exports = { STATE_FILE, AUTO_REVERT_MS, getMode, setMode, resolveProfileName, noteFailure, forceFlip };

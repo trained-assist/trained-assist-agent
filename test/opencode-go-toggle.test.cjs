@@ -76,3 +76,20 @@ test('noteFailure is a no-op once already on openrouter', () => {
   const flipped = mod.noteFailure('opencode-go/deepseek-v4.1-flash', 'Go usage limit exceeded');
   assert.equal(flipped, false);
 });
+
+test('forceFlip alternates unconditionally, no error text required (blind crash-retry alternation)', () => {
+  const { mod } = freshModule();
+  assert.equal(mod.getMode(), 'go');
+  assert.equal(mod.forceFlip(), 'openrouter');
+  assert.equal(mod.getMode(), 'openrouter');
+  assert.equal(mod.forceFlip(), 'go', 'and vice versa — a second forced flip goes back to go');
+  assert.equal(mod.getMode(), 'go');
+});
+
+test('forceFlip marks the switch as auto (eligible for AUTO_REVERT_MS), not a sticky manual override', () => {
+  const { mod } = freshModule();
+  mod.forceFlip();
+  const state = JSON.parse(fs.readFileSync(mod.STATE_FILE, 'utf8'));
+  assert.equal(state.switchedBy, 'auto');
+  assert.ok(state.autoRevertAt);
+});
