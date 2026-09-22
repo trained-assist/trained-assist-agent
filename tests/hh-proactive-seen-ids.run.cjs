@@ -32,11 +32,6 @@ function cleanup() {
   delete process.env.AGENT_DATA_DIR;
 }
 
-const candidates = (n) => Array.from({ length: n }, (_, i) => ({
-  id: `hh-${String(i).padStart(4, '0')}`, first_name: 'X', last_name: String(i),
-  tag: 'REVIEW', total_exp_years: 5, area: 'Москва',
-}));
-
 test('first-run backfill: every collected ID is new', () => {
   freshUser();
   const r = mergeSeenIds('alice', 'vac-1', ['hh-0001', 'hh-0002', 'hh-0003']);
@@ -128,24 +123,26 @@ test('lossless: union of new across N runs === total distinct IDs', () => {
   assert.ok(!unionNews.has('hh-0054')); // never collected
 });
 
-test('buildProactiveDigest: shows count + glyphs + link', () => {
+// Multi-vacancy step 4/6: cold search results are a one-line count + link, never a
+// per-candidate name list, in Telegram.
+test('buildProactiveDigest: one-line count summary + link, no candidate names', () => {
   const text = buildProactiveDigest({
     vacancyTitle: 'Финансовый советник', newCount: 3, totalSeen: 47,
-    newCandidates: candidates(3), url: 'https://example/hh/proactive',
+    url: 'https://example/hh/proactive',
   });
   assert.ok(text.includes('🧊 Холодный поиск: 3 новых'));
   assert.ok(text.includes('«Финансовый советник»'));
-  assert.ok(text.includes('Всего в базе по этой вакансии: 47'));
+  assert.ok(text.includes('всего в базе: 47'));
   assert.ok(text.includes('https://example/hh/proactive'));
-  assert.ok(text.includes('🟡'));
+  assert.ok(text.split('\n').length === 1);
 });
 
-test('buildProactiveDigest: truncates at 10 + tail', () => {
+test('buildProactiveDigest: omits link line when no url given', () => {
   const text = buildProactiveDigest({
-    vacancyTitle: 'X', newCount: 15, totalSeen: 100,
-    newCandidates: candidates(15), url: '',
+    vacancyTitle: 'X', newCount: 15, totalSeen: 100, url: '',
   });
-  assert.ok(text.includes('…и ещё 5'));
+  assert.ok(!text.includes('http'));
+  assert.ok(text.includes('15 новых'));
 });
 
 (async () => {
