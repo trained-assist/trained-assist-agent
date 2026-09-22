@@ -65,7 +65,7 @@ function removeActiveVacancy(vacancyId) {
 
 // ── Token storage ──────────────────────────────────────────────────────────
 
-const { readHhToken: _readHhTokenUtil, hhTokenPath, hhFetch: hhGet, hhPost, hhPut } = require('../../hh-utils');
+const { readHhToken: _readHhTokenUtil, hhTokenPath, hhFetch: hhGet, hhPost, hhPut, hhPostForm } = require('../../hh-utils');
 
 function tokenBase() {
   return process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -348,6 +348,45 @@ async function formatCandidateContext(negotiation) {
   const resume = negotiation.resume || {};
   const name = [resume.last_name, resume.first_name].filter(Boolean).join(' ') || 'Кандидат';
   return { name, text: buildResumeText(negotiation) };
+}
+
+// ── Resume search (cold search) query builder ───────────────────────────────
+//
+// GET /resumes accepts multi-value params only as REPEATED query keys
+// (?professional_role=70&professional_role=96), never comma-joined —
+// sending "70,96" as one value is silently treated as a single (invalid)
+// role id and HH rejects it. toArray()+append below is the fix.
+function toArray(v) {
+  if (v === undefined || v === null || v === '') return [];
+  return Array.isArray(v) ? v.filter(x => x !== undefined && x !== null && x !== '') : [v];
+}
+
+function buildResumeSearchQuery(params) {
+  const qs = new URLSearchParams();
+  const multi = ['text', 'area', 'professional_role', 'experience', 'skill', 'label', 'employment_form', 'work_format', 'education_levels'];
+  for (const key of multi) {
+    for (const v of toArray(params[key])) qs.append(key, String(v));
+  }
+  const scalar = ['vacancy_id', 'resume', 'age_from', 'age_to', 'salary_from', 'salary_to', 'currency', 'gender', 'order_by', 'page', 'per_page', 'search_in_responses', 'relocation'];
+  for (const key of scalar) {
+    if (params[key] !== undefined && params[key] !== null && params[key] !== '') qs.append(key, String(params[key]));
+  }
+  return qs.toString();
+}
+
+function summarizeResumeItem(item) {
+  const name = [item.last_name, item.first_name].filter(Boolean).join(' ') || item.title || 'Кандидат (имя скрыто)';
+  return {
+    resume_id: item.id,
+    name,
+    title: item.title || '',
+    area: item.area?.name || '',
+    experience_months: item.total_experience?.months ?? null,
+    age: item.age ?? null,
+    salary: item.salary ? `${item.salary.amount ?? ''} ${item.salary.currency || ''}`.trim() : null,
+    updated_at: item.updated_at ? item.updated_at.slice(0, 10) : null,
+    resume_url: item.alternate_url || null,
+  };
 }
 
 // ── Module exports ──────────────────────────────────────────────────────────
@@ -635,6 +674,143 @@ module.exports = {
             pages: data.pages,
             items,
           };
+        } catch (e) {
+          return { error: e.message };
+        }
+      },
+    },
+
+    // ── Cold search (резюме, поиск по базе — не отклики) ────────────────────
+
+    hh_search_resumes: {
+      description:
+        'РЕАЛЬНЫЙ холодный поиск резюме через API HH (не boolean_search — тот только генерирует строки для ручного поиска в интерфейсе HH). ' +
+        'Ищет кандидатов, которые НЕ откликались на вакансию — база резюме. Требует платный доступ работодателя к базе резюме на hh.ru; ' +
+        'без него вернёт ошибку прав доступа. ВЫЗЫВАЙ ЭТОТ ИНСТРУМЕНТ (не hh_api_call/hh_discover) когда просят «холодный поиск», ' +
+        '«найди кандидатов», «поищи резюме», «прогрей базу» и т.п. ' +
+        'Проще всего передать только vacancy_id — HH сам подберёт похожие резюме по роли/региону/ключевым словам вакансии (как «похожие вакансии», но для резюме). ' +
+        'Для точного поиска задавай text/area/professional_role/experience сам. ' +
+        'ВАЖНО: professional_role, area, text, skill и т.п. принимают НЕСКОЛЬКО значений как МАССИВ (каждое уйдёт отдельным query-параметром) — ' +
+        'никогда не соединяй значения через запятую в одну строку, HH это не поддерживает и вернёт 400.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          vacancy_id: { type: 'string', description: 'ID вакансии — HH подберёт похожие резюме автоматически (рекомендуемый способ для быстрого старта холодного поиска).' },
+          text: { description: 'Поисковая фраза(ы). Строка или массив строк — каждая уточняет поиск.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          area: { description: 'ID региона(ов) из /areas (например "2" — СПб). Строка или массив.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          professional_role: { description: 'ID профессиональной роли(ей) из /professional_roles. Строка или массив — НЕ через запятую.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          experience: { description: 'Опыт работы: noExperience | between1And3 | between3And6 | moreThan6. Строка или массив.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          skill: { description: 'ID ключевых навыков (из подсказок HH). Строка или массив.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          age_from: { type: 'number' },
+          age_to: { type: 'number' },
+          salary_from: { type: 'number' },
+          salary_to: { type: 'number' },
+          order_by: { type: 'string', description: 'Сортировка, см. resume_search_order в справочнике HH. По умолчанию — релевантность.' },
+          page: { type: 'number', description: 'Номер страницы, с 0 (по умолчанию 0).' },
+          per_page: { type: 'number', description: 'Кол-во на странице, макс 100 (по умолчанию 20).' },
+        },
+      },
+      handler: async (params = {}) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+
+        const qs = buildResumeSearchQuery(params);
+        try {
+          const data = await hhGet(`/resumes${qs ? `?${qs}` : ''}`, token);
+          const items = (data.items || []).map(summarizeResumeItem);
+          return {
+            total: data.found,
+            pages: data.pages,
+            page: data.page ?? params.page ?? 0,
+            items,
+            note: items.length
+              ? 'Дальше: hh_evaluate_resume(resume_id, ats_config) для скоринга по критериям вакансии, затем hh_invite_resume для приглашения на вакансию.'
+              : 'Пусто. Если ожидал результаты — проверь area/professional_role (id из /areas, /professional_roles через hh_discover) или ослабь фильтры.',
+          };
+        } catch (e) {
+          const msg = /403/.test(e.message)
+            ? 'Нет платного доступа к базе резюме на hh.ru (услуга не подключена или закончилась) — холодный поиск недоступен для этого аккаунта.'
+            : e.message;
+          return { error: msg };
+        }
+      },
+    },
+
+    hh_evaluate_resume: {
+      description:
+        'Оценить резюме из холодного поиска (hh_search_resumes) той же ATS-рубрикой, что и отклики — но БЕЗ отклика/переписки, ' +
+        'по самому резюме. Используй после hh_search_resumes, до приглашения (hh_invite_resume), чтобы не звать вслепую.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          resume_id: { type: 'string', description: 'ID резюме из hh_search_resumes.' },
+          ats_config: {
+            type: 'object',
+            description: 'ATS config от hh_extract_ats_config (или свой). Обязательные поля: knockout[], required[], preferred[], pass_threshold, review_threshold.',
+          },
+        },
+        required: ['resume_id', 'ats_config'],
+      },
+      handler: async ({ resume_id, ats_config }) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+        const apiKey = readOrKey(USER_ID);
+        if (!apiKey) return { error: 'OpenRouter API key не найден.' };
+
+        try {
+          const fakeNeg = { resume: { id: resume_id } };
+          await hydrateResume(fakeNeg, token);
+          if (fakeNeg._resume_status !== 'full') {
+            return { error: fakeNeg._resume_status === 'restricted' ? 'Резюме не открыто для просмотра (нужен платный контакт-доступ).' : 'Не удалось загрузить резюме.' };
+          }
+          const name = [fakeNeg.resume.last_name, fakeNeg.resume.first_name].filter(Boolean).join(' ') || 'Кандидат';
+          const candidateText = buildResumeText(fakeNeg);
+
+          const result = await evaluateCandidate(candidateText, ats_config, apiKey);
+
+          return {
+            resume_id,
+            name,
+            score: result.score,
+            verdict: result.verdict,
+            reasoning: result.reasoning,
+            matched: result.matched,
+            gaps: result.gaps,
+            knockout_failed: result.knockout_failed || [],
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
+      },
+    },
+
+    hh_invite_resume: {
+      description:
+        'Пригласить кандидата из холодного поиска на вакансию (POST /negotiations/phone_interview на hh.ru) — превращает найденное резюме ' +
+        'в полноценный отклик/переписку, дальше работает как с обычным откликом (hh_get_messages, hh_send_message). ' +
+        'Списывает контакт кандидата с баланса услуги базы резюме — сначала покажи текст сообщения рекрутёру и дождись подтверждения.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          resume_id: { type: 'string', description: 'ID резюме (из hh_search_resumes).' },
+          vacancy_id: { type: 'string', description: 'ID вакансии, на которую приглашаем.' },
+          message: { type: 'string', description: 'Текст приглашения кандидату (на email).' },
+          send_sms: { type: 'boolean', description: 'Также отправить SMS-уведомление (стандартный текст, не редактируется). По умолчанию false.' },
+        },
+        required: ['resume_id', 'vacancy_id'],
+      },
+      handler: async ({ resume_id, vacancy_id, message, send_sms = false }) => {
+        const token = readHhToken(USER_ID);
+        if (!token) return { error: 'HH не подключён.' };
+
+        try {
+          await hhPostForm('/negotiations/phone_interview', token, {
+            resume_id,
+            vacancy_id,
+            ...(message ? { message } : {}),
+            ...(send_sms ? { send_sms: 'true' } : {}),
+          });
+          return { ok: true, resume_id, vacancy_id, note: 'Приглашение отправлено. Дальше — hh_list_responses или hh_get_messages по этому кандидату.' };
         } catch (e) {
           return { error: e.message };
         }
