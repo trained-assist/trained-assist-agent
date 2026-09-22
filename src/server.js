@@ -872,13 +872,17 @@ ${recent || '(пока нет)'}
         '10-nalog.js': 'nalog', '20-tilda.js': 'tilda', '21-browser-session.js': 'browser',
         '30-weeek.js': 'weeek', '40-company.js': 'company', '50-gdrive.js': 'gdrive',
         '60-github.js': 'github', '70-inn-enrichment.js': 'inn', '80-getcourse.js': 'getcourse',
-        '85-expo.js': 'expo', '86-expo-flexi.js': 'expo-flexi', '90-hh.js': 'hh',
+        '85-expo.js': 'expo', '86-expo-flexi.js': 'expo-flexi',
         '92-flexi-sales.js': 'flexi-sales',
       };
       const toolsDir = path.join(__dirname, 'mcp-skills', 'tools');
       const skills = fs.existsSync(toolsDir)
         ? fs.readdirSync(toolsDir).map(f => SKILL_NAMES[f]).filter(Boolean)
         : [];
+      // hh skill was extracted (#942) — its MCP tools no longer live under toolsDir,
+      // so detect it the same way src/mcp-action.js does: sibling checkout present.
+      const HH_SKILL_SIBLING = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
+      if (fs.existsSync(HH_SKILL_SIBLING)) skills.push('hh');
       const upsell_text = process.env.AGENT_UPSELL_TEXT ||
         'За HH-рекрутингом, налогами, задачами Weeek и другим — обратитесь к @super_personal_assistant_bot';
       return json(res, 200, { capabilities, skills, upsell_text });
