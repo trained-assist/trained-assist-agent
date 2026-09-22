@@ -10,6 +10,7 @@ const projects = require('../projects');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('../auth-flag');
 const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
+const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
 const { recordUsage } = require('../usage-store');
 const {
   loadUserTokens,
@@ -153,6 +154,13 @@ const MAX_RESUME_ATTEMPTS = 3; // cap on auto-retries for a task resumed after a
 // restart is our fault, not the user's, so it's worth retrying automatically, but bounded: without
 // this, a task whose resume keeps crashing (e.g. a genuinely broken session) would retry forever
 // across restarts. resumePendingTasks() in server.js reads/writes this same cap.
+// MAX_INCOMPLETE_RETRIES (from retry-policy, shared with the resume-after-restart backoff below)
+// bounds the OTHER dead-end: a run that exits without a confirmed final answer for reasons that
+// aren't a restart, a quota/ladder hit, or an auth failure (those have their own specific retry
+// paths below) — e.g. a bare crash mid-task, or the engine just not emitting a completion event.
+// Previously this dead-ended immediately with "напиши продолжай", pushing a transient hiccup onto
+// the human. getRetryDelayMs() gives the same 30s/3min/10min (ms in TEST_MODE) backoff as the
+// restart-resume path, so a provider blip gets a chance to pass before we ask a human to retry.
 
 // ── Pending-task journal — survives process restart ──────────────────────────
 const PENDING_DIR = path.join(
@@ -1246,7 +1254,7 @@ function buildOcCapabilitiesBlock(secrets) {
   return lines.join('\n');
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, resumedAfterRestart = false, resumeAttempts = 0 }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0 }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1875,12 +1883,15 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const answer = terminalSuccess ? pickFinalText(claudeResult, lastAssistantMsg, '') : '';
   const incomplete = interrupted || !answer;
   let result = answer;
+  let incompleteReason = null; // hoisted so the generic-retry check below (after the
+  // engine-specific classifiers) can build its status message without recomputing it
   if (incomplete) {
     const reason = processSignal
       ? (restartShutdown ? 'сервер перезапускается' : `сигнал ${processSignal}`)
       : exitCode !== 0 ? `код ${exitCode}`
       : processError ? `ошибка запуска`
       : 'нет подтверждённого финального ответа';
+    incompleteReason = reason;
 
     // A task resumed after a server restart that fails again is our fault, not the
     // user's task — auto-retry a bounded number of times instead of dead-ending on
@@ -1906,8 +1917,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
     result = resumedAfterRestart
       ? `⚠️ Не удалось восстановить сессию после перезапуска сервера (${reason}), попытка ${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS}. Это сбой сервера, а не твоей задачи — отправь «продолжай», чтобы попробовать вручную ещё раз.`
+      : incompleteRetryAttempts > 0
+      ? `⚠️ Работа прервана (${reason}) — не помогло и после ${incompleteRetryAttempts} автоматических попыток. Отправь «продолжай», чтобы попробовать вручную ещё раз.`
       : `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
-    console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess} resumedAfterRestart=${resumedAfterRestart} resumeAttempts=${resumeAttempts}`);
+    console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess} resumedAfterRestart=${resumedAfterRestart} resumeAttempts=${resumeAttempts} incompleteRetryAttempts=${incompleteRetryAttempts}`);
   }
 
   // OpenCode-only: a quota/rate-limit or one-time-config error on the CURRENT ladder rung
@@ -2052,6 +2065,34 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, authMsg);
     return authMsg;
+  }
+
+  // Generic mid-task dead-end retry — reached only when the run is incomplete but none of the
+  // classifiers above claimed it (not a restart-resume, not an opencode ladder/quota hit, not an
+  // auth failure): a bare crash, a dropped connection, or the engine just not emitting a
+  // completion event. Previously this dead-ended immediately with "напиши продолжай"; now it
+  // retries the same task/session on the same engine, bounded by MAX_INCOMPLETE_RETRIES with the
+  // shared backoff schedule, before handing it back to a human.
+  if (incomplete && !resumedAfterRestart && !restartShutdown && incompleteRetryAttempts < MAX_INCOMPLETE_RETRIES) {
+    const nextAttempt = incompleteRetryAttempts + 1;
+    const delayMs = getRetryDelayMs(nextAttempt) || 0;
+    const retryMsg = `🔄 Работа прервана (${incompleteReason}) — пробую ещё раз (${nextAttempt}/${MAX_INCOMPLETE_RETRIES})…`;
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
+    else await tgSend(BOT_TOKEN, chatId, retryMsg);
+    if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
+    const fireRetry = () => runTask({
+      initiatedAt, threadId,
+      taskId: `${user.username}-retry-${Date.now()}`,
+      user, task, context,
+      sessionId: activeSessionId,
+      forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
+      incompleteRetryAttempts: nextAttempt,
+      continuationCount, mode, projectId, internalGtd, engine,
+    });
+    const queuedRetry = delayMs > 0
+      ? new Promise((resolve, reject) => setTimeout(() => { fireRetry().then(resolve, reject); }, delayMs))
+      : fireRetry();
+    return { queuedRetry };
   }
 
   // Record token usage for billing
