@@ -178,8 +178,16 @@ function clearPendingTask(taskId) {
 
 function getPendingTasks() {
   if (!fs.existsSync(PENDING_DIR)) return [];
+  // One malformed journal entry must not abort resume for every OTHER task —
+  // this runs once at boot (resumePendingTasks) and used to let a single bad
+  // JSON.parse throw out of the whole function, silently stranding every
+  // legitimately-resumable session (including GTD turns) behind it.
   return fs.readdirSync(PENDING_DIR).filter(f => f.endsWith('.json'))
-    .map(f => JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')));
+    .map(f => {
+      try { return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), 'utf8')); }
+      catch (e) { console.warn(`[runner] getPendingTasks: skipping malformed ${f}:`, e.message); return null; }
+    })
+    .filter(Boolean);
 }
 
 // ── Soft-continuation journal — survives process restart ─────────────────────
@@ -206,8 +214,14 @@ function clearSoftContinuationFile(username) {
 
 function listSoftContinuations() {
   if (!fs.existsSync(SOFT_CONT_DIR)) return [];
+  // Same defensive read as getPendingTasks: one malformed record must not
+  // abort reconciliation for every other user's soft-continuation.
   return fs.readdirSync(SOFT_CONT_DIR).filter(f => f.endsWith('.json'))
-    .map(f => JSON.parse(fs.readFileSync(path.join(SOFT_CONT_DIR, f), 'utf8')));
+    .map(f => {
+      try { return JSON.parse(fs.readFileSync(path.join(SOFT_CONT_DIR, f), 'utf8')); }
+      catch (e) { console.warn(`[runner] listSoftContinuations: skipping malformed ${f}:`, e.message); return null; }
+    })
+    .filter(Boolean);
 }
 
 
@@ -362,21 +376,26 @@ function isTaskRunning(username) {
   return false;
 }
 
-// True while a Claude/codex/opencode process for this exact session is actually
-// spawned and streaming — checks the live in-process activeTimers map, not the
-// pending-task journal. Used by gtd-controller's re-entrancy guard: the journal-based
-// check it used before had a 30-min TTL heuristic while real runs can legitimately
-// take up to CLAUDE_TIMEOUT_MS (40min) plus up to 8 extend-timeout calls (2h+), so a
-// long-running GTD turn could age out of the guard and get double-fired by the next
-// tick. chatLanes still serializes same-session execution (no actual concurrent
-// process), but the redundant fire burns an extra iteration/notification/GitHub-
-// precheck queued right behind the first — which could exhaust maxIterations before
-// the checklist was genuinely done.
+// True while this exact session is either spawned-and-streaming OR still queued
+// waiting for a turn — checks activeTimers (live process) AND chatLanes (accepted,
+// waiting on the per-chat lane / per-profile cap / RAM / global slot). Used by
+// gtd-controller's re-entrancy guard: the journal-based check it used before had a
+// 30-min TTL heuristic while real runs can legitimately take up to CLAUDE_TIMEOUT_MS
+// (40min) plus up to 8 extend-timeout calls (2h+), so a long-running GTD turn could
+// age out of the guard and get double-fired by the next tick — fixed by switching to
+// this live in-process check (#1062). But activeTimers only gets an entry once the
+// process actually spawns (claude-runner.js, after every admission wait), while
+// chatLanes.set() happens synchronously the instant runTask() is called and stays
+// until the queued work finishes. Under load (profile cap / RAM / global slot all
+// busy), a GTD turn can sit queued for minutes with activeTimers still empty — the
+// next 5-min tick would see "not running" and fire a duplicate queued turn for the
+// same session onto the same lane. Checking chatLanes too closes that window.
 function isSessionRunning(sessionId) {
   if (!sessionId) return false;
   for (const s of activeTimers.values()) {
     if (s.sessionId === sessionId) return true;
   }
+  if (chatLanes.has(_laneKey(sessionId, null))) return true;
   return false;
 }
 
@@ -1154,7 +1173,7 @@ function buildOcCapabilitiesBlock(secrets) {
   return lines.join('\n');
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1787,12 +1806,41 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
   }
 
-  // Detect Claude Code auth failure — set flag and send clear message instead of raw error
+  // Detect an auth/quota failure for the current engine — set the per-engine flag so the
+  // operator repair loop sees it either way. Claude and Codex additionally get ONE automatic
+  // fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on repair;
+  // engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
   const authText = claudeResult || fullOutput.text || result;
   if (isAuthError(authText)) {
     const reason = detectReason(authText);
-    setAuthFailedFlag({ reason, error_text: authText });
-    const authMsg = '⚠️ Авторизация Claude Code истекла — оператор уже уведомлён, скоро починим.';
+    setAuthFailedFlag({ reason, error_text: authText, engine });
+    const engineLabel = engine === 'codex' ? 'Codex' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
+
+    if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
+      const fallbackMsg = `⚠️ ${engineLabel} потерял авторизацию — автоматически переключаюсь на OpenCode для этой задачи.`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg));
+      else await tgSend(BOT_TOKEN, chatId, fallbackMsg);
+      if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
+      const queuedRetry = runTask({
+        initiatedAt, threadId,
+        taskId: `${user.username}-${Date.now()}`,
+        user,
+        task,
+        context,
+        sessionId: activeSessionId,
+        forceClaude,
+        initialMsgId: msgId,
+        pinnedMsgId,
+        secrets,
+        retryCount,
+        continuationCount, mode, projectId, internalGtd,
+        engine: 'opencode',
+        engineFallbackDone: true,
+      });
+      return { queuedRetry };
+    }
+
+    const authMsg = `⚠️ Авторизация ${engineLabel} истекла — оператор уже уведомлён, скоро починим.`;
     if (msgId) {
       await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg));
     } else {
@@ -2041,4 +2089,6 @@ module.exports = {
   _cap: { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY },
   // Exported for isSessionRunning tests only — the real Map backing activeTimers
   _activeTimers: activeTimers,
+  // Exported for isSessionRunning tests only — the real Map backing chatLanes
+  _chatLanes: chatLanes,
 };
