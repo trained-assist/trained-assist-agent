@@ -9,6 +9,7 @@ const { getCurrentSessionId, setCurrentSessionId } = require('../session-store')
 const projects = require('../projects');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('../auth-flag');
 const opencodeLadder = require('../opencode-ladder');
+const opencodeGoToggle = require('../opencode-go-toggle');
 const { recordUsage } = require('../usage-store');
 const {
   loadUserTokens,
@@ -857,12 +858,15 @@ function buildContextCard(username, workDir, chatId) {
     // ~/.config/opencode/.current-profile file — that file is machine-wide and went stale
     // once #1045 scoped /oc_* switching to each profile individually.
     const ocProfile = profiles.getOcProfile(workDir);
+    // "deepseek" is a logical/virtual profile (issue #1096) — resolves to deepseek-go or
+    // deepseek-openrouter via the shared VM-wide toggle, not a literal .opencode/profiles file.
+    const ocProfileResolved = ocProfile === 'deepseek' ? opencodeGoToggle.resolveProfileName() : ocProfile;
     let ocModel = process.env.OPENCODE_MODEL || null;
     try {
       // Resolve through the ladder (issue #1061 Фаза 1-2), not a raw ocCfg.model read —
       // profiles migrated to the `ladder` shape have no top-level `model`, so reading it
       // directly would silently blank the pin's model line for every non-legacy profile.
-      const resolved = opencodeLadder.buildOcProfileOverrides(ocProfile);
+      const resolved = opencodeLadder.buildOcProfileOverrides(ocProfileResolved);
       if (resolved.model) ocModel = resolved.model;
     } catch (e) { console.warn('[runner] oc pin model:', e.message); }
     lines.push(`⚙️ OpenCode · ${ocProfile}${ocModel ? ` (${ocModel})` : ''}`);
@@ -1708,9 +1712,16 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // so the next attempt degrades to the ladder's next rung instead of repeating the same model.
   let ocProfileOverrides = null;
   let ocProfileName = null;
+  // Whether the profile the user actually picked (profiles.getOcProfile) is the shared
+  // "deepseek" logical profile (issue #1096) — set before ocProfileName gets rewritten to the
+  // concrete deepseek-go/deepseek-openrouter file below, so the failure handler further down
+  // knows whether to consult the global go/openrouter toggle.
+  let ocProfileIsDeepseek = false;
   if (engine === 'opencode') {
     try {
       ocProfileName = profiles.getOcProfile(user.workDir);
+      ocProfileIsDeepseek = ocProfileName === 'deepseek';
+      if (ocProfileIsDeepseek) ocProfileName = opencodeGoToggle.resolveProfileName();
       ocProfileOverrides = opencodeLadder.buildOcProfileOverrides(ocProfileName);
       // Фаза 4 (issue #1061): the ladder can degrade between two turns of the SAME
       // session (a different task exhausted a rung in the meantime) — that's not the
@@ -1931,6 +1942,45 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // which never mentions "rate limit"/"429"/"quota" — so classifyError() below always misses and
   // the ladder never degrades, even though the raw error was a clean quota hit.
   const preLadderText = codexErrorMsg || claudeResult || fullOutput.text || result;
+
+  // Shared "deepseek" OpenCode profile (issue #1096): flip the VM-wide go/openrouter toggle
+  // instead of the per-role ladder above — deepseek-go/deepseek-openrouter are each a single
+  // uniform model (no ladder to degrade through within the profile), and the Go subscription's
+  // quota is account-wide across the whole team, not per-model, so "try the next rung" doesn't
+  // apply here the way it does for max/value. A successful flip retries the SAME task; the
+  // retry re-resolves the "deepseek" profile (see ocProfileIsDeepseek above) and picks up
+  // deepseek-openrouter. Falls through to the generic ladder block below when the failure isn't
+  // a Go-quota hit (e.g. the OpenRouter side itself failed) so it's still reported normally.
+  if (engine === 'opencode' && ocProfileIsDeepseek) {
+    const failedModel = ocProfileOverrides?.model;
+    const flipped = opencodeGoToggle.noteFailure(failedModel, preLadderText);
+    if (flipped && ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
+      const newProfile = opencodeGoToggle.resolveProfileName();
+      const switchMsg = `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg));
+      else await tgSend(BOT_TOKEN, chatId, switchMsg);
+      if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
+      const queuedRetry = runTask({
+        initiatedAt, threadId,
+        taskId: `${user.username}-${Date.now()}`,
+        user,
+        task,
+        context,
+        sessionId: activeSessionId,
+        forceClaude,
+        initialMsgId: msgId,
+        pinnedMsgId,
+        secrets,
+        retryCount,
+        continuationCount, mode, projectId, internalGtd,
+        engine: 'opencode',
+        engineFallbackDone,
+        ladderAttempt: ladderAttempt + 1,
+      });
+      return { queuedRetry };
+    }
+  }
+
   if (engine === 'opencode' && ocProfileName) {
     const verdict = opencodeLadder.recordFailure(ocProfileName, 'build', ocProfileOverrides?.model, preLadderText);
     if (verdict) {
