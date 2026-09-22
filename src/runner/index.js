@@ -362,6 +362,24 @@ function isTaskRunning(username) {
   return false;
 }
 
+// True while a Claude/codex/opencode process for this exact session is actually
+// spawned and streaming — checks the live in-process activeTimers map, not the
+// pending-task journal. Used by gtd-controller's re-entrancy guard: the journal-based
+// check it used before had a 30-min TTL heuristic while real runs can legitimately
+// take up to CLAUDE_TIMEOUT_MS (40min) plus up to 8 extend-timeout calls (2h+), so a
+// long-running GTD turn could age out of the guard and get double-fired by the next
+// tick. chatLanes still serializes same-session execution (no actual concurrent
+// process), but the redundant fire burns an extra iteration/notification/GitHub-
+// precheck queued right behind the first — which could exhaust maxIterations before
+// the checklist was genuinely done.
+function isSessionRunning(sessionId) {
+  if (!sessionId) return false;
+  for (const s of activeTimers.values()) {
+    if (s.sessionId === sessionId) return true;
+  }
+  return false;
+}
+
 /**
  * Kill any running Claude process for a given username.
  * Finds all entries in activeTimers whose taskId starts with `${username}-`
@@ -1614,7 +1632,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // otherwise the post-processing below (retry, incomplete detection, usage).
   const engineResult = await runEngineProcess({
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
-    cleanEnv, userTokens, sessionFilePath,
+    cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
     engineBin, engineArgs, mcpConfig, ocProfileOverrides,
@@ -2005,7 +2023,7 @@ async function reconcileSoftContinuations(secrets) {
 module.exports = {
   interruptForRestart,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  isTaskRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  isTaskRunning, isSessionRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   clearPendingContinuation, reconcileSoftContinuations,
   // Exported for soft-continuation journal tests only
   _softCont: { saveSoftContinuationFile, clearSoftContinuationFile, listSoftContinuations, SOFT_CONT_DIR },
@@ -2021,4 +2039,6 @@ module.exports = {
   _laneKey,
   // Exported for per-profile cap-isolation tests only (R7/S8a)
   _cap: { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY },
+  // Exported for isSessionRunning tests only — the real Map backing activeTimers
+  _activeTimers: activeTimers,
 };

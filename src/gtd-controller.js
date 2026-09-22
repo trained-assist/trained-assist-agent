@@ -476,15 +476,24 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
   let users = [];
   try { users = fs.readdirSync(baseUsersDir).filter(u => /^[a-zA-Z0-9_-]+$/.test(u)); } catch { return; }
 
-  let fired = 0;
+  // Flatten + sort by dueAt (oldest-overdue-first) BEFORE applying MAX_FIRES_PER_TICK.
+  // fs.readdirSync order is filesystem-arbitrary but stable across ticks — without this
+  // sort, whichever users/records happen to list first would win every tick's fire slots
+  // while later ones starve indefinitely (checklists that silently never progress).
+  const due = [];
   for (const username of users) {
-    if (fired >= MAX_FIRES_PER_TICK) break;
     const workDir = path.join(baseUsersDir, username);
-    const recs = listGtd(workDir).filter(r => r && r.status === 'open' && r.dueAt <= now);
-    for (const rec of recs) {
-      if (fired >= MAX_FIRES_PER_TICK) break;
+    for (const rec of listGtd(workDir).filter(r => r && r.status === 'open' && r.dueAt <= now)) {
+      due.push({ username, workDir, rec });
+    }
+  }
+  due.sort((a, b) => a.rec.dueAt - b.rec.dueAt);
 
-      // Re-entrancy guard: тот же sessionId уже обрабатывается — не переоткрываем.
+  let fired = 0;
+  for (const { username, workDir, rec } of due) {
+    if (fired >= MAX_FIRES_PER_TICK) break;
+
+    // Re-entrancy guard: тот же sessionId уже обрабатывается — не переоткрываем.
       // Проверяем по sessionId, а не по username, чтобы разные GTD одного профиля
       // могли стрелять параллельно (разные чаты, разные задачи).
       if (isTaskRunning(username, rec.sessionId)) { console.log(`[gtd] skip ${rec.sessionId}: task running for this session`); continue; }
@@ -561,12 +570,12 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
       const _recSnap = { ...rec };
       runTask({
         taskId, user, task: buildReopenMessage(_recSnap),
-        sessionId: _recSnap.sessionId, forceClaude: true,
+        sessionId: _recSnap.sessionId, forceClaude: true, engine: 'claude',
         secrets, internalGtd: true,
       }).then(reply => {
         // Терминал: итерация сказала done/escalated, либо исчерпали cap.
         const said = typeof reply === 'string' ? reply : '';
-        const doneNow      = DONE_RE.test(said) || DONE_RE.test(session.summary?.ended || '');
+        const doneNow      = DONE_RE.test(said);
         const escalatedNow = ESCALATED_RE.test(said);
         const fresh = readGtd(workDir, _recSnap.sessionId) || _recSnap;
         if (doneNow) {
@@ -617,7 +626,6 @@ async function runDue({ secrets, baseUsersDir, isTaskRunning, runTask, getSessio
         r.dueAt = now + r.etaMinutes * 60 * 1000;
         writeGtd(workDir, r);
       });
-    }
   }
 }
 
@@ -627,5 +635,5 @@ module.exports = {
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
-  CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS,
+  CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS, MAX_FIRES_PER_TICK,
 };

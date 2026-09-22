@@ -211,6 +211,70 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   });
   ok(firedIds.length === 2 && new Set(firedIds).size === 2, 'runDue: concurrent sessions of one profile get distinct taskIds');
 
+  // 15. runDue pins engine:'claude' on every fire — forceClaude alone does NOT force
+  // the engine (it only widens context/skips quick-answers; engine selection falls
+  // back to the profile's default). A GTD record fired under codex/opencode can
+  // never resume after a server restart (those engines have no resume capability),
+  // permanently stranding the record open. Pinning engine explicitly closes that gap.
+  const wd7 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd7-'));
+  const userDir7 = path.join(wd7, 'u');
+  fs.mkdirSync(userDir7, { recursive: true });
+  G.writeGtd(userDir7, { ...rec, sessionId: 's-engine', dueAt: 100 });
+  let capturedEngine;
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd7, now: 200,
+    isTaskRunning: () => false,
+    getSession: () => ({ summary: {} }),
+    runTask: async o => { capturedEngine = o.engine; return 'x'; },
+  });
+  ok(capturedEngine === 'claude', 'runDue: fires with engine explicitly pinned to claude (not left to profile default)');
+
+  // 16. fairness: due records are fired oldest-dueAt-first, not in filesystem-listing
+  // order — otherwise the same early users/records win every tick's MAX_FIRES_PER_TICK
+  // slots while later ones starve indefinitely.
+  const wd8 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd8-'));
+  // Deliberately write users in an order whose directory listing would put the
+  // newest-due record first if unsorted (zzz sorts after aaa alphabetically on
+  // most filesystems, but readdirSync order isn't guaranteed either way — the
+  // point is dueAt must be what decides firing order, not listing order).
+  for (const [uname, sid, due] of [['zzz-newest', 's-new', 190], ['aaa-oldest', 's-old', 100], ['mmm-mid', 's-mid', 150]]) {
+    const ud = path.join(wd8, uname);
+    fs.mkdirSync(ud, { recursive: true });
+    G.writeGtd(ud, { ...rec, sessionId: sid, dueAt: due });
+  }
+  const fireOrder = [];
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd8, now: 200,
+    isTaskRunning: () => false,
+    getSession: () => ({ summary: {} }),
+    runTask: async o => { fireOrder.push(o.sessionId); return 'x'; },
+  });
+  ok(fireOrder.length === 3, 'fairness: all 3 due records fired (under the MAX_FIRES_PER_TICK cap)');
+  ok(JSON.stringify(fireOrder) === JSON.stringify(['s-old', 's-mid', 's-new']),
+    `fairness: fires oldest-dueAt-first regardless of directory order, got ${JSON.stringify(fireOrder)}`);
+
+  // 17. fairness under the cap: with MORE due records than MAX_FIRES_PER_TICK, the
+  // oldest-due ones win the slots this tick — a starved record isn't randomly dropped,
+  // it's simply the newest and gets its turn on a later tick.
+  const wd9 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd9-'));
+  const dues9 = [['u-d', 's-d', 400], ['u-a', 's-a2', 100], ['u-e', 's-e', 500], ['u-b', 's-b2', 200], ['u-c', 's-c', 300]];
+  for (const [uname, sid, due] of dues9) {
+    const ud = path.join(wd9, uname);
+    fs.mkdirSync(ud, { recursive: true });
+    G.writeGtd(ud, { ...rec, sessionId: sid, dueAt: due });
+  }
+  const fireOrder9 = [];
+  await G.runDue({
+    secrets: {}, baseUsersDir: wd9, now: 1000,
+    isTaskRunning: () => false,
+    getSession: () => ({ summary: {} }),
+    runTask: async o => { fireOrder9.push(o.sessionId); return 'x'; },
+  });
+  ok(JSON.stringify(fireOrder9) === JSON.stringify(['s-a2', 's-b2', 's-c']),
+    `fairness under cap: only the ${G.MAX_FIRES_PER_TICK} oldest-due records fire, got ${JSON.stringify(fireOrder9)}`);
+  ok(G.readGtd(path.join(wd9, 'u-d'), 's-d').status === 'open', 'fairness under cap: newer-due record stays open, not dropped');
+  ok(G.readGtd(path.join(wd9, 'u-e'), 's-e').status === 'open', 'fairness under cap: newest-due record stays open, not dropped');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
