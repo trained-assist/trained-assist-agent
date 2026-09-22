@@ -41,10 +41,19 @@ function listActionTools() {
   return [...local, ...hhRegistry.listTools().filter(t => !localNames.has(t.name))];
 }
 
+// Pure decision, no disk/registry access — the part worth unit-testing directly.
+// Mirrors resolveIndexPath's branch order exactly: local name wins over hh name,
+// unmatched tool defaults to local (existing behavior, not a new default).
+function resolveToolSource(tool, localNames, hhNames) {
+  if (localNames.has(tool)) return 'local';
+  if (hhNames && hhNames.has(tool)) return 'hh';
+  return 'local';
+}
+
 function resolveIndexPath(tool) {
-  if (registry.listTools().some(t => t.name === tool)) return INDEX_PATH;
-  if (hhRegistry && hhRegistry.listTools().some(t => t.name === tool)) return HH_SKILL_INDEX_PATH;
-  return INDEX_PATH;
+  const localNames = new Set(registry.listTools().map(t => t.name));
+  const hhNames = hhRegistry ? new Set(hhRegistry.listTools().map(t => t.name)) : null;
+  return resolveToolSource(tool, localNames, hhNames) === 'hh' ? HH_SKILL_INDEX_PATH : INDEX_PATH;
 }
 
 function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEOUT_MS }) {
@@ -109,4 +118,4 @@ function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEO
   });
 }
 
-module.exports = { runMcpTool, listActionTools };
+module.exports = { runMcpTool, listActionTools, resolveToolSource };
