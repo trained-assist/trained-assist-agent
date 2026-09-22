@@ -1433,7 +1433,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
   // Quick answer — bypass Claude. Utility commands skip session logging entirely.
   // forceClaude=true skips quick answers entirely (user explicitly wants Claude).
-  const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId);
+  const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId, activeSessionId);
   const quickReply = forceClaude ? null : await dispatchQuick();
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);

@@ -1161,7 +1161,11 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 }
 
 // Async wrapper: sync quick-answer first, then HH API handlers (no Claude).
-async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null) {
+// sessionId: the id the caller (gateway, via /run) has already committed to for this
+// chat turn — e.g. after a forceNew dispatch. BUG_OR_FEATURE_INTENT honors it (PR3) so
+// the session it creates is the SAME one the gateway's lastSessionId now points at,
+// instead of an orphan the next buffered message can never find its way back to.
+async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null) {
   // Session summaries (durable artifact) — handled here (async) so we can generate
   // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
   if (workDir) {
@@ -1217,15 +1221,21 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   // one-message capture: ensure the reserved `bugs-and-features` project, make it active,
   // and open a FRESH session bound to it. The user then piles on as many messages / voice /
   // screenshots as they want — the gateway accumulator holds them and ▶️ launches one deep
-  // run in THIS session (gateway side: PR3). Structuring into reports/<item>/ + index.jsonl
-  // is driven declaratively by the project's PROFILE.md, not by branches in this code.
+  // run in THIS session (gateway side: PR3 forces a fresh sessionId for the command so this
+  // session's id matches what the gateway's lastSessionId now points at — otherwise the
+  // buffered follow-ups launch into whatever unrelated session the chat had before).
+  // Structuring into reports/<item>/ + index.jsonl is driven declaratively by the
+  // project's PROFILE.md, not by branches in this code.
   if (BUG_OR_FEATURE_INTENT.test(task)) {
     if (!workDir) return null;
     try {
       const proj = projects.bugsProject(workDir);
       projects.setActiveProjectId(workDir, proj.id, chatId);
       const firstMessage = task.trim() || '/bug_or_feature';
-      const sid = sessions.createSession(workDir, { task: firstMessage, chatId, projectId: proj.id });
+      // Only adopt the caller's sessionId when it's actually fresh (sessionExists=false) —
+      // never overwrite a real, already-existing session file.
+      const reuseId = (!sessionExists && sessionId) ? sessionId : undefined;
+      const sid = sessions.createSession(workDir, { task: firstMessage, chatId, projectId: proj.id, id: reuseId });
       const greeting = [
         '🐞✨ Проект «Bugs and Features».',
         'Кидай что случилось или что хочешь — можно несколько сообщений, голосом, скриншотами.',
