@@ -10,6 +10,8 @@ import {
   getSession,
   buildContext,
   resolveChatSession,
+  getLastOcModel,
+  setLastOcModel,
 } from '../src/session-store.js';
 
 let tmpDir;
@@ -149,5 +151,40 @@ describe('resolveChatSession — chatId sign-split heal', () => {
     createSession(tmpDir, { task: 'other chat', chatId: -42 });
     // CHAT has no session / pointer of its own → no accidental adoption of chat -42's session.
     expect(resolveChatSession(tmpDir, 's-1003814002203-9999', CHAT)).toBeNull();
+  });
+});
+
+// issue #1061 Фаза 4: track the OpenCode ladder's resolved model per session/role so the
+// runner can tell whether it changed between two turns of the same session.
+describe('getLastOcModel / setLastOcModel', () => {
+  it('returns null when no model has been recorded yet', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    expect(getLastOcModel(tmpDir, id, 'build')).toBeNull();
+  });
+
+  it('round-trips the model recorded for a role', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    setLastOcModel(tmpDir, id, 'build', 'opencode/gpt-6-astra');
+    expect(getLastOcModel(tmpDir, id, 'build')).toBe('opencode/gpt-6-astra');
+  });
+
+  it('overwrites on a later turn, reflecting the ladder degrading', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    setLastOcModel(tmpDir, id, 'build', 'opencode/gpt-6-astra');
+    setLastOcModel(tmpDir, id, 'build', 'deepseek-v4.1-flash');
+    expect(getLastOcModel(tmpDir, id, 'build')).toBe('deepseek-v4.1-flash');
+  });
+
+  it('tracks roles independently', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    setLastOcModel(tmpDir, id, 'build', 'opencode/gpt-6-astra');
+    setLastOcModel(tmpDir, id, 'plan', 'gpt-5.6-sol');
+    expect(getLastOcModel(tmpDir, id, 'build')).toBe('opencode/gpt-6-astra');
+    expect(getLastOcModel(tmpDir, id, 'plan')).toBe('gpt-5.6-sol');
+  });
+
+  it('is a no-op when the session file does not exist', () => {
+    expect(() => setLastOcModel(tmpDir, 's-missing', 'build', 'x')).not.toThrow();
+    expect(getLastOcModel(tmpDir, 's-missing', 'build')).toBeNull();
   });
 });

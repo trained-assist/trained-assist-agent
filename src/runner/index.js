@@ -8,6 +8,7 @@ const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
 const { isAuthError, detectReason, setAuthFailedFlag } = require('../auth-flag');
+const opencodeLadder = require('../opencode-ladder');
 const { recordUsage } = require('../usage-store');
 const {
   loadUserTokens,
@@ -853,11 +854,11 @@ function buildContextCard(username, workDir, chatId) {
     const ocProfile = profiles.getOcProfile(workDir);
     let ocModel = process.env.OPENCODE_MODEL || null;
     try {
-      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfile}.json`);
-      if (fs.existsSync(ocProfilePath)) {
-        const ocCfg = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
-        if (ocCfg.model) ocModel = ocCfg.model;
-      }
+      // Resolve through the ladder (issue #1061 Фаза 1-2), not a raw ocCfg.model read —
+      // profiles migrated to the `ladder` shape have no top-level `model`, so reading it
+      // directly would silently blank the pin's model line for every non-legacy profile.
+      const resolved = opencodeLadder.buildOcProfileOverrides(ocProfile);
+      if (resolved.model) ocModel = resolved.model;
     } catch (e) { console.warn('[runner] oc pin model:', e.message); }
     lines.push(`⚙️ OpenCode · ${ocProfile}${ocModel ? ` (${ocModel})` : ''}`);
   } else if (eng === 'codex') {
@@ -1235,7 +1236,7 @@ function buildOcCapabilitiesBlock(secrets) {
   return lines.join('\n');
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0 }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1695,15 +1696,31 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     mcpConfig, systemPromptFile, user,
   });
 
-  // Per-profile OpenCode model set (value|quality|free|mimo|...), folded into the per-invocation
-  // OPENCODE_CONFIG in runEngineProcess/writeOpencodeMcpConfig instead of the old shell script
-  // that overwrote one shared ~/.config/opencode/opencode.json for every profile on the VM.
+  // Per-profile OpenCode model ladder (max|value|free|russian), resolved to the flat
+  // {model, agent: {role: {model}}} shape and folded into the per-invocation OPENCODE_CONFIG in
+  // runEngineProcess/writeOpencodeMcpConfig — see src/opencode-ladder.js (issue #1061 Фаза 1-2).
+  // ocProfileName is also used below to report a quota/rate-limit failure back to the resolver
+  // so the next attempt degrades to the ladder's next rung instead of repeating the same model.
   let ocProfileOverrides = null;
+  let ocProfileName = null;
   if (engine === 'opencode') {
     try {
-      const ocProfileName = profiles.getOcProfile(user.workDir);
-      const ocProfilePath = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${ocProfileName}.json`);
-      ocProfileOverrides = JSON.parse(fs.readFileSync(ocProfilePath, 'utf8'));
+      ocProfileName = profiles.getOcProfile(user.workDir);
+      ocProfileOverrides = opencodeLadder.buildOcProfileOverrides(ocProfileName);
+      // Фаза 4 (issue #1061): the ladder can degrade between two turns of the SAME
+      // session (a different task exhausted a rung in the meantime) — that's not the
+      // intra-task retry loop below (which already messages via degradeMsg), it's a
+      // silent swap the user would otherwise never see. Compare against the model
+      // recorded for this session's last turn and say so explicitly if it moved.
+      if (activeSessionId && ocProfileOverrides?.model) {
+        const prevModel = sessions.getLastOcModel(user.workDir, activeSessionId, 'build');
+        if (prevModel && prevModel !== ocProfileOverrides.model) {
+          const switchMsg = `ℹ️ Модель сменилась: ${prevModel} → ${ocProfileOverrides.model} (лестница профиля «${ocProfileName}» деградировала между сообщениями).`;
+          await tgSend(BOT_TOKEN, chatId, switchMsg).catch(() => {});
+          sessions.appendReply(user.workDir, activeSessionId, switchMsg);
+        }
+        sessions.setLastOcModel(user.workDir, activeSessionId, 'build', ocProfileOverrides.model);
+      }
     } catch (e) { console.warn('[runner] ocProfileOverrides:', e.message); }
   }
 
@@ -1867,6 +1884,60 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : 'нет подтверждённого финального ответа';
     result = `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
     console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
+  }
+
+  // OpenCode-only: a quota/rate-limit or one-time-config error on the CURRENT ladder rung
+  // (issue #1061 Фаза 2) — checked before isAuthError below, which would otherwise treat the
+  // same "rate limit"/"quota exceeded" text as a total auth loss and stop the engine instead of
+  // just moving to the next model. Quota-class errors mark the rung exhausted (with TTL) and
+  // retry this same task on OpenCode again, capped at MAX_LADDER_ATTEMPTS so a ladder that
+  // rate-limits all the way round doesn't loop forever. Config-class errors (one-time account
+  // setup, e.g. Go "Global regions" not enabled) mark the rung exhausted with no TTL and alert
+  // the operator immediately instead — retrying other rungs won't fix a config problem, and
+  // doing so anyway would burn through the whole ladder on every task until a human intervenes.
+  const preLadderText = claudeResult || fullOutput.text || result;
+  if (engine === 'opencode' && ocProfileName) {
+    const verdict = opencodeLadder.recordFailure(ocProfileName, 'build', ocProfileOverrides?.model, preLadderText);
+    if (verdict) {
+      if (verdict.class === 'config') {
+        setAuthFailedFlag({ reason: 'CONFIG_ONE_TIME', error_text: preLadderText, engine: 'opencode' });
+        const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg));
+        else await tgSend(BOT_TOKEN, chatId, configMsg);
+        if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, configMsg);
+        return configMsg;
+      }
+      if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
+        const degradeMsg = `⚠️ Модель «${verdict.model}» исчерпала лимит — пробую следующую ступень лестницы профиля «${ocProfileName}».`;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, degradeMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, degradeMsg));
+        else await tgSend(BOT_TOKEN, chatId, degradeMsg);
+        if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, degradeMsg);
+        const queuedRetry = runTask({
+          initiatedAt, threadId,
+          taskId: `${user.username}-${Date.now()}`,
+          user,
+          task,
+          context,
+          sessionId: activeSessionId,
+          forceClaude,
+          initialMsgId: msgId,
+          pinnedMsgId,
+          secrets,
+          retryCount,
+          continuationCount, mode, projectId, internalGtd,
+          engine: 'opencode',
+          engineFallbackDone,
+          ladderAttempt: ladderAttempt + 1,
+        });
+        return { queuedRetry };
+      }
+      const exhaustedMsg = `⛔ Вся лестница моделей профиля «${ocProfileName}» временно недоступна (лимиты) — оператор уведомлён.`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg));
+      else await tgSend(BOT_TOKEN, chatId, exhaustedMsg);
+      if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, exhaustedMsg);
+      setAuthFailedFlag({ reason: 'QUOTA_EXCEEDED', error_text: preLadderText, engine: 'opencode' });
+      return exhaustedMsg;
+    }
   }
 
   // Detect an auth/quota failure for the current engine — set the per-engine flag so the

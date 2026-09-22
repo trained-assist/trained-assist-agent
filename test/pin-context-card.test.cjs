@@ -38,15 +38,17 @@ function withFakeConnectedService(username) {
   withFakeConnectedService(username);
   const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'pin-card-'));
   profiles.setEngine(wd, 'opencode', 42);
-  profiles.setOcProfile(wd, 'mimo');
+  profiles.setOcProfile(wd, 'free');
 
   // Simulate stale shared state from a DIFFERENT profile/user on the same VM.
   const staleFile = path.join(os.tmpdir(), 'pin-card-stale-current-profile-' + Date.now());
-  fs.writeFileSync(staleFile, 'quality');
+  fs.writeFileSync(staleFile, 'value');
 
   const card = buildContextCard(username, wd, 42);
-  ok(/⚙️ OpenCode · mimo/.test(card), `pin shows this workDir's own oc profile (mimo), got: ${card}`);
-  ok(/mimo-v2\.5/.test(card), `pin shows mimo's actual model, got: ${card}`);
+  ok(/⚙️ OpenCode · free/.test(card), `pin shows this workDir's own oc profile (free), got: ${card}`);
+  // free's top rung is resolved through the ladder (issue #1061 Фаза 1-2), not a stale
+  // ocCfg.model read — profiles.json no longer has a top-level `model` field.
+  ok(/mimo-v2\.5/.test(card), `pin shows free's actual resolved model, got: ${card}`);
   fs.unlinkSync(staleFile);
 }
 

@@ -316,6 +316,7 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
           await runProactiveSearch(username, workDir, {
             refreshAccessToken: (u) => refreshHhToken(u, secrets),
             proactiveUrl: buildProactiveUrlForScheduler(username),
+            alwaysNotify: true,
             notifyChat: async (info) => {
               const chatId = readChatId(username);
               if (!chatId) return;
