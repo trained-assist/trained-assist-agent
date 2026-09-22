@@ -43,9 +43,9 @@ function resumeHarness({ pending, now = Date.now() }) {
   const end = serverSrc.indexOf('async function main()', start);
   const calls = [], runs = [], cleared = [];
   const sandbox = {
-    path, console: { log() {}, error() {} }, Date: class extends Date { static now() { return now; } },
+    path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise, setTimeout: fn => { fn(); return 0; },
-    process: { env: {} }, isTaskResumable,
+    process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
     getPendingTasks: () => pending,
     clearPendingTask: id => cleared.push(id),
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
@@ -65,8 +65,19 @@ test('interrupted Claude task is re-run silently and its old journal entry is dr
   assert.equal(h.runs.length, 1);
   assert.equal(h.runs[0].sessionId, 's1');
   assert.equal(h.runs[0].initialMsgId, 7);
+  assert.equal(h.runs[0].resumedAfterRestart, true, 'runner must know this attempt followed a restart');
+  assert.equal(h.runs[0].resumeAttempts, 1);
   assert.deepEqual(h.calls, [], 'no Telegram message on a successful resume');
   assert.deepEqual(h.cleared, ['alice-1'], 'old entry cleared so a second restart does not re-run it');
+});
+
+test('a task that already exhausted MAX_RESUME_ATTEMPTS across restarts is not resumed again', async () => {
+  const h = resumeHarness({ pending: [task({ resumeAttempts: 3 })] });
+  await h.resume();
+  assert.equal(h.runs.length, 0, 'must not fire a 4th resume attempt');
+  assert.deepEqual(h.cleared, ['alice-1']);
+  assert.equal(h.calls.length, 1);
+  assert.match(h.calls[0].body.text, /сбой сервера/);
 });
 
 test('codex/opencode tasks cannot resume: user is told, entry cleared', async () => {
@@ -86,8 +97,8 @@ test('a resumed task that fails to start tells the user', async () => {
   const pending = [task()];
   const calls = [];
   const sandbox = {
-    path, console: { log() {}, error() {} }, BASE_USERS_DIR: '/users', AbortSignal, Promise,
-    setTimeout: fn => { fn(); return 0; }, process: { env: {} }, isTaskResumable,
+    path, console: { log() {}, error() {}, warn() {} }, BASE_USERS_DIR: '/users', AbortSignal, Promise,
+    setTimeout: fn => { fn(); return 0; }, process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
     getPendingTasks: () => pending, clearPendingTask() {},
     fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return {}; },
     runTask: () => Promise.reject(new Error('boom')),

@@ -147,6 +147,10 @@ const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-re
 const MAX_SOFT_CONTINUATIONS = 3; // auto-continue after "still working" response, max 3 rounds
 const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth 1 retry
 const MAX_QUICK_RETRIES = 1; // cap so a repeatable crash doesn't loop forever
+const MAX_RESUME_ATTEMPTS = 3; // cap on auto-retries for a task resumed after a server restart — a
+// restart is our fault, not the user's, so it's worth retrying automatically, but bounded: without
+// this, a task whose resume keeps crashing (e.g. a genuinely broken session) would retry forever
+// across restarts. resumePendingTasks() in server.js reads/writes this same cap.
 
 // ── Pending-task journal — survives process restart ──────────────────────────
 const PENDING_DIR = path.join(
@@ -649,6 +653,7 @@ function runTask(opts) {
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId, fileRefs: opts.fileRefs,
     profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
     continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
+    resumedAfterRestart: opts.resumedAfterRestart, resumeAttempts: opts.resumeAttempts,
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('../admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
@@ -1236,7 +1241,7 @@ function buildOcCapabilitiesBlock(secrets) {
   return lines.join('\n');
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0 }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, resumedAfterRestart = false, resumeAttempts = 0 }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1254,7 +1259,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
     profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
     task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
-    initialMsgId, pinnedMsgId, initiatedAt, threadId,
+    initialMsgId, pinnedMsgId, initiatedAt, threadId, resumedAfterRestart, resumeAttempts,
     startedAt: Date.now(),
   });
 
@@ -1882,8 +1887,33 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : exitCode !== 0 ? `код ${exitCode}`
       : processError ? `ошибка запуска`
       : 'нет подтверждённого финального ответа';
-    result = `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
-    console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess}`);
+
+    // A task resumed after a server restart that fails again is our fault, not the
+    // user's task — auto-retry a bounded number of times instead of dead-ending on
+    // "напиши продолжай". resumePendingTasks() (server.js) already drops the pre-restart
+    // pending record right after firing this attempt, so recursing here is the only path
+    // that can re-fire it — bounded by MAX_RESUME_ATTEMPTS so a genuinely broken resume
+    // can't loop forever across restarts.
+    if (resumedAfterRestart && resumeAttempts < MAX_RESUME_ATTEMPTS && !restartShutdown) {
+      const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})…`;
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
+      else await tgSend(BOT_TOKEN, chatId, retryMsg);
+      const queuedRetry = runTask({
+        initiatedAt, threadId,
+        taskId: `${user.username}-resume-${Date.now()}`,
+        user, task, context,
+        sessionId: activeSessionId,
+        forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
+        resumedAfterRestart: true, resumeAttempts: resumeAttempts + 1,
+        continuationCount, mode, projectId, internalGtd, engine,
+      });
+      return { queuedRetry };
+    }
+
+    result = resumedAfterRestart
+      ? `⚠️ Не удалось восстановить сессию после перезапуска сервера (${reason}), попытка ${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS}. Это сбой сервера, а не твоей задачи — отправь «продолжай», чтобы попробовать вручную ещё раз.`
+      : `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
+    console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess} resumedAfterRestart=${resumedAfterRestart} resumeAttempts=${resumeAttempts}`);
   }
 
   // OpenCode-only: a quota/rate-limit or one-time-config error on the CURRENT ladder rung
@@ -2203,7 +2233,7 @@ async function reconcileSoftContinuations(secrets) {
 }
 
 module.exports = {
-  interruptForRestart,
+  interruptForRestart, MAX_RESUME_ATTEMPTS,
   runTask, getQuickAnswer, runQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   isTaskRunning, isSessionRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   clearPendingContinuation, reconcileSoftContinuations,
