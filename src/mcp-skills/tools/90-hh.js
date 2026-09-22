@@ -644,14 +644,15 @@ module.exports = {
     // ── Funnel stats (fast, no LLM) ─────────────────────────────────────────
 
     hh_funnel_stats: {
-      description: 'Fast snapshot of the recruiting funnel for the active vacancy — counts candidates by stage, unread applicant messages, new responses. No LLM, sub-second. Use in digest crons and monitoring.',
+      description: 'Fast snapshot of the recruiting funnel for the active vacancy — counts candidates by stage, unread applicant messages, new responses. No LLM, sub-second (score breakdown reads cached ATS results from disk only, never triggers scoring). Use in digest crons and monitoring.',
       inputSchema: {
         type: 'object',
         properties: {
           vacancy_id: { type: 'string', description: 'Vacancy ID. Omit to read from context (active_vacancy).' },
+          notify_threshold: { type: 'number', description: 'Optional 0-100 ATS score cutoff. When set (>0), also returns new_responses_above_threshold / new_responses_pending_score by reading each new candidate\'s cached ats_result — no LLM call, unscored candidates just count as pending.' },
         },
       },
-      handler: async ({ vacancy_id } = {}) => {
+      handler: async ({ vacancy_id, notify_threshold } = {}) => {
         const token = readHhToken(USER_ID);
         if (!token) return { error: 'HH не подключён.' };
 
@@ -667,6 +668,7 @@ module.exports = {
         const STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer', 'hired', 'discard'];
         const counts = {};
         let unreadMessages = 0;
+        const threshold = Math.max(0, Math.min(100, Number(notify_threshold) || 0));
 
         try {
           // Count candidates per stage — parallel for speed
@@ -695,7 +697,7 @@ module.exports = {
             .filter(s => s !== 'discard')
             .reduce((sum, s) => sum + (counts[s] || 0), 0);
 
-          return {
+          const result = {
             ok: true,
             vacancy_id: resolvedVacancyId,
             vacancy_title: vacancyTitle,
@@ -713,6 +715,32 @@ module.exports = {
               discard: counts.discard,
             },
           };
+
+          // Score breakdown for "response" (new) candidates — reads cached ats_result only,
+          // never scores on the fly (background loop scores every ~5 min, digest just reads).
+          if (threshold > 0 && counts.response > 0) {
+            try {
+              const respData = await hhGet(
+                `/negotiations/response?vacancy_id=${resolvedVacancyId}&per_page=100&page=0`,
+                token,
+              );
+              let above = 0;
+              let pending = 0;
+              for (const neg of respData.items || []) {
+                const history = readCandidateHistory(USER_ID, neg.id);
+                const score = history.ats_result?.score;
+                if (score == null) { pending++; continue; }
+                if (Math.round(score * 10) >= threshold) above++;
+              }
+              result.notify_threshold = threshold;
+              result.new_responses_above_threshold = above;
+              result.new_responses_pending_score = pending;
+            } catch {
+              // score breakdown is best-effort; funnel counts above are unaffected
+            }
+          }
+
+          return result;
         } catch (e) {
           return { error: e.message };
         }
