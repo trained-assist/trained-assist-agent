@@ -249,7 +249,7 @@ jobs:
               '${{ secrets.GITHUB_ISSUES_TOKEN }}' \
               '${{ secrets.CHECKLIST_API_KEY }}' \
               '' \
-              '' \
+              '${{ secrets.OPENCODE_PROFILE }}' \
               '${{ secrets.OPENCODE_GO_API_KEY }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
@@ -309,7 +309,7 @@ jobs:
               '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
               '${{ secrets.GITHUB_ISSUES_TOKEN }}' \
               '' \
-              '' \
+              '${{ secrets.OPENCODE_PROFILE }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
