@@ -11,7 +11,7 @@ const os = require('os');
 const { execSync, execFile, spawn } = require('child_process');
 const path = require('path');
 const { loadSecrets } = require('./secrets');
-const { savePassword, generatePassword } = require('./web-auth');
+const { webAuth, signJwt, setTokenCookie, clearTokenCookie, switchProfileCookie, savePassword, checkPassword, generatePassword, generateMagicToken, consumeMagicToken, listAuthedProfiles } = require('./web-auth');
 const { handleWebRoute } = require('./web-routes');
 const { handleHhPublic, handleHhAuthed } = require('./handlers/hh');
 const { handleConnect } = require('./handlers/connect');
@@ -530,15 +530,26 @@ async function main() {
 
 
     // ── /web/* routes — cookie-auth endpoints (sessions, files, run) ─────────
-    if (url.pathname.startsWith('/web/') && url.pathname !== '/web/auth' && url.pathname !== '/web/verify' && url.pathname !== '/web/projects' && url.pathname !== '/web/project-create' && url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' && url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer' && url.pathname !== '/web/reproject-preview' && url.pathname !== '/web/reproject-adjust' && url.pathname !== '/web/reproject-apply' && url.pathname !== '/web/reproject-revert') {
+    // Note: /web/magic, /web/auth, /web/logout, /web/me, /web/profiles,
+    //       /web/switch-profile are handled above (no handleWebRoute delegation needed)
+    if (url.pathname.startsWith('/web/') &&
+        url.pathname !== '/web/auth' && url.pathname !== '/web/magic' &&
+        url.pathname !== '/web/logout' && url.pathname !== '/web/me' &&
+        url.pathname !== '/web/profiles' && url.pathname !== '/web/switch-profile' &&
+        url.pathname !== '/web/verify' && url.pathname !== '/web/projects' &&
+        url.pathname !== '/web/project-create' &&
+        url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' &&
+        url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer' &&
+        url.pathname !== '/web/reproject-preview' && url.pathname !== '/web/reproject-adjust' &&
+        url.pathname !== '/web/reproject-apply' && url.pathname !== '/web/reproject-revert') {
       if (await handleWebRoute(req, url, res, secrets)) return;
     }
 
-    // ── /web/* bearer-auth endpoints + static asset serving — dispatched to
-    // src/handlers/web.js (#942 P3.3b) ────────────────────────────────────────
+// ── /web/* bearer-auth endpoints + static asset serving — dispatched to
+    // src/handlers/web.js (#942 P3.3b) ────────────────────────────────
     if (await handleWeb(req, url, res, { secrets }) !== false) return;
 
-    // ── POST /admin/webpass — generate password for a profile (AGENT_SECRET) ─
+    // ── POST /admin/webpass — generate magic link (or password) for a profile ─
     if (req.method === 'POST' && url.pathname === '/admin/webpass') {
       const auth = req.headers['authorization'] || '';
       if (auth !== `Bearer ${secrets.AGENT_SECRET}`) return json(res, 401, { error: 'unauthorized' });
@@ -546,9 +557,13 @@ async function main() {
       try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
       const { username } = body || {};
       if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      // Generate magic token (preferred) + password as fallback
+      const magicToken = generateMagicToken(username);
+      const publicUrl = process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru';
+      const magicUrl = `${publicUrl}/web/magic?t=${magicToken}`;
       const password = generatePassword();
       savePassword(username, password);
-      return json(res, 200, { ok: true, username, password });
+      return json(res, 200, { ok: true, username, password, magicUrl });
     }
 
     // Scoped token for the Call Tips desktop app: bound to one profile, not the

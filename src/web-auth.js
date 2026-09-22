@@ -5,7 +5,38 @@ const os = require('os');
 
 const PASSWD_FILE = '.webpasswd';
 const TOKEN_COOKIE = 'web_token';
+const TOKEN_COOKIE_PREFIX = 'web_token_';  // per-profile: web_token_<username>
+const CURRENT_PROFILE_COOKIE = 'web_current';  // non-httpOnly, readable by JS
 const JWT_EXP_MS = 24 * 60 * 60 * 1000;
+const MAGIC_TOKEN_TTL_MS = 15 * 60 * 1000;  // 15 minutes
+
+// ── Magic token store (in-memory, short-lived) ────────────────────────────────
+// Map<token: string, {username: string, exp: number}>
+const magicTokenStore = new Map();
+
+// Sweep expired tokens occasionally (every login attempt)
+function sweepExpiredTokens() {
+  const now = Date.now();
+  for (const [token, entry] of magicTokenStore) {
+    if (entry.exp < now) magicTokenStore.delete(token);
+  }
+}
+
+function generateMagicToken(username) {
+  sweepExpiredTokens();
+  const token = crypto.randomBytes(32).toString('hex');
+  magicTokenStore.set(token, { username, exp: Date.now() + MAGIC_TOKEN_TTL_MS });
+  return token;
+}
+
+function consumeMagicToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const entry = magicTokenStore.get(token);
+  if (!entry) return null;
+  magicTokenStore.delete(token);  // one-use
+  if (entry.exp < Date.now()) return null;
+  return entry.username;
+}
 
 // ── Scrypt password hashing ───────────────────────────────────────────────────
 
@@ -58,21 +89,72 @@ function parseCookies(req) {
   return Object.fromEntries(header.split(';').map(c => c.trim().split('=').map(decodeURIComponent)));
 }
 
-function setTokenCookie(res, token) {
-  res.setHeader('Set-Cookie', `${TOKEN_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${JWT_EXP_MS / 1000}`);
+function setTokenCookie(res, token, username) {
+  const cookies = [
+    // Per-profile httpOnly cookie (new scheme)
+    username
+      ? `${TOKEN_COOKIE_PREFIX}${username}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${JWT_EXP_MS / 1000}`
+      : `${TOKEN_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${JWT_EXP_MS / 1000}`,
+  ];
+  if (username) {
+    // Non-httpOnly so JS can read it for the profile switcher
+    cookies.push(`${CURRENT_PROFILE_COOKIE}=${encodeURIComponent(username)}; Path=/; SameSite=Strict; Max-Age=${JWT_EXP_MS / 1000}`);
+  }
+  res.setHeader('Set-Cookie', cookies);
 }
 
-function clearTokenCookie(res) {
-  res.setHeader('Set-Cookie', `${TOKEN_COOKIE}=; HttpOnly; Path=/; Max-Age=0`);
+function clearTokenCookie(res, username) {
+  const cookies = [
+    `${TOKEN_COOKIE}=; HttpOnly; Path=/; Max-Age=0`,
+  ];
+  if (username) {
+    cookies.push(`${TOKEN_COOKIE_PREFIX}${username}=; HttpOnly; Path=/; Max-Age=0`);
+    cookies.push(`${CURRENT_PROFILE_COOKIE}=; Path=/; Max-Age=0`);
+  }
+  res.setHeader('Set-Cookie', cookies);
+}
+
+function switchProfileCookie(res, username) {
+  res.setHeader('Set-Cookie',
+    `${CURRENT_PROFILE_COOKIE}=${encodeURIComponent(username)}; Path=/; SameSite=Strict; Max-Age=${JWT_EXP_MS / 1000}`);
 }
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 
 function webAuth(req, secret) {
   const cookies = parseCookies(req);
+
+  // New scheme: read active profile from web_current, validate per-profile cookie
+  const currentProfile = cookies[CURRENT_PROFILE_COOKIE]
+    ? decodeURIComponent(cookies[CURRENT_PROFILE_COOKIE])
+    : null;
+  if (currentProfile && /^[a-zA-Z0-9_-]{1,64}$/.test(currentProfile)) {
+    const profileToken = cookies[`${TOKEN_COOKIE_PREFIX}${currentProfile}`];
+    if (profileToken) {
+      const sub = verifyJwt(profileToken, secret);
+      if (sub) return sub;
+    }
+  }
+
+  // Fallback: legacy web_token cookie (old logins / password-based)
   const token = cookies[TOKEN_COOKIE];
   if (!token) return null;
   return verifyJwt(token, secret);
+}
+
+// Returns all profiles with valid JWTs found in request cookies
+function listAuthedProfiles(req, secret) {
+  const cookies = parseCookies(req);
+  const profiles = [];
+  const prefix = TOKEN_COOKIE_PREFIX;
+  for (const [name, value] of Object.entries(cookies)) {
+    if (!name.startsWith(prefix)) continue;
+    const username = name.slice(prefix.length);
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) continue;
+    const sub = verifyJwt(value, secret);
+    if (sub === username) profiles.push(username);
+  }
+  return profiles;
 }
 
 // ── Password file helpers ─────────────────────────────────────────────────────
@@ -101,4 +183,9 @@ function generatePassword() {
   return crypto.randomBytes(6).toString('base64').replace(/[+/=]/g, '').slice(0, 8);
 }
 
-module.exports = { webAuth, signJwt, setTokenCookie, clearTokenCookie, savePassword, checkPassword, generatePassword };
+module.exports = {
+  webAuth, signJwt, setTokenCookie, clearTokenCookie, switchProfileCookie,
+  savePassword, checkPassword, generatePassword,
+  generateMagicToken, consumeMagicToken, listAuthedProfiles,
+  CURRENT_PROFILE_COOKIE,
+};
