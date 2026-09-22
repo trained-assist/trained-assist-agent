@@ -30,6 +30,7 @@ const {
   STOP_TASK_INTENT,
   GTD_STOP_INTENT,
   ACTIVE_CHECKLIST_INTENT,
+  CHECKLIST_EDIT_INTENT,
   WAKEUP_INTENT,
   SKIP_TASK_INTENT,
   PING_INTENT,
@@ -497,33 +498,57 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // /active_checklist — list all open GTD records for this user.
+  // /active_checklist — list all open GTD records for this user, plus a one-click
+  // link into checklist.trainedassist.store (no password needed, see checklistAutologinUrl).
   if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
-    const workDir = opts.user.workDir;
-    const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
-    const chatId = opts.user.id;
-    let msg;
-    if (!workDir) {
-      msg = '📋 Нет активных чек-листов.';
-    } else {
-      const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
-      if (!openRecs.length) {
+    return (async () => {
+      const workDir = opts.user.workDir;
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+      const chatId = opts.user.id;
+      let msg;
+      if (!workDir) {
         msg = '📋 Нет активных чек-листов.';
       } else {
-        const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
-        for (const r of openRecs) {
-          const task = (r.originalTask || '').slice(0, 80);
-          lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+        const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+        if (!openRecs.length) {
+          msg = '📋 Нет активных чек-листов.';
+        } else {
+          const lines = [`📋 Активных чек-листов: ${openRecs.length}`];
+          for (const r of openRecs) {
+            const task = (r.originalTask || '').slice(0, 80);
+            lines.push(`• «${task}» · ${_relativeTime(r.dueAt)} · итерация ${r.iterations}/${r.maxIterations}`);
+          }
+          msg = lines.join('\n');
         }
-        msg = lines.join('\n');
       }
-    }
-    if (botToken) {
-      const im = opts.initialMsgId;
-      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-      else     tgSend(botToken, chatId, msg).catch(() => {});
-    }
-    return Promise.resolve(msg);
+      const link = await require('../gtd-controller').checklistAutologinUrl().catch(() => null);
+      if (link) msg += `\n\n✏️ Править: ${link}`;
+      if (botToken) {
+        const im = opts.initialMsgId;
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+        else     await tgSend(botToken, chatId, msg).catch(() => {});
+      }
+      return msg;
+    })();
+  }
+
+  // Natural-language "хочу поправить чек-лист" — hand back a one-click autologin link
+  // instead of asking the user to type a password (checklist.trainedassist.store).
+  if (CHECKLIST_EDIT_INTENT.test((opts.task || '').trim())) {
+    return (async () => {
+      const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
+      const chatId = opts.user.id;
+      const link = await require('../gtd-controller').checklistAutologinUrl().catch(() => null);
+      const msg = link
+        ? `✏️ Правь чек-лист здесь — вход автоматический: ${link}`
+        : '⚠️ Не смог получить ссылку на чек-лист (сервис недоступен или не настроен пароль). Попробуй чуть позже.';
+      if (botToken) {
+        const im = opts.initialMsgId;
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
+        else     await tgSend(botToken, chatId, msg).catch(() => {});
+      }
+      return msg;
+    })();
   }
 
   // Control commands bypass lanes and admission. Available to every authenticated profile.
