@@ -194,7 +194,11 @@ function getProject(workDir, id) {
 }
 
 // List projects (meta only), most-recently-touched first.
-function listProjects(workDir) {
+// `audience` (default 'default') scopes the list the same way as session-store.listSessions
+// — a project with no `audience` field (every project created before this feature existed)
+// counts as 'default'. Pass audience: null explicitly to bypass filtering (internal/debug
+// tools only — never an HTTP path reachable by an external bot).
+function listProjects(workDir, audience = 'default') {
   const root = projectsRoot(workDir);
   let ids = [];
   try {
@@ -204,10 +208,13 @@ function listProjects(workDir) {
   } catch {
     return [];
   }
-  return ids
+  const all = ids
     .map(id => getProject(workDir, id))
-    .filter(Boolean)
-    .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+    .filter(Boolean);
+  const filtered = audience === null
+    ? all
+    : all.filter(p => (p.audience || 'default') === audience);
+  return filtered.sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
 }
 
 // Re-sort a project list by usage (session count) descending, most-recent as tiebreaker.
@@ -224,11 +231,14 @@ function sortByUsage(list, countByProject) {
 
 // Create a project from a raw "type: name" string (or explicit {name,type}).
 // Rolls out the type scaffold + PROFILE.md. Idempotent by id: existing project is returned.
-function createProject(workDir, input, { now = Date.now() } = {}) {
+// `audience` (default 'default') stamps the project so listProjects/decideNewSessionProject
+// can scope it to the bot/surface that created it (see AUDIENCE-SCOPE-SPEC).
+function createProject(workDir, input, { now = Date.now(), audience } = {}) {
   const parsed = typeof input === 'string'
     ? parseTypedName(input)
     : { type: input.type || 'generic', name: input.name || 'project' };
   const def = typeOf(parsed.type);
+  const aud = audience || 'default';
 
   // Singleton types (e.g. bugs -> bugs-and-features) declare a fixed canonical id: reuse
   // the existing project instead of minting a sibling. Other types: <type>-<slug>[-n].
@@ -255,7 +265,7 @@ function createProject(workDir, input, { now = Date.now() } = {}) {
   const pfp = profilePath(workDir, id);
   if (!fs.existsSync(pfp)) fs.writeFileSync(pfp, def.profile);
 
-  const meta = { id, name: parsed.name, type: parsed.type, label: def.label, createdAt: now, lastAt: now };
+  const meta = { id, name: parsed.name, type: parsed.type, label: def.label, audience: aud, createdAt: now, lastAt: now };
   atomicWrite(metaPath(workDir, id), JSON.stringify(meta, null, 2));
   return meta;
 }
@@ -320,29 +330,36 @@ function archiveProject(workDir, id) {
 // Canonical "Bugs and Features" reserved project — finds the existing bugs-type project,
 // or creates the singleton if none exists yet. Idempotent; safe to call on every
 // /bug_or_feature invocation.
-function bugsProject(workDir, { now = Date.now() } = {}) {
-  const existing = listProjects(workDir).find(p => p.type === 'bugs');
+function bugsProject(workDir, { now = Date.now(), audience } = {}) {
+  const existing = listProjects(workDir, audience || 'default').find(p => p.type === 'bugs');
   if (existing) return existing;
-  return createProject(workDir, { type: 'bugs', name: TYPES.bugs.label }, { now });
+  return createProject(workDir, { type: 'bugs', name: TYPES.bugs.label }, { now, audience });
 }
 
 // ── Active project per chat ─────────────────────────────────────────────────
 
-function _activePath(workDir, chatId) {
-  return path.join(projectsRoot(workDir), `active-${chatId || 'default'}.json`);
+// `audience` scopes the active-project pointer per bot/surface sharing the same chatId,
+// same pattern as session-store's _currentSessionFile. Falsy or 'default' → EXACTLY the
+// pre-existing filename (note: the chatId-less fallback already used the literal string
+// 'default' before audience existed — preserved as-is so that path never moves).
+function _activePath(workDir, chatId, audience) {
+  if (!audience || audience === 'default') {
+    return path.join(projectsRoot(workDir), `active-${chatId || 'default'}.json`);
+  }
+  return path.join(projectsRoot(workDir), `active-${audience}-${chatId || 'default'}.json`);
 }
-function getActiveProjectId(workDir, chatId) {
+function getActiveProjectId(workDir, chatId, audience) {
   try {
-    const { id } = JSON.parse(fs.readFileSync(_activePath(workDir, chatId), 'utf8'));
+    const { id } = JSON.parse(fs.readFileSync(_activePath(workDir, chatId, audience), 'utf8'));
     return getProject(workDir, id) ? id : null; // ignore stale pointer
   } catch {
     return null;
   }
 }
-function setActiveProjectId(workDir, id, chatId, { now = Date.now() } = {}) {
+function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience } = {}) {
   try {
     fs.mkdirSync(projectsRoot(workDir), { recursive: true });
-    atomicWrite(_activePath(workDir, chatId), JSON.stringify({ id, at: now }));
+    atomicWrite(_activePath(workDir, chatId, audience), JSON.stringify({ id, at: now }));
     touchProject(workDir, id, { now });
   } catch (e) {
     console.warn('[projects] setActiveProjectId:', e.message);
@@ -355,11 +372,11 @@ function setActiveProjectId(workDir, id, chatId, { now = Date.now() } = {}) {
 //   { action:'ask',    choices, active }      several projects   -> ask which / offer new
 //   { action:'create', suggestType }          no projects yet    -> create the first one
 // A CONTINUING session never calls this — it keeps the project stored on the session.
-function decideNewSessionProject(workDir, chatId, countByProject) {
-  const projects = sortByUsage(listProjects(workDir), countByProject);
+function decideNewSessionProject(workDir, chatId, countByProject, audience = 'default') {
+  const projects = sortByUsage(listProjects(workDir, audience), countByProject);
   if (projects.length === 0) return { action: 'create', suggestType: 'generic' };
   if (projects.length === 1) return { action: 'auto', project: projects[0] };
-  return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId) };
+  return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId, audience) };
 }
 
 // PROFILE.md text for merging into the system prompt (null if none).

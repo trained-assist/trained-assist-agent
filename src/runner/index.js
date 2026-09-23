@@ -631,7 +631,7 @@ function runTask(opts) {
   // forceClaude means the user explicitly wants Claude (e.g. a "proработка" button tap on
   // one of these commands' replies) — respect that and fall through to the normal path.
   if (!opts.forceClaude && isPreQueueQuickIntent((opts.task || '').trim())) {
-    const quick = getQuickAnswer(opts.task, opts.user.username, opts.user.workDir, false, opts.user.id, opts.user.telegramUserId);
+    const quick = getQuickAnswer(opts.task, opts.user.username, opts.user.workDir, false, opts.user.id, opts.user.telegramUserId, opts.user.audience || 'default');
     if (quick) {
       const msg = `⚡ ${quick}`;
       const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
@@ -651,7 +651,7 @@ function runTask(opts) {
     // this fixed set of intents) — fall through to the normal queued path as a safety net.
   }
 
-  if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id) || null;
+  if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id, opts.user.audience) || null;
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
@@ -1291,6 +1291,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const actionButtons = answerRouter.oneshotActionMarkup;
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
+  // Scopes session/project lookups to the calling bot/surface (see AUDIENCE-SCOPE-SPEC)
+  // — e.g. the recruiter bot sets user.audience='recruiter' so its sessions never mix
+  // with the general-purpose bot's for the same shared username+chatId. Defaults to
+  // 'default', identical to every existing session/project on disk.
+  const audience = user.audience || 'default';
 
   savePendingTask(taskId, {
     phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
@@ -1333,7 +1338,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // SUPPOSED to have no file on disk yet, so it must never heal back onto
     // the chat's old pointer, or "start new session" would silently reattach
     // to the stale one.
-    activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId) || sessionId);
+    activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId, audience) || sessionId);
     const existing = sessions.getSession(user.workDir, activeSessionId);
     if (existing) {
       // Strict chat isolation: a live session is attached to exactly one chat.
@@ -1359,7 +1364,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
   } else {
     // No explicit session — try to continue the most recent one (within 4h)
-    const currentId = getCurrentSessionId(user.workDir, chatId);
+    const currentId = getCurrentSessionId(user.workDir, chatId, audience);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
       sessionExists = true;
@@ -1389,24 +1394,24 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   try {
     if (sessionExists && activeSessionId) {
       const s = sessions.getSession(user.workDir, activeSessionId);
-      boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId);
+      boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId, audience);
     } else if (projectId && projects.getProject(user.workDir, projectId)) {
       boundProjectId = projectId; // explicit choice from the gateway picker
     } else if (newProjectName) {
       // gateway "➕ Новый проект" — provisional name derived from the first message
-      boundProjectId = projects.createProject(user.workDir, newProjectName).id;
+      boundProjectId = projects.createProject(user.workDir, newProjectName, { audience }).id;
     } else {
-      const decision = projects.decideNewSessionProject(user.workDir, chatId);
+      const decision = projects.decideNewSessionProject(user.workDir, chatId, undefined, audience);
       if (decision.action === 'auto') {
         boundProjectId = decision.project.id;
       } else if (decision.action === 'create') {
-        boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }).id;
+        boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }, { audience }).id;
       } else { // 'ask' — gateway didn't pass a choice; fall back so we never block silently
         boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
       }
     }
     if (boundProjectId) {
-      projects.setActiveProjectId(user.workDir, boundProjectId, chatId);
+      projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience });
       const dir = projects.projectDir(user.workDir, boundProjectId);
       if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
     }
@@ -1467,7 +1472,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // forceClaude=true skips quick answers for ambiguous prose (user explicitly wants Claude /
   // restart-resume), but NOT for slash commands — a command is unambiguous and must never be
   // replayed to the LLM. See shouldAttemptQuickAnswer (intent-engine).
-  const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId, activeSessionId);
+  const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId, activeSessionId, audience);
   const quickReply = shouldAttemptQuickAnswer(forceClaude, task) ? await dispatchQuick() : null;
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
@@ -1484,11 +1489,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       } else {
         // New conversation — create session with first exchange
-        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
+        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
       bindTaskActivity(taskId, user, activeSessionId);
-      setCurrentSessionId(user.workDir, activeSessionId, chatId);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
     }
     // Escalate-button (requirements-log [062], 2026-09-15): §9.2 killed the generic
     // one-shot action markup (oneshotActionMarkup — see answer-router.js), but a quick
@@ -1518,7 +1523,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (sessionExists) {
     if (!userMessageRecorded) sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
-    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId });
+    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience });
   }
 
   bindTaskActivity(taskId, user, activeSessionId);
@@ -1788,7 +1793,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // Save partial progress so the next run sees what was done
     if (activeSessionId && partialText) {
       sessions.appendReply(user.workDir, activeSessionId, `[${inactivityKill ? 'прервано: молчал 5 мин' : 'прервано таймаутом'}]\n${partialText}`);
-      setCurrentSessionId(user.workDir, activeSessionId, chatId);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
     }
 
     if (continuationCount < MAX_CONTINUATIONS) {
@@ -1847,7 +1852,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
     if (activeSessionId && partial) {
       sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
-      setCurrentSessionId(user.workDir, activeSessionId, chatId);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
     }
     return stoppedMsg;
   }
@@ -2200,7 +2205,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Append assistant reply to session history
   if (activeSessionId) {
     sessions.appendReply(user.workDir, activeSessionId, result);
-    setCurrentSessionId(user.workDir, activeSessionId, chatId);
+    setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
 
   }
 

@@ -8,7 +8,7 @@ const sessions = require('./session-store');
 function createIntakeQuick({ baseDir, answer, apiKey, recordActivity = () => {} }) {
   const inflight = new Map();
   return async payload => {
-    const { username, userId, query, messageId, telegramUserId, projectId } = payload;
+    const { username, userId, query, messageId, telegramUserId, projectId, audience } = payload;
     if (!/^[a-zA-Z0-9_-]{1,32}$/.test(username || '') ||
         !/^-?\d{1,20}$/.test(String(userId)) || !Number.isSafeInteger(messageId) ||
         typeof query !== 'string' || !query.trim() || query.length > 50000) {
@@ -26,10 +26,10 @@ function createIntakeQuick({ baseDir, answer, apiKey, recordActivity = () => {} 
       const previous = sessions.getSession(workDir, id);
       const reply = previous?.messages?.find(m => m.role === 'assistant')?.content;
       if (reply) return { answer: reply, sessionId: id };
-      const result = await answer(query, username, workDir, apiKey, false, userId, telegramUserId);
+      const result = await answer(query, username, workDir, apiKey, false, userId, telegramUserId, null, audience || 'default');
       if (!result) return { answer: null };
       // Do not replace the chat's current deep session with this utility exchange.
-      if (!previous) sessions.createSession(workDir, { task: query, id, projectId: projectId || null });
+      if (!previous) sessions.createSession(workDir, { task: query, id, projectId: projectId || null, audience });
       sessions.appendReply(workDir, id, result);
       recordActivity({username,chatId:Number(userId),sessionId:id});
       return { answer: result, sessionId: id };
