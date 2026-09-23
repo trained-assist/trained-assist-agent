@@ -46,6 +46,41 @@ test('classifyError catches retired/unavailable model slugs and provider overloa
   assert.equal(mod.classifyError('HTTP 503 Service Unavailable').class, 'quota');
 });
 
+test('classifyError recognizes context-overflow text as its own class, distinct from quota/config', () => {
+  const { mod } = freshModule();
+  assert.equal(mod.classifyError('This model\'s maximum context length is 128000 tokens').class, 'context');
+  assert.equal(mod.classifyError('context_length_exceeded').class, 'context');
+  assert.equal(mod.classifyError('prompt is too long: 250000 tokens > 200000 maximum').class, 'context');
+  assert.equal(mod.classifyError('input too long for requested model').class, 'context');
+  assert.equal(mod.classifyError('too many tokens in the request').class, 'context');
+});
+
+test('recordFailure does NOT persist exhaustion for context-overflow (unlike quota/config) — it must not block other tasks sharing the rung', () => {
+  const { mod } = freshModule();
+  const verdict = mod.recordFailure('p', 'build', 'big-model', 'Error: context_length_exceeded');
+  assert.deepEqual(verdict, { class: 'context', model: 'big-model', alertNeeded: false });
+  // A fresh task with no skip list still resolves the same model — nothing was marked exhausted.
+  assert.equal(mod.resolveModel({ ladder: { build: ['big-model', 'other-model'] } }, 'p', 'build'), 'big-model');
+});
+
+test('resolveModel skipModels excludes a rung for one call without touching persisted state', () => {
+  const { mod } = freshModule();
+  const ladder = { build: ['m1', 'm2', 'm3'] };
+  assert.equal(mod.resolveModel({ ladder }, 'p', 'build', ['m1']), 'm2');
+  // Unaffected call (no skipModels) still resolves m1 — the skip was never persisted.
+  assert.equal(mod.resolveModel({ ladder }, 'p', 'build'), 'm1');
+});
+
+test('buildOcProfileOverrides skipModels only affects the build role, not other roles', () => {
+  const { mod, dir } = freshModule();
+  writeProfile(dir, 'p', {
+    ladder: { build: ['m1', 'm2'], review: ['m1', 'm3'] },
+  });
+  const resolved = mod.buildOcProfileOverrides('p', dir, { skipModels: ['m1'] });
+  assert.equal(resolved.agent.build.model, 'm2', 'build role skips m1 per opts.skipModels');
+  assert.equal(resolved.agent.review.model, 'm1', 'review role ignores build-only skipModels');
+});
+
 test('resolveModel degrades to the next rung once the first is marked exhausted', () => {
   const { mod } = freshModule();
   const ladder = { build: ['m1', 'm2', 'm3'] };

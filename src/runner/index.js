@@ -1278,7 +1278,7 @@ function forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, o
   return null;
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0 }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0 }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1744,7 +1744,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       ocProfileName = profiles.getOcProfile(user.workDir);
       ocProfileIsDeepseek = ocProfileName === 'deepseek';
       if (ocProfileIsDeepseek) ocProfileName = opencodeGoToggle.resolveProfileName();
-      ocProfileOverrides = opencodeLadder.buildOcProfileOverrides(ocProfileName);
+      ocProfileOverrides = opencodeLadder.buildOcProfileOverrides(ocProfileName, undefined, { skipModels: contextSkipModels });
       // Фаза 4 (issue #1061): the ladder can degrade between two turns of the SAME
       // session (a different task exhausted a rung in the meantime) — that's not the
       // intra-task retry loop below (which already messages via degradeMsg), it's a
@@ -2012,6 +2012,44 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (engine === 'opencode' && ocProfileName) {
     const verdict = opencodeLadder.recordFailure(ocProfileName, 'build', ocProfileOverrides?.model, preLadderText);
     if (verdict) {
+      // The request itself didn't fit this rung's context window — try the next rung for THIS
+      // task only (contextSkipModels, not a persisted/shared exhaustion — see recordFailure's
+      // 'context' branch), and once the ladder runs out, say so explicitly instead of silently
+      // retrying the same oversized prompt: the caller should split the request into smaller
+      // pieces rather than resend it as-is.
+      if (verdict.class === 'context') {
+        const nextSkip = [...contextSkipModels, verdict.model];
+        if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
+          const contextMsg = `⚠️ Запрос не поместился в контекст модели «${verdict.model}» — пробую следующую ступень лестницы профиля «${ocProfileName}» (это не блокирует модель для других задач).`;
+          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, contextMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, contextMsg));
+          else await tgSend(BOT_TOKEN, chatId, contextMsg);
+          if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, contextMsg);
+          const queuedRetry = runTask({
+            initiatedAt, threadId,
+            taskId: `${user.username}-${Date.now()}`,
+            user,
+            task,
+            context,
+            sessionId: activeSessionId,
+            forceClaude,
+            initialMsgId: msgId,
+            pinnedMsgId,
+            secrets,
+            retryCount,
+            continuationCount, mode, projectId, internalGtd,
+            engine: 'opencode',
+            engineFallbackDone,
+            ladderAttempt: ladderAttempt + 1,
+            contextSkipModels: nextSkip,
+          });
+          return { queuedRetry };
+        }
+        const tooBigMsg = `⛔ Запрос слишком большой для всех моделей лестницы профиля «${ocProfileName}» — разбей задачу на более мелкие части и отправь по шагам.`;
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tooBigMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tooBigMsg));
+        else await tgSend(BOT_TOKEN, chatId, tooBigMsg);
+        if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, tooBigMsg);
+        return tooBigMsg;
+      }
       if (verdict.class === 'config') {
         setAuthFailedFlag({ reason: 'CONFIG_ONE_TIME', error_text: preLadderText, engine: 'opencode' });
         const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
