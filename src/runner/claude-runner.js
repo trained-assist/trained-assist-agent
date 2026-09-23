@@ -393,7 +393,8 @@ async function runEngineProcess(opts) {
             lastOutputAt = Date.now();
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`).catch(() => {});
+              if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
             }
             scheduleStream();
           } else if (event.type === 'step_start') {
@@ -448,7 +449,8 @@ async function runEngineProcess(opts) {
             lastActivity = formatToolActivity('Bash', { command: event.item.command });
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
+              if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
             }
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
@@ -493,7 +495,8 @@ async function runEngineProcess(opts) {
               lastActivity = formatToolActivity(block.name, block.input);
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
-                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
+                if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
               }
             }
           }
