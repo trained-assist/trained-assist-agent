@@ -38,3 +38,10 @@ Goal: revert the "durable last-failure ledger" (recordLastFailure/readAndClearLa
 - [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1173
 - [ ] Merged to main
 - [ ] Deployed to prod — verified via deploy-gcp/deploy-ru check-runs (success) on merge commit
+
+Goal: /run accepts chatId as alias for userId — P1-A of naming-conventions refactor (issue #1177, plan generic-naming-conventions-refactoring/plan.md §4). userId in /run has always meant the Telegram chat to stream into, not a user identity; chatId is the forward-looking wire name for that same value. Dual-accept only (chatId wins if both sent), no behavior change for callers still sending only userId. Next steps after this lands: tg-bot starts sending chatId too (PR-B), observation period, then flip canonical field.
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1178
+- [ ] Merged to main
+- [ ] Deployed to prod — verified via deploy-gcp/deploy-ru check-runs (success) on merge commit
+- [ ] Live smoke-check: /run still accepts old-style `userId`-only calls unchanged, and a `chatId`-only call is accepted too
