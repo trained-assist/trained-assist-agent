@@ -2138,6 +2138,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       cache_read_input_tokens: opencodeUsage.cacheRead || 0,
       cache_creation_input_tokens: opencodeUsage.cacheWrite || 0,
       cost_usd: opencodeUsage.cost,
+      breakdown: opencodeBreakdown,
     });
   } else if (claudeUsage) {
     recordUsage(user.workDir, {
