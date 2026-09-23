@@ -11,6 +11,7 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { userWorkDir } = require('../data-paths');
 
 const { sendRejection } = require('../hh-rejection');
 const { hydrateResume, buildResumeText, resumeNotice } = require('../hh-resume');
@@ -647,7 +648,7 @@ if (req.method === 'POST' && url.pathname === '/hh/generate-message') {
   let vacancyContext = '';
   if (hhToken) {
     try {
-      const vacancyCtxFile = path.join(dataDir, 'sessions', String(username), 'contexts', 'hh', 'active_vacancy.json');
+      const vacancyCtxFile = path.join(userWorkDir(username), 'contexts', 'hh', 'active_vacancy.json');
       const vacData = fs.existsSync(vacancyCtxFile) ? JSON.parse(fs.readFileSync(vacancyCtxFile, 'utf8'))?.value : null;
       if (vacData?.id) {
         const vac = await hhFetch(`/vacancies/${vacData.id}`, hhToken);

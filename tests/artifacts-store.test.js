@@ -11,22 +11,28 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 
-// We need to reset the module so DATA_DIR picks up the updated env var.
-// Both 84-artifacts.js and artifacts-store.js must be cleared together.
+// We need to reset the module so the workspace root picks up the updated env var.
+// artifacts-store resolves paths via src/data-paths.js (USERS_ROOT), so both the
+// store/tool AND data-paths caches must be cleared together.
 function loadModule() {
   const storePath = require.resolve('../src/artifacts-store.js');
   const toolPath = require.resolve('../src/mcp-skills/tools/84-artifacts.js');
+  const dataPaths = require.resolve('../src/data-paths.js');
   delete require.cache[storePath];
   delete require.cache[toolPath];
+  delete require.cache[dataPaths];
   return require('../src/mcp-skills/tools/84-artifacts.js');
 }
 
 let tmpDir;
 let mod;
 let handlers;
+let prevUsersDir;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'artifacts-test-'));
+  prevUsersDir = process.env.USERS_DIR;
+  process.env.USERS_DIR = tmpDir;
   process.env.AGENT_DATA_DIR = tmpDir;
   process.env.AGENT_USER_ID = 'alice';
   delete process.env.AGENT_SESSION_FILE;
@@ -41,6 +47,8 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
   delete process.env.AGENT_DATA_DIR;
+  if (prevUsersDir === undefined) delete process.env.USERS_DIR;
+  else process.env.USERS_DIR = prevUsersDir;
   delete process.env.AGENT_USER_ID;
 });
 

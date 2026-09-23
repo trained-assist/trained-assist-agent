@@ -75,6 +75,15 @@ jobs:
             echo "❌ Inline HH function definition found in src/server.js — HH logic belongs in src/handlers/hh.js, server.js is a router (issue #942 P3.1/P3.2)"
             exit 1
           fi
+      - name: Per-profile paths must use src/data-paths.js (no legacy AGENT_DATA_DIR/sessions)
+        run: |
+          # Legacy per-profile storage (AGENT_DATA_DIR/sessions/<profile>) is deprecated —
+          # resolve profile paths via src/data-paths.js (userWorkDir/sessionsDirPath).
+          # See storage-paths-auth-refactor-spec.md §2 and scripts/migrate-workspaces.mjs.
+          if grep -rnE "['\"]sessions['\"]\s*,\s*(USER_ID|String\(|username|profile)|dataDir\s*,\s*['\"]sessions['\"]" src/ --include="*.js"; then
+            echo "❌ Legacy AGENT_DATA_DIR/sessions/<profile> path construction found — use src/data-paths.js helpers instead"
+            exit 1
+          fi
 
   coherence:
     needs: [ci]

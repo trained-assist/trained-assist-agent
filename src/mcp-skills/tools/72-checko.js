@@ -18,8 +18,8 @@ function readKey() {
   if (env) return env;
   try {
     const cfgPath = path.join(
-      process.env.AGENT_DATA_DIR || path.join(require('os').homedir(), 'agent-data'),
-      'sessions', USER_ID, '.inn-config.json',
+      require('../../data-paths').userWorkDir(USER_ID),
+      '.inn-config.json',
     );
     if (fs.existsSync(cfgPath)) {
       const c = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));

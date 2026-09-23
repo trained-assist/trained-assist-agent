@@ -67,8 +67,7 @@ function sessionDir(outDir) {
     const base = activeProjectDir() || userWorkspace();
     dir = base
       ? path.join(base, 'interviews', 'analysis')
-      : path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
-          'sessions', USER_ID, 'interview-analysis');
+      : path.join(require('../../data-paths').userWorkDir(USER_ID), 'interview-analysis');
   }
   fs.mkdirSync(dir, { recursive: true });
   return dir;
