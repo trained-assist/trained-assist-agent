@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
-const { runEngineProcess, buildEngineCommand } = require('../src/runner/claude-runner');
+const { runEngineProcess, buildEngineCommand, editLanded, runningControls, _const } = require('../src/runner/claude-runner');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-'));
 const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-mcp-'));
@@ -127,4 +127,52 @@ const baseOpts = {
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(tmp2, { recursive: true, force: true });
   console.log('V2 PASS: happy path + crash-no-hang + timers cleanup + command build + codex/opencode mcp wiring');
+
+  // (6) editLanded — pins the ⛔/➕ button delivery contract. progressEdit is
+  // best-effort+coalesced (tg-stream.js), so a real Telegram success, a 429
+  // drop, and a coalesce-skip are three different shapes; only the first one
+  // means the buttons actually reached the chat.
+  assert.equal(editLanded({ ok: true, message_id: 1 }), true, 'real Telegram success lands');
+  assert.equal(editLanded({ ok: false, flooded: true }), false, '429 best-effort drop does not land');
+  assert.equal(editLanded({ ok: true, skipped: true }), false, 'coalesce-skip does not land (text/markup unchanged)');
+  assert.equal(editLanded(undefined), false, 'no response (thrown+caught) does not land');
+  assert.deepEqual(
+    runningControls('t-x').reply_markup.inline_keyboard[0].map(b => b.callback_data),
+    ['stop|t-x', 'sup|t-x'],
+    'runningControls pairs ⛔ Стоп with ➕ Дополнить on the same row'
+  );
+
+  // (7) Regression for the bug this fixes: a heartbeat tick that hits STOP_BUTTON_
+  // AFTER_SECS but gets its edit dropped (429/coalesce) used to still mark the
+  // buttons "shown" and never retry — ⛔/➕ silently never appeared for the rest
+  // of the task. Fake engine stays quiet past STOP_BUTTON_AFTER_SECS so the
+  // heartbeat (not the stream) timer drives this; injected tgEdit drops exactly
+  // the first button-carrying edit, then succeeds.
+  const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-buttons-'));
+  const quietBin = path.join(tmp3, 'fake-claude-quiet');
+  writeFake(quietBin, `#!/usr/bin/env sh
+sleep 10
+echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens":1}}'
+`);
+  const buttonEdits = [];
+  const flakyTgEdit = async (token, chatId, messageId, text, extra) => {
+    if (extra?.reply_markup) {
+      buttonEdits.push(extra);
+      if (buttonEdits.length === 1) return { ok: false, flooded: true }; // simulate a dropped 429
+    }
+    return { ok: true, message_id: messageId };
+  };
+  await runEngineProcess({
+    ...baseOpts, engineBin: quietBin, cwd: tmp3, msgId: 'm-1', taskId: 't-retry',
+    user: { username: 'smoke', workDir: tmp3, name: 'Smoke' },
+    tgEdit: flakyTgEdit,
+  });
+  assert.ok(buttonEdits.length >= 2, `expected a dropped attempt + a landed retry, got ${buttonEdits.length} button-carrying edits`);
+  assert.deepEqual(
+    buttonEdits[0].reply_markup.inline_keyboard[0].map(b => b.callback_data),
+    ['stop|t-retry', 'sup|t-retry'],
+    'the dropped attempt still carried both buttons (not silently downgraded to Стоп-only)'
+  );
+  fs.rmSync(tmp3, { recursive: true, force: true });
+  console.log('V2b PASS: editLanded gate + dropped button edit retries instead of being marked shown');
 })();
