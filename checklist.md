@@ -32,3 +32,9 @@ Goal: fix free-tier OpenCode model ladder — dead xiaomi/mimo-v2.5:free rung gu
 - [ ] Deployed to prod — verified live (static config/JS files, live via systemd restart of assist-agent.service; no separate build step)
 
 Unrelated, non-blocking finding while investigating #1164's CI: the `autofix` check-run fails on every PR in this repo (curl 404 fetching `pr-autofix`'s `scripts/autofix.mjs` at `refs/pull/<N>/merge` — that ref only exists in trained-assist-agent, not in the pr-autofix repo it's fetched from). Not a required status check (branch protection only requires `ci` + `staging-gate`), so it doesn't block merges — but it means autofix has likely never run successfully on this repo. Worth a follow-up issue if the `autofix` job is meant to do anything; not fixed here (out of scope for the ladder fix).
+
+Goal: document Agent Control Plane / Domain Skill Server naming pattern (P0 item, naming-conventions-refactoring plan) — repo-role table fix + domain-not-platform naming rule + hh-skill flagged mid-migration
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1168
+- [ ] Merged to main
+- [ ] Deployed to prod — docs-only change (README.md), no runtime behavior to verify; merge is sufficient
