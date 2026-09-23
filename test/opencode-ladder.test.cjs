@@ -163,3 +163,11 @@ test('forceAdvance is a no-op when profile or model is missing', () => {
   mod.forceAdvance('p', 'build', null);
   assert.equal(mod.resolveModel({ ladder }, 'p', 'build'), 'm1', 'neither malformed call should have marked anything exhausted');
 });
+
+test('real free profile: every role ladder ends on a paid rung, not another :free model', () => {
+  const freeProfile = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.opencode', 'profiles', 'free.json'), 'utf8'));
+  for (const [role, ladder] of Object.entries(freeProfile.ladder)) {
+    const lastRung = ladder[ladder.length - 1];
+    assert.ok(!lastRung.endsWith(':free'), `${role}'s last rung (${lastRung}) must be a paid model — if every :free rung is rate-limited/dead, there must be one guaranteed-to-work fallback left`);
+  }
+});
