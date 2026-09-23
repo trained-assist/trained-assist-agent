@@ -315,6 +315,32 @@ function setSummary(workDir, id, summary, atMsgCount) {
   }
 }
 
+// Rebind (or clear, id=null) the project a session belongs to. Used to self-heal a stale
+// binding — e.g. the project folder was archived/merged in a reproject.js restructuring
+// after this session last ran — so the NEXT message resolves fresh instead of repeating
+// the same missing-folder situation forever.
+function setSessionProject(workDir, id, projectId) {
+  if (!id) return false;
+  try {
+    const fp = sessionFilePath(workDir, id);
+    if (fs.existsSync(fp)) {
+      const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      full.projectId = projectId || null;
+      atomicWrite(fp, JSON.stringify(full, null, 2));
+    }
+    const sessions = loadIndex(workDir);
+    const idx = sessions.findIndex(s => s.id === id);
+    if (idx >= 0) {
+      sessions[idx].projectId = projectId || null;
+      saveIndex(workDir, sessions);
+    }
+    return true;
+  } catch (e) {
+    console.error('[session-store] setSessionProject error:', e.message);
+    return false;
+  }
+}
+
 // OpenCode model ladder can degrade between two turns of the same session (issue #1061
 // Фаза 4) — the resolved model for a role isn't part of the visible transcript, so track
 // it separately per session to detect a silent swap and tell the user explicitly.
@@ -362,7 +388,7 @@ function archiveSessions(workDir, sessionIds) {
 module.exports = {
   createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
   getCurrentSessionId, setCurrentSessionId, claimLiveChatId, resolveChatSession, archiveSessions, setSummary, needsSummary,
-  getLastOcModel, setLastOcModel,
+  getLastOcModel, setLastOcModel, setSessionProject,
   // Back-compat alias for the pre-rename name (see PROFILE-RENAME-SPEC.md); remove once no caller uses it.
   claimOwnerChatId: claimLiveChatId,
 };
