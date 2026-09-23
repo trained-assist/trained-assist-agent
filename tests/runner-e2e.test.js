@@ -80,7 +80,10 @@ echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output
 // then behaves like a normal successful run. Invocation count tracked on disk so it
 // survives the fact that a retry spawns a brand-new process. Callers MUST call
 // restoreNormalClaude() afterwards — this overwrites the shared claude binary in place.
-function setupCrashingClaude(crashCount = 1, exitCode = 1) {
+// argsLogFile, if given, gets one base64-encoded line per invocation holding that
+// invocation's last argv (the --print prompt) — lets a test assert what a retry actually saw
+// without a raw prompt's embedded newlines corrupting the line-per-invocation format.
+function setupCrashingClaude(crashCount = 1, exitCode = 1, { argsLogFile = null } = {}) {
   claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
   writeFileSync(claudeReplyFile, 'OK after retry');
   const counterFile = join(fakeBinDir, 'crash-counter.txt');
@@ -90,6 +93,7 @@ function setupCrashingClaude(crashCount = 1, exitCode = 1) {
 COUNT=$(cat "${counterFile}" 2>/dev/null || echo 0)
 COUNT=$((COUNT+1))
 echo $COUNT > "${counterFile}"
+${argsLogFile ? `printf '%s' "\${@: -1}" | base64 -w0 >> "${argsLogFile}"; printf '\\n' >> "${argsLogFile}"` : ''}
 if [ "$COUNT" -le ${crashCount} ]; then
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}'
   exit ${exitCode}
@@ -110,7 +114,7 @@ function restoreNormalClaude() {
 // Exits 0 with narration text but no `result`/completion event on the first `badCount`
 // invocations (the "no confirmed final answer" dead-end — distinct from setupCrashingClaude's
 // non-zero exit, which is the separate QUICK_CRASH_MS path), then behaves normally.
-function setupIncompleteClaude(badCount = 1) {
+function setupIncompleteClaude(badCount = 1, { argsLogFile = null } = {}) {
   claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
   writeFileSync(claudeReplyFile, 'Готово после ретраев');
   const counterFile = join(fakeBinDir, 'incomplete-counter.txt');
@@ -120,6 +124,7 @@ function setupIncompleteClaude(badCount = 1) {
 COUNT=$(cat "${counterFile}" 2>/dev/null || echo 0)
 COUNT=$((COUNT+1))
 echo $COUNT > "${counterFile}"
+${argsLogFile ? `printf '%s' "\${@: -1}" | base64 -w0 >> "${argsLogFile}"; printf '\\n' >> "${argsLogFile}"` : ''}
 if [ "$COUNT" -le ${badCount} ]; then
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"работаю над задачей"}]}}'
   exit 0
@@ -778,6 +783,26 @@ describe('Quick-crash auto-retry', () => {
     expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
   });
 
+  // Voice 2026-09-23 (simplest version, in-memory only — see lastAttemptError in runner/index.js):
+  // the retried invocation must tell the agent it's re-running the same task after a crash,
+  // not silently repeat the identical prompt as if nothing happened.
+  it('retried invocation prompt tells the agent about the previous crash', { timeout: 20000 }, async () => {
+    const argsLogFile = join(fakeBinDir, 'crash-args.log');
+    setupCrashingClaude(1, 1, { argsLogFile });
+    try {
+      await chat('сделай штуку', { claudeReply: 'Готово, сделал штуку' });
+    } finally {
+      restoreNormalClaude();
+    }
+
+    const prompts = readFileSync(argsLogFile, 'utf8').split('\n').filter(Boolean)
+      .map(line => Buffer.from(line, 'base64').toString('utf8'));
+    expect(prompts.length).toBe(2);
+    expect(prompts[0]).not.toMatch(/ПРОШЛАЯ ПОПЫТКА/);
+    expect(prompts[1]).toMatch(/ПРОШЛАЯ ПОПЫТКА ЭТОЙ ЖЕ ЗАДАЧИ УПАЛА/);
+    expect(prompts[1]).toMatch(/быстрый сбой при запуске/);
+  });
+
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -823,6 +848,23 @@ describe('General incomplete auto-retry', () => {
     expect(texts[texts.length - 1]).toContain('продолжай');
     // Original launch + exactly 3 retries = 4 invocations, no infinite loop.
     expect(readFileSync(join(fakeBinDir, 'incomplete-counter.txt'), 'utf8').trim()).toBe('4');
+  });
+
+  it('retried invocation prompt tells the agent about the previous incomplete run', { timeout: 20000 }, async () => {
+    const argsLogFile = join(fakeBinDir, 'incomplete-args.log');
+    setupIncompleteClaude(1, { argsLogFile });
+    try {
+      await chat('сделай штуку');
+    } finally {
+      restoreNormalClaude();
+    }
+
+    const prompts = readFileSync(argsLogFile, 'utf8').split('\n').filter(Boolean)
+      .map(line => Buffer.from(line, 'base64').toString('utf8'));
+    expect(prompts.length).toBe(2);
+    expect(prompts[0]).not.toMatch(/ПРОШЛАЯ ПОПЫТКА/);
+    expect(prompts[1]).toMatch(/ПРОШЛАЯ ПОПЫТКА ЭТОЙ ЖЕ ЗАДАЧИ УПАЛА/);
+    expect(prompts[1]).toMatch(/работа прервана/);
   });
 
 });
