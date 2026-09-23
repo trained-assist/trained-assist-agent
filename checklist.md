@@ -19,8 +19,14 @@ Goal: persist OpenCode per-step usage breakdown (agent/model/cache/cost per step
 - [x] Deployed to prod — verified via deploy-gcp/deploy-ru check-runs (success, 2026-09-23T08:08:53Z) on merge commit
 - [ ] Live data check pending: no usage.json on disk yet has a `breakdown` field — no OpenCode session has run since the 08:08:53Z deploy. Will confirm on the next real OpenCode run (per-step breakdown array in usage.json entries).
 
-Goal: fix free-tier OpenCode model ladder — dead xiaomi/mimo-v2.5:free rung guaranteed-failed the first attempt of every /oc_free task, and the error classifier couldn't recognize model-unavailable/provider-overload errors to degrade the ladder (owner voice note 2026-09-23, asked "как сделать так, чтобы бесплатный никогда не умирал")
+Goal: add a paid last-resort rung to every /oc_free role ladder — every rung ended in :free, so a retry storm where all free rungs are simultaneously rate-limited/dead had nowhere to fall back to (owner voice note 2026-09-23, follow-up ask "предложим все-таки не бесплатную, а платную недорогую модель")
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1161
+- [x] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1163
+- [x] Merged to main
+- [x] Deployed to prod — verified via deploy-gcp/deploy-ru check-runs (success) on merge commit 79ce9e7
+
+Goal: fix free-tier OpenCode model ladder — dead xiaomi/mimo-v2.5:free rung guaranteed-failed the first attempt of every /oc_free task, and the error classifier couldn't recognize model-unavailable/provider-overload errors to degrade the ladder (owner voice note 2026-09-23, asked "как сделать так, чтобы бесплатный никогда не умирал"). Originally PR #1161 — conflicted with #1163 (merged first, same free.json lines), went mergeable_state:dirty with failing CI; rebased cleanly onto main as PR #1164 (branch-immutability hook blocks pushing directly to a branch with an open PR, so #1161 was closed as superseded rather than force-pushed).
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1164
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live (static config/JS files, live via systemd restart of assist-agent.service; no separate build step)
