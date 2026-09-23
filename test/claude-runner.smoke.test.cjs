@@ -115,7 +115,8 @@ const baseOpts = {
   assert.ok(codexArgs.includes('-c'), 'codex args include -c overrides');
   assert.ok(codexArgs.some(a => a === 'mcp_servers.trained-skills.command="node"'), 'codex mcp command override');
   assert.ok(codexArgs.some(a => a.startsWith('mcp_servers.trained-skills.env=') && a.includes('USER_ID="99"')), 'codex mcp env override');
-  assert.deepEqual(codexMcpArgs(mcpFixture), codexArgs.slice(6, -1), 'codexMcpArgs matches what buildEngineCommand spliced in');
+  assert.ok(codexArgs.includes('tool_output_token_limit=4000'), 'codex args cap tool-output tokens (validated 2026-09-23, ~40% uncached-token cut)');
+  assert.deepEqual(codexMcpArgs(mcpFixture), codexArgs.slice(8, -1), 'codexMcpArgs matches what buildEngineCommand spliced in');
 
   const ocConfigPath = writeOpencodeMcpConfig(tmp2, mcpFixture);
   const ocConfig = JSON.parse(fs.readFileSync(ocConfigPath, 'utf8'));

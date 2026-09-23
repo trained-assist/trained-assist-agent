@@ -100,12 +100,20 @@ function readOcAgentModels() {
 function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user }) {
   const opencodeModelResolved = opencodeModel || process.env.OPENCODE_MODEL || null;
   if (engine === 'codex') {
+    // Validated 2026-09-23: capping raw tool-output tokens cuts the *uncached* input
+    // tokens a cat/grep/diff-heavy turn needs by ~40% (measured 18.7k -> 10.7k avg
+    // over repeated codex exec trials on the same task) without breaking correctness
+    // (codex appends a truncation notice with real counts, it doesn't blindly cut).
+    // This is the confirmed root cause of Codex's outsized input-token growth — see
+    // https://instant-publish.trainedassist.store/p/codex-input-token-breakdown.
+    const toolOutputTokenLimit = process.env.CODEX_TOOL_OUTPUT_TOKEN_LIMIT || '4000';
     return [process.env.CODEX_BIN || 'codex', [
       'exec',
       '--json',
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
       '-C', user.cwd || user.workDir,
+      '-c', `tool_output_token_limit=${toolOutputTokenLimit}`,
       ...codexMcpArgs(mcpConfig),
       systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
     ]];
