@@ -58,6 +58,17 @@ const CLASSIFIERS = [
   // upstream provider being busy right now, not a limit that resets hourly/daily.
   { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /temporarily overloaded/i },
   { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /\b503\b/ },
+  // The request itself didn't fit this rung's context window — not a quota/config problem
+  // with the rung, so unlike the classes above this must NOT persist a shared exhaustion:
+  // the next task on this rung (from any user) is very likely a normal-sized prompt that
+  // would work fine. recordFailure() below special-cases this class to skip markExhausted
+  // entirely; the caller instead skips this one rung for THIS task's own retry only.
+  { class: 'context', ttlMs: null, pattern: /context[_\s-]?length/i },
+  { class: 'context', ttlMs: null, pattern: /maximum context/i },
+  { class: 'context', ttlMs: null, pattern: /context window/i },
+  { class: 'context', ttlMs: null, pattern: /prompt is too long/i },
+  { class: 'context', ttlMs: null, pattern: /input (?:is )?too long/i },
+  { class: 'context', ttlMs: null, pattern: /too many tokens/i },
 ];
 
 function classifyError(text) {
@@ -113,6 +124,12 @@ function clearExhausted(profile, role, model) {
 function recordFailure(profile, role, model, errorText) {
   const verdict = classifyError(errorText);
   if (!verdict) return null;
+  if (verdict.class === 'context') {
+    // Deliberately no markExhausted call — see the 'context' CLASSIFIERS entries above.
+    // The caller (runner/index.js) skips this rung for its own retry via buildOcProfileOverrides'
+    // skipModels, not by writing shared state that would block unrelated, normal-sized tasks.
+    return { class: 'context', model, alertNeeded: false };
+  }
   markExhausted(profile, role, model, verdict.ttlMs);
   return { class: verdict.class, model, alertNeeded: verdict.class === 'config' };
 }
@@ -130,11 +147,16 @@ function _roleLadder(profileRaw, role) {
 // ladder — if every rung is currently exhausted, degrades to the last rung rather than failing
 // resolution outright (some model beats none; the caller's retry-count cap is what prevents an
 // infinite loop, not this function refusing to pick anything).
-function resolveModel(profileRaw, profileName, role) {
+//
+// skipModels (optional) additionally excludes specific models WITHOUT touching persisted state —
+// used for the context-overflow case, where a rung should be skipped for this one task's retry
+// only, not for every other task sharing the same ladder (see recordFailure's 'context' branch).
+function resolveModel(profileRaw, profileName, role, skipModels) {
   const ladder = _roleLadder(profileRaw, role);
   if (!ladder.length) return null;
   const state = _readState();
-  const usable = ladder.find(m => !_isExhausted(state, profileName, role, m));
+  const skip = skipModels && skipModels.length ? new Set(skipModels) : null;
+  const usable = ladder.find(m => !_isExhausted(state, profileName, role, m) && !(skip && skip.has(m)));
   return usable || ladder[ladder.length - 1];
 }
 
@@ -142,17 +164,22 @@ function resolveModel(profileRaw, profileName, role) {
 // shape writeOpencodeMcpConfig spreads into the per-invocation OPENCODE_CONFIG. `rolePrompts` in
 // the raw profile (e.g. russian's strict-reviewer prompt for `review`) survives ladder
 // degradation unchanged — it's about the role, not which model is currently filling it.
-function buildOcProfileOverrides(profileName, profilesDir) {
+//
+// opts.skipModels (optional) is a per-task, non-persisted skip list for the `build` role only —
+// that's the only role the runner retries within a single task (recordFailure always reports
+// role: 'build'), so there's nothing to skip for the other roles.
+function buildOcProfileOverrides(profileName, profilesDir, opts) {
   const dir = profilesDir || path.join(__dirname, '..', '.opencode', 'profiles');
   const profileRaw = JSON.parse(fs.readFileSync(path.join(dir, `${profileName}.json`), 'utf8'));
+  const skipModels = opts?.skipModels;
   const agent = {};
   for (const role of ROLES) {
-    const model = resolveModel(profileRaw, profileName, role);
+    const model = resolveModel(profileRaw, profileName, role, role === 'build' ? skipModels : undefined);
     if (!model) continue;
     agent[role] = { model, ...(profileRaw.rolePrompts?.[role] ? { prompt: profileRaw.rolePrompts[role] } : {}) };
   }
   return {
-    model: agent.build?.model || resolveModel(profileRaw, profileName, 'build') || profileRaw.model,
+    model: agent.build?.model || resolveModel(profileRaw, profileName, 'build', skipModels) || profileRaw.model,
     agent,
   };
 }
