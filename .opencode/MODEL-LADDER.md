@@ -10,7 +10,14 @@ changes, don't let it drift into a description of some past state.
 ## Error classes (`src/opencode-ladder.js: CLASSIFIERS`)
 
 - **quota** (auto-clears after a TTL, safe to retry automatically): rate-limit / HTTP 429 (1h
-  TTL), "usage limit" / "quota exceeded" (24h TTL — daily caps reset once a day, not hourly).
+  TTL), "usage limit" / "quota exceeded" (24h TTL — daily caps reset once a day, not hourly),
+  "temporarily overloaded" / HTTP 503 (5min TTL — upstream provider capacity, not our quota, and
+  the point of skipping to the next rung is to dodge it, not wait it out). A retired/never-existed
+  model slug ("unavailable for free", "model not found", "no endpoints found") is ALSO classified
+  as quota with a 30-day TTL, even though it will never actually recover — see the comment in
+  `CLASSIFIERS` for why: unlike a true account-wide config problem, a dead single rung shouldn't
+  stop the whole task, it should just be skipped, and 'quota' is the class that skips instead of
+  dead-stopping.
 - **config** (never auto-clears, alerts an operator instead of burning the rest of the ladder):
   "subscription required", "requires Global regions" (OpenCode Go region not enabled on the
   account — a one-time setting, not a quota), "insufficient account funds" (Zen pay-as-you-go
@@ -38,10 +45,24 @@ carried over from the pre-#1061 config, kept because planning benefited from it 
 
 ## `free` — zero cost, background/fallback use
 
-Only `:free`-tier OpenRouter models, cycled per role so retries don't all hammer the same one.
-No paid fallback rung on purpose — if every rung here is exhausted the right move is to fail
-loudly (see `MAX_LADDER_ATTEMPTS`), not silently start spending money on a profile a caller chose
-specifically because it's free.
+Mostly `:free`-tier OpenRouter models, cycled per role so retries don't all hammer the same one.
+Each role's ladder ends on one metered rung, `openrouter/deepseek/deepseek-v4-flash-0731` — the
+same cheap paid model `value`/`max` already trust as their fallback. Added 2026-09-23 after a
+retry storm where every `:free` rung was simultaneously rate-limited/dead left the task with
+nowhere to degrade to; a caller on `/oc_free` still wants cost near zero, not a hard failure, so
+one guaranteed-to-work paid rung as the very last resort beats failing loudly.
+
+2026-09-23: dropped `xiaomi/mimo-v2.5:free` from every role — confirmed live against OpenRouter
+that this slug 404s unconditionally ("This model is unavailable for free"), and it sat FIRST in
+`build`/`general`, so every fresh `/oc_free` task's first attempt was a guaranteed failure before
+the ladder had a chance to degrade. It was retired rather than kept as a rung, because the old
+error-classifier had no pattern for "unavailable for free" at all (`classifyError` returned
+`null`), so the ladder never even recognized it as exhausted — it silently fell through to the
+generic incomplete-retry path and could burn the whole retry budget hammering a dead model. Also
+observed `nemotron-3-ultra-550b-a55b:free` returning "Service temporarily overloaded" (HTTP 503)
+on 3/3 consecutive live calls — reordered it to the LAST rung in every role (instead of first)
+since it's the one most likely to be busy on the free tier, and added a short-TTL 'quota' rule so
+a genuine overload now correctly advances the ladder instead of being an unclassified crash.
 
 ## `russian` (formerly `russian-recruiter`) — Russian-language tasks, not recruiting-only
 

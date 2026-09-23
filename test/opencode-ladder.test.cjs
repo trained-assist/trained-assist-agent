@@ -30,6 +30,22 @@ test('classifyError sorts quota vs config vs unrecognized text', () => {
   assert.equal(mod.classifyError('some unrelated engine crash'), null);
 });
 
+test('classifyError catches retired/unavailable model slugs and provider overload as quota-class (skip the rung, do not dead-stop the task)', () => {
+  const { mod } = freshModule();
+  const unavailable = mod.classifyError('This model is unavailable for free. The paid version is available now - use this slug instead: xiaomi/mimo-v2.5');
+  assert.equal(unavailable.class, 'quota');
+  assert.ok(unavailable.ttlMs > 24 * 60 * 60 * 1000, 'retired-slug TTL should be long (effectively permanent), not a short quota window');
+
+  assert.equal(mod.classifyError('model not found').class, 'quota');
+  assert.equal(mod.classifyError('No endpoints found matching your data policy').class, 'quota');
+
+  const overloaded = mod.classifyError('Upstream error from Nvidia: Service temporarily overloaded');
+  assert.equal(overloaded.class, 'quota');
+  assert.ok(overloaded.ttlMs <= 15 * 60 * 1000, 'overload TTL should be short — this is transient provider congestion, retry soon');
+
+  assert.equal(mod.classifyError('HTTP 503 Service Unavailable').class, 'quota');
+});
+
 test('resolveModel degrades to the next rung once the first is marked exhausted', () => {
   const { mod } = freshModule();
   const ladder = { build: ['m1', 'm2', 'm3'] };
