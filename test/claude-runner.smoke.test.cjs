@@ -175,4 +175,35 @@ echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens"
   );
   fs.rmSync(tmp3, { recursive: true, force: true });
   console.log('V2b PASS: editLanded gate + dropped button edit retries instead of being marked shown');
+
+  // (8) Regression for the "buttons visible for 1 second then vanish" bug:
+  // editMessageText WITHOUT reply_markup clears the keyboard. The old code sent
+  // markup only on the first landing and bare text on every later tick, so the
+  // next progress edit erased ⛔/➕. Every landed progress edit past the
+  // threshold must carry the running-controls markup.
+  const tmp4 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-persist-'));
+  const quietBin2 = path.join(tmp4, 'fake-claude-quiet2');
+  writeFake(quietBin2, `#!/usr/bin/env sh
+sleep 10
+echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens":1}}'
+`);
+  const landedEdits = [];
+  const persistTgEdit = async (token, chatId, messageId, text, extra) => {
+    if (!extra?.reply_markup) landedEdits.push({ bare: true, text });
+    else landedEdits.push({ bare: false, keys: extra.reply_markup.inline_keyboard[0].map(b => b.callback_data) });
+    return { ok: true, message_id: messageId };
+  };
+  await runEngineProcess({
+    ...baseOpts, engineBin: quietBin2, cwd: tmp4, msgId: 'm-1', taskId: 't-persist',
+    user: { username: 'smoke', workDir: tmp4, name: 'Smoke' },
+    tgEdit: persistTgEdit,
+  });
+  const postThreshold = landedEdits.filter(e => !e.bare);
+  assert.ok(postThreshold.length >= 3, `expected several button-carrying edits across ticks, got ${postThreshold.length}`);
+  for (const e of postThreshold) {
+    assert.deepEqual(e.keys, ['stop|t-persist', 'sup|t-persist'], 'every post-threshold edit carries ⛔/➕ markup (no bare edits after buttons appear)');
+  }
+  assert.ok(!landedEdits.some(e => e.bare && landedEdits.indexOf(e) > landedEdits.indexOf(postThreshold[0])), 'no bare (button-stripping) edit after the first button-carrying one');
+  fs.rmSync(tmp4, { recursive: true, force: true });
+  console.log('V2c PASS: buttons persist across consecutive progress edits (no button-stripping edits)');
 })();
