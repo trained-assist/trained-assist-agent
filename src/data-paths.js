@@ -2,13 +2,21 @@
 // Single source of truth for all on-disk paths used by the agent.
 // Every module must import paths from here — never compute them inline.
 //
-// Two root directories exist by design:
+// Three root directories exist by design:
 //   USERS_ROOT  — Claude's cwd when spawned; MCP context_set writes here
 //   SYSTEM_ROOT — server-side state: candidate history, cache, pending tasks
+//   TOKENS_ROOT — per-profile credentials, one file per service
 //
 // They intentionally differ: USERS_ROOT is the "Claude workspace" (one dir per profile,
 // used as cwd), SYSTEM_ROOT is the "agent database" (structured subdirs by feature).
 // Confusing them causes silent misses — see issue #428.
+//
+// Identity ≠ location: durable state stores stable IDs (profileId, projectId,
+// sessionId, executionId); filesystem paths are always derived here at read time.
+// Do NOT persist an absolute path into a durable record — persist the ID and
+// resolve it through one of the helpers below. The legacy workspace root
+// `SYSTEM_ROOT/sessions/<profile>` is DEPRECATED (see migrate-workspaces.mjs);
+// the workspace root is USERS_ROOT.
 
 const path = require('path');
 const os = require('os');
@@ -34,7 +42,31 @@ function contextFilePath(username, skill, key) {
   return path.join(USERS_ROOT, String(username), 'contexts', skill, `${key}.json`);
 }
 
+// Session store lives in the workspace (see session-store.js): index + per-session files.
+function sessionsDirPath(username) {
+  return path.join(userWorkDir(username), 'sessions');
+}
+
+// Projects live in the workspace; the project folder is the session's cwd.
+function projectsRoot(username) {
+  return path.join(userWorkDir(username), 'projects');
+}
+
+function projectDir(username, projectId) {
+  return path.join(projectsRoot(username), String(projectId));
+}
+
 // ── Agent database (SYSTEM_ROOT) ──────────────────────────────────────────────
+
+// Execution history / tracing — one JSON per execution, keyed by executionId.
+function executionHistoryPath(executionId) {
+  return path.join(SYSTEM_ROOT, 'execution-history', `${executionId}.json`);
+}
+
+// Operational flags (engine auth health, etc.) — server-side, not per-profile.
+function systemFlagsDir() {
+  return path.join(SYSTEM_ROOT, 'system-flags');
+}
 
 function candidateHistoryPath(username, negotiationId) {
   return path.join(SYSTEM_ROOT, 'hh', String(username), 'candidates', `${negotiationId}.json`);
@@ -76,6 +108,11 @@ module.exports = {
   TOKENS_ROOT,
   userWorkDir,
   contextFilePath,
+  sessionsDirPath,
+  projectsRoot,
+  projectDir,
+  executionHistoryPath,
+  systemFlagsDir,
   candidateHistoryPath,
   negotiationsCachePath,
   pendingTaskPath,
