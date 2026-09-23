@@ -197,6 +197,8 @@ function formatToolActivity(name, input = {}) {
  *   ocProfileOverrides (optional, opencode only — {model, agent} from profiles.getOcProfile,
  *   folded into the same per-invocation OPENCODE_CONFIG file),
  *   formatToolActivity, readOcAgentModels
+ *   onHeartbeat (optional, () => void — called on the existing 30s inactivity-check tick so the
+ *   pending-task journal's lastHeartbeatAt stays fresh while the process is alive; issue #942 [011])
  *
  * Returns a plain result object — never throws for process-level failures:
  *   { fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
@@ -209,7 +211,7 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
-    ocProfileOverrides,
+    ocProfileOverrides, onHeartbeat,
   } = opts;
 
   const proc = spawn(engineBin, engineArgs, {
@@ -545,7 +547,10 @@ async function runEngineProcess(opts) {
 
       // Inactivity check: if no stdout for 5 min, kill + auto-restart (works for all engines).
       // Checked every 30s; lastOutputAt updated on any raw stdout chunk before JSON parsing.
+      // Same tick also heartbeats the pending-task journal (issue #942 [011] watchdog step 1a) —
+      // piggybacking on this existing interval instead of adding a second timer.
       inactivityCheckTimer = setInterval(() => {
+        if (onHeartbeat) { try { onHeartbeat(); } catch (e) { console.warn(`[${taskId}] heartbeat write failed:`, e.message); } }
         if (timedOut || sessionState.userStopped) return;
         const silentMs = Date.now() - lastOutputAt;
         if (silentMs >= INACTIVITY_TIMEOUT_MS) {
