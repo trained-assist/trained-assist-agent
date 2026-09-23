@@ -1021,16 +1021,19 @@ ${recent || '(пока нет)'}
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
+      // audience scopes the list to the calling bot/surface (see AUDIENCE-SCOPE-SPEC);
+      // omitted -> 'default', matching every project created before this feature existed.
+      const audience = url.searchParams.get('audience') || 'default';
 
       const workDir = path.join(BASE_USERS_DIR, username);
       try {
         const { listProjects, sortByUsage } = require('./projects');
         const sessions = require('./session-store');
         const countByProject = {};
-        for (const s of sessions.listSessions(workDir, 1000)) {
+        for (const s of sessions.listSessions(workDir, 1000, audience)) {
           if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
         }
-        const projects = sortByUsage(listProjects(workDir), countByProject).map(p => ({
+        const projects = sortByUsage(listProjects(workDir, audience), countByProject).map(p => ({
           id: p.id, name: p.name, type: p.type, label: p.label || p.name, lastAt: p.lastAt || 0,
         }));
         return json(res, 200, { projects });
@@ -1047,6 +1050,9 @@ ${recent || '(пока нет)'}
     if (req.method === 'GET' && url.pathname === '/project-decision') {
       const username = url.searchParams.get('username');
       const chatId = url.searchParams.get('chatId') || null;
+      // audience scopes the decision to the calling bot/surface (see AUDIENCE-SCOPE-SPEC);
+      // omitted -> 'default', matching every project/session created before this feature existed.
+      const audience = url.searchParams.get('audience') || 'default';
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
 
@@ -1066,11 +1072,11 @@ ${recent || '(пока нет)'}
         // Session counts per project (metadata read, cheap) — computed up front so
         // decideNewSessionProject can order choices by usage (most-used first), not
         // just by recency.
-        const allSess = sessions.listSessions(workDir, 1000);
+        const allSess = sessions.listSessions(workDir, 1000, audience);
         const countByProject = {};
         for (const s of allSess) if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
 
-        const d = projects.decideNewSessionProject(workDir, chatId, countByProject);
+        const d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience);
         const out = { action: d.action, active: d.active || null };
 
         // Data gap fix: a project's 3-sense summary used to be generated ONLY in the
@@ -1116,7 +1122,8 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt } = payload;
+      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
+      if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))) return json(res, 400, { error: 'invalid audience' });
       if (initiatedAt != null && (!Number.isSafeInteger(initiatedAt) || initiatedAt < 0 || initiatedAt > Date.now() + 30000)) return json(res, 400, { error: 'invalid initiatedAt' });
       if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return json(res, 400, { error: 'invalid threadId' });
       if (!userId || !username) return json(res, 400, { error: 'missing fields' });
@@ -1165,7 +1172,11 @@ ${recent || '(пока нет)'}
       // explicitly, but until it does we alias the existing `username` field (same
       // string value) so both repos migrate independently — no flag-day break.
       const profileId = payload.profileId ?? username;
-      const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null };
+      // audience scopes sessions/projects per bot/surface sharing this username+chatId
+      // (see AUDIENCE-SCOPE-SPEC) — e.g. the recruiter bot passes 'recruiter' so its
+      // sessions never mix with the general-purpose bot's. Defaults to 'default', which
+      // is byte-for-byte identical to pre-audience behavior.
+      const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
       trackChat(userId);
 
       // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
@@ -1531,14 +1542,17 @@ ${recent || '(пока нет)'}
       return json(res, 200, { ok: true });
     }
 
-    // GET /sessions?username=xxx[&limit=N] — list sessions for a user
+    // GET /sessions?username=xxx[&limit=N][&audience=xxx] — list sessions for a user
     if (req.method === 'GET' && url.pathname === '/sessions') {
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '10', 10), 50);
+      // audience scopes the list to the calling bot/surface (see AUDIENCE-SCOPE-SPEC);
+      // omitted -> 'default', matching every session created before this feature existed.
+      const audience = url.searchParams.get('audience') || 'default';
       const workDir = path.join(BASE_USERS_DIR, username);
-      let sessionList = listSessions(workDir, limit);
+      let sessionList = listSessions(workDir, limit, audience);
       // Lazily backfill durable summaries so external consumers (Telegram gateway,
       // web UI) get a meaningful {title, gist} — not a raw first-message truncation.
       // Mirrors the /sessions lazy-generation in runner.runQuickAnswer; this is the
@@ -1554,7 +1568,7 @@ ${recent || '(пока нет)'}
             if (sum) setSummary(workDir, s.id, sum, s.messageCount);
           } catch { /* best-effort; fall back to raw topic */ }
         }));
-        sessionList = listSessions(workDir, limit); // reload with fresh summaries
+        sessionList = listSessions(workDir, limit, audience); // reload with fresh summaries
       }
       // Resolve projectId -> projectName so the gateway/web session lists can label
       // each dialog by its typed project (issue #517).

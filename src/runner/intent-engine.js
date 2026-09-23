@@ -275,7 +275,7 @@ function renderSessionDetail(meta, n) {
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
-function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null, telegramUserId = null) {
+function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null, telegramUserId = null, audience = 'default') {
   // Stale PR alarm — fires repeatedly from csm-relay after PR is already merged
   if (STALE_PR_ALARM_INTENT.test(task)) {
     const prNum = task.match(/#(\d+)/)?.[1];
@@ -344,14 +344,14 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   if (PROJECT_INTENT.test(task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
     const rest = task.replace(PROJECT_INTENT, '').trim();
-    const list = projects.listProjects(workDir);
-    const activeId = projects.getActiveProjectId(workDir, chatId);
+    const list = projects.listProjects(workDir, audience);
+    const activeId = projects.getActiveProjectId(workDir, chatId, audience);
 
     // create: /project new recruiting: Название
     const createMatch = rest.match(/^(?:new|new project|новый|создать|создай|create|add)\s+(.+)$/i);
     if (createMatch) {
-      const meta = projects.createProject(workDir, createMatch[1].trim());
-      projects.setActiveProjectId(workDir, meta.id, chatId);
+      const meta = projects.createProject(workDir, createMatch[1].trim(), { audience });
+      projects.setActiveProjectId(workDir, meta.id, chatId, { audience });
       return `✅ Проект создан и выбран: «${meta.name}» (${meta.label}).\nНовые сессии пойдут в него. Список: \`/project\``;
     }
 
@@ -406,7 +406,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
         || list.find(p => (p.name || '').toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
     }
     if (!target) return `Проект «${rest}» не найден. Список проектов: \`/project\``;
-    projects.setActiveProjectId(workDir, target.id, chatId);
+    projects.setActiveProjectId(workDir, target.id, chatId, { audience });
     return `▶️ Активный проект: «${target.name}» (${target.label}).\nСледующие новые сессии пойдут в него. Список: \`/project\``;
   }
 
@@ -664,7 +664,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   // /sessions — list recent sessions
   if (SESSIONS_INTENT.test(task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию.';
-    const list = sessions.listSessions(workDir, 10);
+    const list = sessions.listSessions(workDir, 10, audience);
     if (!list || list.length === 0) return 'Нет активных диалогов.';
     return renderSessionsList(list);
   }
@@ -1170,14 +1170,14 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // chat turn — e.g. after a forceNew dispatch. BUG_OR_FEATURE_INTENT honors it (PR3) so
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
-async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null) {
+async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
   // Session summaries (durable artifact) — handled here (async) so we can generate
   // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
   if (workDir) {
     const detailM = task.trim().match(SESSION_DETAIL_INTENT);
     if (detailM) {
       const n = parseInt(detailM[1] || detailM[2] || detailM[3], 10);
-      const list = sessions.listSessions(workDir, 10);
+      const list = sessions.listSessions(workDir, 10, audience);
       if (!list || list.length === 0) return 'Нет активных диалогов.';
       if (!n || n < 1 || n > list.length) return `Нет диалога №${n}. Напишите /sessions — покажу список.`;
       const meta = list[n - 1];
@@ -1189,7 +1189,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
       return renderSessionDetail(meta, n);
     }
     if (SESSIONS_INTENT.test(task)) {
-      let list = sessions.listSessions(workDir, 10);
+      let list = sessions.listSessions(workDir, 10, audience);
       if (!list || list.length === 0) return 'Нет активных диалогов.';
       // Generate summaries for sessions that lack a fresh one — in parallel, persist to disk.
       const stale = list.filter(s => sessions.needsSummary(s));
@@ -1200,17 +1200,17 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
           const sum = await generateSummary(full.messages, { apiKey: openrouterKey });
           if (sum) sessions.setSummary(workDir, s.id, sum, s.messageCount);
         }));
-        list = sessions.listSessions(workDir, 10); // reload with fresh summaries
+        list = sessions.listSessions(workDir, 10, audience); // reload with fresh summaries
       }
       // Also refresh the ACTIVE project's name + 3-sense summary if it's stale (session
       // count grew). Cheap: one gemini-2.5-flash call, only when needed. This is how a
       // project "matures" — born with a provisional name, renamed from its real work.
       try {
         const orK = openrouterKey || process.env.OPENROUTER_API_KEY;
-        const activePid = projects.getActiveProjectId(workDir, chatId);
+        const activePid = projects.getActiveProjectId(workDir, chatId, audience);
         if (orK && activePid) {
           const meta = projects.getProject(workDir, activePid);
-          const projSess = sessions.listSessions(workDir, 1000).filter(s => s.projectId === activePid);
+          const projSess = sessions.listSessions(workDir, 1000, audience).filter(s => s.projectId === activePid);
           if (meta && projects.needsSummary(meta, projSess.length)) {
             const { generateProjectSummary } = require('../project-summary');
             const res = await generateProjectSummary(projSess, { apiKey: orK });
@@ -1234,13 +1234,13 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   if (BUG_OR_FEATURE_INTENT.test(task)) {
     if (!workDir) return null;
     try {
-      const proj = projects.bugsProject(workDir);
-      projects.setActiveProjectId(workDir, proj.id, chatId);
+      const proj = projects.bugsProject(workDir, { audience });
+      projects.setActiveProjectId(workDir, proj.id, chatId, { audience });
       const firstMessage = task.trim() || '/bug_or_feature';
       // Only adopt the caller's sessionId when it's actually fresh (sessionExists=false) —
       // never overwrite a real, already-existing session file.
       const reuseId = (!sessionExists && sessionId) ? sessionId : undefined;
-      const sid = sessions.createSession(workDir, { task: firstMessage, chatId, projectId: proj.id, id: reuseId });
+      const sid = sessions.createSession(workDir, { task: firstMessage, chatId, projectId: proj.id, id: reuseId, audience });
       const greeting = [
         '🐞✨ Проект «Bugs and Features».',
         'Кидай что случилось или что хочешь — можно несколько сообщений, голосом, скриншотами.',
@@ -1284,7 +1284,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   const LONG_MSG_QUICK_SKIP = 200;
   const isSlashCommand = /^\//.test(task.trim());
   const sync = (isSlashCommand || task.trim().length <= LONG_MSG_QUICK_SKIP)
-    ? getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId)
+    ? getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId, audience)
     : null;
   if (sync !== null) {
     const preview = (sync && typeof sync === 'object') ? sync.hint : sync;

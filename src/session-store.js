@@ -51,13 +51,17 @@ function saveIndex(workDir, sessions) {
 
 /** Create a new session record, return its id.
  *  `projectId` anchors the session to a project folder (see projects.js). Optional —
- *  legacy/un-migrated profiles create sessions with projectId=null and behave as before. */
-function createSession(workDir, { task, id: providedId, chatId, projectId = null }) {
+ *  legacy/un-migrated profiles create sessions with projectId=null and behave as before.
+ *  `audience` scopes the session to a bot/surface (e.g. 'recruiter') sharing the same
+ *  username+chatId (see AUDIENCE-SCOPE-SPEC). Defaults to 'default' — omitting it, or
+ *  passing 'default' explicitly, is byte-for-byte identical to the pre-audience behavior. */
+function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience }) {
   const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
+  const aud = audience || 'default';
 
-  const meta = { id, topic, projectId: projectId || null, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
+  const meta = { id, topic, projectId: projectId || null, audience: aud, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
 
   const sessions = loadIndex(workDir);
   sessions.unshift(meta);
@@ -80,7 +84,7 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
   // freshly-created session orphaned: getCurrentSessionId returns null, the next
   // message spawns a brand-new context-blind session, and the accumulated ТЗ is lost
   // (issue #531). setCurrentSessionId is idempotent with the later runner calls.
-  if (chatId) setCurrentSessionId(workDir, id, chatId);
+  if (chatId) setCurrentSessionId(workDir, id, chatId, audience);
 
   return id;
 }
@@ -138,12 +142,21 @@ function appendReply(workDir, id, reply) {
   }
 }
 
-/** List sessions (index only, no message bodies) */
-function listSessions(workDir, limit = 10) {
+/** List sessions (index only, no message bodies).
+ *  `audience` (default 'default') scopes the list so two bots sharing the same username
+ *  don't see each other's sessions — a session with no `audience` field (every record on
+ *  disk before this feature existed) counts as 'default'. Pass audience: null explicitly
+ *  to bypass filtering entirely (internal/debug tools only — never an HTTP path reachable
+ *  by an external bot). */
+function listSessions(workDir, limit = 10, audience = 'default') {
   // Defensive re-sort: heals legacy indexes written before recency ordering,
   // so the picker/classifier get the most-recently-active sessions even on the
   // first read after upgrade (before any write re-orders the file).
-  return sortByRecency(loadIndex(workDir)).slice(0, limit);
+  const all = sortByRecency(loadIndex(workDir));
+  const filtered = audience === null
+    ? all
+    : all.filter(s => (s.audience || 'default') === audience);
+  return filtered.slice(0, limit);
 }
 
 /** Get full session with messages */
@@ -174,13 +187,20 @@ function buildContext(workDir, sessionId, limit = 500, msgCount = 6) {
 const CURRENT_SESSION_FILE = 'current-session.json';
 const CURRENT_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
-function _currentSessionFile(chatId) {
-  return chatId ? `current-session-${chatId}.json` : CURRENT_SESSION_FILE;
+// `audience` distinguishes the current-session pointer file per bot/surface sharing the
+// same chatId (see AUDIENCE-SCOPE-SPEC). Falsy or 'default' → EXACTLY the pre-existing
+// filename, so every existing pointer on disk keeps resolving unchanged. Only a truthy
+// non-default audience gets its own pointer file.
+function _currentSessionFile(chatId, audience) {
+  if (!audience || audience === 'default') {
+    return chatId ? `current-session-${chatId}.json` : CURRENT_SESSION_FILE;
+  }
+  return chatId ? `current-session-${audience}-${chatId}.json` : `current-session-${audience}.json`;
 }
 
-function getCurrentSessionId(workDir, chatId) {
+function getCurrentSessionId(workDir, chatId, audience) {
   try {
-    const fp = path.join(workDir, SESSIONS_DIR, _currentSessionFile(chatId));
+    const fp = path.join(workDir, SESSIONS_DIR, _currentSessionFile(chatId, audience));
     if (!fs.existsSync(fp)) return null;
     const { id, lastAt } = JSON.parse(fs.readFileSync(fp, 'utf8'));
     if (Date.now() - lastAt > CURRENT_SESSION_TTL_MS) return null;
@@ -188,11 +208,11 @@ function getCurrentSessionId(workDir, chatId) {
   } catch (e) { console.warn('[session-store] getCurrentSessionId:', e.message); return null; }
 }
 
-function setCurrentSessionId(workDir, id, chatId) {
+function setCurrentSessionId(workDir, id, chatId, audience) {
   try {
     const dir = path.join(workDir, SESSIONS_DIR);
     fs.mkdirSync(dir, { recursive: true });
-    atomicWrite(path.join(dir, _currentSessionFile(chatId)), JSON.stringify({ id, lastAt: Date.now() }));
+    atomicWrite(path.join(dir, _currentSessionFile(chatId, audience)), JSON.stringify({ id, lastAt: Date.now() }));
     // Update liveChatId in the session file so it knows which chat it's attached to
     if (id && chatId) {
       const fp = sessionFilePath(workDir, id);
@@ -248,14 +268,16 @@ function claimLiveChatId(workDir, id, chatId) {
  * (`current-session--1003….json`), so it is the durable source of truth for "which
  * session does this chat continue". Resolution order:
  *   1. the explicit id, if its session file exists (normal path — no divergence);
- *   2. otherwise the chat's current-session pointer, if it resolves to a real session;
+ *      a session id, once known, is unambiguous — audience-agnostic by design.
+ *   2. otherwise the chat's current-session pointer (scoped by `audience`, see
+ *      _currentSessionFile), if it resolves to a real session;
  *   3. otherwise null — caller creates a fresh session.
  * Returns the id to use, or null.
  */
-function resolveChatSession(workDir, sessionId, chatId) {
+function resolveChatSession(workDir, sessionId, chatId, audience) {
   if (sessionId && getSession(workDir, sessionId)) return sessionId;
   if (chatId) {
-    const pointerId = getCurrentSessionId(workDir, chatId);
+    const pointerId = getCurrentSessionId(workDir, chatId, audience);
     if (pointerId && getSession(workDir, pointerId)) return pointerId;
   }
   return null;
