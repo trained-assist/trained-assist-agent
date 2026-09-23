@@ -360,6 +360,24 @@ async function runEngineProcess(opts) {
             fullOutput.text += event.part.text;
             lastAssistantMsg = fullOutput.text;
             scheduleStream();
+          } else if (event.type === 'tool_use' && event.part) {
+            // Progress visibility for opencode (issue: GLM sessions look frozen):
+            // tool events arrive only AFTER completion in --format json, so also
+            // track step_start as "model is thinking/working" to update lastActivity.
+            const ocTool = event.part.tool || 'tool';
+            const ocInput = event.part.state?.input || {};
+            const ocLabel = formatToolActivity(ocTool === 'bash' ? 'Bash' : ocTool === 'read' ? 'Read' : ocTool === 'write' ? 'Write' : ocTool === 'edit' ? 'Edit' : ocTool === 'glob' || ocTool === 'grep' ? 'WebSearch' : ocTool, ocInput);
+            lastActivity = ocLabel;
+            lastOutputAt = Date.now();
+            if (!outputStarted && msgId) {
+              const secs = Math.round((Date.now() - thinkingStart) / 1000);
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`).catch(() => {});
+            }
+            scheduleStream();
+          } else if (event.type === 'step_start') {
+            lastOutputAt = Date.now();
+            if (!lastActivity) lastActivity = 'Думаю…';
+            scheduleStream();
           } else if (event.type === 'agent') {
             // Track which agent is about to run so we can label its step_finish
             currentOcAgent = event.part?.name || null;
