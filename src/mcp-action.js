@@ -19,15 +19,13 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const registry = require('./mcp-skills/registry');
+const { mergeToolCatalogs } = require('./action-provider-registry');
 
 const INDEX_PATH = path.join(__dirname, 'mcp-skills', 'index.js');
 const DEFAULT_TIMEOUT_MS = 45_000;
 
-// HH skill was extracted into its own repo (issue #942). Its MCP server lives in a
-// sibling checkout and is only wired in when that checkout is present. Tool names
-// still registered locally (src/mcp-skills/tools/90-hh.js etc.) take priority — this
-// keeps behavior unchanged until step 11 of the extraction checklist removes them,
-// at which point hh_* calls fall through to the extracted registry automatically.
+// HH metadata is discovered from the existing external provider. Duplicate names
+// are configuration errors, never implicit local-first overrides (contract v1).
 const HH_SKILL_INDEX_PATH = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
 const hhRegistry = fs.existsSync(HH_SKILL_INDEX_PATH)
   ? require(path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'registry'))
@@ -35,19 +33,16 @@ const hhRegistry = fs.existsSync(HH_SKILL_INDEX_PATH)
 
 // Safe in-process: listTools() is static tool metadata, not user-scoped execution.
 function listActionTools() {
-  const local = registry.listTools();
-  if (!hhRegistry) return local;
-  const localNames = new Set(local.map(t => t.name));
-  return [...local, ...hhRegistry.listTools().filter(t => !localNames.has(t.name))];
+  return mergeToolCatalogs(registry.listTools(), hhRegistry ? hhRegistry.listTools() : []);
 }
 
-// Pure decision, no disk/registry access — the part worth unit-testing directly.
-// Mirrors resolveIndexPath's branch order exactly: local name wins over hh name,
-// unmatched tool defaults to local (existing behavior, not a new default).
 function resolveToolSource(tool, localNames, hhNames) {
+  if (localNames.has(tool) && hhNames?.has(tool)) {
+    throw Object.assign(new Error(`Duplicate action: ${tool}`), { code: 'CONFLICT' });
+  }
   if (localNames.has(tool)) return 'local';
-  if (hhNames && hhNames.has(tool)) return 'hh';
-  return 'local';
+  if (hhNames?.has(tool)) return 'hh';
+  throw Object.assign(new Error('Action is not registered'), { code: 'ACTION_NOT_FOUND' });
 }
 
 function resolveIndexPath(tool) {
