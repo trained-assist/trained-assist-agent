@@ -20,6 +20,15 @@ const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').repl
 const EDIT_MIN_INTERVAL_MS = 1200;    // Telegram edit flood is ~1/s per chat; stay under it
 const MAX_EDIT_RETRY_WAIT_SEC = 8;    // cap the 429 wait so terminal edits never stall minutes
 const MAX_CHAT_TRACK = 256;           // bound the per-chat coalesce map
+// A busy chat (concurrent task + GTD + quick-answer edits) can make ONE message's
+// updates lose the per-chat coalesce slot every single tick — the coalesce map has
+// no fairness, so a message reported as "stuck at 3с" was actually starved forever
+// by a sibling message that kept winning the window (issue: voice report 2026-09-23,
+// "постоянно 3 секунды, не меняется"). After this many consecutive drops (coalesce
+// skip OR best-effort 429 drop) for the SAME message, the next attempt is forced
+// through — bypassing coalesce and, if best-effort, actually waiting out a 429 —
+// so no message can be silently frozen indefinitely.
+const MAX_STARVE_STREAK = 2;
 
 // Lazy singleton cheap-LLM fixer for the formatting ladder (rung 2).
 let _tgFixer;
@@ -64,6 +73,26 @@ function _coalesceTracked(chatId, coalesce) {
   return false;
 }
 
+// Per-message drop streak — the fairness backstop on top of the per-chat coalesce
+// above. Keyed by `${chatId}:${messageId}` so one message's edits can't be starved
+// forever by a sibling message in the same chat that keeps winning the coalesce slot.
+const editStarveStreak = new Map();
+function _starveKey(chatId, messageId) { return `${chatId}:${messageId}`; }
+function _isStarved(chatId, messageId) {
+  return (editStarveStreak.get(_starveKey(chatId, messageId)) || 0) >= MAX_STARVE_STREAK;
+}
+function _recordDrop(chatId, messageId) {
+  const key = _starveKey(chatId, messageId);
+  editStarveStreak.set(key, (editStarveStreak.get(key) || 0) + 1);
+  if (editStarveStreak.size > MAX_CHAT_TRACK) {
+    const oldestKey = editStarveStreak.keys().next().value;
+    editStarveStreak.delete(oldestKey);
+  }
+}
+function _recordLanded(chatId, messageId) {
+  editStarveStreak.delete(_starveKey(chatId, messageId));
+}
+
 /**
  * Edit a message, with flood control.
  *
@@ -79,7 +108,14 @@ function _coalesceTracked(chatId, coalesce) {
 async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
   const { retries = 3, bestEffort = false, coalesce = false } = opts;
   const f = await tgFormat(text, extra);
-  if (_coalesceTracked(chatId, coalesce)) return { ok: true, skipped: true };
+  // A message that's been dropped MAX_STARVE_STREAK times in a row (coalesce-skip
+  // or best-effort 429-drop) is forced through below: skip coalescing, and if it
+  // still 429s, actually wait it out instead of dropping — see MAX_STARVE_STREAK.
+  const forced = _isStarved(chatId, messageId);
+  if (!forced && _coalesceTracked(chatId, coalesce)) {
+    _recordDrop(chatId, messageId);
+    return { ok: true, skipped: true };
+  }
   for (let i = 0; i < retries; i++) {
     const res = await fetch(`${TG_API}/bot${token}/editMessageText`, {
       method: 'POST',
@@ -92,15 +128,22 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
       const raw = data.parameters?.retry_after || 5;
       const waitSec = Math.min(raw, MAX_EDIT_RETRY_WAIT_SEC);
       console.warn(`[tg] 429 rate limit on editMessageText, retry after ${raw}s (attempt ${i + 1}/${retries}, wait capped ${waitSec}s)`);
-      if (bestEffort) return { ok: false, flooded: true }; // progress: drop, next tick re-tries
+      if (bestEffort && !forced) {
+        _recordDrop(chatId, messageId);
+        return { ok: false, flooded: true }; // progress: drop, next tick re-tries
+      }
       await new Promise(r => setTimeout(r, waitSec * 1000));
       continue;
     }
     if (!res.ok || !data.ok) {
-      if (data.error_code === 400 && /message is not modified/i.test(data.description || '')) return data;
+      if (data.error_code === 400 && /message is not modified/i.test(data.description || '')) {
+        _recordLanded(chatId, messageId);
+        return data;
+      }
       throw new Error(`Telegram editMessageText failed (${data.error_code || res.status})`);
     }
     lastEditAt.set(chatId, Date.now());
+    _recordLanded(chatId, messageId);
     return data;
   }
   throw new Error('Telegram editMessageText rate limit retries exhausted');
