@@ -12,6 +12,9 @@ const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
 const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
 const { recordUsage } = require('../usage-store');
+const { classifyDeterministic: classifyFailureDeterministic } = require('../failure-classifier');
+const executionHistory = require('../execution-history');
+const { randomUUID } = require('crypto');
 const {
   loadUserTokens,
   listConnectedServices,
@@ -1278,7 +1281,35 @@ function forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, o
   return null;
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0 }) {
+// Failure Event recording (issue #1175, PR #1179 follow-up) — Phase A: observational only. Every
+// branch of the crash/retry maze below calls this right before it acts, so execution-history.js
+// builds a real per-executionId attempt chain from live production failures instead of unit-test
+// fixtures. Deliberately does NOT feed recovery-policy.js back into any decision here — the
+// existing branches below keep steering exactly as before; this only records what they saw and
+// chose, so the classifier/history can be validated against real traffic before a later, separate
+// PR is trusted to let recovery-policy.js actually make the call (see PR #1179's own DoD note and
+// the #1172/#1173 lesson — this hot path does not get a second unreviewed behavioral change).
+// Stage A (classifyDeterministic) only — free, synchronous, no added latency/cost on a path that
+// runs on every real task failure; Stage B's cheap-LLM fallback is for cold-start unmatched text
+// and stays opt-in via failure-classifier.classify() for callers who need it.
+// Never throws: classifyDeterministic is pure, and execution-history's own recordAttempt already
+// catches+warns internally rather than letting a history-write failure take down the retry itself.
+function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engine, provider, model, exitCode, errorText, action }) {
+  try {
+    const cls = classifyFailureDeterministic(errorText);
+    executionHistory.recordAttempt(executionId, {
+      taskId, projectId, sessionId, engine, provider, model, exitCode,
+      errorText,
+      failureClass: cls?.class || 'UNKNOWN',
+      classificationSource: cls ? 'rule' : 'none',
+      action,
+    });
+  } catch (e) {
+    console.warn('[runner] _recordFailureAttempt failed:', e.message);
+  }
+}
+
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID() }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1806,6 +1837,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
       else await tgSend(BOT_TOKEN, chatId, tgMsg);
 
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine,
+        errorText: inactivityKill ? 'inactivity kill: silent 5min' : 'timeout: 40min budget',
+        action: 'auto_continue',
+      });
       const continuationTask = inactivityKill
         ? `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Процесс завис (молчал 5 мин без вывода) и был перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`
         : `[ПРОДОЛЖЕНИЕ ${nextCount}/${MAX_CONTINUATIONS}] Тебя прервал 40-минутный таймаут — процесс был остановлен и перезапущен автоматически. Посмотри историю сессии — там видно что уже сделано. Продолжи с того места, где остановился. Оригинальная задача:\n${task}`;
@@ -1820,11 +1856,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         pinnedMsgId,
         secrets,
         continuationCount: nextCount, mode, projectId, internalGtd, engine,
+        executionId,
       });
     } else {
       const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
       else await tgSend(BOT_TOKEN, chatId, limitMsg);
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine,
+        errorText: 'timeout: auto-continuation budget exhausted',
+        action: null,
+      });
+      executionHistory.finalizeExecution(executionId, 'FAILED');
     }
     return;
   }
@@ -1854,6 +1897,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
       setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
     }
+    executionHistory.recordAttempt(executionId, {
+      taskId, projectId, sessionId: activeSessionId, engine,
+      errorText: 'user stopped', failureClass: 'USER_STOP', classificationSource: 'rule', action: null,
+    });
+    executionHistory.finalizeExecution(executionId, 'CANCELLED');
     return stoppedMsg;
   }
 
@@ -1870,6 +1918,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+        errorText: codexErrorMsg || `exit ${exitCode}`, action: 'quick_crash_retry',
+      });
       const queuedRetry = runTask({
         initiatedAt, threadId,
         taskId: `${user.username}-${Date.now()}`,
@@ -1883,6 +1935,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         secrets,
         retryCount: retryCount + 1,
         continuationCount, mode, projectId, internalGtd, engine,
+        executionId,
       });
       return { queuedRetry };
     }
@@ -1897,6 +1950,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
     else await tgSend(BOT_TOKEN, chatId, crashMsg);
+    _recordFailureAttempt(executionId, {
+      taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+      errorText: codexErrorMsg || `exit ${exitCode}`, action: null,
+    });
+    executionHistory.finalizeExecution(executionId, 'FAILED');
     return crashMsg;
   }
 
@@ -1935,6 +1993,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})${altNote ? `, ${altNote}` : ''}…`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
       else await tgSend(BOT_TOKEN, chatId, retryMsg);
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+        errorText: reason, action: 'resume_after_restart_retry',
+      });
       const queuedRetry = runTask({
         initiatedAt, threadId,
         taskId: `${user.username}-resume-${Date.now()}`,
@@ -1943,6 +2005,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
         resumedAfterRestart: true, resumeAttempts: resumeAttempts + 1,
         continuationCount, mode, projectId, internalGtd, engine,
+        executionId,
       });
       return { queuedRetry };
     }
@@ -1988,6 +2051,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg));
       else await tgSend(BOT_TOKEN, chatId, switchMsg);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: failedModel,
+        errorText: preLadderText, action: 'deepseek_go_toggle_flip',
+      });
       const queuedRetry = runTask({
         initiatedAt, threadId,
         taskId: `${user.username}-${Date.now()}`,
@@ -2004,6 +2071,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         engine: 'opencode',
         engineFallbackDone,
         ladderAttempt: ladderAttempt + 1,
+        executionId,
       });
       return { queuedRetry };
     }
@@ -2024,6 +2092,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, contextMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, contextMsg));
           else await tgSend(BOT_TOKEN, chatId, contextMsg);
           if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, contextMsg);
+          _recordFailureAttempt(executionId, {
+            taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+            errorText: preLadderText, action: 'context_ladder_next_rung',
+          });
           const queuedRetry = runTask({
             initiatedAt, threadId,
             taskId: `${user.username}-${Date.now()}`,
@@ -2041,6 +2113,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             engineFallbackDone,
             ladderAttempt: ladderAttempt + 1,
             contextSkipModels: nextSkip,
+            executionId,
           });
           return { queuedRetry };
         }
@@ -2048,6 +2121,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tooBigMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tooBigMsg));
         else await tgSend(BOT_TOKEN, chatId, tooBigMsg);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, tooBigMsg);
+        _recordFailureAttempt(executionId, {
+          taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+          errorText: preLadderText, action: null,
+        });
+        executionHistory.finalizeExecution(executionId, 'FAILED');
         return tooBigMsg;
       }
       if (verdict.class === 'config') {
@@ -2056,6 +2134,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg));
         else await tgSend(BOT_TOKEN, chatId, configMsg);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, configMsg);
+        _recordFailureAttempt(executionId, {
+          taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+          errorText: preLadderText, action: null,
+        });
+        executionHistory.finalizeExecution(executionId, 'BLOCKED');
         return configMsg;
       }
       if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
@@ -2063,6 +2146,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, degradeMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, degradeMsg));
         else await tgSend(BOT_TOKEN, chatId, degradeMsg);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, degradeMsg);
+        _recordFailureAttempt(executionId, {
+          taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+          errorText: preLadderText, action: 'ladder_next_rung',
+        });
         const queuedRetry = runTask({
           initiatedAt, threadId,
           taskId: `${user.username}-${Date.now()}`,
@@ -2079,6 +2166,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           engine: 'opencode',
           engineFallbackDone,
           ladderAttempt: ladderAttempt + 1,
+          executionId,
         });
         return { queuedRetry };
       }
@@ -2087,6 +2175,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       else await tgSend(BOT_TOKEN, chatId, exhaustedMsg);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, exhaustedMsg);
       setAuthFailedFlag({ reason: 'QUOTA_EXCEEDED', error_text: preLadderText, engine: 'opencode' });
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+        errorText: preLadderText, action: null,
+      });
+      executionHistory.finalizeExecution(executionId, 'BLOCKED');
       return exhaustedMsg;
     }
   }
@@ -2108,6 +2201,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg));
       else await tgSend(BOT_TOKEN, chatId, fallbackMsg);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine,
+        errorText: authText, action: 'engine_fallback_to_opencode',
+      });
       const queuedRetry = runTask({
         initiatedAt, threadId,
         taskId: `${user.username}-${Date.now()}`,
@@ -2123,6 +2220,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         continuationCount, mode, projectId, internalGtd,
         engine: 'opencode',
         engineFallbackDone: true,
+        executionId,
       });
       return { queuedRetry };
     }
@@ -2134,6 +2232,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       await tgSend(BOT_TOKEN, chatId, authMsg);
     }
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, authMsg);
+    _recordFailureAttempt(executionId, {
+      taskId, projectId, sessionId: activeSessionId, engine,
+      errorText: authText, action: null,
+    });
+    executionHistory.finalizeExecution(executionId, 'BLOCKED');
     return authMsg;
   }
 
@@ -2151,6 +2254,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
     else await tgSend(BOT_TOKEN, chatId, retryMsg);
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
+    _recordFailureAttempt(executionId, {
+      taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+      errorText: incompleteReason, action: 'generic_incomplete_retry',
+    });
     const fireRetry = () => runTask({
       initiatedAt, threadId,
       taskId: `${user.username}-retry-${Date.now()}`,
@@ -2159,6 +2266,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
       incompleteRetryAttempts: nextAttempt,
       continuationCount, mode, projectId, internalGtd, engine,
+      executionId,
     });
     const queuedRetry = delayMs > 0
       ? new Promise((resolve, reject) => setTimeout(() => { fireRetry().then(resolve, reject); }, delayMs))
@@ -2197,6 +2305,20 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? (() => { try { return require('../gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
     : '';
   const final = (result + costFooter).slice(-MAX_MSG_LEN) + gtdFooter;
+
+  // Terminal record for every chain that reaches here without an earlier branch already
+  // recording+finalizing its own outcome (auth/ladder/quick-crash/timeout dead-ends above all
+  // return before this point). Covers both success and the generic "handed back to the human,
+  // resumable via продолжай" incomplete give-up — recordAttempt/finalizeExecution never throw.
+  if (incomplete) {
+    _recordFailureAttempt(executionId, {
+      taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+      errorText: incompleteReason || 'incomplete', action: null,
+    });
+    executionHistory.finalizeExecution(executionId, 'INTERRUPTED');
+  } else {
+    executionHistory.finalizeExecution(executionId, 'COMPLETED');
+  }
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
   // сессия уже deep (проработка только что и была). После clarify — показываем (чтобы
@@ -2412,4 +2534,6 @@ module.exports = {
   _chatLanes: chatLanes,
   // Exported for provider-alternation wiring tests only (unified crash-retry, issue #1132 follow-up)
   _forceOpencodeAlternation: forceOpencodeAlternation,
+  // Exported for failure-brain wiring tests only (issue #1175, PR #1179 follow-up)
+  _recordFailureAttempt,
 };
