@@ -33,6 +33,16 @@ echo "boom" >&2
 exit 1
 `);
 
+// Codex names its cache usage fields differently from Claude's `result` event
+// (cached_input_tokens/cache_write_input_tokens vs. cache_read_input_tokens/
+// cache_creation_input_tokens) — regression for the bug where those fields were
+// silently read under Claude's names and always came out 0 for Codex tasks.
+const codexBin = path.join(tmp, 'fake-codex-ok');
+writeFake(codexBin, `#!/usr/bin/env sh
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"Готово"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":80,"cache_write_input_tokens":15}}'
+`);
+
 const baseOpts = {
   engine: 'claude', taskId: 't-smoke', chatId: '42', thinkingStart: Date.now(),
   msgId: null, BOT_TOKEN: 'tok', secrets: { BOT_TOKEN: 'tok' },
@@ -71,6 +81,13 @@ const baseOpts = {
 
   // (3) activeTimers registration + cleanup
   assert.equal(baseOpts.activeTimers.has('t-smoke'), false, 'timer cleaned up');
+
+  // (2.5) codex usage normalization — cache fields land under Claude's field names
+  const r2b = await runEngineProcess({ ...baseOpts, engine: 'codex', engineBin: codexBin });
+  assert.equal(r2b.terminalSuccess, true, 'codex terminalSuccess on turn.completed');
+  assert.ok(r2b.claudeUsage, 'codex usage captured');
+  assert.equal(r2b.claudeUsage.cache_read_input_tokens, 80, 'codex cached_input_tokens normalized to cache_read_input_tokens');
+  assert.equal(r2b.claudeUsage.cache_creation_input_tokens, 15, 'codex cache_write_input_tokens normalized to cache_creation_input_tokens');
 
   // (4) buildEngineCommand — claude path uses stream-json + mcp-config
   const [bin, args] = buildEngineCommand({

@@ -2130,6 +2130,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       engine: 'opencode', model: opencodeModel || 'opencode-config',
       input_tokens: opencodeUsage.input || 0,
       output_tokens: opencodeUsage.output || 0,
+      cache_read_input_tokens: opencodeUsage.cacheRead || 0,
+      cache_creation_input_tokens: opencodeUsage.cacheWrite || 0,
       cost_usd: opencodeUsage.cost,
     });
   } else if (claudeUsage) {
