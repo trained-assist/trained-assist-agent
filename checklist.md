@@ -27,14 +27,20 @@ Goal: add a paid last-resort rung to every /oc_free role ladder — every rung e
 
 Goal: fix free-tier OpenCode model ladder — dead xiaomi/mimo-v2.5:free rung guaranteed-failed the first attempt of every /oc_free task, and the error classifier couldn't recognize model-unavailable/provider-overload errors to degrade the ladder (owner voice note 2026-09-23, asked "как сделать так, чтобы бесплатный никогда не умирал"). Originally PR #1161 — conflicted with #1163 (merged first, same free.json lines), went mergeable_state:dirty with failing CI; rebased cleanly onto main as PR #1164 (branch-immutability hook blocks pushing directly to a branch with an open PR, so #1161 was closed as superseded rather than force-pushed). #1164's CI then caught a stale test (`test/pin-context-card.test.cjs` hardcoded the old top rung `mimo-v2.5` in a regex, which the fix correctly removed) — same immutability hook blocked pushing the test fix to #1164, so it was closed as superseded and re-opened as PR #1166 with the fix included.
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1166
-- [ ] Merged to main
-- [ ] Deployed to prod — verified live (static config/JS files, live via systemd restart of assist-agent.service; no separate build step)
+- [x] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1166
+- [x] Merged to main (merge commit b7871b1)
+- [x] Deployed to prod — verified live, /health reported commit fdc4948 (descendant of b7871b1) at the time this was checked
 
 Unrelated, non-blocking finding while investigating #1164's CI: the `autofix` check-run fails on every PR in this repo (curl 404 fetching `pr-autofix`'s `scripts/autofix.mjs` at `refs/pull/<N>/merge` — that ref only exists in trained-assist-agent, not in the pr-autofix repo it's fetched from). Not a required status check (branch protection only requires `ci` + `staging-gate`), so it doesn't block merges — but it means autofix has likely never run successfully on this repo. Worth a follow-up issue if the `autofix` job is meant to do anything; not fixed here (out of scope for the ladder fix).
 
 Goal: document Agent Control Plane / Domain Skill Server naming pattern (P0 item, naming-conventions-refactoring plan) — repo-role table fix + domain-not-platform naming rule + hh-skill flagged mid-migration
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1168
+- [x] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1168
+- [x] Merged to main (merge commit 1c8d8fd)
+- [x] Deployed to prod — docs-only change (README.md), no runtime behavior to verify; merge is sufficient
+
+Goal: context-overflow errors on the current OpenCode ladder rung (e.g. "context_length_exceeded", "prompt is too long") skip just that rung for just this one task's retry (non-persisted skipModels), instead of looping forever resending the same oversized prompt or persisting a shared TTL-exhaustion that would block unrelated smaller tasks on the same profile/role/model. Once the whole ladder is exhausted this way, the task now gets an explicit "split into smaller pieces" message instead of a silent infinite retry (owner voice-note follow-up, 2026-09-23).
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1170
 - [ ] Merged to main
-- [ ] Deployed to prod — docs-only change (README.md), no runtime behavior to verify; merge is sufficient
+- [ ] Deployed to prod — verified live (static config/JS files, live via systemd restart of assist-agent.service; no separate build step)
