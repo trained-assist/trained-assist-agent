@@ -48,6 +48,14 @@ function pendingTaskPath(taskId) {
   return path.join(SYSTEM_ROOT, 'pending-tasks', `${taskId}.json`);
 }
 
+// One shared SQLite file for all profiles — DurableTaskStore scopes every
+// query by profile_id, so a single DB is simpler than one-file-per-profile
+// and matches durable-task-orchestrator-spec-2026-09-23.md (dedicated
+// Persistent Disk path is a later infra step, not a blocker for this).
+function durableTaskDbPath() {
+  return path.join(SYSTEM_ROOT, 'durable-tasks', 'state.db');
+}
+
 function sessionIndexPath(username) {
   return path.join(USERS_ROOT, String(username), 'sessions.json');
 }
@@ -74,4 +82,5 @@ module.exports = {
   sessionIndexPath,
   sessionFilePath,
   tokenPath,
+  durableTaskDbPath,
 };
