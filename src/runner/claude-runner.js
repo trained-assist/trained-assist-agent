@@ -18,6 +18,15 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
+
+// Same running-task row on every progress edit: kill it (⛔) or feed it more
+// context without waiting for it to finish (➕). Mirrors the web UI's
+// Стоп/Дополнить pair (trained-assist-web#33) — the tg-bot's `sup|` callback
+// handler owns the actual restart-with-supplement flow.
+const runningControls = taskId => ({ reply_markup: { inline_keyboard: [[
+  { text: '⛔ Стоп', callback_data: `stop|${taskId}` },
+  { text: '➕ Дополнить', callback_data: `sup|${taskId}` },
+]] } });
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-restart (all engines)
 
@@ -287,7 +296,7 @@ async function runEngineProcess(opts) {
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
       const extra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
-        ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
+        ? (stopButtonShown = true, runningControls(taskId))
         : {};
       await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, extra).catch(() => {});
     }, HEARTBEAT_INTERVAL_MS);
@@ -316,7 +325,7 @@ async function runEngineProcess(opts) {
         const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
         const secs = Math.round((Date.now() - thinkingStart) / 1000);
         const stopExtra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
-          ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
+          ? (stopButtonShown = true, runningControls(taskId))
           : {};
         if (snippet) {
           // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
