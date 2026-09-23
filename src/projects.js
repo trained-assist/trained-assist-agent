@@ -193,6 +193,18 @@ function getProject(workDir, id) {
   }
 }
 
+// Resolve the cwd for a bound project, self-healing when its folder is gone — e.g.
+// archived/merged by reproject.js's restructuring since a session last touched it, or any
+// other out-of-band move. meta.json lives inside the project's own dir, so if we can't
+// read it the dir doesn't exist either; callers must treat a null return as "this binding
+// is stale, clear it" rather than falling back to whatever cwd happened to be set before
+// (that silent fallback was the bug — a session could keep running in the wrong/default
+// folder with no explanation after a reorg).
+function resolveProjectDir(workDir, id) {
+  if (!id || !getProject(workDir, id)) return null;
+  return projectDir(workDir, id);
+}
+
 // List projects (meta only), most-recently-touched first.
 // `audience` (default 'default') scopes the list the same way as session-store.listSessions
 // — a project with no `audience` field (every project created before this feature existed)
@@ -412,6 +424,7 @@ module.exports = {
   profilePath,
   notesPath,
   getProject,
+  resolveProjectDir,
   listProjects,
   sortByUsage,
   createProject,

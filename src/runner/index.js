@@ -1451,9 +1451,22 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       }
     }
     if (boundProjectId) {
-      projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience });
-      const dir = projects.projectDir(user.workDir, boundProjectId);
-      if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
+      const dir = projects.resolveProjectDir(user.workDir, boundProjectId);
+      if (dir) {
+        projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience });
+        user.cwd = dir; // session runs inside its project
+      } else {
+        // Project folder is gone — e.g. archived/merged by a projects reorg since this
+        // session last ran. Previously this fell through silently, leaving user.cwd at
+        // whatever it already was (wrong project, or the bare profile root) with zero
+        // indication to the user. Clear the stale binding so the NEXT message resolves
+        // fresh instead of repeating this every turn, and tell Claude so it can explain
+        // instead of quietly working in the wrong place.
+        console.warn('[runner] project %s has no folder — clearing stale binding (session %s)', boundProjectId, activeSessionId || '(new)');
+        if (activeSessionId) sessions.setSessionProject(user.workDir, activeSessionId, null);
+        task = `[Системное уведомление: папка проекта этой сессии была перенесена или архивирована (реструктуризация проектов) и больше не существует по старому пути. Работаю в профиле по умолчанию — прежние файлы не удалены, ищи в projects/_archive/. Сообщи об этом пользователю одной короткой фразой в начале ответа.]\n\n${task}`;
+        boundProjectId = null;
+      }
     }
   } catch (e) {
     console.warn('[runner] project binding:', e.message);
