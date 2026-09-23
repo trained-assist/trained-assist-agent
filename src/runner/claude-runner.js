@@ -300,15 +300,19 @@ async function runEngineProcess(opts) {
   // best-effort+coalesced (issue: a 429/coalesce drop on the one tick that
   // carried the buttons used to mark them "shown" anyway, so a single dropped
   // edit permanently hid ⛔/➕ for the rest of the task with no retry).
+  // Once the threshold passes, EVERY progress edit must carry the ⛔/➕ markup.
+  // editMessageText without reply_markup clears the keyboard, so sending markup
+  // only on the first landing (and bare text afterwards) makes the buttons
+  // visible for one tick and then vanish on the next — the reported bug.
   let stopButtonShown = false;
   if (msgId) {
     heartbeatTimer = setInterval(async () => {
       if (outputStarted) return;
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
-      const showButtons = !stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS;
-      const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, showButtons ? runningControls(taskId) : {});
-      if (showButtons && editLanded(result)) stopButtonShown = true;
+      if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+      const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {});
+      if (stopButtonShown && editLanded(result)) stopButtonShown = true;
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -334,30 +338,24 @@ async function runEngineProcess(opts) {
       try {
         const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
         const secs = Math.round((Date.now() - thinkingStart) / 1000);
-        const showButtons = !stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS;
-        const stopExtra = showButtons ? runningControls(taskId) : {};
+        if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+        const stopExtra = stopButtonShown ? runningControls(taskId) : {};
         if (snippet) {
           // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
           const silentMins = Math.round((Date.now() - lastOutputAt) / 60000);
           const silentSuffix = silentMins >= 1 ? ` — молчит ${silentMins}мин` : '';
           const activitySuffix = lastActivity ? `\n\n⚡ ${lastActivity} (${secs}с)${silentSuffix}` : `\n\n⚡ Пишу… (${secs}с)${silentSuffix}`;
           const newText = `🧠 ${snippet}${activitySuffix}`;
-          if (newText === lastSent && !stopExtra.reply_markup) return;
+          if (newText === lastSent) return;
           lastSent = newText;
-          if (msgId) {
-            const result = await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra);
-            if (showButtons && editLanded(result)) stopButtonShown = true;
-          }
+          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra);
         } else {
           // No text yet (e.g. Claude running tools) — show activity + elapsed
           const label = lastActivity || 'Думаю…';
           const newText = `🧠 ${label} (${secs}с)`;
-          if (newText === lastSent && !stopExtra.reply_markup) return;
+          if (newText === lastSent) return;
           lastSent = newText;
-          if (msgId) {
-            const result = await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra);
-            if (showButtons && editLanded(result)) stopButtonShown = true;
-          }
+          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra);
         }
       } finally {
         streamEditInProgress = false;
