@@ -1,0 +1,411 @@
+// Durable Task Store — SQLite source of truth for durable/GTD tasks (spec:
+// durable-task-orchestrator-v1). better-sqlite3, WAL, foreign_keys ON.
+// checklist.md is only a generated file projection; the DB is authoritative.
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const Database = require('better-sqlite3');
+
+const TASK_STATUSES = ['active', 'done', 'failed', 'cancelled'];
+const ITEM_STATUSES = ['pending', 'running', 'waiting', 'done', 'failed', 'skipped'];
+const TIERS = ['free', 'standard', 'strong'];
+const TIER_RANK = { free: 0, standard: 1, strong: 2 };
+
+function nowMs() { return Date.now(); }
+
+class DurableTaskStore {
+  constructor(dbPath) {
+    fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
+    this.db = new Database(dbPath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+    this.db.pragma('busy_timeout = 5000');
+    this._migrate();
+    this._stmts = {};
+  }
+
+  _migrate() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS durable_tasks (
+        id          TEXT PRIMARY KEY,
+        profile_id  TEXT NOT NULL,
+        project_id  TEXT,
+        goal        TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active','done','failed','cancelled')),
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        revision    INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS task_items (
+        id                  TEXT PRIMARY KEY,
+        task_id             TEXT NOT NULL REFERENCES durable_tasks(id) ON DELETE CASCADE,
+        position            INTEGER NOT NULL,
+        title               TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending','running','waiting','done','failed','skipped')),
+        execution_tier      TEXT NOT NULL DEFAULT 'free'
+                            CHECK (execution_tier IN ('free','standard','strong')),
+        current_tier        TEXT NOT NULL DEFAULT 'free'
+                            CHECK (current_tier IN ('free','standard','strong')),
+        escalation_count    INTEGER NOT NULL DEFAULT 0,
+        delay_after_sec     INTEGER NOT NULL DEFAULT 0,
+        due_at              INTEGER,
+        last_execution_id   TEXT,
+        last_error          TEXT,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_items_due
+        ON task_items(status, due_at);
+      CREATE INDEX IF NOT EXISTS idx_task_items_task
+        ON task_items(task_id, position);
+      CREATE TABLE IF NOT EXISTS task_sessions (
+        task_id     TEXT NOT NULL REFERENCES durable_tasks(id) ON DELETE CASCADE,
+        session_id  TEXT NOT NULL,
+        profile_id  TEXT NOT NULL,
+        attached_at INTEGER NOT NULL,
+        active      INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (task_id, session_id)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_task_sessions_one_active
+        ON task_sessions(profile_id, session_id) WHERE active = 1;
+      CREATE TABLE IF NOT EXISTS executions (
+        id             TEXT PRIMARY KEY,
+        task_id        TEXT NOT NULL REFERENCES durable_tasks(id) ON DELETE CASCADE,
+        task_item_id   TEXT REFERENCES task_items(id) ON DELETE SET NULL,
+        session_id     TEXT,
+        engine         TEXT,
+        model          TEXT,
+        tier           TEXT CHECK (tier IN ('free','standard','strong')),
+        status         TEXT NOT NULL,
+        started_at     INTEGER NOT NULL,
+        finished_at    INTEGER,
+        error_class    TEXT,
+        error_text     TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_executions_task
+        ON executions(task_id, started_at);
+    `);
+  }
+
+  _prep(sql) {
+    if (!this._stmts[sql]) this._stmts[sql] = this.db.prepare(sql);
+    return this._stmts[sql];
+  }
+
+  // ── Tasks ──────────────────────────────────────────────────────────────
+  createTask({ id, profile_id, project_id = null, goal }) {
+    if (!profile_id) throw new Error('profile_id is required (ownership/isolation)');
+    if (!goal) throw new Error('goal is required');
+    const ts = nowMs();
+    this._prep(`INSERT INTO durable_tasks
+        (id, profile_id, project_id, goal, status, created_at, updated_at, revision)
+        VALUES (?, ?, ?, ?, 'active', ?, ?, 0)`)
+      .run(id, profile_id, project_id, goal, ts, ts);
+    return this.getTask(id, profile_id);
+  }
+
+  /** profile_id is mandatory: every read/write is scoped to the owner profile. */
+  getTask(id, profileId) {
+    return this._prep('SELECT * FROM durable_tasks WHERE id = ? AND profile_id = ?')
+      .get(id, profileId) || null;
+  }
+
+  listTasks(profileId, { status } = {}) {
+    let sql = 'SELECT * FROM durable_tasks WHERE profile_id = ?';
+    const args = [profileId];
+    if (status) { sql += ' AND status = ?'; args.push(status); }
+    sql += ' ORDER BY created_at DESC';
+    return this._prep(sql).all(...args);
+  }
+
+  updateTask(id, profileId, patch) {
+    const allowed = ['goal', 'status', 'project_id'];
+    const sets = [];
+    const args = [];
+    for (const k of allowed) {
+      if (k in patch) {
+        if (k === 'status' && !TASK_STATUSES.includes(patch.status)) {
+          throw new Error(`invalid task status: ${patch.status}`);
+        }
+        sets.push(`${k} = ?`); args.push(patch[k]);
+      }
+    }
+    if (!sets.length) return this.getTask(id, profileId);
+    sets.push('updated_at = ?', 'revision = revision + 1');
+    args.push(nowMs(), id, profileId);
+    const res = this._prep(`UPDATE durable_tasks SET ${sets.join(', ')}
+      WHERE id = ? AND profile_id = ?`).run(...args);
+    if (res.changes === 0) return null;
+    return this.getTask(id, profileId);
+  }
+
+  /** Close a task terminal-side and settle its non-done items. */
+  completeTask(id, profileId, finalStatus = 'done') {
+    return this.db.transaction(() => {
+      const task = this.getTask(id, profileId);
+      if (!task) return null;
+      this._prep(`UPDATE task_items SET status = 'skipped', updated_at = ?
+        WHERE task_id = ? AND status IN ('pending','waiting','running')`)
+        .run(nowMs(), id);
+      const updated = this.updateTask(id, profileId, { status: finalStatus });
+      return updated;
+    })();
+  }
+
+  // ── Items ──────────────────────────────────────────────────────────────
+  createTaskItem({ id, task_id, position = 0, title, execution_tier = 'free',
+                   delay_after_sec = 0, due_at = null }) {
+    if (!TIERS.includes(execution_tier)) throw new Error(`invalid tier: ${execution_tier}`);
+    const task = this.db.prepare('SELECT id FROM durable_tasks WHERE id = ?').get(task_id);
+    if (!task) throw new Error(`task not found: ${task_id}`);
+    const ts = nowMs();
+    this._prep(`INSERT INTO task_items
+        (id, task_id, position, title, status, execution_tier, current_tier,
+         escalation_count, delay_after_sec, due_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, ?, ?, ?, ?)`)
+      .run(id, task_id, position, title, execution_tier, execution_tier,
+           delay_after_sec, due_at, ts, ts);
+    this._bump(task_id);
+    return this.getTaskItem(id);
+  }
+
+  getTaskItem(id) {
+    return this._prep('SELECT * FROM task_items WHERE id = ?').get(id) || null;
+  }
+
+  listTaskItems(taskId, profileId) {
+    // join guards profile ownership of the parent task
+    return this._prep(`SELECT i.* FROM task_items i
+      JOIN durable_tasks t ON t.id = i.task_id
+      WHERE i.task_id = ? AND t.profile_id = ?
+      ORDER BY i.position`).all(taskId, profileId);
+  }
+
+  updateTaskItem(id, patch, profileId) {
+    const allowed = ['title', 'status', 'current_tier', 'delay_after_sec', 'due_at',
+                     'last_execution_id', 'last_error'];
+    const sets = [];
+    const args = [];
+    for (const k of allowed) {
+      if (k in patch) {
+        if (k === 'status' && !ITEM_STATUSES.includes(patch.status)) {
+          throw new Error(`invalid item status: ${patch.status}`);
+        }
+        if (k === 'current_tier' && !TIERS.includes(patch.current_tier)) {
+          throw new Error(`invalid tier: ${patch.current_tier}`);
+        }
+        sets.push(`${k} = ?`); args.push(patch[k]);
+      }
+    }
+    if (!sets.length) return this.getTaskItem(id);
+    sets.push('updated_at = ?');
+    args.push(nowMs(), id);
+    const res = this.db.transaction(() => {
+      const r = this._prep(`UPDATE task_items SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+      if (r.changes === 0) return null;
+      const item = this.getTaskItem(id);
+      // ownership check — throw away if parent task belongs to another profile
+      const owner = this._prep('SELECT profile_id FROM durable_tasks WHERE id = ?')
+        .get(item.task_id);
+      if (!owner || owner.profile_id !== profileId) return null;
+      this._bump(item.task_id);
+      return item;
+    })();
+    return res;
+  }
+
+  /** Escalate current tier one step up (free→standard→strong). Idempotent at ceiling. */
+  escalateItem(id, profileId) {
+    return this.db.transaction(() => {
+      const item = this._itemOwnedBy(id, profileId);
+      if (!item) return null;
+      const rank = TIER_RANK[item.current_tier];
+      const next = Object.entries(TIER_RANK).find(([, r]) => r === rank + 1);
+      if (!next) return item; // already at ceiling tier
+      const ts = nowMs();
+      this._prep(`UPDATE task_items SET current_tier = ?, escalation_count =
+          escalation_count + 1, status = 'pending', updated_at = ? WHERE id = ?`)
+        .run(next[0], ts, id);
+      this._bump(item.task_id);
+      return this.getTaskItem(id);
+    })();
+  }
+
+  /**
+   * Claim the next runnable item atomically (scheduler tick). Never returns the
+   * same item to two concurrent callers — status flips to 'running' inside the
+   * same transaction that selects it.
+   */
+  claimNextRunnable() {
+    return this.db.transaction(() => {
+      const now = nowMs();
+      const row = this._prep(`SELECT i.* FROM task_items i
+        JOIN durable_tasks t ON t.id = i.task_id
+        WHERE i.status IN ('pending','waiting') AND t.status = 'active'
+          AND (i.due_at IS NULL OR i.due_at <= ?)
+        ORDER BY (i.due_at IS NULL) DESC, i.due_at ASC, i.position ASC
+        LIMIT 1`).get(now);
+      if (!row) return null;
+      this._prep(`UPDATE task_items SET status = 'running', updated_at = ? WHERE id = ?`)
+        .run(now, row.id);
+      return this.getTaskItem(row.id);
+    })();
+  }
+
+  /**
+   * Mark an item done. If the next sibling exists, arm it: delay_after_sec <= 300
+   * keeps it immediately runnable (due_at = now); longer delays set waiting+due_at.
+   */
+  completeItem(id, profileId, { executionId = null } = {}) {
+    return this.db.transaction(() => {
+      const item = this._itemOwnedBy(id, profileId);
+      if (!item) return null;
+      const now = nowMs();
+      this._prep(`UPDATE task_items SET status = 'done', last_execution_id = ?,
+          updated_at = ? WHERE id = ?`).run(executionId, now, id);
+      const next = this._prep(`SELECT * FROM task_items WHERE task_id = ? AND status = 'pending'
+        ORDER BY position LIMIT 1`).get(item.task_id);
+      if (next) {
+        const due = next.delay_after_sec > 300 ? now + next.delay_after_sec * 1000
+          : (next.delay_after_sec > 0 ? now : null);
+        this._prep(`UPDATE task_items SET status = ?, due_at = ?, updated_at = ? WHERE id = ?`)
+          .run(next.delay_after_sec > 300 ? 'waiting' : 'pending', due, now, next.id);
+      }
+      this._bump(item.task_id);
+      return this.getTaskItem(id);
+    })();
+  }
+
+  failItem(id, profileId, { executionId = null, error = null } = {}) {
+    return this.db.transaction(() => {
+      const item = this._itemOwnedBy(id, profileId);
+      if (!item) return null;
+      this._prep(`UPDATE task_items SET status = 'failed', last_execution_id = ?,
+          last_error = ?, updated_at = ? WHERE id = ?`)
+        .run(executionId, error, nowMs(), id);
+      this._bump(item.task_id);
+      return this.getTaskItem(id);
+    })();
+  }
+
+  progressSummary(taskId, profileId) {
+    const row = this._prep(`SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN i.status IN ('done','skipped') THEN 1 ELSE 0 END) AS finished
+      FROM task_items i JOIN durable_tasks t ON t.id = i.task_id
+      WHERE i.task_id = ? AND t.profile_id = ?`).get(taskId, profileId);
+    return { total: row?.total || 0, finished: row?.finished || 0 };
+  }
+
+  _itemOwnedBy(id, profileId) {
+    return this._prep(`SELECT i.* FROM task_items i
+      JOIN durable_tasks t ON t.id = i.task_id
+      WHERE i.id = ? AND t.profile_id = ?`).get(id, profileId) || null;
+  }
+
+  _bump(taskId) {
+    this._prep(`UPDATE durable_tasks SET revision = revision + 1, updated_at = ?
+      WHERE id = ?`).run(nowMs(), taskId);
+  }
+
+  // ── Sessions (many-to-many) ────────────────────────────────────────────
+  attachSession(taskId, sessionId, profileId) {
+    return this.db.transaction(() => {
+      const task = this.getTask(taskId, profileId);
+      if (!task) return null;
+      // one active task per session (unique partial index enforces too — surface nicely)
+      const clash = this._prep(`SELECT task_id FROM task_sessions
+        WHERE profile_id = ? AND session_id = ? AND active = 1 AND task_id != ?`)
+        .get(profileId, sessionId, taskId);
+      if (clash) throw new Error(`session ${sessionId} already has an active task ${clash.task_id}`);
+      this._prep(`INSERT INTO task_sessions (task_id, session_id, profile_id, attached_at, active)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT(task_id, session_id) DO UPDATE SET active = 1, attached_at = ?`)
+        .run(taskId, sessionId, profileId, nowMs(), nowMs());
+      return true;
+    })();
+  }
+
+  detachSession(taskId, sessionId, profileId) {
+    const res = this._prep(`UPDATE task_sessions SET active = 0
+      WHERE task_id = ? AND session_id = ? AND profile_id = ?`)
+      .run(taskId, sessionId, profileId);
+    return res.changes > 0;
+  }
+
+  listSessions(taskId, profileId) {
+    return this._prep(`SELECT s.* FROM task_sessions s
+      JOIN durable_tasks t ON t.id = s.task_id
+      WHERE s.task_id = ? AND s.profile_id = ?`).all(taskId, profileId);
+  }
+
+  // ── Executions (minimal history) ───────────────────────────────────────
+  startExecution({ id, task_id, task_item_id = null, session_id = null,
+                   engine = null, model = null, tier = null }) {
+    this._prep(`INSERT INTO executions
+        (id, task_id, task_item_id, session_id, engine, model, tier, status, started_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
+      .run(id, task_id, task_item_id, session_id, engine, model, tier, nowMs());
+    return this.getExecution(id);
+  }
+
+  finishExecution(id, { status, error_class = null, error_text = null }) {
+    this._prep(`UPDATE executions SET status = ?, finished_at = ?, error_class = ?,
+        error_text = ? WHERE id = ?`)
+      .run(status, nowMs(), error_class, error_text, id);
+    return this.getExecution(id);
+  }
+
+  getExecution(id) {
+    return this._prep('SELECT * FROM executions WHERE id = ?').get(id) || null;
+  }
+
+  // ── File projection ────────────────────────────────────────────────────
+  /**
+   * checklist.md is generated FROM the DB. Deleting the file never deletes the
+   * task; call this on startup and after every task/item mutation.
+   */
+  generateChecklistMd(taskId, profileId) {
+    const task = this.getTask(taskId, profileId);
+    if (!task) return null;
+    const items = this.listTaskItems(taskId, profileId);
+    const lines = [`# ${task.goal}`, '', `Task: ${task.id}`, `Revision: ${task.revision}`, ''];
+    for (const it of items) {
+      const box = (it.status === 'done' || it.status === 'skipped') ? 'x' : ' ';
+      const skip = it.status === 'skipped' ? ' (skipped)' : '';
+      lines.push(`- [${box}] [${it.current_tier}] ${it.title}${skip}`);
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  writeProjection(taskId, profileId, projectDir) {
+    const md = this.generateChecklistMd(taskId, profileId);
+    if (!md) return null;
+    const dir = path.join(projectDir, '.trained-assist', 'tasks', taskId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'checklist.md');
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, md);
+    fs.renameSync(tmp, file); // atomic-ish on same fs
+    return file;
+  }
+
+  /** Rebuild projections for all active tasks (startup catch-up). */
+  rebuildProjections(projectDir, profileId) {
+    const out = [];
+    for (const t of this.listTasks(profileId, { status: 'active' })) {
+      const f = this.writeProjection(t.id, profileId, projectDir);
+      if (f) out.push(f);
+    }
+    return out;
+  }
+
+  close() {
+    try { this.db.close(); } catch { /* already closed */ }
+  }
+}
+
+module.exports = { DurableTaskStore, TASK_STATUSES, ITEM_STATUSES, TIERS, TIER_RANK };
