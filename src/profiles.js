@@ -46,4 +46,22 @@ function setEngine(workDir, engine, chatId) {
   return clean;
 }
 
-module.exports = { load, save, toContext, getEngine, setEngine };
+// Which OpenCode model profile (max|value|free|russian — each a ladder of models per role, see
+// src/opencode-ladder.js, issue #1061) this profile's opencode tasks use. Profile-scoped only
+// (no per-chat level, unlike getEngine) — simplest fix that still satisfies "never shared across
+// users": each profile already maps 1:1 to a VM user, so this alone stops the old behaviour of
+// overwriting one machine-wide ~/.config/opencode/opencode.json for every profile on the box.
+// See writeOpencodeMcpConfig in claude-runner.js for how this gets applied per-invocation
+// instead of via a shared file.
+function getOcProfile(workDir) {
+  const p = load(workDir);
+  return p.ocProfile || 'max';
+}
+
+function setOcProfile(workDir, ocProfile) {
+  const current = load(workDir);
+  save(workDir, { ...current, ocProfile });
+  return ocProfile;
+}
+
+module.exports = { load, save, toContext, getEngine, setEngine, getOcProfile, setOcProfile };

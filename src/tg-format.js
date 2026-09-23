@@ -167,7 +167,7 @@ async function formatForTelegram(text, opts = {}) {
   return { text: stripToPlainText(raw), parse_mode: undefined };
 }
 
-// Cheap LLM repair rung factory. Reuses OPENROUTER + DeepSeek V4 Flash (same
+// Cheap LLM repair rung factory. Reuses OPENROUTER + GLM 5.3 Flash (same
 // model the rest of the runner uses for fast classification). Returns null
 // when no key is configured so the ladder skips straight to the floor.
 function makeLlmFixer(orKey) {
@@ -175,7 +175,7 @@ function makeLlmFixer(orKey) {
   if (!key) return null;
   return async (html, reason) => {
     const body = JSON.stringify({
-      model: 'deepseek/deepseek-v4-flash-0731',
+      model: 'z-ai/glm-5.3-flash',
       messages: [
         {
           role: 'system',

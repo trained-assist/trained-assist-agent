@@ -10,6 +10,9 @@ import {
   getSession,
   buildContext,
   resolveChatSession,
+  getLastOcModel,
+  setLastOcModel,
+  getCurrentSessionId as getCurrentSessionIdRef,
 } from '../src/session-store.js';
 
 let tmpDir;
@@ -149,5 +152,93 @@ describe('resolveChatSession — chatId sign-split heal', () => {
     createSession(tmpDir, { task: 'other chat', chatId: -42 });
     // CHAT has no session / pointer of its own → no accidental adoption of chat -42's session.
     expect(resolveChatSession(tmpDir, 's-1003814002203-9999', CHAT)).toBeNull();
+  });
+});
+
+// AUDIENCE-SCOPE-SPEC: two bots (e.g. general-purpose + recruiter) share the same
+// username+chatId. `audience` scopes sessions/projects per bot so they never mix —
+// while every session/project created before this feature existed (no `audience`
+// field on disk) must keep resolving exactly as it did, under the implicit 'default'.
+describe('audience scoping', () => {
+  const CHAT = 555;
+
+  it('a session created under audience A is invisible to listSessions(..., "B")', () => {
+    const idA = createSession(tmpDir, { task: 'recruiter task', chatId: CHAT, audience: 'recruiter' });
+    const listB = listSessions(tmpDir, 10, 'other');
+    expect(listB.find(s => s.id === idA)).toBeUndefined();
+
+    const listA = listSessions(tmpDir, 10, 'recruiter');
+    expect(listA.find(s => s.id === idA)).toBeDefined();
+  });
+
+  it('the current-session pointer for the same chatId is independent between two audiences', () => {
+    const idDefault = createSession(tmpDir, { task: 'general task', id: 's-default-1', chatId: CHAT, audience: 'default' });
+    const idRecruiter = createSession(tmpDir, { task: 'recruiter task', id: 's-recruiter-1', chatId: CHAT, audience: 'recruiter' });
+
+    expect(getCurrentSessionIdRef(tmpDir, CHAT, 'default')).toBe(idDefault);
+    expect(getCurrentSessionIdRef(tmpDir, CHAT, 'recruiter')).toBe(idRecruiter);
+    // Cross-check: neither pointer leaks into the other audience.
+    expect(getCurrentSessionIdRef(tmpDir, CHAT, 'default')).not.toBe(idRecruiter);
+    expect(getCurrentSessionIdRef(tmpDir, CHAT, 'recruiter')).not.toBe(idDefault);
+  });
+
+  it('existing sessions with no audience field resolve under "default"', () => {
+    // Simulate a pre-audience session record written before this feature existed.
+    const id = createSession(tmpDir, { task: 'legacy task', chatId: CHAT });
+    const fp = path.join(tmpDir, 'sessions', `${id}.json`);
+    const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    delete full.audience;
+    fs.writeFileSync(fp, JSON.stringify(full, null, 2));
+    const sessions = JSON.parse(fs.readFileSync(path.join(tmpDir, 'sessions.json'), 'utf8'));
+    const idx = sessions.findIndex(s => s.id === id);
+    delete sessions[idx].audience;
+    fs.writeFileSync(path.join(tmpDir, 'sessions.json'), JSON.stringify(sessions, null, 2));
+
+    const listDefault = listSessions(tmpDir, 10, 'default');
+    expect(listDefault.find(s => s.id === id)).toBeDefined();
+    const listRecruiter = listSessions(tmpDir, 10, 'recruiter');
+    expect(listRecruiter.find(s => s.id === id)).toBeUndefined();
+  });
+
+  it('omitting audience in listSessions defaults to "default" (no accidental cross-bot mixing)', () => {
+    createSession(tmpDir, { task: 'general task', id: 's-default-2', chatId: CHAT, audience: 'default' });
+    const recruiterId = createSession(tmpDir, { task: 'recruiter task', id: 's-recruiter-2', chatId: CHAT, audience: 'recruiter' });
+    const list = listSessions(tmpDir, 10); // no audience arg
+    expect(list.find(s => s.id === recruiterId)).toBeUndefined();
+  });
+});
+
+// issue #1061 Фаза 4: track the OpenCode ladder's resolved model per session/role so the
+// runner can tell whether it changed between two turns of the same session.
+describe('getLastOcModel / setLastOcModel', () => {
+  it('returns null when no model has been recorded yet', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    expect(getLastOcModel(tmpDir, id, 'build')).toBeNull();
+  });
+
+  it('round-trips the model recorded for a role', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    setLastOcModel(tmpDir, id, 'build', 'opencode/gpt-6-astra');
+    expect(getLastOcModel(tmpDir, id, 'build')).toBe('opencode/gpt-6-astra');
+  });
+
+  it('overwrites on a later turn, reflecting the ladder degrading', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    setLastOcModel(tmpDir, id, 'build', 'opencode/gpt-6-astra');
+    setLastOcModel(tmpDir, id, 'build', 'deepseek-v4.1-flash');
+    expect(getLastOcModel(tmpDir, id, 'build')).toBe('deepseek-v4.1-flash');
+  });
+
+  it('tracks roles independently', () => {
+    const id = createSession(tmpDir, { task: 'first turn' });
+    setLastOcModel(tmpDir, id, 'build', 'opencode/gpt-6-astra');
+    setLastOcModel(tmpDir, id, 'plan', 'gpt-5.6-sol');
+    expect(getLastOcModel(tmpDir, id, 'build')).toBe('opencode/gpt-6-astra');
+    expect(getLastOcModel(tmpDir, id, 'plan')).toBe('gpt-5.6-sol');
+  });
+
+  it('is a no-op when the session file does not exist', () => {
+    expect(() => setLastOcModel(tmpDir, 's-missing', 'build', 'x')).not.toThrow();
+    expect(getLastOcModel(tmpDir, 's-missing', 'build')).toBeNull();
   });
 });

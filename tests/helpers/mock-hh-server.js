@@ -144,16 +144,40 @@ const DEFAULT_NEGOTIATIONS = [
   },
 ];
 
+// A resume that has never applied to anything — only reachable via cold search
+// (GET /resumes), never via /negotiations. Proves hh_search_resumes surfaces
+// candidates the responses-only endpoints can't see.
+const DEFAULT_COLD_RESUME = {
+  id: 'res-100',
+  alternate_url: 'https://hh.ru/resume/res-100',
+  first_name: 'Ольга',
+  last_name: 'Кузнецова',
+  title: 'Менеджер по продажам B2B',
+  area: { name: 'Санкт-Петербург' },
+  total_experience: { months: 30 },
+  salary: { amount: 90000, currency: 'RUR' },
+  skill_set: ['Холодные звонки', 'B2B продажи', 'CRM'],
+  experience: [
+    { company: 'ООО «Стройторг»', position: 'Менеджер по продажам', start: '2023-06', end: null, description: 'Холодные звонки, привлечение B2B клиентов.' },
+  ],
+  education: { primary: [{ name: 'СПбГЭУ', organization: 'Экономический факультет', year: 2020 }] },
+  _professional_role_id: '70',
+  _area_id: '2',
+};
+
 function createMockHhServer(options = {}) {
   const employer = options.employer || DEFAULT_EMPLOYER;
   const vacancies = options.vacancies ? [...options.vacancies] : [...DEFAULT_VACANCIES];
   const negotiations = options.negotiations ? [...options.negotiations] : [...DEFAULT_NEGOTIATIONS];
+  const coldResumes = options.coldResumes ? [...options.coldResumes] : [DEFAULT_COLD_RESUME];
 
   // Mutable per-test state
   const state = {
     messages: {},      // negId → string[]
     moves: {},         // negId → string (action id)
     discarded: new Set(),
+    resumeAccessDenied: false,
+    invites: [],        // {resume_id, vacancy_id, message, send_sms}
   };
 
   const LIST_STATES = new Set([
@@ -211,10 +235,36 @@ function createMockHhServer(options = {}) {
       return vac ? send(200, vac) : send(404, { error: 'Not found' });
     }
 
+    // GET /resumes  (cold search — must be checked before /resumes/{id})
+    if (req.method === 'GET' && p === '/resumes') {
+      if (state.resumeAccessDenied) return send(403, { errors: [{ value: 'no resume database access' }] });
+      // Repeated-key multi-value params (?professional_role=70&professional_role=96) —
+      // this is the shape hh_search_resumes must send; comma-joined values would show
+      // up here as a single malformed entry and fail this filter.
+      const roles = u.searchParams.getAll('professional_role');
+      const areas = u.searchParams.getAll('area');
+      let pool = [...coldResumes, ...negotiations.map(n => n.resume)];
+      if (roles.length) pool = pool.filter(r => roles.includes(r._professional_role_id));
+      if (areas.length) pool = pool.filter(r => areas.includes(r._area_id));
+      return send(200, { found: pool.length, pages: 1, page: 0, items: pool });
+    }
+
     const resumeMatch = p.match(/^\/resumes\/([^/]+)$/);
     if (req.method === 'GET' && resumeMatch) {
-      const resume = options.resumes?.[resumeMatch[1]] || negotiations.find(n => n.resume?.id === resumeMatch[1])?.resume;
+      const resume = options.resumes?.[resumeMatch[1]]
+        || negotiations.find(n => n.resume?.id === resumeMatch[1])?.resume
+        || coldResumes.find(r => r.id === resumeMatch[1]);
       return resume ? send(200, resume) : send(404, { error: 'not found' });
+    }
+
+    // POST /negotiations/phone_interview  (invite a cold-search candidate)
+    if (req.method === 'POST' && p === '/negotiations/phone_interview') {
+      return readBody(({ resume_id, vacancy_id, message, send_sms }) => {
+        if (!resume_id || !vacancy_id) return send(400, { errors: [{ value: 'resume_id and vacancy_id required' }] });
+        state.invites.push({ resume_id, vacancy_id, message: message || null, send_sms: send_sms === 'true' });
+        res.setHeader('Location', `/negotiations/inv-${state.invites.length}`);
+        return send(201, {});
+      });
     }
 
     // GET /negotiations/{state}  (list by state)
@@ -312,8 +362,10 @@ function createMockHhServer(options = {}) {
       state.messages = {};
       state.moves = {};
       state.discarded.clear();
+      state.resumeAccessDenied = false;
+      state.invites = [];
     },
   };
 }
 
-module.exports = { createMockHhServer, DEFAULT_NEGOTIATIONS, DEFAULT_VACANCIES, DEFAULT_EMPLOYER };
+module.exports = { createMockHhServer, DEFAULT_NEGOTIATIONS, DEFAULT_VACANCIES, DEFAULT_EMPLOYER, DEFAULT_COLD_RESUME };

@@ -77,12 +77,31 @@ Three distinct concepts — understanding them prevents confusion:
 >
 > Future cleanup: rename `/run`'s `userId` → `chatId`.
 
+> **In-progress/TBD terms — do not copy further without checking the naming-conventions-refactoring plan first:**
+> - `profileId` — emerging canonical name for the identity unit above (replacing `username` long-term). Partially introduced (`server.js`: `payload.profileId ?? username`); `username` is still the authoritative field everywhere else. Not yet a stable API — don't rely on `profileId` being present.
+> - `audience` — scopes sessions/projects by bot surface (`session-store.js`, `server.js`, `projects.js`), default `'default'`. No canonical name has been agreed yet (candidates include `audience`, `botAudience`, `deliverySurface`). Keep using `audience` for now, but don't add new derived terms from it until a name is settled.
+
 ## Repos
+
+Architecture: **Agent Control Plane** (this repo, `trained-assist-agent`) hosts
+core/cross-domain MCP skills (`src/mcp-skills/`) plus the runtime (session
+store, runner, web UI backend). Predetermined-domain functionality is meant to
+live in a separate **Domain Skill Server** repo — a repeatable pattern, not a
+one-off. Naming rule: `trained-assist-<domain>-skill`, where `<domain>` is the
+business capability (e.g. `recruiting`), **not** the first external
+platform/API it happens to integrate (e.g. not `hh` for HeadHunter) — a
+domain server may grow to cover more than one platform under the same
+capability. Inside a domain skill server, platform-specific tool files live
+under `src/mcp-skills/tools/<platform>/`; domain-general tools stay at the
+`tools/` root.
 
 | Repo | Description |
 |------|-------------|
+| [trained-assist-agent](https://github.com/trained-assist/trained-assist-agent) | This repo — Agent Control Plane, GCP VM agent + core MCP skills |
 | [trained-assist-tg-bot](https://github.com/trained-assist/trained-assist-tg-bot) | Cloudflare Worker — Telegram webhook |
-| [trained-assist-agent](https://github.com/trained-assist/trained-assist-agent) | This repo — GCP VM agent |
+| [trained-assist-hh-skill](https://github.com/trained-assist/trained-assist-hh-skill) | Domain Skill Server — HR/Recruiting (first pilot of the pattern). **Mid-migration**: rename to `trained-assist-recruiting-skill` pending, blocked on closing the fallback-registration cleanup (issue #942) — see naming-conventions-refactoring plan. Both names may appear until the rename PR lands. |
+| [trained-assist-web](https://github.com/trained-assist/trained-assist-web) | Web UI (session manager) for the agent |
+| [trained-assist-checklist](https://github.com/trained-assist/trained-assist-checklist) | Standalone D1-backed generic checklist worker (not the GTD `checklist.md` mechanism) |
 
 ## API
 
@@ -257,6 +276,8 @@ Set in repo **Settings → Secrets and variables → Actions**:
 1. Merge your change to main first (or it's already there)
 2. GitHub → Actions → **Manual Deploy** → Run workflow → choose target (`gcp` / `ru` / `both`)
 3. Enter reason (optional, goes to deploy log)
+
+**Restart model — instant and silent** (details: [docs/instant-restart.md](docs/instant-restart.md)): a deploy or `/restart` never drains, pauses admission or messages users. SIGTERM → `interruptForRestart()` → exit; running tasks stay in `pending-tasks/` and the new process re-runs them via `resumePendingTasks` with no status messages. Users are told only when a task cannot come back. Do not reintroduce a drain gate, a "paused/restart planned" status, or a "restart finished" broadcast.
 
 **After a failed deploy:**
 ```bash

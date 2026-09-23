@@ -1,0 +1,130 @@
+'use strict';
+// V2 smoke for issue #942 P1.3 (claude-runner extraction).
+// (1) End-to-end: a fake engine binary emits stream-json → module must stream
+//     and return terminalSuccess=true + claudeResult.
+// (2) Crash: fake engine exits 1 quickly with no JSON → module must NOT hang,
+//     return exitCode!=0, no throw.
+// (3) Inactivity/timeout machinery present.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawn } = require('node:child_process');
+const { runEngineProcess, buildEngineCommand } = require('../src/runner/claude-runner');
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-'));
+const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-mcp-'));
+
+function writeFake(binPath, script) {
+  fs.writeFileSync(binPath, script);
+  fs.chmodSync(binPath, 0o755);
+}
+
+const okBin = path.join(tmp, 'fake-claude-ok');
+writeFake(okBin, `#!/usr/bin/env sh
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Привет"}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":" мир"}]}}'
+echo '{"type":"result","result":"Привет мир","usage":{"input_tokens":10,"output_tokens":5}}'
+`);
+
+const crashBin = path.join(tmp, 'fake-claude-crash');
+writeFake(crashBin, `#!/usr/bin/env sh
+echo "boom" >&2
+exit 1
+`);
+
+// Codex names its cache usage fields differently from Claude's `result` event
+// (cached_input_tokens/cache_write_input_tokens vs. cache_read_input_tokens/
+// cache_creation_input_tokens) — regression for the bug where those fields were
+// silently read under Claude's names and always came out 0 for Codex tasks.
+const codexBin = path.join(tmp, 'fake-codex-ok');
+writeFake(codexBin, `#!/usr/bin/env sh
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"Готово"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":80,"cache_write_input_tokens":15}}'
+`);
+
+const baseOpts = {
+  engine: 'claude', taskId: 't-smoke', chatId: '42', thinkingStart: Date.now(),
+  msgId: null, BOT_TOKEN: 'tok', secrets: { BOT_TOKEN: 'tok' },
+  user: { username: 'smoke', workDir: tmp, name: 'Smoke' },
+  cleanEnv: { PATH: process.env.PATH }, userTokens: {}, sessionFilePath: '',
+  restartShutdown: () => false,
+  activeTimers: new Map(),
+  tgEdit: async () => ({ ok: true }), tgSend: async () => ({ ok: true }),
+  outputCallback: null,
+  engineBin: okBin, engineArgs: ['--print', 'test'], cwd: tmp,
+};
+
+(async () => {
+  // (1) happy path
+  let streamed = '';
+  const r1 = await runEngineProcess({ ...baseOpts, outputCallback: (t) => { streamed += t; } });
+  assert.equal(r1.terminalSuccess, true, 'terminalSuccess on result event');
+  assert.equal(r1.claudeResult, 'Привет мир');
+  assert.equal(r1.exitCode, 0);
+  assert.equal(r1.processError, null);
+  assert.equal(r1.timedOut, false);
+  assert.equal(r1.sessionState.userStopped, false);
+  assert.ok(r1.claudeUsage && r1.claudeUsage.input_tokens === 10, 'usage captured');
+  assert.ok(streamed.includes('Привет'), 'outputCallback streamed text');
+  assert.ok(r1.fullOutput.text.includes('Привет мир'), 'fullOutput accumulated');
+
+  // (2) crash — no hang, exitCode set, no throw
+  const started = Date.now();
+  const r2 = await runEngineProcess({ ...baseOpts, engineBin: crashBin });
+  const elapsed = Date.now() - started;
+  assert.notEqual(r2.exitCode, 0, 'crash exit code non-zero');
+  assert.equal(r2.terminalSuccess, false);
+  assert.equal(r2.timedOut, false);
+  assert.ok(elapsed < 5000, `crash returns promptly (${elapsed}ms)`);
+  assert.equal(r2.fullOutput.text.trim(), '', 'no streamed text on crash');
+
+  // (3) activeTimers registration + cleanup
+  assert.equal(baseOpts.activeTimers.has('t-smoke'), false, 'timer cleaned up');
+
+  // (2.5) codex usage normalization — cache fields land under Claude's field names
+  const r2b = await runEngineProcess({ ...baseOpts, engine: 'codex', engineBin: codexBin });
+  assert.equal(r2b.terminalSuccess, true, 'codex terminalSuccess on turn.completed');
+  assert.ok(r2b.claudeUsage, 'codex usage captured');
+  assert.equal(r2b.claudeUsage.cache_read_input_tokens, 80, 'codex cached_input_tokens normalized to cache_read_input_tokens');
+  assert.equal(r2b.claudeUsage.cache_creation_input_tokens, 15, 'codex cache_write_input_tokens normalized to cache_creation_input_tokens');
+
+  // (4) buildEngineCommand — claude path uses stream-json + mcp-config
+  const [bin, args] = buildEngineCommand({
+    engine: 'claude', prompt: 'P', systemPromptText: null, ocSystemPrompt: null,
+    opencodeModel: null, mcpConfig: '/tmp/mcp.json', systemPromptFile: null,
+    user: { cwd: '/tmp' },
+  });
+  assert.ok(args.includes('--output-format') && args.includes('stream-json'), 'claude args stream-json');
+  assert.ok(args.includes('--mcp-config'), 'claude args mcp-config');
+  assert.equal(args[args.length - 1], 'P');
+
+  // (5) codex/opencode MCP wiring — regression for the gap where codex/opencode had no
+  // MCP tools at all (agent_store_artifact, hermes_run, etc. were invisible to them).
+  const mcpFixture = path.join(tmp2, '.mcp.json');
+  fs.writeFileSync(mcpFixture, JSON.stringify({
+    mcpServers: {
+      'trained-skills': { command: 'node', args: ['/opt/mcp-skills/index.js'], env: { USER_ID: '99', HOME: '/home/x' } },
+    },
+  }));
+
+  const { codexMcpArgs, writeOpencodeMcpConfig } = require('../src/runner/claude-runner');
+  const [, codexArgs] = buildEngineCommand({
+    engine: 'codex', prompt: 'P', systemPromptText: null, mcpConfig: mcpFixture, user: { cwd: tmp2 },
+  });
+  assert.ok(codexArgs.includes('-c'), 'codex args include -c overrides');
+  assert.ok(codexArgs.some(a => a === 'mcp_servers.trained-skills.command="node"'), 'codex mcp command override');
+  assert.ok(codexArgs.some(a => a.startsWith('mcp_servers.trained-skills.env=') && a.includes('USER_ID="99"')), 'codex mcp env override');
+  assert.ok(codexArgs.includes('tool_output_token_limit=4000'), 'codex args cap tool-output tokens (validated 2026-09-23, ~40% uncached-token cut)');
+  assert.deepEqual(codexMcpArgs(mcpFixture), codexArgs.slice(8, -1), 'codexMcpArgs matches what buildEngineCommand spliced in');
+
+  const ocConfigPath = writeOpencodeMcpConfig(tmp2, mcpFixture);
+  const ocConfig = JSON.parse(fs.readFileSync(ocConfigPath, 'utf8'));
+  assert.deepEqual(ocConfig.mcp['trained-skills'].command, ['node', '/opt/mcp-skills/index.js'], 'opencode mcp command array');
+  assert.deepEqual(ocConfig.mcp['trained-skills'].environment, { USER_ID: '99', HOME: '/home/x' }, 'opencode mcp environment');
+  assert.equal(ocConfig.mcp['trained-skills'].type, 'local', 'opencode mcp type=local');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.rmSync(tmp2, { recursive: true, force: true });
+  console.log('V2 PASS: happy path + crash-no-hang + timers cleanup + command build + codex/opencode mcp wiring');
+})();

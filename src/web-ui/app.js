@@ -57,55 +57,6 @@ function md(text) {
 
 const $ = id => document.getElementById(id);
 
-// Durable confirmations are independent of the currently selected session.
-async function loadRestartIntents() {
-  const panel = $('restart-intents');
-  if (!panel) return;
-  try {
-    const res = await api('/web/restart-intents');
-    if (!res.ok) throw new Error('Не удалось загрузить отложенные задачи');
-    const { intents } = await res.json();
-    panel.replaceChildren();
-    panel.classList.toggle('hidden', !intents.length);
-    for (const intent of intents) {
-      const row = document.createElement('div');
-      row.dataset.testid = 'restart-intent';
-      const label = document.createElement('p');
-      label.textContent = `${intent.title} — ожидает подтверждения`;
-      row.append(label);
-      for (const [action, text] of [['confirm', '▶️ Запустить'], ['cancel', 'Отменить']]) {
-        const button = document.createElement('button');
-        button.className = 'btn'; button.textContent = text;
-        button.dataset.testid = `restart-${action}`;
-        button.addEventListener('click', async () => {
-          const buttons = [...row.querySelectorAll('button')];
-          buttons.forEach(b => { b.disabled = true; });
-          try {
-            const response = await api('/web/restart-intents', { method: 'POST',
-              body: JSON.stringify({ handle: intent.handle, action }) });
-            if (!response.ok) throw new Error('Не удалось сохранить решение. Повторите позже.');
-            const result = await response.json();
-            if (!result.decision) throw new Error('Подтверждение устарело. Обновите страницу.');
-            label.setAttribute('role', 'status');
-            label.textContent = `${intent.title} — ${result.decision === 'cancel' ? 'отменена' : 'подтверждена, ожидает запуска'}`;
-            buttons.forEach(b => b.remove());
-          } catch (error) {
-            label.setAttribute('role', 'alert'); label.textContent = error.message;
-            buttons.forEach(b => { b.disabled = false; });
-          }
-        });
-        row.append(button);
-      }
-      panel.append(row);
-    }
-  } catch (error) {
-    if (error.message !== 'Unauthorized') {
-      panel.classList.remove('hidden'); panel.textContent = 'Не удалось загрузить отложенные задачи. Обновите страницу.';
-      panel.setAttribute('role', 'alert');
-    }
-  }
-}
-
 // ─── Sidebar: session list ──────────────────────────────────────────────────
 function highlightSession(id) {
   document.querySelectorAll('.session-item').forEach(el =>
@@ -139,7 +90,6 @@ async function refreshSidebar() {
     const sessions = await res.json();
     renderSessions(Array.isArray(sessions) ? sessions : []);
     highlightSession(currentSessionId);
-    await loadRestartIntents();
   } catch (err) {
     if (err.message !== 'Unauthorized') {
       $('sessions-list').innerHTML = '<div class="empty"><h3>Failed to load</h3><p>Check connection and try refreshing</p></div>';
@@ -541,6 +491,64 @@ $('btn-logout').addEventListener('click', async () => {
   location.href = 'login.html';
 });
 
+// ─── Profile switcher ──────────────────────────────────────────────────────
+async function loadProfileSwitcher() {
+  try {
+    const res = await fetch('/web/profiles', { credentials: 'include' });
+    if (!res.ok) return;
+    const { profiles, current } = await res.json();
+
+    const header = document.querySelector('.sidebar-header');
+    if (!header) return;
+
+    // Show current profile name
+    const title = header.querySelector('.nav-title');
+    if (title && current) title.textContent = current;
+
+    if (profiles.length <= 1) return;  // nothing to switch to
+
+    // Build profile dropdown
+    const wrap = document.createElement('div');
+    wrap.className = 'profile-switcher';
+    wrap.innerHTML = `
+      <button class="btn btn-ghost btn-sm" id="btn-profile-menu" title="Switch profile">⇄</button>
+      <div class="profile-menu hidden" id="profile-menu">
+        ${profiles.map(p => `<button class="profile-option${p === current ? ' active' : ''}" data-profile="${esc(p)}">${esc(p)}</button>`).join('')}
+        <div class="profile-hint">Добавить: /get_webpass в боте</div>
+      </div>`;
+    header.appendChild(wrap);
+
+    document.getElementById('btn-profile-menu').addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('profile-menu').classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', () => {
+      document.getElementById('profile-menu')?.classList.add('hidden');
+    });
+
+    wrap.querySelectorAll('.profile-option').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const target = btn.dataset.profile;
+        if (target === current) return;
+        try {
+          const r = await fetch('/web/switch-profile', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: target }),
+          });
+          if (r.ok) location.reload();
+          else {
+            const err = await r.json().catch(() => ({}));
+            alert(err.error || 'Ошибка переключения профиля');
+          }
+        } catch {}
+      });
+    });
+  } catch {}
+}
+
 $('btn-stop').addEventListener('click', stopSession);
 
 $('btn-composer-submit').addEventListener('click', onComposerSubmit);
@@ -567,7 +575,7 @@ window.addEventListener('hashchange', route);
 
 // ─── Boot ───────────────────────────────────────────────────────────────────
 async function boot() {
-  await Promise.all([loadFolderOptions(), refreshSidebar()]);
+  await Promise.all([loadFolderOptions(), refreshSidebar(), loadProfileSwitcher()]);
   $('view-loading').classList.add('hidden');
   $('shell').classList.remove('hidden');
   setupVoice();

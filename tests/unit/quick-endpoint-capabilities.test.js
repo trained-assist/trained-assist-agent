@@ -8,6 +8,10 @@ import { tmpdir } from 'os';
 import { spawn } from 'child_process';
 import * as http from 'http';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const { computeSkillsList } = require('../../src/capabilities-skills.js');
 
 const SECRET = 'test-secret-quick-caps';
 const TEST_USER = 'quicktestuser';
@@ -157,8 +161,11 @@ describe('GET /capabilities (extended)', () => {
     expect(r.status).toBe(200);
     expect(Array.isArray(r.body.skills)).toBe(true);
     expect(r.body.skills.length).toBeGreaterThan(0);
-    // Must include at least the core skills that exist in mcp-skills/tools/
-    expect(r.body.skills).toContain('hh');
+    // Must include at least a core skill that exists in mcp-skills/tools/.
+    // 'hh' is deliberately NOT asserted here: since #942 it's only reported
+    // when the extracted trained-assist-hh-skill sibling repo is checked
+    // out, which CI (checkout of this repo alone) never has. See the
+    // computeSkillsList unit tests below for that branch.
     expect(r.body.skills).toContain('weeek');
   });
 
@@ -175,5 +182,28 @@ describe('GET /capabilities (extended)', () => {
     expect(r.body.capabilities).toEqual([]);
     expect(Array.isArray(r.body.skills)).toBe(true);
     expect(typeof r.body.upsell_text).toBe('string');
+  });
+});
+
+// ── computeSkillsList (pure) ─────────────────────────────────────────────────
+// The hh-extracted branch (#942) as a deterministic unit test, independent of
+// whether the trained-assist-hh-skill sibling repo is actually checked out —
+// mirrors resolveToolSource in tests/mcp-action-routing.test.js.
+
+describe('computeSkillsList', () => {
+  it('maps known tool filenames to skill names', () => {
+    expect(computeSkillsList(['30-weeek.js', '40-company.js'], false)).toEqual(['weeek', 'company']);
+  });
+
+  it('ignores unknown filenames', () => {
+    expect(computeSkillsList(['README.md', '30-weeek.js'], false)).toEqual(['weeek']);
+  });
+
+  it('adds hh when the extracted sibling repo is present', () => {
+    expect(computeSkillsList(['30-weeek.js'], true)).toEqual(['weeek', 'hh']);
+  });
+
+  it('omits hh when the extracted sibling repo is absent (CI reality post-#942)', () => {
+    expect(computeSkillsList(['30-weeek.js'], false)).toEqual(['weeek']);
   });
 });

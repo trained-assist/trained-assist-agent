@@ -18,7 +18,7 @@ import { tmpdir, homedir } from 'os';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { getQuickAnswer } = require('../src/runner.js');
+const { getQuickAnswer } = require('../src/runner');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -93,6 +93,45 @@ describe('System commands', () => {
     'обращения к секретам',
   ])('secrets_log: "%s" → quick', (task) => {
     expect(qa(task)).not.toBeNull();
+  });
+});
+
+// ── Model / agent info — natural language ──────────────────────────────────────
+// «на какой модели ты сейчас работаешь?» must be intercepted (same answer as /agent_info).
+// Loose regex is safe because the non-slash path runs verifyQuickAnswerIntent before sending.
+
+describe('Model / agent info — natural language', () => {
+  it.each([
+    'на какой модели ты сейчас работаешь?',
+    'на какой модели ты работаешь?',
+    'на какой модели работаешь',
+    'на какой модели ты',
+    'на какой нейросети ты работаешь?',
+    'какая у тебя модель?',
+    'какая у тебя модель и движок?',
+    'какой моделью ты работаешь?',
+    'какой моделью пользуешься?',
+    'какую модель используешь?',
+    'какую модель ты ставишь?',
+    'что за модель у тебя?',
+    'какой ты агент?',
+    'какая ты нейросеть?',
+  ])('model-info: "%s" → quick (agent info)', (task) => {
+    const r = qa(task);
+    expect(r).not.toBeNull();
+    expect(r).toMatch(/Агент|Движок|Модель|VM|Версия/i);
+  });
+
+  // Real questions that merely mention "модель" must NOT be eaten as model-info.
+  it.each([
+    'какая модель лучше для парсинга?',
+    'сравни модели GPT и DeepSeek',
+    'объясни, как выбрать модель для датасета',
+    'напиши промпт для модели',
+    'обучи модель на этих данных',
+    'модель перестала отвечать, что делать',
+  ])('real task NOT intercepted: "%s"', (task) => {
+    expect(qa(task)).toBeNull();
   });
 });
 
@@ -391,7 +430,7 @@ describe('False positives — real tasks must reach Claude', () => {
 // We test the raw intent regexes exported for this purpose.
 
 describe('HH intents — vacancies', () => {
-  const { HH_MY_VACANCIES_INTENT } = require('../src/runner.js')._intents;
+  const { HH_MY_VACANCIES_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'мои вакансии',
@@ -413,7 +452,7 @@ describe('HH intents — vacancies', () => {
 });
 
 describe('HH intents — funnel stats', () => {
-  const { HH_FUNNEL_INTENT } = require('../src/runner.js')._intents;
+  const { HH_FUNNEL_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'сколько откликов',
@@ -433,7 +472,7 @@ describe('HH intents — funnel stats', () => {
 });
 
 describe('HH intents — new responses', () => {
-  const { HH_RESPONSES_INTENT } = require('../src/runner.js')._intents;
+  const { HH_RESPONSES_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'новые отклики',
@@ -454,7 +493,7 @@ describe('HH intents — new responses', () => {
 });
 
 describe('HH intents — ATS editor', () => {
-  const { HH_ATS_EDITOR_INTENT } = require('../src/runner.js')._intents;
+  const { HH_ATS_EDITOR_INTENT } = require('../src/runner')._intents;
 
   it.each([
     'открой ats редактор',

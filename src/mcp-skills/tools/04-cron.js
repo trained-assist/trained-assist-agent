@@ -125,15 +125,28 @@ function makeGcpJob(id, schedule, timezone, task) {
 }
 
 // ── HH digest task template ───────────────────────────────────────────────────
-// Claude reads active_vacancy + ats_config from context store at runtime.
+// Claude reads active_vacancies (or the legacy singleton active_vacancy) + per-vacancy
+// ats_config from context store at runtime. hh_funnel_stats and hh_batch_evaluate both
+// already accept an explicit vacancy_id (they only fall back to context when omitted),
+// so looping this prompt over several vacancies needs no tool changes — just asking
+// Claude to pass vacancy_id explicitly instead of relying on the single-vacancy default.
+//
+// digest_notify_threshold (context 'hh', 0-100, default 0/unset = off) lets the recruiter
+// mute the raw "N new responses" noise and only get told how many cleared an ATS score bar.
+// hh_funnel_stats reads this from cached ats_result on disk — no LLM call from the digest
+// itself; candidates get scored by the separate background scoring loop (~5 min cadence).
 
-const HH_DIGEST_TASK = `SCHEDULED: HH мониторинг — быстрый дайджест состояния воронки. Выполни автоматически без вопросов.
+const HH_DIGEST_TASK = `SCHEDULED: HH мониторинг — быстрый дайджест состояния воронки по всем отслеживаемым вакансиям. Выполни автоматически без вопросов.
 
-1. context_get('hh', 'active_vacancy') → если found=false → отправь «⏸ HH: нет активной вакансии.» и завершай.
-2. hh_funnel_stats() — без аргументов, читает активную вакансию из контекста автоматически.
-3. Сформируй дайджест и отправь сообщение в Telegram:
+1. context_get('hh', 'active_vacancies') → список вакансий {id, title}.
+   Если found=false или список пуст — fallback на context_get('hh', 'active_vacancy') (старый формат, одна вакансия).
+   Если и там ничего нет — отправь «⏸ HH: нет активной вакансии.» и завершай.
+2. context_get('hh', 'digest_notify_threshold') → порог 0-100 (число). Если found=false или значение 0/пусто — порог выключен (threshold=0).
+3. Для КАЖДОЙ вакансии из списка вызови hh_funnel_stats({vacancy_id: <id вакансии>, notify_threshold: <порог из шага 2>}) — явно передавай vacancy_id, не полагайся на дефолт из контекста (иначе для второй и последующих вакансий получишь статистику первой).
+   Если ответ содержит reauth_required:true — токен HH истёк, дальше по вакансиям не ходи (у всех будет та же ошибка). Сразу отправь в Telegram «⚠️ HH-токен истёк, нужна переавторизация: {reauth_link}» и завершай — не отправляй блок статистики с нулями вместо этого.
+4. Собери ОДНО сообщение в Telegram с одним блоком на каждую вакансию (не отправляй отдельное сообщение на вакансию):
 
-Формат сообщения:
+Формат блока (повторяется для каждой вакансии, разделяй пустой строкой):
 📊 HH | {название вакансии}
 Новых откликов: {new_responses}
 Непрочитанных: {unread_messages ?? 'н/д'}
@@ -149,7 +162,13 @@ const HH_DIGEST_TASK = `SCHEDULED: HH мониторинг — быстрый д
 • Принят: {hired}
 (Отклонено за всё время: {discard})
 
-Если new_responses > 0 — добавь в конце: «Есть {N} новых откликов — запусти hh_batch_evaluate для оценки.»`.trim();
+Если порог (шаг 2) > 0 И в ответе hh_funnel_stats пришли new_responses_above_threshold/new_responses_pending_score — ЗАМЕНИ строку «Новых откликов: {new_responses}» на:
+Новых откликов: {new_responses} (из них ≥{notify_threshold}%: {new_responses_above_threshold}{, если new_responses_pending_score > 0: ", ещё не оценено: {new_responses_pending_score}"})
+Если порог выключен (0) — оставь строку «Новых откликов: {new_responses}» как есть, без изменений.
+
+Если у вакансии new_responses > 0 — добавь под её блоком: «Есть {N} новых откликов — запусти hh_batch_evaluate({vacancy_id: "<id>"}) для оценки.» (обязательно с vacancy_id, если вакансий больше одной). Если порог включён, замени {N} на new_responses_above_threshold, если он есть.
+
+Если вакансия ровно одна — формат не меняется (один блок, без нумерации и заголовков-разделителей).`.trim();
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -211,9 +230,9 @@ module.exports = {
 
     cron_hh_digest: {
       description:
-        'Convenience: create an HH recruiting digest cron — evaluates new responses for the active vacancy and sends a summary to Telegram. ' +
-        'Uses context_get("hh", "active_vacancy") and context_get("hh", "ats_config") at runtime. ' +
-        'Set the active vacancy first with context_set before enabling this cron.',
+        'Convenience: create an HH recruiting digest cron — sends a Telegram summary of new responses/funnel per tracked vacancy, one block per vacancy if several are active. ' +
+        'Uses context_get("hh", "active_vacancies") (falls back to the legacy singleton "active_vacancy") and per-vacancy "ats_config:{id}" at runtime. ' +
+        'Track at least one vacancy first with hh_set_active_vacancy before enabling this cron.',
       inputSchema: {
         type: 'object',
         required: ['schedule'],
@@ -254,7 +273,7 @@ module.exports = {
           timezone,
           gcp_job: gcpResult.name,
           next_run: gcpResult.scheduleTime,
-          note: 'Дайджест будет читать active_vacancy и ats_config из context store при каждом запуске.',
+          note: 'Дайджест будет читать active_vacancies (или legacy active_vacancy) и per-vacancy ats_config из context store при каждом запуске — один блок в сообщении на каждую отслеживаемую вакансию.',
         };
       },
     },

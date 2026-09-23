@@ -166,16 +166,18 @@ describe('hhFunnelStats', () => {
 // ── hhNewResponses ────────────────────────────────────────────────────────────
 
 describe('hhNewResponses', () => {
-  it('lists new response candidates', async () => {
+  it('returns a one-line count + review-page link, never candidate names', async () => {
     writeActiveVacancy('vac-001', 'Backend Developer (Node.js)');
     const { hhNewResponses } = freshModule();
     const result = await hhNewResponses(TEST_UID, workDir);
 
     expect(result).toContain('Backend Developer');
-    expect(result).toContain('новые отклики');
-    // Mock returns 3 candidates in "response" state for vac-001
-    expect(result).toContain('Иванов');
-    expect(result).toContain('Петрова');
+    expect(result).toContain('новых откликов');
+    expect(result).toContain('/hh/review');
+    expect(result).toContain('vacancy_id=vac-001');
+    // Multi-vacancy step 4/6: never list candidate names in Telegram — link to web instead.
+    expect(result).not.toContain('Иванов');
+    expect(result).not.toContain('Петрова');
   });
 
   it('reports empty when no new responses', async () => {
@@ -331,13 +333,14 @@ describe('hhStatus — HH token expiry awareness', () => {
 });
 
 describe('HH_DISCONNECT_INTENT regex — /hh_disconnect + natural-language matches', () => {
-  // The regex may live in src/runner.js or src/intent-engine.js depending on refactor stage.
+  // The regex may live in src/runner/index.js, src/runner/intent-engine.js, or
+  // src/domains/hh/intents.js depending on refactor stage (issue #942).
   const fs = require('fs'), path = require('path');
-  const src = ['src/runner.js', 'src/intent-engine.js']
+  const src = ['src/runner/index.js', 'src/runner/intent-engine.js', 'src/domains/hh/intents.js']
     .map(f => { try { return fs.readFileSync(path.join(__dirname, '../..', f), 'utf8'); } catch { return ''; } })
     .join('\n');
   const m = src.match(/const HH_DISCONNECT_INTENT\s*=\s*(\/[^;]+\/[gimsuy]*);/);
-  if (!m) throw new Error('HH_DISCONNECT_INTENT not found in runner.js or intent-engine.js — update this test');
+  if (!m) throw new Error('HH_DISCONNECT_INTENT not found in src/runner/index.js, src/runner/intent-engine.js, or src/domains/hh/intents.js — update this test');
   const HH_DISCONNECT_INTENT = new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), m[1].slice(m[1].lastIndexOf('/') + 1));
 
   it('slash /hh_disconnect matches', () => {

@@ -107,6 +107,31 @@ function restoreNormalClaude() {
   setupFakeClaude('OK');
 }
 
+// Exits 0 with narration text but no `result`/completion event on the first `badCount`
+// invocations (the "no confirmed final answer" dead-end — distinct from setupCrashingClaude's
+// non-zero exit, which is the separate QUICK_CRASH_MS path), then behaves normally.
+function setupIncompleteClaude(badCount = 1) {
+  claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
+  writeFileSync(claudeReplyFile, 'Готово после ретраев');
+  const counterFile = join(fakeBinDir, 'incomplete-counter.txt');
+  writeFileSync(counterFile, '0');
+  const scriptPath = join(fakeBinDir, 'claude');
+  const script = `#!/bin/bash
+COUNT=$(cat "${counterFile}" 2>/dev/null || echo 0)
+COUNT=$((COUNT+1))
+echo $COUNT > "${counterFile}"
+if [ "$COUNT" -le ${badCount} ]; then
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"работаю над задачей"}]}}'
+  exit 0
+fi
+REPLY=$(cat "${claudeReplyFile}" 2>/dev/null || echo "OK")
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$REPLY"'"}]}}'
+echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output_tokens":50}}'
+`;
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
+}
+
 function buildFakeClaudeBinary() {
   fakeBinDir = mkdtempSync(join(tmpdir(), 'fake-claude-bin-'));
   claudeReplyFile = join(fakeBinDir, 'claude-reply.txt');
@@ -140,8 +165,9 @@ beforeAll(async () => {
   process.env.TELEGRAM_API_URL = `http://127.0.0.1:${tgPort}`;
   process.env.CLAUDE_BIN = join(fakeBinDir, 'claude'); // explicit path, no PATH manipulation
   process.env.AGENT_TOKENS_ROOT = testTokensRoot;     // isolate from real ~/agent-tokens/
+  process.env.TEST_MODE = '1'; // retry-policy backoff → ms instead of 30s/3min/10min (see src/retry-policy.js)
 
-  const mod = require('../src/runner.js');
+  const mod = require('../src/runner');
   runTask = mod.runTask;
   sessionStore = require('../src/session-store.js');
 });
@@ -150,6 +176,7 @@ afterAll(async () => {
   process.env.TELEGRAM_API_URL = origTgUrl;
   delete process.env.CLAUDE_BIN;
   delete process.env.AGENT_TOKENS_ROOT;
+  delete process.env.TEST_MODE;
   if (origDataRoot === undefined) delete process.env.AGENT_DATA_DIR;
   else process.env.AGENT_DATA_DIR = origDataRoot;
   rmSync(testDataRoot, { recursive: true, force: true });
@@ -339,6 +366,78 @@ describe('Utility commands do not pollute sessions', () => {
     const commandMsgs = sess.messages.filter(m => m.content.match(/^\/ping|^\/help/));
     expect(commandMsgs.length, 'utility commands leaked into session').toBe(0);
     expect(sess.messages.length).toBe(2); // user + bot
+  });
+
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO 2b: pure-info quick answers bypass the per-chat admission queue
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Pre-queue quick answers skip the chat queue', () => {
+
+  function writeSlowClaudeScript(delayMs) {
+    const script = `#!/bin/bash
+sleep ${(delayMs / 1000).toFixed(2)}
+REPLY=$(cat "${claudeReplyFile}" 2>/dev/null || echo "OK")
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$REPLY"'"}]}}'
+echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output_tokens":50}}'
+`;
+    writeFileSync(join(fakeBinDir, 'claude'), script);
+    chmodSync(join(fakeBinDir, 'claude'), 0o755);
+  }
+
+  it('/agent_info answers immediately while a real task is still running in the same chat', { timeout: 20000 }, async () => {
+    const SLOW_MS = 4000;
+    writeSlowClaudeScript(SLOW_MS);
+    const userId = 555444333;
+    try {
+      // Kick off a slow task in this chat — deliberately NOT awaited, it occupies the
+      // per-chat queue for SLOW_MS.
+      const slowTask = runTask({
+        taskId: `slow-${Date.now()}`,
+        user: makeUser(userId),
+        task: 'сделай что-нибудь долгое',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        // Real callers (server.js) pass both keys — TELEGRAM_BOT_TOKEN is an alias of
+        // BOT_TOKEN that the pre-queue bypass blocks (/stop, /agent_info, ...) read.
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+
+      // Give the slow task a moment to actually enter the queue/admission path.
+      await new Promise(r => setTimeout(r, 300));
+
+      const t0 = Date.now();
+      await runTask({
+        taskId: `info-${Date.now()}`,
+        user: makeUser(userId),
+        task: '/agent_info',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+      const elapsedMs = Date.now() - t0;
+
+      expect(elapsedMs, `/agent_info took ${elapsedMs}ms — looks like it waited behind the slow task instead of bypassing the queue`).toBeLessThan(SLOW_MS / 2);
+
+      // The bypass sends its Telegram reply fire-and-forget (same style as /stop etc.,
+      // see runTask()) — runTask() itself resolves before that HTTP call necessarily lands.
+      // Poll briefly instead of asserting immediately.
+      let texts = [];
+      for (let i = 0; i < 20; i++) {
+        texts = tgTexts();
+        if (texts.some(t => /Модель:|Движок:|VM:/i.test(t))) break;
+        await new Promise(r => setTimeout(r, 25));
+      }
+      expect(texts.some(t => /Модель:|Движок:|VM:/i.test(t)), 'expected an agent-info-shaped reply').toBe(true);
+
+      await slowTask; // drain before the next test reuses fakeBinDir/claude
+    } finally {
+      restoreNormalClaude();
+    }
   });
 
 });
@@ -677,6 +776,53 @@ describe('Quick-crash auto-retry', () => {
     expect(texts[texts.length - 1]).toMatch(/реальный сбой/);
     // Original launch + exactly 1 retry = 2 invocations, no infinite loop.
     expect(readFileSync(join(fakeBinDir, 'crash-counter.txt'), 'utf8').trim()).toBe('2');
+  });
+
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO: general mid-task dead-end (no confirmed final answer, not a crash, not a
+// restart) auto-retries with the shared backoff schedule instead of dead-ending
+// immediately on "напиши продолжай" — this is the "OpenCode не смог перезапуститься"
+// class of complaint: a transient hiccup shouldn't need a human in the loop.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('General incomplete auto-retry', () => {
+
+  it('incomplete run auto-retries and delivers the eventual success', { timeout: 20000 }, async () => {
+    setupIncompleteClaude(2); // incomplete on invocations #1 and #2, succeeds from #3 on
+    try {
+      await chat('сделай штуку');
+    } finally {
+      restoreNormalClaude();
+    }
+
+    const texts = tgTexts();
+    const retryLines = texts.filter(t => /🔄 Работа прервана.*пробую ещё раз/.test(t));
+    expect(retryLines.length, 'two silent retries before success').toBe(2);
+    expect(retryLines[0]).toContain('1/3');
+    expect(retryLines[1]).toContain('2/3');
+    expect(texts[texts.length - 1]).toContain('Готово после ретраев');
+    // Original launch + 2 retries = 3 invocations, no give-up message anywhere.
+    expect(readFileSync(join(fakeBinDir, 'incomplete-counter.txt'), 'utf8').trim()).toBe('3');
+    expect(texts.some(t => t.includes('не помогло'))).toBe(false);
+  });
+
+  it('incomplete run that keeps happening gives up after MAX_INCOMPLETE_RETRIES, capped', { timeout: 20000 }, async () => {
+    setupIncompleteClaude(99); // would stay incomplete forever if retries weren't bounded
+    try {
+      await chat('сделай штуку');
+    } finally {
+      restoreNormalClaude();
+    }
+
+    const texts = tgTexts();
+    const retryLines = texts.filter(t => /🔄 Работа прервана.*пробую ещё раз/.test(t));
+    expect(retryLines.length, 'exactly 3 retries, not a loop').toBe(3);
+    expect(texts[texts.length - 1]).toContain('не помогло и после 3 автоматических попыток');
+    expect(texts[texts.length - 1]).toContain('продолжай');
+    // Original launch + exactly 3 retries = 4 invocations, no infinite loop.
+    expect(readFileSync(join(fakeBinDir, 'incomplete-counter.txt'), 'utf8').trim()).toBe('4');
   });
 
 });

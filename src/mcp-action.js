@@ -15,6 +15,7 @@
 // cross-tenant data leak, not a race condition you can paper over. Do not
 // "optimize" this into an in-process registry.callTool() call.
 
+const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const registry = require('./mcp-skills/registry');
@@ -22,9 +23,37 @@ const registry = require('./mcp-skills/registry');
 const INDEX_PATH = path.join(__dirname, 'mcp-skills', 'index.js');
 const DEFAULT_TIMEOUT_MS = 45_000;
 
+// HH skill was extracted into its own repo (issue #942). Its MCP server lives in a
+// sibling checkout and is only wired in when that checkout is present. Tool names
+// still registered locally (src/mcp-skills/tools/90-hh.js etc.) take priority — this
+// keeps behavior unchanged until step 11 of the extraction checklist removes them,
+// at which point hh_* calls fall through to the extracted registry automatically.
+const HH_SKILL_INDEX_PATH = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
+const hhRegistry = fs.existsSync(HH_SKILL_INDEX_PATH)
+  ? require(path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'registry'))
+  : null;
+
 // Safe in-process: listTools() is static tool metadata, not user-scoped execution.
 function listActionTools() {
-  return registry.listTools();
+  const local = registry.listTools();
+  if (!hhRegistry) return local;
+  const localNames = new Set(local.map(t => t.name));
+  return [...local, ...hhRegistry.listTools().filter(t => !localNames.has(t.name))];
+}
+
+// Pure decision, no disk/registry access — the part worth unit-testing directly.
+// Mirrors resolveIndexPath's branch order exactly: local name wins over hh name,
+// unmatched tool defaults to local (existing behavior, not a new default).
+function resolveToolSource(tool, localNames, hhNames) {
+  if (localNames.has(tool)) return 'local';
+  if (hhNames && hhNames.has(tool)) return 'hh';
+  return 'local';
+}
+
+function resolveIndexPath(tool) {
+  const localNames = new Set(registry.listTools().map(t => t.name));
+  const hhNames = hhRegistry ? new Set(hhRegistry.listTools().map(t => t.name)) : null;
+  return resolveToolSource(tool, localNames, hhNames) === 'hh' ? HH_SKILL_INDEX_PATH : INDEX_PATH;
 }
 
 function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEOUT_MS }) {
@@ -36,7 +65,7 @@ function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEO
 
     // process.execPath (not the string 'node') — avoids depending on PATH resolution
     // inside whatever env/sandbox this server process is itself running under.
-    const child = spawn(process.execPath, [INDEX_PATH], {
+    const child = spawn(process.execPath, [resolveIndexPath(tool)], {
       // cwd matters, not just WORK_DIR: tools like context-store resolve paths off
       // process.cwd() (inherited from Claude Code's own cwd today), not the env var.
       cwd: workDir || process.cwd(),
@@ -89,4 +118,4 @@ function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEO
   });
 }
 
-module.exports = { runMcpTool, listActionTools };
+module.exports = { runMcpTool, listActionTools, resolveToolSource };

@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { buildNalogOrigins } from '../src/browser.js';
+import { buildNalogOrigins, writeMcpConfig } from '../src/browser.js';
+
+const HH_SKILL_SUFFIX = path.join('trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
 
 let tmpDir;
 let tokenFile;
@@ -60,5 +62,42 @@ describe('buildNalogOrigins', () => {
 
   it('returns [] for non-existent file', () => {
     expect(buildNalogOrigins('/nonexistent/path/nalog')).toEqual([]);
+  });
+});
+
+// Regression coverage for the extraction-checklist step 6/7 wiring (issue #942, PR #1107):
+// writeMcpConfig must register the 'hh-skills' MCP server only when the sibling
+// trained-assist-hh-skill checkout is actually present on disk, so environments without
+// it cloned (a fresh CI runner, a laptop clone) keep working unchanged.
+describe('writeMcpConfig hh-skills registration', () => {
+  const realExistsSync = fs.existsSync;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('registers hh-skills when the sibling checkout is present', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) =>
+      String(p).endsWith(HH_SKILL_SUFFIX) ? true : realExistsSync(p));
+
+    const configPath = writeMcpConfig(tmpDir, null, {});
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+    expect(config.mcpServers).toHaveProperty('hh-skills');
+    expect(config.mcpServers['hh-skills'].command).toBe('node');
+    expect(config.mcpServers['hh-skills'].args[0]).toMatch(/trained-assist-hh-skill.*mcp-skills.*index\.js$/);
+    // Always present regardless of hh-skills availability
+    expect(config.mcpServers).toHaveProperty('trained-skills');
+  });
+
+  it('omits hh-skills when the sibling checkout is absent', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) =>
+      String(p).endsWith(HH_SKILL_SUFFIX) ? false : realExistsSync(p));
+
+    const configPath = writeMcpConfig(tmpDir, null, {});
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+    expect(config.mcpServers).not.toHaveProperty('hh-skills');
+    expect(config.mcpServers).toHaveProperty('trained-skills');
   });
 });

@@ -13,8 +13,10 @@
 //
 // Layout (FLAT — projects are typed by a name prefix, never nested by domain):
 //   <workDir>/projects/<id>/
-//       project.json          meta {id,name,type,createdAt,lastAt}
-//       PROFILE.md            domain rules for this project (merged into the system prompt)
+//       project.json           meta {id,name,type,createdAt,lastAt}
+//       PROFILE.md             domain rules for this project (hand-authored, merged into system prompt)
+//       agent-project-notes.md agent-LEARNED notes scoped to this project (mirrors profile-tier
+//                               agent-notes.md; not seeded — Claude writes it as it learns).
 //       <type scaffold>       recruiting → interviews/{transcripts,analysis}, criteria.md, applylink/
 //   <workDir>/projects/active-<chatId>.json   which project this chat is currently in
 //
@@ -28,6 +30,7 @@ const path = require('path');
 const PROJECTS_DIR = 'projects';
 const META_FILE = 'project.json';
 const PROFILE_FILE = 'PROFILE.md';
+const NOTES_FILE = 'agent-project-notes.md';
 const MAX_NAME = 120;
 
 // ── Type registry ─────────────────────────────────────────────────────────────
@@ -71,6 +74,48 @@ const TYPES = {
       '- Общие данные (brands.json, cpm-list.json, критерии классификации) — durable-инфра профиля, НЕ копируются в проект.\n' +
       '- Классификация target/near-target и revenue-фильтры — через expo_* инструменты.\n' +
       '- Деплой: npx wrangler pages deploy deploy/<slug> --project-name <slug>.\n',
+  },
+  bugs: {
+    label: 'Баги и фичи',
+    // Canonical id — one reserved project per profile (owner's voice: "создаётся сессия
+    // в папке Bugs and Features"), never a fresh id-<n> per report like other types.
+    id: 'bugs-and-features',
+    prefixes: [
+      'bugs', 'bug', 'баги', 'баг', 'фичи', 'фича', 'features', 'feature',
+      'bugs and features', 'bug and features',
+    ],
+    dirs: ['reports', '_processed', 'collector'],
+    seedFiles: {
+      'reports/README.md':
+        '# Контракт: reports/\n\n' +
+        'Одна папка на один инцидент/фичу: `reports/<YYYY-MM-DD>-<slug>/`.\n\n' +
+        '- `report.json` — `{id, kind:"bug"|"feature", title, summary, status:"open", severity, area, createdAt, sessionId, attachments:[]}`\n' +
+        '- `transcript.md` — сырые сообщения пользователя (текст + транскрипты голоса)\n' +
+        '- `attachments/` — скопированные скриншоты/фото/файлы\n' +
+        '- `evidence/` — логи/сниппеты\n\n' +
+        'На каждый отчёт обязательна одна строка в `../index.jsonl` (главный фид сборщика).\n',
+      'collector/README.md':
+        '# Контракт: как сборщик читает этот проект\n\n' +
+        'Сборщик — отдельный сервис (`src/bugs-collector.js`, крона `scripts/bugs-collector-cron.sh`),\n' +
+        'вне доступа пользователей. Он:\n\n' +
+        '1. Читает `../index.jsonl` (append-only, 1 строка = 1 отчёт).\n' +
+        '2. Берёт записи со `status:"open"`, которых ещё нет в `collector/state.json`.\n' +
+        '3. Ждёт «тишины»: папка отчёта не менялась ~3 минуты (не хватает недописанный отчёт).\n' +
+        '4. Составляет подробную GitHub-заявку (что/кто/зачем/что хочет пользователь) и создаёт issue.\n' +
+        '5. Помечает обработанное в `collector/state.json` (`{processed:{<id>:{issue,url,at}}}`).\n\n' +
+        '`index.jsonl` сборщик НЕ перезаписывает — он append-only. Если `collector/` удалить,\n' +
+        'он пересоздаётся при следующем прогоне, а дубли отсекаются по маркеру в теле issue.\n\n' +
+        'Формат строки индекса: `{id, kind, title, dir, status, createdAt, sessionId}`.\n',
+    },
+    profile:
+      '# Домен проекта: Приём баг/фич\n\n' +
+      '- Ты — приёмщик багов и предложений. Вход — сессия из нескольких сообщений (текст, голос,\n' +
+      '  скриншоты), накопленных пользователем.\n' +
+      '- Классифицируй: баг или фича.\n' +
+      '- Для КАЖДОГО инцидента создай `reports/<дата>-<slug>/`: `report.json` (см. reports/README.md),\n' +
+      '  `transcript.md` (сырые сообщения), `attachments/` (скопируй вложения), `evidence/`.\n' +
+      '- Допиши одну строку в `index.jsonl` — это фид сборщика. Не создавай GitHub issues.\n' +
+      '- Ничего не удаляй; структурируй как считаешь полезным, «от души».\n',
   },
   generic: {
     label: 'Проект',
@@ -127,6 +172,9 @@ function metaPath(workDir, id) {
 function profilePath(workDir, id) {
   return path.join(projectDir(workDir, id), PROFILE_FILE);
 }
+function notesPath(workDir, id) {
+  return path.join(projectDir(workDir, id), NOTES_FILE);
+}
 
 function atomicWrite(fp, data) {
   const tmp = `${fp}.tmp`;
@@ -146,7 +194,11 @@ function getProject(workDir, id) {
 }
 
 // List projects (meta only), most-recently-touched first.
-function listProjects(workDir) {
+// `audience` (default 'default') scopes the list the same way as session-store.listSessions
+// — a project with no `audience` field (every project created before this feature existed)
+// counts as 'default'. Pass audience: null explicitly to bypass filtering (internal/debug
+// tools only — never an HTTP path reachable by an external bot).
+function listProjects(workDir, audience = 'default') {
   const root = projectsRoot(workDir);
   let ids = [];
   try {
@@ -156,26 +208,52 @@ function listProjects(workDir) {
   } catch {
     return [];
   }
-  return ids
+  const all = ids
     .map(id => getProject(workDir, id))
-    .filter(Boolean)
-    .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+    .filter(Boolean);
+  const filtered = audience === null
+    ? all
+    : all.filter(p => (p.audience || 'default') === audience);
+  return filtered.sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+}
+
+// Re-sort a project list by usage (session count) descending, most-recent as tiebreaker.
+// `countByProject` ({id: count}) lives in session-store, not here, so callers that have
+// it (server.js) pass it in; without it we keep the recency-only order from listProjects.
+function sortByUsage(list, countByProject) {
+  if (!countByProject) return list;
+  return [...list].sort((a, b) => {
+    const ca = countByProject[a.id] || 0, cb = countByProject[b.id] || 0;
+    if (cb !== ca) return cb - ca;
+    return (b.lastAt || 0) - (a.lastAt || 0);
+  });
 }
 
 // Create a project from a raw "type: name" string (or explicit {name,type}).
 // Rolls out the type scaffold + PROFILE.md. Idempotent by id: existing project is returned.
-function createProject(workDir, input, { now = Date.now() } = {}) {
+// `audience` (default 'default') stamps the project so listProjects/decideNewSessionProject
+// can scope it to the bot/surface that created it (see AUDIENCE-SCOPE-SPEC).
+function createProject(workDir, input, { now = Date.now(), audience } = {}) {
   const parsed = typeof input === 'string'
     ? parseTypedName(input)
     : { type: input.type || 'generic', name: input.name || 'project' };
   const def = typeOf(parsed.type);
+  const aud = audience || 'default';
 
-  // Unique id: <type>-<slug>[-n]
-  const base = `${parsed.type}-${slugify(parsed.name)}`;
-  let id = base;
-  let n = 2;
-  // If a real project already lives at `id`, make a fresh sibling instead of colliding.
-  while (getProject(workDir, id)) id = `${base}-${n++}`;
+  // Singleton types (e.g. bugs -> bugs-and-features) declare a fixed canonical id: reuse
+  // the existing project instead of minting a sibling. Other types: <type>-<slug>[-n].
+  let id;
+  if (def.id) {
+    id = def.id;
+    const existing = getProject(workDir, id);
+    if (existing) return existing;
+  } else {
+    const base = `${parsed.type}-${slugify(parsed.name)}`;
+    id = base;
+    let n = 2;
+    // If a real project already lives at `id`, make a fresh sibling instead of colliding.
+    while (getProject(workDir, id)) id = `${base}-${n++}`;
+  }
 
   const dir = projectDir(workDir, id);
   fs.mkdirSync(dir, { recursive: true });
@@ -187,7 +265,7 @@ function createProject(workDir, input, { now = Date.now() } = {}) {
   const pfp = profilePath(workDir, id);
   if (!fs.existsSync(pfp)) fs.writeFileSync(pfp, def.profile);
 
-  const meta = { id, name: parsed.name, type: parsed.type, label: def.label, createdAt: now, lastAt: now };
+  const meta = { id, name: parsed.name, type: parsed.type, label: def.label, audience: aud, createdAt: now, lastAt: now };
   atomicWrite(metaPath(workDir, id), JSON.stringify(meta, null, 2));
   return meta;
 }
@@ -249,23 +327,39 @@ function archiveProject(workDir, id) {
   return dest;
 }
 
+// Canonical "Bugs and Features" reserved project — finds the existing bugs-type project,
+// or creates the singleton if none exists yet. Idempotent; safe to call on every
+// /bug_or_feature invocation.
+function bugsProject(workDir, { now = Date.now(), audience } = {}) {
+  const existing = listProjects(workDir, audience || 'default').find(p => p.type === 'bugs');
+  if (existing) return existing;
+  return createProject(workDir, { type: 'bugs', name: TYPES.bugs.label }, { now, audience });
+}
+
 // ── Active project per chat ─────────────────────────────────────────────────
 
-function _activePath(workDir, chatId) {
-  return path.join(projectsRoot(workDir), `active-${chatId || 'default'}.json`);
+// `audience` scopes the active-project pointer per bot/surface sharing the same chatId,
+// same pattern as session-store's _currentSessionFile. Falsy or 'default' → EXACTLY the
+// pre-existing filename (note: the chatId-less fallback already used the literal string
+// 'default' before audience existed — preserved as-is so that path never moves).
+function _activePath(workDir, chatId, audience) {
+  if (!audience || audience === 'default') {
+    return path.join(projectsRoot(workDir), `active-${chatId || 'default'}.json`);
+  }
+  return path.join(projectsRoot(workDir), `active-${audience}-${chatId || 'default'}.json`);
 }
-function getActiveProjectId(workDir, chatId) {
+function getActiveProjectId(workDir, chatId, audience) {
   try {
-    const { id } = JSON.parse(fs.readFileSync(_activePath(workDir, chatId), 'utf8'));
+    const { id } = JSON.parse(fs.readFileSync(_activePath(workDir, chatId, audience), 'utf8'));
     return getProject(workDir, id) ? id : null; // ignore stale pointer
   } catch {
     return null;
   }
 }
-function setActiveProjectId(workDir, id, chatId, { now = Date.now() } = {}) {
+function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience } = {}) {
   try {
     fs.mkdirSync(projectsRoot(workDir), { recursive: true });
-    atomicWrite(_activePath(workDir, chatId), JSON.stringify({ id, at: now }));
+    atomicWrite(_activePath(workDir, chatId, audience), JSON.stringify({ id, at: now }));
     touchProject(workDir, id, { now });
   } catch (e) {
     console.warn('[projects] setActiveProjectId:', e.message);
@@ -278,11 +372,11 @@ function setActiveProjectId(workDir, id, chatId, { now = Date.now() } = {}) {
 //   { action:'ask',    choices, active }      several projects   -> ask which / offer new
 //   { action:'create', suggestType }          no projects yet    -> create the first one
 // A CONTINUING session never calls this — it keeps the project stored on the session.
-function decideNewSessionProject(workDir, chatId) {
-  const projects = listProjects(workDir);
+function decideNewSessionProject(workDir, chatId, countByProject, audience = 'default') {
+  const projects = sortByUsage(listProjects(workDir, audience), countByProject);
   if (projects.length === 0) return { action: 'create', suggestType: 'generic' };
   if (projects.length === 1) return { action: 'auto', project: projects[0] };
-  return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId) };
+  return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId, audience) };
 }
 
 // PROFILE.md text for merging into the system prompt (null if none).
@@ -296,6 +390,19 @@ function profileText(workDir, id) {
   }
 }
 
+// agent-project-notes.md text — same shape as profile-tier agent-notes.md, but scoped to
+// one project. Never seeded (unlike PROFILE.md): only exists once Claude/Hermes writes
+// something project-specific it learned, so an empty file never pollutes the prompt.
+function notesText(workDir, id) {
+  if (!id) return null;
+  try {
+    const t = fs.readFileSync(notesPath(workDir, id), 'utf8').trim();
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   TYPES,
   parseTypedName,
@@ -303,14 +410,18 @@ module.exports = {
   projectsRoot,
   projectDir,
   profilePath,
+  notesPath,
   getProject,
   listProjects,
+  sortByUsage,
   createProject,
+  bugsProject,
   touchProject,
   getActiveProjectId,
   setActiveProjectId,
   decideNewSessionProject,
   profileText,
+  notesText,
   setProjectSummary,
   needsSummary,
   renameProject,

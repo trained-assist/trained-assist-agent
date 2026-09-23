@@ -9,8 +9,8 @@ import { tmpdir } from 'os';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { getQuickAnswer } = require('../../src/runner.js');
-const { ENGINE_SWITCH_INTENT } = require('../../src/runner.js')._intents;
+const { getQuickAnswer, shouldAttemptQuickAnswer } = require('../../src/runner');
+const { ENGINE_SWITCH_INTENT } = require('../../src/runner')._intents;
 const profiles = require('../../src/profiles.js');
 
 describe('ENGINE_SWITCH_INTENT regex', () => {
@@ -73,5 +73,26 @@ describe('getQuickAnswer handles /switch2klod, /switch2codex end-to-end', () => 
     expect(reply).toMatch(/Claude Code/);
     expect(profiles.getEngine(workDir, 'chat-1')).toBe('claude');
     expect(profiles.getEngine(workDir, 'chat-2')).toBe('codex');
+  });
+});
+
+// Regression: forceClaude must not swallow slash commands. server.js resumePendingTasks()
+// re-runs a task interrupted by a restart with forceClaude=true; before this guard an
+// interrupted `/switch2klod` was replayed straight to the LLM, which answered
+// «не распознал команду» instead of switching the engine (live 2026-09-22).
+describe('shouldAttemptQuickAnswer (forceClaude vs slash commands)', () => {
+  it('skips quick answers for free-form prose when forceClaude is set', () => {
+    expect(shouldAttemptQuickAnswer(true, 'сделай нормальный отчёт по выручке')).toBe(false);
+  });
+
+  it('ALWAYS attempts quick answers for a slash command, even with forceClaude', () => {
+    expect(shouldAttemptQuickAnswer(true, '/switch2klod')).toBe(true);
+    expect(shouldAttemptQuickAnswer(true, '/switch2klod@super_personal_assistant_bot')).toBe(true);
+    expect(shouldAttemptQuickAnswer(true, '  /persona роль')).toBe(true);
+  });
+
+  it('attempts quick answers on the normal path (forceClaude unset)', () => {
+    expect(shouldAttemptQuickAnswer(undefined, 'привет')).toBe(true);
+    expect(shouldAttemptQuickAnswer(false, '/agent_info')).toBe(true);
   });
 });

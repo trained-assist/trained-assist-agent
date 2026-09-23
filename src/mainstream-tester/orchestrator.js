@@ -4,11 +4,18 @@
 // Wired to FakeTelegram events via onFinalMessage().
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { decideFirstAction, decideNextAction } = require('./mainstream-decider');
 
 const STEP_TIMEOUT_MS = 180_000; // 3 min per step (Claude can be slow)
 const TEST_CHAT_ID = 999_000_001;
+
+// Durable cross-run bug log — separate from the per-invocation stateDir (which
+// stays isolated to avoid GTD spillover between agent instances). Every bug
+// from every run also lands here so bugs accumulate instead of being scattered
+// across timestamped directories.
+const GLOBAL_BUGS_FILE = path.join(os.homedir(), 'agent-data', 'mainstream-test', 'bugs.jsonl');
 
 // Patterns that indicate something went wrong in the agent response.
 const BUG_PATTERNS = [
@@ -42,6 +49,8 @@ class Orchestrator {
   _logBug(bug) {
     const entry = { ...bug, runId: this.state?.runId, at: new Date().toISOString() };
     fs.appendFileSync(this.bugsFile, JSON.stringify(entry) + '\n');
+    fs.mkdirSync(path.dirname(GLOBAL_BUGS_FILE), { recursive: true });
+    fs.appendFileSync(GLOBAL_BUGS_FILE, JSON.stringify(entry) + '\n');
     this.state.bugs.push(entry);
     this._saveState();
     console.warn(`[bug] type=${bug.type} step=${bug.step ?? '?'} detail=${(bug.detail || '').slice(0, 120)}`);

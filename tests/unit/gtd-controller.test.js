@@ -505,3 +505,121 @@ describe('runDue — progress-check', () => {
     expect(after.closedReason).toBe('done');
   });
 });
+
+// ── settleResumedGtd (GTD turn resumed after a restart) ───────────────────────
+
+describe('settleResumedGtd', () => {
+  let base, workDir, G;
+  const rec = (over = {}) => ({
+    sessionId: 's-1', chatId: 42, status: 'open', iterations: 1, maxIterations: 5,
+    etaMinutes: 20, dueAt: 0, originalTask: 't', ...over,
+  });
+  beforeEach(() => { base = mkTmp(); workDir = makeUserDir(base, 'alice'); G = freshG(); });
+  afterEach(() => { rmSync(base, { recursive: true, force: true }); });
+
+  it('closes the record when the resumed turn says GTD: done', () => {
+    G.writeGtd(workDir, rec());
+    G.settleResumedGtd(workDir, 's-1', 'Всё доехало.\n\nGTD: done');
+    const after = G.readGtd(workDir, 's-1');
+    expect(after.status).toBe('closed');
+    expect(after.closedReason).toBe('done');
+    expect(G.listGtd(workDir).filter(r => r.status === 'open')).toHaveLength(0);
+  });
+
+  it('closes on GTD: escalated', () => {
+    G.writeGtd(workDir, rec());
+    G.settleResumedGtd(workDir, 's-1', 'слишком сложно\nGTD: escalated');
+    expect(G.readGtd(workDir, 's-1').closedReason).toBe('complexity-escalated');
+  });
+
+  it('keeps the record open and pushes dueAt out when not done', () => {
+    G.writeGtd(workDir, rec());
+    G.settleResumedGtd(workDir, 's-1', 'ещё жду CI\nGTD: continue', { now: 1_000_000 });
+    const after = G.readGtd(workDir, 's-1');
+    expect(after.status).toBe('open');
+    expect(after.dueAt).toBe(1_000_000 + 20 * 60 * 1000);
+  });
+
+  it('is a no-op for a missing or already-closed record', () => {
+    expect(G.settleResumedGtd(workDir, 's-none', 'GTD: done')).toBeNull();
+    G.writeGtd(workDir, rec({ status: 'closed', closedReason: 'no-progress' }));
+    G.settleResumedGtd(workDir, 's-1', 'GTD: done');
+    expect(G.readGtd(workDir, 's-1').closedReason).toBe('no-progress');
+  });
+});
+
+// ── mirrorGtdChecklist ──────────────────────────────────────────────────────
+// checklist.md stays authoritative for the tick loop; this only best-effort
+// pushes a copy to checklist.trainedassist.store so the human sees GTD
+// auto-tracking checklists in the same UI as their manual ones.
+
+describe('mirrorGtdChecklist', () => {
+  const realFetch = global.fetch;
+  const realKey = process.env.CHECKLIST_API_KEY;
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    if (realKey === undefined) delete process.env.CHECKLIST_API_KEY;
+    else process.env.CHECKLIST_API_KEY = realKey;
+  });
+
+  it('does nothing when CHECKLIST_API_KEY is not configured', async () => {
+    const G = freshG();
+    delete process.env.CHECKLIST_API_KEY;
+    let called = false;
+    global.fetch = async () => { called = true; return { ok: true, json: async () => ({}) }; };
+    await G.mirrorGtdChecklist({ username: 'u1', sessionId: 's-1', checklist: { goal: null, items: [{ text: 'a', done: false }] }, rec: {} });
+    expect(called).toBe(false);
+  });
+
+  it('does nothing when checklist has no items', async () => {
+    const G = freshG();
+    process.env.CHECKLIST_API_KEY = 'k';
+    let called = false;
+    global.fetch = async () => { called = true; return { ok: true, json: async () => ({}) }; };
+    await G.mirrorGtdChecklist({ username: 'u1', sessionId: 's-1', checklist: { goal: null, items: [] }, rec: {} });
+    expect(called).toBe(false);
+  });
+
+  it('upserts by external_key then syncs items, using username+sessionId as the key', async () => {
+    const G = freshG();
+    process.env.CHECKLIST_API_KEY = 'k';
+    const calls = [];
+    global.fetch = async (url, opts) => {
+      calls.push({ url, body: opts.body ? JSON.parse(opts.body) : null, auth: opts.headers.Authorization });
+      if (url.endsWith('/api/checklists')) return { ok: true, json: async () => ({ id: 'cl-1' }) };
+      return { ok: true, json: async () => ({}) };
+    };
+    await G.mirrorGtdChecklist({
+      username: 'u1', sessionId: 's-1',
+      checklist: { goal: 'Ship it', items: [{ text: 'CI green', done: true }, { text: 'Deploy', done: false }] },
+      rec: { originalTask: 'unused when goal is set' },
+    });
+    expect(calls.length).toBe(2);
+    expect(calls[0].url).toMatch(/\/api\/checklists$/);
+    expect(calls[0].body).toEqual({ name: 'Ship it', external_key: 'gtd:u1:s-1', source: 'agent' });
+    expect(calls[0].auth).toBe('Bearer k');
+    expect(calls[1].url).toBe(`${G.CHECKLIST_API_BASE}/api/checklists/cl-1/sync-items`);
+    expect(calls[1].body).toEqual({ items: [{ text: 'CI green', done: true }, { text: 'Deploy', done: false }] });
+  });
+
+  it('swallows fetch errors without throwing', async () => {
+    const G = freshG();
+    process.env.CHECKLIST_API_KEY = 'k';
+    global.fetch = async () => { throw new Error('network down'); };
+    await expect(G.mirrorGtdChecklist({
+      username: 'u1', sessionId: 's-1', checklist: { goal: 'g', items: [{ text: 'a', done: false }] }, rec: {},
+    })).resolves.toBeUndefined();
+  });
+
+  it('stops after a non-ok create response (no sync-items call)', async () => {
+    const G = freshG();
+    process.env.CHECKLIST_API_KEY = 'k';
+    let calls = 0;
+    global.fetch = async () => { calls += 1; return { ok: false, json: async () => ({}) }; };
+    await G.mirrorGtdChecklist({
+      username: 'u1', sessionId: 's-1', checklist: { goal: 'g', items: [{ text: 'a', done: false }] }, rec: {},
+    });
+    expect(calls).toBe(1);
+  });
+});

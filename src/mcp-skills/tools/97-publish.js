@@ -17,6 +17,12 @@ const AGENT_DATA_DIR = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'ag
 // Public base: prefer profile's configured domain, fall back to AGENT_PUBLIC_URL
 const DEFAULT_BASE = process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru';
 
+// A raw IP or sslip.io host looks unprofessional on a link sent to a client/partner
+// (flagged during the Renovatio ТЗ session). set_publish_domain already lets a profile
+// fix this once; nudge whoever is calling publish_page so they don't have to be told
+// by hand every time.
+const RAW_HOST_RE = /^https?:\/\/(\d{1,3}[.-]\d{1,3}[.-]\d{1,3}[.-]\d{1,3}(\.sslip\.io)?)(\/|$)/i;
+
 function sha256(s) {
   return createHash('sha256').update(s).digest('hex');
 }
@@ -211,6 +217,10 @@ module.exports = {
           slug: slugClean,
           is_protected: !!password,
           ...(rawSource ? { raw_url: `${pageUrl}?raw` } : {}),
+          ...(RAW_HOST_RE.test(base) ? {
+            domain_tip: 'Ссылка на сыром IP/sslip.io — для документов, уходящих клиенту/партнёру, ' +
+              'настрой один раз красивый домен: set_publish_domain("https://your-domain.ru"), дальше все ссылки будут на нём.',
+          } : {}),
         };
       },
     },
@@ -236,6 +246,52 @@ module.exports = {
             is_protected: !p.is_public,
             created: p.created,
           })),
+        };
+      },
+    },
+
+    get_page_content: {
+      description:
+        'Read back the current source (markdown/text) of a page you published, for a safe edit. ' +
+        'Use this BEFORE editing a published page in place — load the current source, edit it as a normal ' +
+        'string in your own context, then republish the FULL content with publish_page (same slug). ' +
+        'Never patch the on-disk index.html/source file directly (e.g. via sed/python) — that has previously ' +
+        'corrupted a published page through double JSON-escaping and collapsed the markdown into one blob.',
+      inputSchema: {
+        type: 'object',
+        required: ['slug'],
+        properties: {
+          slug: { type: 'string', description: 'Slug of the page to read.' },
+        },
+      },
+      handler: async ({ slug } = {}) => {
+        if (!slug) return { error: 'slug required' };
+        if (!USER_ID) return { error: 'USER_ID not set' };
+
+        const username = USER_ID;
+        const dir = path.join(pagesDir(), cleanSlug(slug));
+        if (!fs.existsSync(dir)) return { error: 'page not found' };
+
+        let meta;
+        try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')); } catch {
+          return { error: 'could not read page metadata' };
+        }
+        if (meta.owner !== username) return { error: 'not your page' };
+
+        const sourcePath = path.join(dir, 'source');
+        const hasSource = fs.existsSync(sourcePath);
+        const content = hasSource
+          ? fs.readFileSync(sourcePath, 'utf8')
+          : fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+
+        return {
+          slug: meta.slug,
+          title: meta.title,
+          format: meta.format,
+          content,
+          note: hasSource
+            ? 'Это исходный markdown/text — редактируй его и вызови publish_page с тем же slug целиком.'
+            : 'Страница опубликована как html без сохранённого markdown-источника — content это сам HTML.',
         };
       },
     },

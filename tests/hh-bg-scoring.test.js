@@ -177,6 +177,46 @@ describe('readAtsConfig — vacancy mismatch guard', () => {
   });
 });
 
+// ── Test: per-vacancy ats_config namespacing — the fix that unblocks concurrent
+//    scoring of several vacancies (previously only one global ats_config.json
+//    existed, so tracking vacancy B silently starved vacancy A of scoring). ────
+
+describe('readAtsConfig — per-vacancy namespacing (multi-vacancy tracking)', () => {
+  function writeNamespacedAtsConfig(workDir, vacancyId, config = ATS_CONFIG) {
+    const dir = join(workDir, 'contexts', 'hh');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `ats_config:${vacancyId}.json`),
+      JSON.stringify({ value: config, updated_at: new Date().toISOString() }, null, 2),
+    );
+  }
+
+  it('prefers ats_config:{vacancyId} over the legacy singleton when both exist', () => {
+    writeAtsConfig(WORK_DIR, { ...ATS_CONFIG, vacancy_title: 'Legacy singleton (stale)' });
+    writeNamespacedAtsConfig(WORK_DIR, 'vac-A', { ...ATS_CONFIG, vacancy_title: 'Vacancy A config' });
+
+    const config = scoring.readAtsConfig(WORK_DIR, 'vac-A');
+    expect(config.vacancy_title).toBe('Vacancy A config');
+  });
+
+  it('two vacancies each get their own config — scoring one never starves the other', () => {
+    writeNamespacedAtsConfig(WORK_DIR, 'vac-A', { ...ATS_CONFIG, vacancy_title: 'Vacancy A' });
+    writeNamespacedAtsConfig(WORK_DIR, 'vac-B', { ...ATS_CONFIG, vacancy_title: 'Vacancy B' });
+
+    expect(scoring.readAtsConfig(WORK_DIR, 'vac-A').vacancy_title).toBe('Vacancy A');
+    expect(scoring.readAtsConfig(WORK_DIR, 'vac-B').vacancy_title).toBe('Vacancy B');
+  });
+
+  it('falls back to the legacy singleton when no per-vacancy config exists yet (backward compat)', () => {
+    // Uses its own vacancy id, distinct from the ones the other tests in this
+    // describe block namespace configs for (WORK_DIR/contexts persists across tests).
+    writeAtsConfig(WORK_DIR, { ...ATS_CONFIG, vacancy_id: 'vac-not-yet-migrated' });
+    const config = scoring.readAtsConfig(WORK_DIR, 'vac-not-yet-migrated');
+    expect(config).not.toBeNull();
+    expect(config.vacancy_title).toBe(ATS_CONFIG.vacancy_title);
+  });
+});
+
 // ── Test 2: saveCandidateHistory / readCandidateHistory roundtrip ─────────────
 
 describe('Candidate history — write & read (disk persistence)', () => {

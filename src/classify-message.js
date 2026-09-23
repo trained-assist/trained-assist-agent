@@ -83,7 +83,7 @@ ${sessionDescriptions}
       'Authorization': `Bearer ${openrouterKey}`,
     },
     body: JSON.stringify({
-      model: 'openai/gpt-4o-mini',
+      model: 'z-ai/glm-5.3-flash',
       max_tokens: 64,
       messages: [{ role: 'user', content: prompt }],
     }),

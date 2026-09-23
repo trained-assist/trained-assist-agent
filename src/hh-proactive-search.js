@@ -110,7 +110,7 @@ function scoreCandidate(r, atsConfig) {
   const reviewThreshold = totalPossible * 0.32;
   const tag = score >= passThreshold ? 'PASS' : score >= reviewThreshold ? 'REVIEW' : 'WEAK';
 
-  return { score, signals, tag };
+  return { score, signals, tag, totalPossible };
 }
 
 // AI enrichment: plus/yellow/red tags + 2-para summary for one candidate
@@ -306,6 +306,144 @@ function mergeSeenIds(username, vacancyId, collectedIds) {
   return { newIds: new Set(newIds), newCount: newIds.length, totalSeenAfter: Object.keys(bucket).length, firstRun };
 }
 
+// Unified candidate store: consolidates auto-discovered (source:'search') and
+// manually-added (source:'manual') candidates into one persistent, accumulating
+// list so the proactive page can render a single scrollable feed instead of the
+// old "overwritten every search run" search-results-<date>.json snapshot.
+// Keyed by HH resume id (global, not per-vacancy — a candidate found for one
+// vacancy today is the same person if added manually tomorrow).
+// Schema: { "<hh_resume_id>": { ...candidate fields, source, found_at|added_at }, ... }
+function allCandidatesPath(username) {
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  return path.join(dataDir, 'hh', String(username), 'proactive', 'all-candidates.json');
+}
+
+function loadAllCandidates(username) {
+  try {
+    const raw = fs.readFileSync(allCandidatesPath(username), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[proactive-search] all-candidates read failed:', e.message);
+    return {};
+  }
+}
+
+function saveAllCandidates(username, data) {
+  const file = allCandidatesPath(username);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+// Dedup-merge a vacancy id into an existing vacancy_ids[] array without dropping
+// entries from other vacancies. Returns a new array (never mutates the input).
+// Missing/empty vacancy_ids means "wildcard — belongs to all vacancies" (see
+// candidateMatchesVacancy below); we only start populating the array once a
+// vacancy_id is actually known for this record.
+function mergeVacancyId(existingIds, vacancyId) {
+  const ids = Array.isArray(existingIds) ? existingIds.map(String) : [];
+  if (!vacancyId) return ids;
+  const vid = String(vacancyId);
+  return ids.includes(vid) ? ids : [...ids, vid];
+}
+
+// Multi-vacancy step 7/7: does `candidate` belong to the given vacancy?
+// A missing/empty vacancy_ids field is a wildcard — it means the record predates
+// this field (backfill case) or was manually added with no active vacancy resolvable,
+// and should show up under every vacancy tab rather than silently disappearing.
+// No vacancyId filter requested (falsy) → everything passes through unfiltered.
+function candidateMatchesVacancy(candidate, vacancyId) {
+  if (!vacancyId) return true;
+  const ids = candidate?.vacancy_ids;
+  if (!Array.isArray(ids) || ids.length === 0) return true; // wildcard
+  return ids.map(String).includes(String(vacancyId));
+}
+
+// Merge a batch of freshly-scored/enriched search candidates into the unified store.
+// Existing records (e.g. manually-added, or already found+annotated) are NOT clobbered
+// wholesale — we merge new fields in while preserving the original found_at/source so
+// re-running search doesn't reset "when we first found this person" or flip a manual
+// candidate back to source:'search'. `vacancyId` (optional — omitted callers keep the
+// pre-step-7 behavior of leaving vacancy_ids untouched) is dedup-appended into each
+// record's vacancy_ids so a candidate re-found under a different vacancy's search
+// later keeps showing up under both tabs instead of one clobbering the other.
+function mergeSearchCandidatesIntoAll(username, candidates, foundAtById, vacancyId) {
+  const store = loadAllCandidates(username);
+  const now = new Date().toISOString();
+  for (const c of candidates || []) {
+    if (!c || !c.id) continue;
+    const id = String(c.id);
+    const existing = store[id];
+    const foundAt = (foundAtById && foundAtById[id]) || existing?.found_at || now;
+    store[id] = {
+      ...existing,
+      ...c,
+      source: existing?.source === 'manual' ? 'manual' : 'search',
+      found_at: foundAt,
+      vacancy_ids: mergeVacancyId(existing?.vacancy_ids, vacancyId),
+    };
+  }
+  saveAllCandidates(username, store);
+  return store;
+}
+
+// Add a single manually-added candidate (from a pasted HH resume URL/id) to the
+// unified store. `resumeData` is the raw HH /resumes/{id} response, shaped through
+// the same field mapping runProactiveSearch uses for search results so the card
+// renderer doesn't need to special-case manual entries. `vacancyId` tags the record
+// with whichever vacancy was active when it was added; if no active vacancy can be
+// resolved, vacancy_ids stays [] (wildcard — shows under every tab).
+function addManualCandidate(username, resumeData, vacancyId) {
+  if (!resumeData || !resumeData.id) throw new Error('resumeData.id required');
+  const id = String(resumeData.id);
+  const expMonths = resumeData.total_experience?.months ?? 0;
+  const companies = (resumeData.experience || []).slice(0, 3).map(e => e.company || '').filter(Boolean);
+  const now = new Date().toISOString();
+  const store = loadAllCandidates(username);
+  const existing = store[id];
+  const record = {
+    id,
+    hh_url: resumeData.alternate_url || `https://hh.ru/resume/${id}`,
+    title: resumeData.title || '',
+    first_name: resumeData.first_name || '',
+    last_name: resumeData.last_name || '',
+    age: resumeData.age || null,
+    area: resumeData.area?.name || '',
+    total_exp_months: expMonths,
+    total_exp_years: Math.round(expMonths / 12 * 10) / 10,
+    score: existing?.score ?? 0,
+    tag: existing?.tag ?? 'REVIEW',
+    score_signals: existing?.score_signals || [],
+    salary: resumeData.salary || null,
+    recent_companies: companies,
+    experience: (resumeData.experience || []).slice(0, 5).map(e => ({
+      position: e.position || '',
+      company: e.company || '',
+      start: e.start || '',
+      end: e.end || null,
+    })),
+    ...existing,
+    source: 'manual',
+    added_at: existing?.added_at || now,
+    found_at: existing?.found_at || now,
+    vacancy_ids: mergeVacancyId(existing?.vacancy_ids, vacancyId),
+  };
+  store[id] = record;
+  saveAllCandidates(username, store);
+  return record;
+}
+
+// Parse an HH resume id out of a full resume URL (e.g. https://hh.ru/resume/abc123def)
+// or accept a bare id as-is. Strips query strings/fragments and non-alphanumeric noise.
+function parseResumeId(input) {
+  const str = String(input || '').trim();
+  const m = str.match(/\/resume\/([a-zA-Z0-9]+)/);
+  if (m) return m[1];
+  return str.replace(/[^a-zA-Z0-9]/g, '');
+}
+
 // Per-vacancy search-query store. Queries live in the same proactive directory, keyed by
 // vacancy ID. This avoids the old anti-pattern of embedding them inside ats_config.json —
 // that file is overwritten on every ATS edit and is shared across all vacancies for a user,
@@ -360,21 +498,21 @@ function saveStoredQueries(username, vacancyId, queries, configHash) {
   fs.renameSync(tmp, file);
 }
 
-// Build a short Telegram digest for a successful proactive run with new candidates.
-// Caller passes the already-enriched slice of `newCandidates` (typically ≤10 shown).
-function buildProactiveDigest({ vacancyTitle, newCount, totalSeen, newCandidates, url }) {
-  const head = `🧊 Холодный поиск: ${newCount} новых кандидатов для «${vacancyTitle || 'вакансии'}»`;
-  const stats = `Всего в базе по этой вакансии: ${totalSeen}.`;
-  const top = (newCandidates || []).slice(0, 10).map((c, i) => {
-    const name = `${c.first_name || ''} ${c.last_name || ''}`.trim() || '—';
-    const yrs = c.total_exp_years ? `${c.total_exp_years} лет опыта` : '';
-    const city = c.area || '';
-    const tag = c.tag === 'PASS' ? '✅' : c.tag === 'REVIEW' ? '🟡' : '⚪️';
-    return `${i + 1}. ${tag} ${name} — ${yrs}${city ? ', ' + city : ''}`;
-  });
-  const tail = newCandidates && newCandidates.length > 10 ? `\n…и ещё ${newCandidates.length - 10}` : '';
-  const link = url ? `\nПолный список: ${url}` : '';
-  return [head, stats, ...top, tail, link].filter(Boolean).join('\n');
+// Build a short Telegram digest for a successful proactive run.
+// Multi-vacancy step 4/6 (owner directive): Telegram never lists candidate names for
+// cold search either ("мы в телеге не отвечаем холодный поиск, вот тебе ссылка") —
+// one line with counts, then a link to the results page. `newCandidates` is no longer
+// rendered here; callers may keep passing it (e.g. for other consumers), it's ignored.
+function buildProactiveDigest({ vacancyTitle, newCount, totalNewCount, totalSeen, url, threshold }) {
+  const total = Number.isFinite(totalNewCount) ? totalNewCount : newCount;
+  // threshold>0 and some candidates got filtered out → say so, otherwise keep the
+  // original unqualified "N новых кандидатов" wording unchanged.
+  const countLine = (threshold > 0 && total !== newCount)
+    ? `${newCount} сильных кандидатов (≥${threshold}%) из ${total} новых`
+    : `${newCount} новых кандидатов`;
+  const head = `🧊 Холодный поиск: ${countLine} для «${vacancyTitle || 'вакансии'}» (всего в базе: ${totalSeen}).`;
+  const link = url ? ` Смотри здесь: ${url}` : '';
+  return `${head}${link}`;
 }
 
 // --- Candidate comments (for search refinement) ---
@@ -403,6 +541,36 @@ function saveCandidateComment(username, candidateId, commentData) {
   const tmp = file + '.tmp-' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(comments, null, 2), 'utf8');
   fs.renameSync(tmp, file);
+}
+
+// Candidate triage lifecycle, driven entirely by `status` on the unified
+// all-candidates record: 'active' (default — just showed up in search, still
+// in the main feed) -> 'starred' (recruiter picked it out) -> 'archived'
+// (recruiter is done with it; kept for error-recovery/debugging, not expected
+// to be revisited). A candidate can also go directly active -> archived, or
+// back from archived/starred to active. Missing status on legacy records
+// means 'active' (see candidateStatusOf below) so old data doesn't need a
+// backfill migration.
+const CANDIDATE_STATUSES = ['active', 'starred', 'archived'];
+
+function candidateStatusOf(candidate) {
+  return CANDIDATE_STATUSES.includes(candidate?.status) ? candidate.status : 'active';
+}
+
+// Persist a status transition on the unified store. `status_changed_at` drives
+// the starred/archived tab sort ("newest on top") — the main active tab sorts
+// by score instead (see handlers/hh.js).
+function setCandidateStatus(username, candidateId, status) {
+  if (!CANDIDATE_STATUSES.includes(status)) {
+    throw new Error(`invalid status "${status}" — must be one of ${CANDIDATE_STATUSES.join(', ')}`);
+  }
+  const store = loadAllCandidates(username);
+  const id = String(candidateId);
+  if (!store[id]) throw new Error('candidate not found');
+  store[id].status = status;
+  store[id].status_changed_at = new Date().toISOString();
+  saveAllCandidates(username, store);
+  return store[id];
 }
 
 // Extract search exclusion hints from candidate comments.
@@ -533,7 +701,7 @@ ${prefStr}
 PASS/REVIEW считаются относительно суммы весов этой вакансии — точную оценку даёт следующий шаг.
 
 🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
-Топ-30 по предварительному скорингу прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента.`;
+Топ-30 по предварительному скорингу + ВСЕ новые кандидаты этого прогона (даже если не попали в топ-30) прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест кандидаты по именам не попадают — только счётчик и ссылка на страницу со списком.`;
 }
 
 // HH resume search with optional one-shot refresh on token-expired (401/403).
@@ -649,7 +817,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
   for (const r of allCandidates.values()) {
     const result = scoreCandidate(r, atsConfig);
     if (!result) continue;
-    const { score, signals, tag } = result;
+    const { score, signals, tag, totalPossible } = result;
     const expMonths = r.total_experience?.months ?? 0;
     const companies = (r.experience || []).slice(0, 3).map(e => e.company || '').filter(Boolean);
     scored.push({
@@ -663,6 +831,10 @@ async function runProactiveSearch(username, workDir, options = {}) {
       total_exp_months: expMonths,
       total_exp_years: Math.round(expMonths / 12 * 10) / 10,
       score,
+      // Normalized 0-100 score, relative to this vacancy's own criteria weights —
+      // lets a recruiter set one Telegram notify threshold (e.g. "≥80") that means
+      // the same thing across vacancies with very different raw weight totals.
+      score_pct: totalPossible > 0 ? Math.round((score / totalPossible) * 100) : 0,
       tag,
       score_signals: signals,
       salary: r.salary || null,
@@ -677,14 +849,42 @@ async function runProactiveSearch(username, workDir, options = {}) {
   }
 
   scored.sort((a, b) => b.score - a.score);
-  const top30 = scored.slice(0, 30);
 
-  // AI enrichment for top-30 (tags + summary)
-  let enriched = top30;
-  if (orKey && top30.length > 0) {
-    console.log(`[proactive-search] enriching ${top30.length} candidates with AI…`);
+  // Seen/new status must be computed against the FULL scored pool, not just the
+  // AI-enriched slice below — otherwise a genuinely new candidate who scores outside
+  // the top-30 never gets marked seen or surfaced as "new" and silently vanishes
+  // forever (recruiter never sees them, digest never mentions them).
+  const collectedIds = scored.map(c => c.id).filter(Boolean);
+  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
+  try {
+    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
+  } catch (e) {
+    console.error('[proactive-search] seen-ids merge failed:', e.message);
+  }
+
+  const top30 = scored.slice(0, 30);
+  const top30Ids = new Set(top30.map(c => c.id));
+  // AI enrichment covers the top-30 by pre-score (for the review page) plus every
+  // candidate that's new this run, so new candidates always get tags/summary and
+  // show up in the Telegram digest even when their pre-score doesn't crack the
+  // top-30. Skipped on first run — then every candidate is "new" and this would
+  // enrich the entire backlog; first run keeps the old top-30-only behavior.
+  // Capped as a cost safety net for an unusually large incremental batch.
+  const NEW_ENRICH_CAP = 50;
+  let newButNotTop30 = seenInfo.firstRun
+    ? []
+    : scored.filter(c => seenInfo.newIds.has(c.id) && !top30Ids.has(c.id));
+  if (newButNotTop30.length > NEW_ENRICH_CAP) {
+    console.warn(`[proactive-search] ${newButNotTop30.length} new candidates outside top-30, capping AI enrichment at ${NEW_ENRICH_CAP}`);
+    newButNotTop30 = newButNotTop30.slice(0, NEW_ENRICH_CAP);
+  }
+  const toEnrich = [...top30, ...newButNotTop30];
+
+  let enriched = toEnrich;
+  if (orKey && toEnrich.length > 0) {
+    console.log(`[proactive-search] enriching ${toEnrich.length} candidates with AI (top-30 + ${newButNotTop30.length} new)…`);
     try {
-      enriched = await enrichCandidates(top30, atsConfig, orKey);
+      enriched = await enrichCandidates(toEnrich, atsConfig, orKey);
     } catch (e) {
       console.error('[proactive-search] enrichment failed:', e.message);
     }
@@ -698,22 +898,26 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const outDir = path.join(dataDir, 'hh', username, 'proactive');
   fs.mkdirSync(outDir, { recursive: true });
 
-  // Compute seen-IDs BEFORE writing the results file so we can mark is_new on candidates.
-  // Any crash after this point means a duplicate alert next time — acceptable trade-off
-  // (losing seen-IDs would cause candidates to be shown again forever).
-  const collectedIds = enriched.map(c => c.id).filter(Boolean);
-  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
-  try {
-    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
-  } catch (e) {
-    console.error('[proactive-search] seen-ids merge failed:', e.message);
-  }
-
   // Mark is_new on candidates that appear for the first time
   const markedCandidates = enriched.map(c => ({
     ...c,
     is_new: seenInfo.newIds.has(c.id),
   }));
+
+  // Merge into the unified all-candidates store so the proactive page can render a
+  // single accumulating list (search + manual) instead of only the latest snapshot.
+  // found_at comes from the per-vacancy seen-ids bucket (date the id was first seen)
+  // when available, so re-running search doesn't reset "when we found this person".
+  try {
+    const seenBucket = loadSeenIds(username)[vacancyKey] || {};
+    const foundAtById = {};
+    for (const c of markedCandidates) {
+      if (c.id && seenBucket[c.id]) foundAtById[c.id] = new Date(seenBucket[c.id]).toISOString();
+    }
+    mergeSearchCandidatesIntoAll(username, markedCandidates, foundAtById, vacancyKey);
+  } catch (e) {
+    console.error('[proactive-search] all-candidates merge failed:', e.message);
+  }
 
   const outFile = path.join(outDir, `search-results-${dateStr}.json`);
   const output = {
@@ -737,19 +941,49 @@ async function runProactiveSearch(username, workDir, options = {}) {
   // module stays Telegram-free — easier to test, and the same mergeSeenIds works
   // for cron-driven and ad-hoc runs alike.
   const notifyChat = typeof options.notifyChat === 'function' ? options.notifyChat : null;
-  if (notifyChat && seenInfo.newCount > 0) {
-    const newCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
-    Promise.resolve()
-      .then(() => notifyChat({
-        username,
-        vacancyTitle: output.vacancy_title,
-        newCount: seenInfo.newCount,
-        totalSeen: seenInfo.totalSeenAfter,
-        firstRun: seenInfo.firstRun,
-        newCandidates,
-        proactiveUrl: typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '',
-      }))
-      .catch(e => console.error('[proactive-search] notify failed:', e.message));
+  // options.alwaysNotify (set by the 30-min background scheduler in hh-negotiations.js,
+  // NOT by the on-demand hh_proactive_search tool) means: send a confirmation even when
+  // zero candidates qualify. The scheduler is the recruiter's only signal that an
+  // unattended run happened at all — going silent on "0 new" or "all below threshold"
+  // looked identical to "the scheduler is broken" (owner report, 2026-09-22). The
+  // on-demand tool already reports 0-results in its own chat reply, so it keeps the
+  // old skip-when-nothing-qualifies behavior to avoid a duplicate message.
+  if (notifyChat && (options.alwaysNotify || seenInfo.newCount > 0)) {
+    const allNewCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
+    // Recruiter-configurable noise filter (schedule.notify_threshold, 0-100, default 0 =
+    // no filter, set via hh_proactive_schedule action=enable). Without it every run pings
+    // Telegram with the raw new-candidate count even when none of them are actually
+    // relevant ("4 новых", "10 новых" — owner ask: filter to only the strong ones).
+    // options.notifyThreshold lets a caller override per-run; otherwise read from schedule.
+    const schedule = loadSchedule(username) || {};
+    const notifyThreshold = options.notifyThreshold !== undefined
+      ? Number(options.notifyThreshold) || 0
+      : Number(schedule.notify_threshold) || 0;
+    const newCandidates = notifyThreshold > 0
+      ? allNewCandidates.filter(c => (c.score_pct ?? 0) >= notifyThreshold)
+      : allNewCandidates;
+    if (newCandidates.length > 0 || options.alwaysNotify) {
+      // options.proactiveUrl is built by the caller BEFORE vacancyKey is resolved here
+      // (it doesn't know which vacancy will run yet), so append vacancy_id at this end
+      // instead of asking every caller to guess it in advance.
+      const baseUrl = typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '';
+      const proactiveUrlWithVacancy = baseUrl
+        ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}vacancy_id=${encodeURIComponent(vacancyKey)}`
+        : '';
+      Promise.resolve()
+        .then(() => notifyChat({
+          username,
+          vacancyTitle: output.vacancy_title,
+          newCount: newCandidates.length,
+          totalNewCount: seenInfo.newCount,
+          totalSeen: seenInfo.totalSeenAfter,
+          firstRun: seenInfo.firstRun,
+          newCandidates,
+          threshold: notifyThreshold,
+          proactiveUrl: proactiveUrlWithVacancy,
+        }))
+        .catch(e => console.error('[proactive-search] notify failed:', e.message));
+    }
   }
 
   return {
@@ -758,6 +992,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
     pass_count,
     review_count,
     searched_at: now.toISOString(),
+    vacancy_id: vacancyKey,
     vacancy_title: output.vacancy_title,
     ai_enriched: output.ai_enriched,
     new_count: seenInfo.newCount,
@@ -846,7 +1081,18 @@ module.exports = {
   seenIdsPath,
   loadCandidateComments,
   saveCandidateComment,
+  CANDIDATE_STATUSES,
+  candidateStatusOf,
+  setCandidateStatus,
   getSearchExclusions,
+  // Unified all-candidates store (search + manual)
+  allCandidatesPath,
+  loadAllCandidates,
+  saveAllCandidates,
+  mergeSearchCandidatesIntoAll,
+  addManualCandidate,
+  candidateMatchesVacancy,
+  parseResumeId,
 // Per-vacancy query store
   atsConfigHash,
   queriesStorePath,
