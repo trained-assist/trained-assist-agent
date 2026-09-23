@@ -253,6 +253,7 @@ function listConnectedServices(userId) {
 function revokeService(userId, serviceName) {
   const dir = tokensDir(userId);
   const ALIASES = {
+    hh: 'hh', хх: 'hh', headhunter: 'hh',
     github: 'github', гитхаб: 'github',
     weeek: 'weeek', вик: 'weeek',
     nalog: 'nalog', налог: 'nalog', нпд: 'nalog', самозан: 'nalog',
