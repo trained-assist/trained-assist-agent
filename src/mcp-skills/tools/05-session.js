@@ -2,7 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
 module.exports = {
   tools: {
@@ -79,8 +78,7 @@ module.exports = {
         const username = process.env.AGENT_USER_ID;
         if (!username) return { error: 'AGENT_USER_ID not set' };
 
-        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-        const sessionsDir = path.join(dataDir, 'sessions', username, 'sessions');
+        const sessionsDir = require('../../data-paths').sessionsDirPath(username);
 
         let re;
         try {

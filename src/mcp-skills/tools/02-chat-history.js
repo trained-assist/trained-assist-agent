@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { sessionsDirPath } = require('../../data-paths');
 
 /**
  * get_chat_history — retrieve conversation history from previous sessions
@@ -18,8 +18,8 @@ const os = require('os');
 function resolveSessionsDir() {
   const username = process.env.AGENT_USER_ID;
   if (!username) return null;
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  return path.join(dataDir, 'sessions', username, 'sessions');
+  // Session store lives in the profile workspace (USERS_ROOT/<u>/sessions).
+  return sessionsDirPath(username);
 }
 
 function readSession(fp) {

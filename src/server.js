@@ -33,10 +33,12 @@ const { createHhNegotiations } = require('./hh-negotiations');
 
 const profiles = require('./profiles');
 const mediaVision = require('./media-vision');
+const dataPaths = require('./data-paths');
 
 const PORT = process.env.PORT || 3001;
-const BASE_USERS_DIR = process.env.USERS_DIR ||
-  path.join(process.env.HOME || '/home/vova', 'users');
+// Single source of truth (src/data-paths.js) — do not re-derive from HOME.
+const BASE_USERS_DIR = dataPaths.USERS_ROOT;
+const userWorkDir = dataPaths.userWorkDir;
 
 // /run idempotency window (see the requestId handling below): in-memory only,
 // resets on restart — acceptable because it's guarding against a retry racing
@@ -554,8 +556,9 @@ async function main() {
       const calltipsToken = url.searchParams.get('token');
       if (!calltipsToken || calltipsToken !== calltipsHmac(profile))
         return json(res, 403, { error: 'invalid or missing token for this profile' });
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const filePath = path.join(dataDir, 'sessions', profile, 'calltips-latest.json');
+      // Call Tips session is written into the profile workspace (USERS_ROOT), not
+      // the legacy SYSTEM_ROOT/sessions tree — resolve via the canonical helper.
+      const filePath = path.join(userWorkDir(profile), 'calltips-latest.json');
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
         return json(res, 200, data);
@@ -732,8 +735,7 @@ ${recent || '(пока нет)'}
 
       if (!secrets.GITHUB_ISSUES_TOKEN) return json(res, 503, { error: 'reporting not configured' });
 
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const workDir = path.join(dataDir, 'sessions', username);
+      const workDir = userWorkDir(username);
 
       // Load current session
       let session = null;
@@ -913,8 +915,9 @@ ${recent || '(пока нет)'}
     // GET /analytics — aggregated token/cost usage across all users
     if (req.method === 'GET' && url.pathname === '/analytics') {
       const { getUsageLog } = require('./usage-store');
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const sessionsDir = path.join(dataDir, 'sessions');
+      // Usage logs live in each profile's workspace (USERS_ROOT/<u>/usage.json),
+      // not the legacy SYSTEM_ROOT/sessions tree.
+      const sessionsDir = dataPaths.USERS_ROOT;
       const totals = { tasks: 0, input: 0, output: 0, cost_usd: 0 };
       const byDate = {};   // date → { model → { input, output, cost, tasks } }
       const byUser = {};   // username → { tasks, input, output, cost_usd }
@@ -1846,8 +1849,7 @@ ${recent || '(пока нет)'}
       // Collect session context (last 8 messages)
       let contextLines = [];
       try {
-        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-        const workDir = path.join(dataDir, 'sessions', username);
+        const workDir = userWorkDir(username);
         if (sessionId) {
           const sessionFile = path.join(workDir, 'sessions', `${sessionId}.json`);
           if (fs.existsSync(sessionFile)) {
