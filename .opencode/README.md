@@ -44,9 +44,11 @@ in Telegram switches per-profile instead (see `src/runner/intent-engine.js`).
 
 | Command | Effect |
 |---------|--------|
-| `/oc_deepseek` | Select the shared `deepseek` logical profile for *your* trained-assist profile (like any other `/oc_*`) |
-| `/oc_go` | Manually point the VM-wide toggle at `opencode-go/deepseek-v4.1-flash` — sticks until changed again |
-| `/oc_openrouter` | Manually point it at `openrouter/deepseek/deepseek-v4-flash-0731` — sticks until changed again |
+| `/oc_deepseek` | Select the shared `deepseek` logical profile for *your* trained-assist profile (like any other `/oc_*`) — follows the VM-wide toggle below |
+| `/oc_go` | Manually point the VM-wide toggle at `opencode-go/deepseek-v4.1-flash` — sticks until changed again, affects everyone on `deepseek` |
+| `/oc_openrouter` | Manually point it at `openrouter/z-ai/glm-5.3-flash` — sticks until changed again, affects everyone on `deepseek` |
+| `/oc_ds_go` (`/oc_deepseek_go`) | Pin *your* profile straight to the `deepseek-go` file — ignores the VM-wide toggle, unaffected by `/oc_go`/`/oc_openrouter` |
+| `/oc_ds_or` (`/oc_deepseek_openrouter`) | Pin *your* profile straight to the `deepseek-openrouter` file — ignores the VM-wide toggle, unaffected by `/oc_go`/`/oc_openrouter` |
 
 On a Go usage-limit error (`opencode-ladder.js`'s `classifyError` catching e.g. "Go usage limit
 exceeded") while running on `opencode-go/*` under the `deepseek` profile, the toggle **auto**-flips
