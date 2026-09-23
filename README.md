@@ -77,6 +77,10 @@ Three distinct concepts — understanding them prevents confusion:
 >
 > Future cleanup: rename `/run`'s `userId` → `chatId`.
 
+> **In-progress/TBD terms — do not copy further without checking the naming-conventions-refactoring plan first:**
+> - `profileId` — emerging canonical name for the identity unit above (replacing `username` long-term). Partially introduced (`server.js`: `payload.profileId ?? username`); `username` is still the authoritative field everywhere else. Not yet a stable API — don't rely on `profileId` being present.
+> - `audience` — scopes sessions/projects by bot surface (`session-store.js`, `server.js`, `projects.js`), default `'default'`. No canonical name has been agreed yet (candidates include `audience`, `botAudience`, `deliverySurface`). Keep using `audience` for now, but don't add new derived terms from it until a name is settled.
+
 ## Repos
 
 Architecture: **Agent Control Plane** (this repo, `trained-assist-agent`) hosts
