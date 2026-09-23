@@ -21,10 +21,10 @@ describe('resolveToolSource', () => {
     expect(resolveToolSource('context_get', local, hh)).toBe('local');
   });
 
-  it('prefers local when a tool name exists in both registries (today\'s reality — 9a found zero drift)', () => {
+  it('rejects a name shared by both providers under contract v1', () => {
     const local = new Set(['hh_status', 'context_get']);
     const hh = new Set(['hh_status']);
-    expect(resolveToolSource('hh_status', local, hh)).toBe('local');
+    expect(() => resolveToolSource('hh_status', local, hh)).toThrow('Duplicate action');
   });
 
   it('falls through to hh-skills for a tool that only exists there (post-deletion state)', () => {
@@ -33,14 +33,14 @@ describe('resolveToolSource', () => {
     expect(resolveToolSource('hh_status', local, hh)).toBe('hh');
   });
 
-  it('defaults to local for an unknown tool', () => {
+  it('rejects an unknown tool', () => {
     const local = new Set(['context_get']);
     const hh = new Set(['hh_status']);
-    expect(resolveToolSource('not_a_real_tool', local, hh)).toBe('local');
+    expect(() => resolveToolSource('not_a_real_tool', local, hh)).toThrow('Action is not registered');
   });
 
-  it('defaults to local when the hh registry is absent (sibling repo not cloned)', () => {
+  it('rejects a missing external action when the provider is absent', () => {
     const local = new Set(['context_get']);
-    expect(resolveToolSource('hh_status', local, null)).toBe('local');
+    expect(() => resolveToolSource('hh_status', local, null)).toThrow('Action is not registered');
   });
 });

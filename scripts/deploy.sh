@@ -175,6 +175,15 @@ cd "$REPO_DIR"
 # Orphan processes (started outside systemd) stay alive on port 8080 and serve stale code.
 sudo fuser -k 8080/tcp 2>/dev/null || true
 
+# ── Workspace storage migration (legacy AGENT_DATA_DIR/sessions → USERS_DIR) ──────
+# Idempotent + ledgered. Runs while the service is stopped so the new code starts
+# with data already in the canonical root (identity ≠ location). Never blocks the
+# deploy — a partial run is reported and can be re-run; the ledger enables rollback.
+echo "==> Migrating legacy per-profile workspaces (agent-data/sessions → users)..."
+USERS_DIR="${USERS_DIR:-$HOME/users}" AGENT_DATA_DIR="${AGENT_DATA_DIR:-$HOME/agent-data}" \
+  node "$REPO_DIR/scripts/migrate-workspaces.mjs" --apply --quiet \
+  || echo "  ⚠️  workspace migration reported issues — re-run scripts/migrate-workspaces.mjs (see ledger)"
+
 echo "==> Starting service..."
 # Clear any failed state (e.g. StartLimitBurst exhausted from crash loops) so
 # systemd accepts the start request even if the previous run ended badly.

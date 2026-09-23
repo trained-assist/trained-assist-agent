@@ -33,10 +33,12 @@ const { createHhNegotiations } = require('./hh-negotiations');
 
 const profiles = require('./profiles');
 const mediaVision = require('./media-vision');
+const dataPaths = require('./data-paths');
 
 const PORT = process.env.PORT || 3001;
-const BASE_USERS_DIR = process.env.USERS_DIR ||
-  path.join(process.env.HOME || '/home/vova', 'users');
+// Single source of truth (src/data-paths.js) — do not re-derive from HOME.
+const BASE_USERS_DIR = dataPaths.USERS_ROOT;
+const userWorkDir = dataPaths.userWorkDir;
 
 // /run idempotency window (see the requestId handling below): in-memory only,
 // resets on restart — acceptable because it's guarding against a retry racing
@@ -298,29 +300,36 @@ async function resumePendingTasks(secrets) {
       id: p.userId, name: p.username, username: p.username, workDir,
       profileId: p.profileId, telegramUserId: p.telegramUserId,
     };
-    const fireResume = () => runTask({
-      taskId: `${p.username}-resume-${Date.now()}`,
-      user, task: p.task, context: p.context || null,
-      engine, sessionId: p.sessionId || null,
-      contextFromSession: p.contextFromSession || null,
-      forceClaude: true, projectId: p.projectId || null,
-      initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
-      resumedAfterRestart: true, resumeAttempts: attempt,
-      secrets, internalGtd: !!p.internalGtd,
-    }).then(reply => {
-      // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
-      if (p.internalGtd && p.sessionId) require('./gtd-controller').settleResumedGtd(workDir, p.sessionId, reply);
-    }).catch(err => {
-      console.error(`[resume] user=${p.username} error:`, err.message);
-      if (!p.internalGtd) notifyFailure(p, '⚠️ Не удалось продолжить задачу после перезапуска. Повтори запрос.');
-    });
+    const fireResume = async () => {
+      try {
+        // runTask journals its replacement synchronously before returning its promise.
+        // Keep the old durable entry throughout backoff and until that handoff succeeds.
+        const running = runTask({
+          taskId: `${p.username}-resume-${Date.now()}`,
+          user, task: p.task, context: p.context || null,
+          engine, sessionId: p.sessionId || null,
+          contextFromSession: p.contextFromSession || null,
+          forceClaude: true, projectId: p.projectId || null,
+          initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
+          resumedAfterRestart: true, resumeAttempts: attempt,
+          secrets, internalGtd: !!p.internalGtd,
+          mode: p.mode, continuationCount: p.continuationCount,
+          initiatedAt: p.initiatedAt, threadId: p.threadId,
+        });
+        clearPendingTask(p.taskId);
+        const reply = await running;
+        // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
+        if (p.internalGtd && p.sessionId) require('./gtd-controller').settleResumedGtd(workDir, p.sessionId, reply);
+      } catch (err) {
+        console.error(`[resume] user=${p.username} error:`, err.message);
+        if (!p.internalGtd) await notifyFailure(p, '⚠️ Не удалось продолжить задачу после перезапуска. Повтори запрос.');
+      }
+    };
     const delayMs = getRetryDelayMs(attempt) || 0;
     if (delayMs > 0) setTimeout(fireResume, delayMs);
     else fireResume();
-    // runTask journals the new task id once fireResume() actually runs; drop the old entry
-    // now regardless, otherwise the next restart within the window would re-run this task
-    // a second time while the delayed attempt is still pending.
-    clearPendingTask(p.taskId);
+    // A process restart destroys its timers. Leave the journal intact while waiting
+    // so the next process can schedule the same attempt again without losing work.
     await new Promise(r => setTimeout(r, 200)); // stagger multiple resumes
   }
 }
@@ -554,8 +563,9 @@ async function main() {
       const calltipsToken = url.searchParams.get('token');
       if (!calltipsToken || calltipsToken !== calltipsHmac(profile))
         return json(res, 403, { error: 'invalid or missing token for this profile' });
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const filePath = path.join(dataDir, 'sessions', profile, 'calltips-latest.json');
+      // Call Tips session is written into the profile workspace (USERS_ROOT), not
+      // the legacy SYSTEM_ROOT/sessions tree — resolve via the canonical helper.
+      const filePath = path.join(userWorkDir(profile), 'calltips-latest.json');
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
         return json(res, 200, data);
@@ -732,8 +742,7 @@ ${recent || '(пока нет)'}
 
       if (!secrets.GITHUB_ISSUES_TOKEN) return json(res, 503, { error: 'reporting not configured' });
 
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const workDir = path.join(dataDir, 'sessions', username);
+      const workDir = userWorkDir(username);
 
       // Load current session
       let session = null;
@@ -913,8 +922,9 @@ ${recent || '(пока нет)'}
     // GET /analytics — aggregated token/cost usage across all users
     if (req.method === 'GET' && url.pathname === '/analytics') {
       const { getUsageLog } = require('./usage-store');
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const sessionsDir = path.join(dataDir, 'sessions');
+      // Usage logs live in each profile's workspace (USERS_ROOT/<u>/usage.json),
+      // not the legacy SYSTEM_ROOT/sessions tree.
+      const sessionsDir = dataPaths.USERS_ROOT;
       const totals = { tasks: 0, input: 0, output: 0, cost_usd: 0 };
       const byDate = {};   // date → { model → { input, output, cost, tasks } }
       const byUser = {};   // username → { tasks, input, output, cost_usd }
@@ -1846,8 +1856,7 @@ ${recent || '(пока нет)'}
       // Collect session context (last 8 messages)
       let contextLines = [];
       try {
-        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-        const workDir = path.join(dataDir, 'sessions', username);
+        const workDir = userWorkDir(username);
         if (sessionId) {
           const sessionFile = path.join(workDir, 'sessions', `${sessionId}.json`);
           if (fs.existsSync(sessionFile)) {

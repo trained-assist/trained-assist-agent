@@ -1,21 +1,18 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const crypto = require('crypto');
+const { userWorkDir } = require('./data-paths');
 
 const VALID_TYPES = new Set([
   'contact', 'decision', 'config', 'url', 'error',
   'snippet', 'company', 'document', 'identifier',
 ]);
 
-// Read DATA_DIR at call time so tests can override AGENT_DATA_DIR between calls.
-function getDataDir() {
-  return process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-}
-
 function getArtifactsPath(username) {
-  const dir = path.join(getDataDir(), 'sessions', username, 'artifacts');
+  // Per-profile operational data lives in the workspace (USERS_ROOT/<u>), not the
+  // legacy SYSTEM_ROOT/sessions tree. Resolved via the canonical helper.
+  const dir = path.join(userWorkDir(username), 'artifacts');
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, 'artifacts.jsonl');
 }

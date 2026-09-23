@@ -498,6 +498,53 @@ describe('Session continuity TTL', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO 3b: cross-chat isolation is non-blocking
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Cross-chat session isolation is non-blocking', () => {
+  const CHAT_A = -5042012537;
+  const CHAT_B = -5042012538;
+
+  it('a foreign session id never blocks — the chat still gets an answer', { timeout: 30000 }, async () => {
+    // CHAT_A owns a session.
+    await chat('подключи github', { userId: CHAT_A });
+    const sessA = readCurrentSession(CHAT_A);
+    expect(sessA, 'CHAT_A session not created').not.toBeNull();
+
+    // CHAT_B's gateway mistakenly hands back CHAT_A's session id.
+    await chat('сделай отчёт', { userId: CHAT_B, sessionId: sessA.id, claudeReply: 'Отчёт готов' });
+
+    // No rejection message.
+    expect(tgTexts().some(t => /закреплена за другим чатом/.test(t))).toBe(false);
+
+    // CHAT_B got its own current session + the answer.
+    const sessB = readCurrentSession(CHAT_B);
+    expect(sessB, 'CHAT_B session not created').not.toBeNull();
+    expect(sessB.id).not.toBe(sessA.id);
+    expect(readSession(sessB.id).messages.some(m => m.content.includes('Отчёт готов'))).toBe(true);
+
+    // CHAT_A's session is untouched and still attached to CHAT_A.
+    const a = readSession(sessA.id);
+    expect(String(a.liveChatId)).toBe(String(CHAT_A));
+    expect(a.messages.some(m => m.content.includes('сделай отчёт'))).toBe(false);
+  });
+
+  it("falls back to this chat's own session when it already has one", { timeout: 30000 }, async () => {
+    await chat('подключи github', { userId: CHAT_B });        // CHAT_B owns S_B
+    const sessB = readCurrentSession(CHAT_B);
+
+    await chat('подключи github', { userId: CHAT_A });        // CHAT_A owns S_A
+    const sessA = readCurrentSession(CHAT_A);
+    expect(sessA.id).not.toBe(sessB.id);
+
+    // CHAT_B receives CHAT_A's id — must continue S_B, not spawn a new session.
+    await chat('прочитай файл sales.xlsx', { userId: CHAT_B, sessionId: sessA.id, claudeReply: 'Прочитал' });
+
+    expect(readCurrentSession(CHAT_B).id, 'expected CHAT_B to continue its own session').toBe(sessB.id);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENARIO 4: full dialogue — setup → work
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -935,7 +982,12 @@ describe('terminal answer delivery', () => {
     };
     try {
       streamScript([tool, { type: 'result', subtype: 'success', result: 'Финальный отчёт' }]);
-      await chat('Проверь проект и исправь найденные дефекты');
+      // Fresh chat id: progress edits coalesce per chat — an edit is skipped if one
+      // already landed for that chat <1.2s ago (tg-stream `lastEditAt`). The default
+      // test chat id is reused across tests, so its coalesce window can already be
+      // open and the event-driven progress edit below would be skipped, leaving
+      // nothing in flight to wait for. A unique id guarantees the edit is sent.
+      await chat('Проверь проект и исправь найденные дефекты', { userId: 555000123 });
       expect(progressFinished).toBe(true);
       expect(tgTexts().at(-1)).toContain('Финальный отчёт');
     } finally { writeNormalClaudeScript(); }
