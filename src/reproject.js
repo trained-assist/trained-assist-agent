@@ -439,6 +439,48 @@ function pruneEmptyDirs(dir, base = dir) {
 // do we know the whole artifact tree should follow. Partial moves / fan-out to several
 // destinations are left untouched and reported as a warning — merging file trees blind
 // risks silently scattering a shared artifact folder across unrelated projects.
+// Update gtd/*.json records whose projectDir points into a project folder that
+// was vacated/moved by this apply. Mirrors the retag logic for sessions.json:
+// old path is preserved in staleProjectDir for reversibility, projectDir is
+// repointed to the new project folder resolved from the session's final project.
+function syncGtdRecords(profileRoot, sessionMoves) {
+  const gtdDir = path.join(profileRoot, 'gtd');
+  const actions = [];
+  if (!fs.existsSync(gtdDir)) return actions;
+  const moveTo = new Map(sessionMoves.map(mv => [mv.id, mv.to]));
+  const byOldDir = new Map(sessionMoves.map(mv => [mv.from, mv.to])); // from-project → to-project
+  for (const f of fs.readdirSync(gtdDir)) {
+    if (!f.endsWith('.json')) continue;
+    const fp = path.join(gtdDir, f);
+    let rec;
+    try { rec = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { continue; }
+    const pd = rec && rec.projectDir;
+    if (!pd || fs.existsSync(pd)) continue; // live path — nothing to do
+    // Resolve new project: prefer the session's explicit move, else same old project.
+    const sid = rec.sessionId;
+    const newPid = (sid && moveTo.get(sid)) || (sid && (() => {
+      const meta = moveTo.has(sid) ? null : null; // sessionId not in moves → fall through
+      return meta;
+    })()) || null;
+    let target = null;
+    if (sid && moveTo.has(sid)) {
+      target = path.join(profileRoot, 'projects', moveTo.get(sid));
+    } else {
+      // No direct move for this session — repoint only if its old dir matches a
+      // vacated project that itself moved wholesale.
+      for (const [fromId, toId] of byOldDir) {
+        if (pd === projects.projectDir(profileRoot, fromId)) { target = projects.projectDir(profileRoot, toId); break; }
+      }
+    }
+    if (!target) { actions.push({ kind: 'gtd-stale', file: f, projectDir: pd, warning: 'не удалось определить новый проект — осталось указывать на мёртвый путь' }); continue; }
+    rec.staleProjectDir = pd;
+    rec.projectDir = target;
+    atomicWrite(fp, JSON.stringify(rec));
+    actions.push({ kind: 'gtd-sync', file: f, from: pd, to: target });
+  }
+  return actions;
+}
+
 function planFolderMoves(profileRoot, index, sessionMoves) {
   const moveTo = new Map(sessionMoves.map(mv => [mv.id, mv.to]));
   const finalProjectId = new Map(index.map(m => [m.id, moveTo.has(m.id) ? moveTo.get(m.id) : (m.projectId || null)]));
@@ -538,6 +580,14 @@ function applyPlan(profileRoot, plan, { dryRun = true, now = Date.now() } = {}) 
         } catch { /* session file may not exist */ }
       }
     }
+  }
+
+  // Keep GTD records (gtd/*.json) in sync: they hold an absolute projectDir that
+  // the tick loop reads as the ONE source of truth (checklist.md location). A missed
+  // update here leaves dead paths after any project move (bug found 2026-09-23:
+  // 37/40 GTD records pointed at pre-reorg folders → readChecklist() returned null).
+  if (!dryRun && ledger.moves.length) {
+    actions.push(...syncGtdRecords(profileRoot, ledger.moves));
   }
 
   // A vacated project's artifact folder (interviews/, applylink/, site/, data/, …)
@@ -718,4 +768,5 @@ module.exports = {
   parseJsonLoose,
   stateFilePath,
   ledgerPath,
+  syncGtdRecords,
 };
