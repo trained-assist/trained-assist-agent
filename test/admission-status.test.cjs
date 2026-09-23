@@ -77,5 +77,15 @@ test('slow queue edit cannot overwrite running status; Telegram ok:false trigger
   assert.deepEqual(messages, ['waiting', 'fallback:waiting', 'running', 'fallback:running']);
 });
 
+test('best-effort 429 drop (flooded) is skipped, not sent as a duplicate message', async () => {
+  const messages = [];
+  const status = createAdmissionStatus(opts, { intervalMs: 999999,
+    edit: async (_t, _c, _i, text) => { messages.push(text); return { ok: false, flooded: true }; },
+    send: async (_t, _c, text) => { messages.push(`fallback:${text}`); },
+  });
+  await status.finish('running');
+  assert.deepEqual(messages, ['running']);
+});
+
 // Legacy unconditional resume assertion replaced by restart-execution.test.cjs
 // and planned-restart-http.test.js: >=5m work is retained and requires confirmation.
