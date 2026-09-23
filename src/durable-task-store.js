@@ -6,8 +6,10 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const crypto = require('crypto');
+const { validateItem } = require('./durable-task-plan');
 
-const TASK_STATUSES = ['active', 'done', 'failed', 'cancelled'];
+const TASK_STATUSES = ['draft', 'paused', 'blocked', 'active', 'done', 'failed', 'cancelled'];
 const ITEM_STATUSES = ['pending', 'running', 'waiting', 'done', 'failed', 'skipped'];
 const TIERS = ['free', 'standard', 'strong'];
 const TIER_RANK = { free: 0, standard: 1, strong: 2 };
@@ -22,6 +24,7 @@ class DurableTaskStore {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     this._migrate();
+    require('./durable-task-migrations')(this.db);
     this._stmts = {};
   }
 
@@ -107,6 +110,37 @@ class DurableTaskStore {
     return this.getTask(id, profile_id);
   }
 
+  /** Persist the complete planner contract in one transaction. No execution. */
+  createPlan({ id = crypto.randomUUID(), profile_id, project_id = null, goal,
+    playbook_id = null, playbook_version = null, user_value, acceptance_criteria,
+    items, session_id = null, execution_policy = null, request_id = null }) {
+    if (typeof user_value !== 'string' || !user_value.trim()) throw new Error('user_value required');
+    if (!Array.isArray(acceptance_criteria) || !acceptance_criteria.length || acceptance_criteria.some(c => !c || typeof c !== 'object' || Array.isArray(c) || !Object.keys(c).length)) throw new Error('acceptance_criteria required');
+    if (!Array.isArray(items) || !items.length) throw new Error('items required');
+    return this.db.transaction(() => {
+      this.createTask({ id, profile_id, project_id, goal });
+      this._prep(`UPDATE durable_tasks SET status='draft', playbook_id=?, playbook_version=?,
+        user_value=?, acceptance_criteria_json=?, execution_policy_json=?, request_id=? WHERE id=?`)
+        .run(playbook_id, playbook_version, user_value, JSON.stringify(acceptance_criteria),
+          execution_policy == null ? null : JSON.stringify(execution_policy), request_id, id);
+      items.forEach((item, position) => {
+        validateItem(item);
+        const itemId = crypto.randomUUID();
+        this.createTaskItem({ id: itemId, task_id: id, title: item.title, position,
+          delay_after_sec: item.delay_after_sec ?? 0 });
+        this._prep(`UPDATE task_items SET stage=?, instructions=?, execution_kind=?, executor_role=?,
+          minimum_model_level=?, current_model_level=?, context_budget=?, validation_json=?,
+          max_attempts=?, execution_timeout_seconds=? WHERE id=?`)
+          .run(item.stage ?? null, item.instructions ?? null, item.execution_kind,
+            item.executor_role ?? null, item.minimum_model_level ?? null, item.minimum_model_level ?? null,
+            item.context_budget ?? null, JSON.stringify(item.validation), item.max_attempts ?? 3,
+            item.execution_timeout_seconds ?? 600, itemId);
+      });
+      if (session_id) this.attachSession(id, session_id, profile_id);
+      return { task: this.getTask(id, profile_id), items: this.listTaskItems(id, profile_id) };
+    })();
+  }
+
   /** profile_id is mandatory: every read/write is scoped to the owner profile. */
   getTask(id, profileId) {
     return this._prep('SELECT * FROM durable_tasks WHERE id = ? AND profile_id = ?')
@@ -122,6 +156,11 @@ class DurableTaskStore {
   }
 
   updateTask(id, profileId, patch) {
+    const task = this.getTask(id, profileId);
+    if (!task) return null;
+    if (task.acceptance_criteria_json && ['active', 'done'].includes(patch.status)) {
+      throw new Error('Plan execution/finalization requires validated runtime (not enabled yet)');
+    }
     const allowed = ['goal', 'status', 'project_id'];
     const sets = [];
     const args = [];
@@ -185,6 +224,7 @@ class DurableTaskStore {
   }
 
   updateTaskItem(id, patch, profileId) {
+    if (!this._itemOwnedBy(id, profileId)) return null;
     const allowed = ['title', 'status', 'current_tier', 'delay_after_sec', 'due_at',
                      'last_execution_id', 'last_error'];
     const sets = [];
@@ -207,7 +247,7 @@ class DurableTaskStore {
       const r = this._prep(`UPDATE task_items SET ${sets.join(', ')} WHERE id = ?`).run(...args);
       if (r.changes === 0) return null;
       const item = this.getTaskItem(id);
-      // ownership check — throw away if parent task belongs to another profile
+      // Defense in depth: ownership was checked before UPDATE.
       const owner = this._prep('SELECT profile_id FROM durable_tasks WHERE id = ?')
         .get(item.task_id);
       if (!owner || owner.profile_id !== profileId) return null;
@@ -376,7 +416,10 @@ class DurableTaskStore {
     for (const it of items) {
       const box = (it.status === 'done' || it.status === 'skipped') ? 'x' : ' ';
       const skip = it.status === 'skipped' ? ' (skipped)' : '';
-      lines.push(`- [${box}] [${it.current_tier}] ${it.title}${skip}`);
+      const executor = task.acceptance_criteria_json
+        ? (it.execution_kind === 'programmatic' ? 'programmatic' : `${it.executor_role}/${it.minimum_model_level}/${it.context_budget}`)
+        : it.current_tier;
+      lines.push(`- [${box}] [${executor}] ${it.title}${skip}`);
     }
     return lines.join('\n') + '\n';
   }
