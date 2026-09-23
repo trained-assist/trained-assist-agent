@@ -138,7 +138,7 @@ const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\
 // \b doesn't fire after a Cyrillic letter in JS, so both alternatives end on
 // (?=\s|$) instead (same fix as PERSONA_INTENT above).
 const ENGINE_SWITCH_INTENT  = /^\/?switch\s*2\s*(klod|codex|opencode|клод|кодекс)(?:@\S+)?(?=\s|$)|(?:переключ\S*|switch)\s+(?:меня\s+)?(?:на|to)\s+(klod|claude|codex|opencode|клод|кодекс)(?=\s|$)/i;
-const OC_PROFILE_INTENT = /^\/oc_(max|value|free|russian-recruiter|russian|recruiter|rr|ru|quality|mimo|lavish-luna|ll|q|x|deepseek|ds)(?:@\S+)?\b|^\/oc\s+(max|value|free|russian-recruiter|russian|recruiter|rr|ru|quality|mimo|lavish-luna|ll|q|x|deepseek|ds)\b/i;
+const OC_PROFILE_INTENT = /^\/oc_(max|value|free|russian-recruiter|russian|recruiter|rr|ru|quality|mimo|lavish-luna|ll|q|x|deepseek_openrouter|deepseek_go|ds_or|ds_go|deepseek|ds)(?:@\S+)?\b|^\/oc\s+(max|value|free|russian-recruiter|russian|recruiter|rr|ru|quality|mimo|lavish-luna|ll|q|x|deepseek_openrouter|deepseek_go|ds_or|ds_go|deepseek|ds)\b/i;
 // /oc_go, /oc_openrouter — manual override for the shared "deepseek" profile's VM-wide
 // go/openrouter toggle (issue #1096). Deliberately separate from OC_PROFILE_INTENT above: that
 // sets THIS profile's own ocProfile choice (profiles.setOcProfile, per trained-assist profile),
@@ -465,7 +465,15 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     if (RETIRED.has(rawAlias)) {
       return `⚠️ Профиль '${rawAlias}' упразднён в #1061 (стал ступенью лестницы max/value) — выбери max|value|free|russian.`;
     }
-    const ALIASES = { ru: 'russian', recruiter: 'russian', rr: 'russian', 'russian-recruiter': 'russian', x: 'max', ds: 'deepseek' };
+    const ALIASES = {
+      ru: 'russian', recruiter: 'russian', rr: 'russian', 'russian-recruiter': 'russian', x: 'max', ds: 'deepseek',
+      // /oc_ds_or, /oc_deepseek_openrouter — pin THIS profile to the concrete OpenRouter file
+      // (deepseek-openrouter.json), bypassing the shared VM-wide go/openrouter toggle below.
+      // Distinct from /oc_deepseek (logical profile that follows the toggle) and from
+      // /oc_openrouter (OC_GO_TOGGLE_INTENT, flips the toggle for everyone on "deepseek").
+      ds_or: 'deepseek-openrouter', deepseek_openrouter: 'deepseek-openrouter',
+      ds_go: 'deepseek-go', deepseek_go: 'deepseek-go',
+    };
     const raw = ALIASES[rawAlias] || rawAlias;
     // "deepseek" (issue #1096) is a logical/virtual profile — it has no .opencode/profiles/
     // file of its own, it resolves to deepseek-go or deepseek-openrouter via the shared VM-wide
@@ -484,9 +492,17 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       value:    'VALUE — DeepSeek V4 Flash → GLM → Qwen',
       free:     'FREE — только бесплатный inference (MiMo/Nemotron)',
       russian:  'RUSSIAN — GigaChat Pro/Ultra/Max',
+      'deepseek-openrouter': 'DEEPSEEK, закреплено на OpenRouter — openrouter/z-ai/glm-5.3-flash',
+      'deepseek-go':         'DEEPSEEK, закреплено на Go — opencode-go/deepseek-v4.1-flash',
     };
     const label = PROFILE_LABELS[raw] || raw;
-    return `✅ OpenCode профиль → ${label}\n\nПрименён только для твоего профиля (другие юзеры VM не затронуты). Следующая задача в OpenCode подхватит новые модели.`;
+    // deepseek-openrouter/deepseek-go are a pin for THIS profile only — unlike /oc_deepseek,
+    // this ignores the shared VM-wide go/openrouter toggle (src/opencode-go-toggle.js), so it
+    // needs its own note to avoid the two being confused (issue that prompted this command).
+    const pinNote = (raw === 'deepseek-openrouter' || raw === 'deepseek-go')
+      ? ' Закреплено намертво за твоим профилем — в отличие от /oc_deepseek (следует общему VM-тумблеру /oc_go, /oc_openrouter), сюда переключиться и остаться можно только явно через /oc_ds_or или /oc_ds_go.'
+      : '';
+    return `✅ OpenCode профиль → ${label}\n\nПрименён только для твоего профиля (другие юзеры VM не затронуты). Следующая задача в OpenCode подхватит новые модели.${pinNote}`;
   }
 
   // /oc_go, /oc_openrouter — manual override for the shared "deepseek" profile's VM-wide
