@@ -1368,7 +1368,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const ctxMsgCount = forceClaude ? 8 : 6;
 
   if (sessionId) {
-    // Explicit session ID from bot — honor it, but enforce per-chat ownership.
+    // Explicit session ID from bot — honor it, but a session belonging to another chat
+    // of this profile is dropped rather than used (see the non-blocking fallback below).
     // Sign-robust: the gateway's remembered id can diverge from disk (chatId
     // sign-split — KV holds `s-1003…`, real content lives under `s--1003…`).
     // resolveChatSession falls back to this chat's durable current-session
@@ -1381,29 +1382,32 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId, audience) || sessionId);
     const existing = sessions.getSession(user.workDir, activeSessionId);
     if (existing) {
-      // Strict chat isolation: a live session is attached to exactly one chat.
-      // If it's attached to a different chat, reject and notify — don't mix contexts.
-      // liveChatId (was ownerChatId): read-compat with pre-rename session files.
+      // Chat isolation is NON-BLOCKING. A live session is attached to exactly one chat;
+      // if the gateway handed us one that belongs to a DIFFERENT chat of this profile
+      // (its remembered id can leak across a profile's chats), we must not reject the
+      // message — that stranded the user with an error and no answer. Instead treat the
+      // foreign session as unavailable here and fall through to THIS chat's own current
+      // session, or start fresh. The foreign session is left untouched so the other chat
+      // keeps its context. liveChatId (was ownerChatId): read-compat with pre-rename files.
       const attachedChatId = existing.liveChatId ?? existing.ownerChatId;
       if (attachedChatId && String(attachedChatId) !== String(chatId)) {
-        const msg = `⚠️ Эта сессия сейчас закреплена за другим чатом этого профиля.\n\nЧтобы перенести её сюда — напишите /sessions и выберите нужную, или просто напишите новый запрос.`;
-        if (initialMsgId) await tgEdit(BOT_TOKEN, chatId, initialMsgId, msg).catch(() => tgSend(BOT_TOKEN, chatId, msg));
-        else await tgSend(BOT_TOKEN, chatId, msg);
-        clearPendingTask(taskId);
-        return;
+        activeSessionId = null;
+      } else {
+        // Legacy / unattached session (#489): a null liveChatId would otherwise let ANY
+        // chat adopt it and mix contexts. Claim it for the current chat on first touch.
+        if (!attachedChatId && chatId) {
+          sessions.claimLiveChatId(user.workDir, sessionId, chatId);
+        }
+        sessionExists = true;
+        const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
+        if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
       }
-      // Legacy / unattached session (#489): a null liveChatId short-circuited
-      // the guard above, letting ANY chat adopt it and mix contexts. Claim it for
-      // the current chat on first touch so a foreign chat is rejected next time.
-      if (!attachedChatId && chatId) {
-        sessions.claimLiveChatId(user.workDir, sessionId, chatId);
-      }
-      sessionExists = true;
-      const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
-      if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
-  } else {
-    // No explicit session — try to continue the most recent one (within 4h)
+  }
+
+  if (!activeSessionId && !(forceNew && sessionId)) {
+    // No usable explicit session (none given, or a foreign one was dropped above) —
+    // continue the most recent one for THIS chat (within 4h), or start a fresh session.
     const currentId = getCurrentSessionId(user.workDir, chatId, audience);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;

@@ -74,6 +74,7 @@
 | ✅ реализовано | MCP skills server | stdio JSON-RPC, auto-discover из tools/*.js |
 | ✅ реализовано | Token storage | ~/agent-tokens/{USER_ID}/{label}, инжектируется в env через runner.js |
 | ✅ реализовано | Session управление | sessions.json, buildContext, appendUserMessage |
+| ✅ реализовано | **Кросс-чат: изоляция без блокировки** | Если шлюз прислал sessionId, привязанный к другому чату того же профиля, сообщение больше НЕ отклоняется («⚠️ Эта сессия закреплена за другим чатом…» удалено). Чужая сессия просто не используется: продолжаем собственную текущую сессию чата (в пределах 4ч) или создаём новую. Чужая сессия не трогается — её контекст остаётся у своего чата. `src/runner/index.js` |
 | ✅ реализовано | Браузерная сессия | noVNC → Chrome CDP, захват кукисов |
 | ✅ реализовано | **Infra manifest + CI sync check** | `infra/env-manifest.json` — единый источник правды для всех секретов. `scripts/check-env-sync.js` валидирует ci.yml в CI. |
 | ✅ реализовано | **Деплой на push в main** | ci.yml: deploy-jobs принимают merge.result == success ИЛИ push to main — больше не нужно PR чтобы задеплоить hotfix. |
