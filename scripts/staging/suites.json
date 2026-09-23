@@ -13,8 +13,7 @@
     "test/gtd-durable-wiring.test.cjs",
     "test/intake-media-retention.test.cjs",
     "test/admission-status.test.cjs",
-    "test/lane-granularity.test.cjs",
-    "test/cap-per-profile.test.cjs",
+    "test/per-chat-queue.test.cjs",
     "test/execution-owner-lock.test.cjs",
     "test/instant-restart.test.cjs"
   ]

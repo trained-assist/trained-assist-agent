@@ -47,16 +47,16 @@ runner._activeTimers.delete('someuser-gtd-s-active-123');
 ok(runner.isSessionRunning('s-active') === false, 'isSessionRunning: false again after the entry is cleared');
 
 // isSessionRunning: also true while QUEUED (accepted, waiting on the per-chat
-// lane / per-profile cap / RAM / global slot) — before activeTimers gets an entry.
-// chatLanes.set() happens synchronously at runTask() call time, well before the
+// queue / RAM / global slot) — before activeTimers gets an entry. The session is
+// added to queuedSessions synchronously at runTask() call time, well before the
 // process spawns; without checking it, a GTD tick could see "not running" and
 // double-fire a session that is simply waiting its turn under load.
 ok(runner.isSessionRunning('s-queued') === false, 'isSessionRunning: false before anything is queued');
-runner._chatLanes.set(runner._laneKey('s-queued', null), Promise.resolve());
-ok(runner.isSessionRunning('s-queued') === true, 'isSessionRunning: true while queued (chatLanes entry, no activeTimers entry yet)');
+runner._queuedSessions.add('s-queued');
+ok(runner.isSessionRunning('s-queued') === true, 'isSessionRunning: true while queued (queuedSessions entry, no activeTimers entry yet)');
 ok(runner.isSessionRunning('s-other-queued') === false, 'isSessionRunning: queued check does not match a different sessionId');
-runner._chatLanes.delete(runner._laneKey('s-queued', null));
-ok(runner.isSessionRunning('s-queued') === false, 'isSessionRunning: false again once the lane clears');
+runner._queuedSessions.delete('s-queued');
+ok(runner.isSessionRunning('s-queued') === false, 'isSessionRunning: false again once the queued entry clears');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

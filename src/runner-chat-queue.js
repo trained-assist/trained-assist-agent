@@ -9,7 +9,7 @@
 // system tasks never block each other behind chat traffic.
 //
 // Extracted from runner.js so the logic is unit-testable without pulling in the
-// full runner (same pattern as runner-lanes.js).
+// full runner.
 
 const _queue = new Map(); // Map<chatId(string), Promise>
 

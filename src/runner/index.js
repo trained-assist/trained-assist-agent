@@ -248,49 +248,29 @@ function listSoftContinuations() {
 
 // ── Concurrency model ────────────────────────────────────────────────────────
 //
-// Three layers, each with a different scope:
+// Two layers, each with a different scope:
 //
 //  1. perChatQueue (Map<chatId, Promise>) — ONE TASK AT A TIME PER CHAT.
 //     The top-level invariant: tasks from the same Telegram chat/group always
 //     queue behind each other, regardless of which session they belong to.
 //     Different chats (even sharing the same workDir/profile) run in parallel.
-//     chatId=0 (internal/web calls) is excluded.
+//     chatId=0 (internal/web calls) is excluded. This lock is deliberate and
+//     must stay: in one Telegram chat there can't be more than one task at a
+//     time — the chat is the single stream the user reads from.
 //
-//  2. chatLanes (Map<laneKey, Promise>) — TRANSCRIPT PROTECTION PER SESSION.
-//     Prevents two `claude` processes from appending to the same session
-//     transcript simultaneously. Lane key = session id; a brand-new session
-//     (no id yet) falls back to chat key so first-messages collapse into one
-//     session instead of spawning two claudes.
+//  2. Global semaphore + RAM watchdog — OOM GUARD.
+//     Bounds how many live `claude` processes run in total (MAX_CONCURRENT_TASKS)
+//     and holds off spawning while free RAM is low (task-queue.js).
 //
-//  3. Per-profile cap + global semaphore — FAIRNESS / OOM GUARD.
-//     Bounds how many live `claude` processes one profile can hold at once
-//     (runner-lanes.js) and globally (MAX_CONCURRENT_TASKS + RAM watchdog).
+// There are deliberately NO per-session, per-profile or per-workDir locks.
+// A profile may run as many tasks as it likes across its chats; different
+// sessions and sessions sharing a workDir all run in parallel. Safe because
+// context is rebuilt from the session store (no `claude --resume`), so
+// parallel claudes never share a transcript file.
 //
-// Confusingly-named historical note: "one active session per chat" was always
-// the invariant, NOT "one session per workDir". Multiple chats can share a
-// workDir and their tasks run in parallel — that is correct and expected.
-//
-// Map<laneKey(string), Promise> — the tail of each transcript lane. laneKey is
-// `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
-const chatLanes = new Map();
-
-// Session serialization lane + per-profile cap primitives live in a pure module
-// (runner-lanes.js) so the REAL admission logic is vendorable/testable in staging
-// without pulling in the whole runner (same discipline as intake-routing.js).
-// See that file for why the lane keys on the SESSION, not the workDir/profile.
-const {
-  _laneKey,
-  DEFAULT_MAX_CONCURRENT_PER_KEY,
-  _capForKey,
-  setKeyCap,
-  _acquireKeySlot,
-  _releaseKeySlot,
-} = require('../runner-lanes');
-
 // Per-chat serialization (layer 1) + the global RAM-aware concurrency
-// semaphore (layer 3) live in src/runner/task-queue.js so admission logic is
-// unit-testable without pulling in the whole runner (same pattern as
-// runner-lanes.js for layer 2). Per-profile cap stays in runner-lanes.js.
+// semaphore (layer 2) live in src/runner/task-queue.js so admission logic is
+// unit-testable without pulling in the whole runner.
 const {
   chatQueue,
   _acquireSlot,
@@ -398,25 +378,30 @@ function isTaskRunning(username) {
 }
 
 // True while this exact session is either spawned-and-streaming OR still queued
-// waiting for a turn — checks activeTimers (live process) AND chatLanes (accepted,
-// waiting on the per-chat lane / per-profile cap / RAM / global slot). Used by
-// gtd-controller's re-entrancy guard: the journal-based check it used before had a
-// 30-min TTL heuristic while real runs can legitimately take up to CLAUDE_TIMEOUT_MS
-// (40min) plus up to 8 extend-timeout calls (2h+), so a long-running GTD turn could
-// age out of the guard and get double-fired by the next tick — fixed by switching to
-// this live in-process check (#1062). But activeTimers only gets an entry once the
-// process actually spawns (claude-runner.js, after every admission wait), while
-// chatLanes.set() happens synchronously the instant runTask() is called and stays
-// until the queued work finishes. Under load (profile cap / RAM / global slot all
-// busy), a GTD turn can sit queued for minutes with activeTimers still empty — the
-// next 5-min tick would see "not running" and fire a duplicate queued turn for the
-// same session onto the same lane. Checking chatLanes too closes that window.
+// waiting for a turn — checks activeTimers (live process) AND queuedSessions
+// (accepted, waiting behind this chat's current task / RAM / global slot). Used
+// by gtd-controller's re-entrancy guard: the journal-based check it used before
+// had a 30-min TTL heuristic while real runs can legitimately take up to
+// CLAUDE_TIMEOUT_MS (40min) plus up to 8 extend-timeout calls (2h+), so a
+// long-running GTD turn could age out of the guard and get double-fired by the
+// next tick — fixed by switching to this live in-process check (#1062).
+// activeTimers only gets an entry once the process actually spawns
+// (claude-runner.js, after every admission wait), while the session is added to
+// queuedSessions synchronously the instant runTask() is called and stays until
+// the queued work finishes. Under load (global slot / RAM busy), a GTD turn can
+// sit queued for minutes with activeTimers still empty — the next 5-min tick
+// would see "not running" and fire a duplicate queued turn for the same
+// session. Checking queuedSessions too closes that window. This is a read-only
+// membership set, NOT a lock: it serializes nothing, so unlimited tasks per
+// session/profile may still run concurrently.
+const queuedSessions = new Set(); // Set<sessionId(string)>
+
 function isSessionRunning(sessionId) {
   if (!sessionId) return false;
   for (const s of activeTimers.values()) {
     if (s.sessionId === sessionId) return true;
   }
-  if (chatLanes.has(_laneKey(sessionId, null))) return true;
+  if (queuedSessions.has(sessionId)) return true;
   return false;
 }
 
@@ -458,14 +443,6 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Transcript lane key — session-scoped to prevent two `claude` processes from
-  // writing to the same transcript at once. Sharing a workDir across chats is
-  // fine and expected; those tasks are serialized by perChatQueue, not here.
-  //   • sessionId present → serialize messages within the same session.
-  //   • no sessionId (brand-new) → fall back to chat key so concurrent
-  //     first-messages from the same chat collapse into one session.
-  let queueKey = _laneKey(opts.sessionId, opts.user.id);
-
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -592,8 +569,8 @@ function runTask(opts) {
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username, chatId);
-    // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
-    chatLanes.delete(queueKey);
+    // Clear this chat's queue so the next task doesn't wait behind a stuck one.
+    chatQueue.clearChat(chatId);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const msg = stopped
       ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
@@ -671,83 +648,59 @@ function runTask(opts) {
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('../admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
+  // One task at a time per chat — the per-chat lock, kept deliberately. There are
+  // no per-session / per-profile / per-workDir locks: those were removed because a
+  // stale promise in them left chats saying "waiting for previous work" with nothing
+  // running. Any number of tasks may run concurrently across chats and sessions of
+  // one profile — context is rebuilt from the session store (no `claude --resume`),
+  // so parallel claudes never share a transcript file.
+  if (chatQueue.hasPending(opts.user.id)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
-  // Per-profile cap key ("repository" = one profile's workspace). The owner is a
-  // PROFILE (L1 shim sets user.profileId = payload.profileId ?? username), so key on
-  // profileId; fall back to username, then chatId for internal/system callers that
-  // build a bare user object. In-memory Map key only — never a path/env key.
-  const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
-
-  // chatQueue.enqueue serializes at the per-chat level (layer 1). Inside the fn,
-  // we handle the session-lane (layer 2) and then run the actual work.
-  //
-  // IMPORTANT: capture sessionPrev HERE, before enqueue(), not inside the fn callback.
-  // The fn runs as a deferred microtask (.then(fn)), so chatLanes.set(queueKey, current)
-  // below executes first — reading chatLanes inside fn would return `current` itself,
-  // creating a circular dependency (work waits for current, current waits for work → deadlock).
-  const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
   // Postmortem diagnostics for issue #1015 ("session hung, no evidence of where
   // the time went"): stamp how long each admission stage actually took. Cheap
   // (a handful of Date.now() calls + one console.log per stage) but turns a
   // future "it was stuck" report into a log grep instead of guesswork.
   const stageT0 = Date.now();
   const logStage = (stage, since) => console.log(`[${opts.taskId}] stage=${stage} tookMs=${Date.now() - since}`);
-  const current = chatQueue.enqueue(opts.user.id, () => {
-    const work = sessionPrev.catch(() => {}).then(async () => {
-      logStage('session_lane_wait', stageT0);
-      // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
-      // profile's 4-slot cap waits here without holding a scarce global slot.
-      // Only show "waiting for slot" when the slot isn't immediately available —
-      // resolving at once means there's no real queue, so stay silent.
-      const capT0 = Date.now();
-      let capAcquired = false;
-      const capP = _acquireKeySlot(capKey);
-      capP.then(() => { capAcquired = true; });
-      await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
-      if (!capAcquired) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
-      await capP;
-      logStage('profile_cap_wait', capT0);
+  // Track the session as "queued" the instant we accept the task — the GTD
+  // re-entrancy guard (isSessionRunning) relies on this window before the
+  // process spawns. Read-only membership, not a lock.
+  if (opts.sessionId) queuedSessions.add(opts.sessionId);
+  const current = chatQueue.enqueue(opts.user.id, async () => {
+    try {
+      // Global admission control: wait for a free slot + enough RAM before we
+      // actually spawn `claude`. This is the OOM guard — the only remaining gate.
+      const ramT0 = Date.now();
+      await _waitForRam();
+      logStage('ram_wait', ramT0);
+      const slotT0 = Date.now();
+      await _acquireSlot();
+      logStage('global_slot_wait', slotT0);
       try {
-        // Global admission control: wait for a free slot + enough RAM before we
-        // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
-        const ramT0 = Date.now();
-        await _waitForRam();
-        logStage('ram_wait', ramT0);
-        const slotT0 = Date.now();
-        await _acquireSlot();
-        logStage('global_slot_wait', slotT0);
+        await status.finish('🧠 Начинаю работу…');
+        const runT0 = Date.now();
         try {
-          await status.finish('🧠 Начинаю работу…');
-          const runT0 = Date.now();
-          try {
-            return await _runTask(opts);
-          } finally {
-            logStage('run_task', runT0);
-          }
+          return await _runTask(opts);
         } finally {
-          _releaseSlot();
+          logStage('run_task', runT0);
         }
       } finally {
-        _releaseKeySlot(capKey);
+        _releaseSlot();
       }
-    });
-    return work;
+    } finally {
+      logStage('total', stageT0);
+    }
   }).catch(async err => {
-    const msg = err.message === 'capacity_wait_timeout'
-      ? '⏰ Сервер перегружен — задача слишком долго ждала свободного места. Попробуй ещё раз через минуту.'
-      : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
+    const msg = '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
     await status.finish(msg);
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
-  chatLanes.set(queueKey, current);
   current.finally(() => {
     // A task cut off by a restart keeps its journal entry: the next process resumes it.
     if (!restartShutdown) clearPendingTask(opts.taskId);
-    // Only clear if no newer task was enqueued after us
-    if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
+    if (opts.sessionId) queuedSessions.delete(opts.sessionId);
   });
   // Await retries for callers, but never hold their predecessor lane/lease.
   return current.then(result => result?.queuedRetry || result);
@@ -2598,14 +2551,10 @@ module.exports = {
   _final: { pickFinalText, isScratchpadFallback },
   // Exported for oc-footer tests only
   _footer: { formatOcFooter, formatCostFooter },
-  // Exported for lane-granularity tests only
-  _laneKey,
-  // Exported for per-profile cap-isolation tests only (R7/S8a)
-  _cap: { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY },
   // Exported for isSessionRunning tests only — the real Map backing activeTimers
   _activeTimers: activeTimers,
-  // Exported for isSessionRunning tests only — the real Map backing chatLanes
-  _chatLanes: chatLanes,
+  // Exported for isSessionRunning tests only — the real Set of queued sessions
+  _queuedSessions: queuedSessions,
   // Exported for provider-alternation wiring tests only (unified crash-retry, issue #1132 follow-up)
   _forceOpencodeAlternation: forceOpencodeAlternation,
   // Exported for failure-brain wiring tests only (issue #1175, PR #1179 follow-up)

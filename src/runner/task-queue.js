@@ -3,10 +3,14 @@
 // RAM-aware concurrency semaphore. Extracted from runner.js (issue #942 P1.2)
 // so the queueing/admission logic is a self-contained, testable unit.
 //
-// Per-chat serialization (layer 1) already lived in runner-chat-queue.js
-// (same pattern as runner-lanes.js) — re-exported here as `chatQueue` rather
-// than duplicated, so this module is the one place runner.js reaches for
+// Per-chat serialization lives in runner-chat-queue.js — re-exported here as
+// `chatQueue` so this module is the one place runner.js reaches for
 // queue/admission primitives.
+//
+// There is intentionally NO per-session / per-profile / per-workDir locking:
+// a stale promise in those left chats saying "waiting for previous work" with
+// nothing running. The only gates are this per-chat queue (one task per
+// Telegram chat at a time — deliberate) and the global OOM guard below.
 
 const os = require('os');
 const chatQueue = require('../runner-chat-queue');
