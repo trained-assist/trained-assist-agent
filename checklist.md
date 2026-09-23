@@ -45,3 +45,10 @@ Goal: /run accepts chatId as alias for userId — P1-A of naming-conventions ref
 - [ ] Merged to main
 - [ ] Deployed to prod — verified via deploy-gcp/deploy-ru check-runs (success) on merge commit
 - [ ] Live smoke-check: /run still accepts old-style `userId`-only calls unchanged, and a `chatId`-only call is accepted too
+
+Goal: wire failure-classifier.js/execution-history.js into runner/index.js's crash/retry maze — Phase A, observational only, no control-flow change (issue #1175 follow-up to #1179, owner voice note 2026-09-23 "подключаем с тобой мозг"). Every crash/retry branch (quick-crash, resume-after-restart, opencode ladder/quota/context/config, deepseek go-toggle, auth fallback, generic incomplete retry, timeout auto-continuation, user-stop) now classifies its error text and records a Failure Event via a new executionId threaded through every recursive runTask() retry, finalized at each real terminal point — but none of them changed which action they take; recovery-policy.js is deliberately NOT wired into any decision yet (separate, later PR once this phase has run against real traffic — the #1172/#1173 lesson: this hot path doesn't get a second unreviewed behavioral change).
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1181
+- [ ] Merged to main
+- [ ] Deployed to prod — verified via deploy-gcp/deploy-ru check-runs (success) on merge commit
+- [ ] Live smoke-check: after a real production crash/retry (any engine), `~/agent-data/execution-history/<executionId>.json` exists with at least one recorded attempt and a non-null failureClass
