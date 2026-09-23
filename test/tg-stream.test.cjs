@@ -7,6 +7,9 @@
 //     no retry-with-retry_after sleep, no throw.
 // (3) terminal edits still retry on 429, but the wait is capped so a dead
 //     message fails fast (caller falls back to sendMessage).
+// (4) starve backstop: a message that loses the per-chat coalesce slot to a
+//     sibling message every tick ("постоянно 3 секунды, не меняется" — voice
+//     report 2026-09-23) must eventually be forced through, not skipped forever.
 const assert = require('node:assert/strict');
 const { tgEdit } = require('../src/runner/tg-stream');
 
@@ -64,7 +67,21 @@ function installFetch(statuses) {
     // 100s retry_after x3 would be 300s; capped at 8s each => well under
     assert.ok(elapsed < 60_000, `terminal wait must be capped (elapsed=${elapsed}ms)`);
 
-    console.log('PASS tg-stream flood-control: coalesce + bestEffort + capped retry');
+    // (4) starve backstop — msgA wins the coalesce slot every tick, msgB keeps
+    // losing; after MAX_STARVE_STREAK (2) consecutive drops, msgB's next edit
+    // must be forced through instead of skipped again.
+    installFetch(200);
+    await tgEdit('tok', 555, 'msgA', 'a0', {}, { bestEffort: true, coalesce: true }); // lands, claims slot
+    const b0 = await tgEdit('tok', 555, 'msgB', 'b0', {}, { bestEffort: true, coalesce: true }); // drop 1
+    await tgEdit('tok', 555, 'msgA', 'a1', {}, { bestEffort: true, coalesce: true }); // re-claims slot
+    const b1 = await tgEdit('tok', 555, 'msgB', 'b1', {}, { bestEffort: true, coalesce: true }); // drop 2
+    await tgEdit('tok', 555, 'msgA', 'a2', {}, { bestEffort: true, coalesce: true }); // re-claims slot
+    const b2 = await tgEdit('tok', 555, 'msgB', 'b2', {}, { bestEffort: true, coalesce: true }); // forced
+    assert.equal(b0.skipped, true, 'starve: 1st drop for msgB should still be skipped');
+    assert.equal(b1.skipped, true, 'starve: 2nd drop for msgB should still be skipped');
+    assert.ok(!b2.skipped, 'starve: 3rd consecutive drop for msgB must be forced through');
+
+    console.log('PASS tg-stream flood-control: coalesce + bestEffort + capped retry + starve backstop');
   } finally {
     globalThis.fetch = realFetch;
   }
