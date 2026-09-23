@@ -32,3 +32,9 @@ Goal: fix free-tier OpenCode model ladder — dead xiaomi/mimo-v2.5:free rung gu
 - [ ] Deployed to prod — verified live (static config/JS files, live via systemd restart of assist-agent.service; no separate build step)
 
 Unrelated, non-blocking finding while investigating #1164's CI: the `autofix` check-run fails on every PR in this repo (curl 404 fetching `pr-autofix`'s `scripts/autofix.mjs` at `refs/pull/<N>/merge` — that ref only exists in trained-assist-agent, not in the pr-autofix repo it's fetched from). Not a required status check (branch protection only requires `ci` + `staging-gate`), so it doesn't block merges — but it means autofix has likely never run successfully on this repo. Worth a follow-up issue if the `autofix` job is meant to do anything; not fixed here (out of scope for the ladder fix).
+
+Goal: revert the "durable last-failure ledger" (recordLastFailure/readAndClearLastFailure + runner hooks + test) that squash-merged into main as part of PR #1172 alongside an unrelated, kept, tool-progress fix — owner voice decision 2026-09-23: catching/recording crashes and re-injecting them into the next run needs an architecture pass (fragile bespoke file+schema, unclear split between "explicit retryable error" (agent's job) vs "session went silent" (supervising runner's job, not agent's)) *before* it ships, and it shipped (merged + deployed to prod 2026-09-23T11:36:42Z) before that review happened.
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1173
+- [ ] Merged to main
+- [ ] Deployed to prod — verified via deploy-gcp/deploy-ru check-runs (success) on merge commit
