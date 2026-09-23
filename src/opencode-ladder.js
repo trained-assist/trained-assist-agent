@@ -34,10 +34,30 @@ const CLASSIFIERS = [
   { class: 'config', ttlMs: null, pattern: /subscription required/i },
   { class: 'config', ttlMs: null, pattern: /requires global regions/i },
   { class: 'config', ttlMs: null, pattern: /insufficient account funds/i },
+  // Model slug retired/never had free-tier access — confirmed live against OpenRouter
+  // 2026-09-23: e.g. "This model is unavailable for free. The paid version is available
+  // now - use this slug instead: ...". This is 'quota' (not 'config'): unlike "subscription
+  // required" or "insufficient funds", which block the WHOLE account/profile and justify
+  // stopping the task to alert an operator, a retired slug is specific to that one rung —
+  // the other rungs in the ladder work fine, so the task should just skip forward silently
+  // rather than dead-stop it. 30-day TTL is "practically permanent" — the exhaustion outlives
+  // any single task's retry loop — without wiring a whole new never-clears-but-still-degrades
+  // class through the config/quota branch in runner/index.js for a case this rare. Whoever
+  // fixes the ladder should still remove the dead rung from the profile JSON and this TTL
+  // becomes moot.
+  { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /unavailable for free/i },
+  { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /model not found/i },
+  { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /no endpoints found/i },
   { class: 'quota', ttlMs: 60 * 60 * 1000, pattern: /rate[_\s-]{0,5}limit/i },
   { class: 'quota', ttlMs: 60 * 60 * 1000, pattern: /\b429\b/ },
   { class: 'quota', ttlMs: 24 * 60 * 60 * 1000, pattern: /usage limit/i },
   { class: 'quota', ttlMs: 24 * 60 * 60 * 1000, pattern: /quota[^.]{0,20}exceeded/i },
+  // Provider-side capacity issue, not our account's quota — confirmed live 2026-09-23
+  // (nemotron-3-ultra-550b-a55b:free returned "Upstream error from Nvidia: Service
+  // temporarily overloaded" on 3/3 consecutive calls). Short TTL: this is about the
+  // upstream provider being busy right now, not a limit that resets hourly/daily.
+  { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /temporarily overloaded/i },
+  { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /\b503\b/ },
 ];
 
 function classifyError(text) {

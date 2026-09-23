@@ -1,9 +1,9 @@
 {
   "ladder": {
-    "build":   ["openrouter/xiaomi/mimo-v2.5:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/nvidia/nemotron-3.5-lightning:free"],
-    "plan":    ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/xiaomi/mimo-v2.5:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free"],
-    "explore": ["openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/xiaomi/mimo-v2.5:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free"],
-    "general": ["openrouter/xiaomi/mimo-v2.5:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"],
-    "review":  ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "openrouter/xiaomi/mimo-v2.5:free"]
+    "build":   ["openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"],
+    "plan":    ["openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"],
+    "explore": ["openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/nvidia/nemotron-3-super-120b-a12b:free"],
+    "general": ["openrouter/nvidia/nemotron-3-super-120b-a12b:free", "openrouter/nvidia/nemotron-3.5-lightning:free", "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"],
+    "review":  ["openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"]
   }
 }
