@@ -8,6 +8,10 @@ const { ACTIVE_CHECKLIST_INTENT, GTD_STOP_INTENT } = require('../../src/runner/i
 
 describe('ACTIVE_CHECKLIST_INTENT', () => {
   it.each([
+    '/show_active_cheklist',
+    '[Сообщение 1]\n/show_active_cheklist',
+    '/show_active_cheklist@SuperAssistantBot',
+    '[Сообщение 1]\n/show_active_cheklist@SuperAssistantBot',
     '/active_checklist',
     '[Сообщение 1]\n/active_checklist',
     '/active_checklist@SuperAssistantBot',
@@ -18,6 +22,9 @@ describe('ACTIVE_CHECKLIST_INTENT', () => {
     'покажи /active_checklist пожалуйста',
     '[Сообщение 1]\n/active_checklist\n\n[Сообщение 2]\nчто-то ещё',
     '/active_checklists',
+    '/show_active_cheklists',
+    'покажи /show_active_cheklist пожалуйста',
+    '[Сообщение 1]\n/show_active_cheklist\n\n[Сообщение 2]\nдругое',
   ])('does not match %j', (t) => expect(ACTIVE_CHECKLIST_INTENT.test(t)).toBe(false));
 });
 

@@ -7,6 +7,11 @@
 // merged in #1200) and just needed a way to be called.
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { itemSchema } = require('../../durable-task-plan');
+const { userWorkDir, sessionFilePath } = require('../../data-paths');
+const { getProject } = require('../../projects');
 const { DurableTaskStore } = require('../../durable-task-store');
 const { durableTaskDbPath } = require('../../data-paths');
 
@@ -22,24 +27,65 @@ function requireProfile(ctx) {
   return String(profileId);
 }
 
+// Resolve references only beneath the authenticated profile. Never trust an
+// incoming profile_id or a caller-supplied filesystem path.
+function checkReferences(profileId, projectId, sessionId) {
+  const safeId = value => typeof value === 'string' && value.length > 0 && value !== '.' && value !== '..' && !/[\\/\0]/.test(value);
+  const root = userWorkDir(profileId);
+  const ownedPath = file => {
+    try { return fs.realpathSync(file).startsWith(fs.realpathSync(root) + path.sep); } catch { return false; }
+  };
+  if (projectId && (!safeId(projectId) || !ownedPath(path.join(root, 'projects', projectId)) || !getProject(root, projectId))) {
+    throw new Error('project not found in this profile');
+  }
+  if (sessionId && (!safeId(sessionId) || !ownedPath(sessionFilePath(profileId, sessionId)))) {
+    throw new Error('session not found in this profile');
+  }
+}
+
+function withProjection(result, profileId) {
+  if (!result.task.project_id || !result.task.acceptance_criteria_json) return result;
+  try {
+    checkReferences(profileId, result.task.project_id, null);
+    result.projection = store().writeProjection(result.task.id, profileId,
+      path.join(userWorkDir(profileId), 'projects', result.task.project_id));
+  } catch (error) {
+    // The committed DB is authoritative. A projection failure must not suggest
+    // creation rolled back and encourage the caller to create a duplicate task.
+    result.projection_warning = `Plan saved; projection unavailable: ${error.message}`;
+  }
+  return result;
+}
+
 module.exports = {
   tools: {
 
     task_create: {
       description:
         'Create a new durable task (a goal tracked across sessions/restarts in SQLite, ' +
-        'not a JSON checklist.md). Scoped to the caller\'s profile.',
+        'not a JSON checklist.md). Supply user_value, acceptance_criteria and items to atomically persist a draft plan. Scoped to the caller\'s profile.',
       inputSchema: {
         type: 'object',
         required: ['goal'],
         properties: {
           goal: { type: 'string', description: 'What this task is trying to accomplish' },
+          session_id: { type: 'string' },
+          playbook_id: { type: 'string' }, playbook_version: { type: 'integer' },
+          user_value: { type: 'string' },
+          acceptance_criteria: { type: 'array', minItems: 1, items: { type: 'object' } },
+          items: { type: 'array', minItems: 1, items: itemSchema },
+          execution_policy: { type: 'object' }, request_id: { type: 'string' },
           project_id: { type: 'string', description: 'Optional project id to associate' },
         },
       },
-      handler: async ({ goal, project_id = null }, ctx) => {
+      handler: async ({ goal, project_id = null, ...plan }, ctx) => {
         const profileId = requireProfile(ctx);
+        checkReferences(profileId, project_id, plan.session_id);
         const id = crypto.randomUUID();
+        if (Object.keys(plan).length) {
+          const result = store().createPlan({ ...plan, id, profile_id: profileId, project_id, goal });
+          return withProjection(result, profileId);
+        }
         const task = store().createTask({ id, profile_id: profileId, project_id, goal });
         return { task };
       },
@@ -82,7 +128,7 @@ module.exports = {
       inputSchema: {
         type: 'object',
         properties: {
-          status: { type: 'string', enum: ['active', 'done', 'failed', 'cancelled'] },
+          status: { type: 'string', enum: ['draft', 'active', 'paused', 'blocked', 'done', 'failed', 'cancelled'] },
         },
       },
       handler: async ({ status } = {}, ctx) => {
@@ -106,7 +152,7 @@ module.exports = {
         const task = store().getTask(task_id, profileId);
         if (!task) return { error: 'task not found (or not owned by this profile)' };
         const items = store().listTaskItems(task_id, profileId);
-        return { task, items };
+        return withProjection({ task, items, sessions: store().listSessions(task_id, profileId) }, profileId);
       },
     },
 
@@ -118,12 +164,13 @@ module.exports = {
         properties: {
           task_id: { type: 'string' },
           goal: { type: 'string' },
-          status: { type: 'string', enum: ['active', 'done', 'failed', 'cancelled'] },
+          status: { type: 'string', enum: ['draft', 'active', 'paused', 'blocked', 'done', 'failed', 'cancelled'] },
           project_id: { type: 'string' },
         },
       },
       handler: async ({ task_id, ...patch }, ctx) => {
         const profileId = requireProfile(ctx);
+        checkReferences(profileId, patch.project_id, null);
         const task = store().updateTask(task_id, profileId, patch);
         if (!task) return { error: 'task not found (or not owned by this profile)' };
         return { task };

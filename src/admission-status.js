@@ -18,7 +18,12 @@ function createAdmissionStatus(opts, { edit, send, intervalMs = 15000 }) {
         // sessions on one bot token a retry storm on editMessageText 429 would
         // only make the flood worse (retry_after escalates 5s->44s).
         const result = await edit(token, chatId, opts.initialMsgId, text, {}, { bestEffort: true, coalesce: true });
-        if (result?.ok === false && !/message is not modified/i.test(result.description || '')) {
+        // A best-effort 429 drop (`flooded`) is an INTENTIONAL skip — the next tick
+        // edits the same message again, same as a coalesce skip. Treating it as a
+        // failure here used to trigger a fallback sendMessage on every rate-limited
+        // tick, producing a pile of duplicate "Ожидаю завершения..." bubbles instead
+        // of one message being edited in place (bug: voice+screenshot report 2026-09-23).
+        if (result?.ok === false && !result?.flooded && !/message is not modified/i.test(result.description || '')) {
           throw new Error(result.description || 'Telegram edit failed');
         }
       } catch (err) {

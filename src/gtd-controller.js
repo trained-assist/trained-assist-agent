@@ -26,6 +26,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { DurableTaskStore } = require('./durable-task-store');
+const { durableTaskDbPath } = require('./data-paths');
 
 // ── Разумные дефолты (небольшие, но осмысленные) ────────────────────────────
 const DEFAULT_ETA_MIN = 60;   // через сколько минут после завершения проверить
@@ -60,6 +62,146 @@ let _tickInFlight = false;
 const GTD_DIR = 'gtd';
 const CHECKLIST_FILE = 'checklist.md';
 const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'agent-tokens');
+
+// ── Durable-task scheduler wiring (Slice A, issue #1201) ────────────────────
+// The SQLite DurableTaskStore is the source of truth for durable tasks; this
+// slice makes the GTD tick EXECUTE its runnable items. Legacy gtd/*.json
+// records keep flowing through the file-based path unchanged — both sources
+// feed the same fire pipeline, migration of old records is deliberately last
+// (spec §"не делать большой rewrite GTD одновременно").
+//
+// Shared singleton: MCP tools (101-durable-tasks.js) open the same DB file —
+// better-sqlite3 with WAL handles multi-connection readers/writers on one
+// process, and busy_timeout (5s) covers the rare write overlap. Reusing one
+// instance per process avoids duplicating the open-migration cost.
+let _durableStore = null;
+function durableStore() {
+  if (!_durableStore) _durableStore = new DurableTaskStore(durableTaskDbPath());
+  return _durableStore;
+}
+
+// Items left status='running' by a crash/restart would never be claimed again
+// (claimNextRunnable only selects pending/waiting) — the classic reboot gap.
+// Called once per tick before claiming: orphaned runs older than the fire
+// lease go back to pending with due_at=now, so the next claim re-executes them.
+// Fresher orphans stay running (their run may still be alive in this process).
+const RUNNING_ORPHAN_GRACE_MS = 45 * 60 * 1000; // mirrors FIRE_LEASE_MS
+function reconcileOrphanedRunning(store = durableStore(), { now = Date.now() } = {}) {
+  const rows = store.db.prepare(`SELECT i.id, i.updated_at FROM task_items i
+    JOIN durable_tasks t ON t.id = i.task_id
+    WHERE i.status = 'running' AND t.status = 'active'`).all();
+  const cutoff = now - RUNNING_ORPHAN_GRACE_MS;
+  for (const row of rows) {
+    if ((row.updated_at || 0) > cutoff) continue;
+    store.updateTaskItem(row.id, { status: 'pending', due_at: now },
+      store.db.prepare('SELECT profile_id FROM durable_tasks WHERE id = ?').get(
+        store.db.prepare('SELECT task_id FROM task_items WHERE id = ?').get(row.id).task_id
+      ).profile_id);
+  }
+}
+
+// Profile ids that own runnable items right now, mapped to their claimable
+// items. Legacy GTD scans per-profile directories; the store is profile-keyed,
+// so we invert: claim globally, then resolve the profile per item.
+function claimNextDurableItem(store = durableStore()) {
+  reconcileOrphanedRunning(store);
+  return store.claimNextRunnable();
+}
+
+
+const FRESH_CLAIM_GRACE_MS = 30 * 1000; // just-claimed items: let the claiming tick run them
+const DURABLE_MAX_ATTEMPTS = 3;
+
+// Fire a claimed durable item through the same pipeline as legacy GTD fires.
+// Contract plans (draft, with acceptance_criteria) stay unclaimable by design —
+// activation is a later slice's decision, not this wiring's.
+async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK }) {
+  const store = durableStore();
+  let fired = 0;
+  for (;;) {
+    if (fired >= maxFires) return fired;
+    const item = claimNextDurableItem(store, { now });
+    if (!item) return fired;
+    const task = store.db.prepare('SELECT * FROM durable_tasks WHERE id = ?').get(item.task_id);
+    if (!task) { store.failItem(item.id, '__system__', { error: 'task vanished' }); continue; }
+
+    // Re-entrancy: a live session for this task must not be double-fired.
+    const sessionRow = store.db.prepare(
+      'SELECT session_id FROM task_sessions WHERE task_id = ? AND active = 1').get(task.id);
+    if (sessionRow && isTaskRunning(null, sessionRow.session_id)) {
+      // release the claim — put back to pending with a short re-try delay
+      store.updateTaskItem(item.id, { status: 'waiting', due_at: now + FRESH_CLAIM_GRACE_MS }, task.profile_id);
+      continue;
+    }
+
+    fired += 1;
+    console.log(`[gtd-durable] fire item=${item.id.slice(0, 8)} task=${task.id.slice(0, 8)} tier=${item.current_tier}`);
+    const executionId = `exec-${item.id.slice(0, 8)}-${now}`;
+    store.startExecution({ id: executionId, task_id: task.id, task_item_id: item.id, session_id: sessionRow?.session_id || null, tier: item.current_tier });
+
+    const prompt = [
+      '[DURABLE TASK — auto-execution]',
+      `Task: ${task.goal}`,
+      `Step (${item.position + 1}/${store.progressSummary(task.id, task.profile_id).total}): ${item.title}`,
+      item.instructions ? `\nInstructions: ${item.instructions}` : '',
+      item.validation && Object.keys(item.validation).length
+        ? `\nValidation (must pass before completion): ${JSON.stringify(item.validation)}` : '',
+      '\nВыполни этот шаг. Если шаг выполнен и проверка прошла — ответь финальной строкой: DURABLE: done.',
+      'Если шаг не удался — опиши ошибку и ответь финальной строкой: DURABLE: failed: <причина>.',
+    ].filter(Boolean).join('\n');
+
+    const itemSnap = { ...item };
+    const fireNow = now;
+    runTask({
+      taskId: `durable-${task.profile_id}-${item.id.slice(0, 8)}-${fireNow}`,
+      user: { id: null, name: task.profile_id, username: task.profile_id, workDir: null },
+      task: prompt, forceClaude: true, engine: 'claude', secrets, internalGtd: true,
+    }).then(reply => {
+      const said = typeof reply === 'string' ? reply : '';
+      if (/DURABLE:\s*done/i.test(said)) {
+        store.completeItem(itemSnap.id, task.profile_id, { executionId });
+        store.finishExecution(executionId, { status: 'success' });
+        console.log(`[gtd-durable] item done: ${itemSnap.id.slice(0, 8)}`);
+      } else if (/DURABLE:\s*failed/i.test(said)) {
+        store.failItem(itemSnap.id, task.profile_id, { executionId, error: said.slice(0, 500) });
+        store.finishExecution(executionId, { status: 'failed', error_text: said.slice(0, 500) });
+        // tier escalation: retry at the next level until the ceiling
+        const esc = store.escalateItem(itemSnap.id, task.profile_id);
+        if (esc && esc.current_tier !== itemSnap.current_tier) {
+          store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() }, task.profile_id);
+          console.log(`[gtd-durable] escalated ${itemSnap.id.slice(0, 8)} → ${esc.current_tier}`);
+        } else {
+          console.log(`[gtd-durable] item failed at ceiling tier: ${itemSnap.id.slice(0, 8)}`);
+        }
+      } else {
+        // no terminal marker — treat as failure and escalate (bounded by DURABLE_MAX_ATTEMPTS via escalation ceiling)
+        store.failItem(itemSnap.id, task.profile_id, { executionId, error: 'no DURABLE terminal marker in reply' });
+        store.finishExecution(executionId, { status: 'failed', error_class: 'no-marker' });
+        const esc = store.escalateItem(itemSnap.id, task.profile_id);
+        if (esc && esc.current_tier !== itemSnap.current_tier) {
+          store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() }, task.profile_id);
+        }
+      }
+      // Keep the task row's revision ticking so projections/UI notice progress.
+      const progress = store.progressSummary(task.id, task.profile_id);
+      if (progress.total > 0 && progress.finished >= progress.total) {
+        // updateTask's activation gate blocks contract-plan finalization on
+        // purpose; the runtime gate for that is a later slice. Finalize via the
+        // same SQL the gate protects for legacy tasks only.
+        if (!task.acceptance_criteria_json) store.completeTask(task.id, task.profile_id, 'done');
+        else store.db.prepare('UPDATE durable_tasks SET status=?, updated_at=? WHERE id=?').run('done', Date.now(), task.id);
+        console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
+      }
+    }).catch(e => {
+      console.error(`[gtd-durable] runTask ${itemSnap.id.slice(0, 8)}:`, e.message);
+      store.failItem(itemSnap.id, task.profile_id, { executionId, error: e.message.slice(0, 500) });
+      store.finishExecution(executionId, { status: 'failed', error_class: 'run-crash', error_text: e.message.slice(0, 500) });
+      // do NOT escalate on crash (engine/env problem, not item problem) — leave
+      // pending so the next tick retries the same tier (bounded by attempts?):
+      store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() + 5 * 60 * 1000 }, task.profile_id);
+    });
+  }
+}
 
 // ── Mirror into checklist.trainedassist.store (2026-09-21) ─────────────────
 // checklist.md in projectDir stays the ONE source of truth the tick loop reads/writes —
@@ -544,6 +686,12 @@ async function runDue(deps) {
 }
 
 async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, getSession, canRunSession = () => true, now = Date.now() }) {
+  // Slice A: durable-task scheduler runs alongside the legacy file scan. Both
+  // share MAX_FIRES_PER_TICK via runDueDurable's own budget — combined bursts
+  // stay bounded per tick.
+  try { await runDueDurable({ secrets, runTask, isTaskRunning, now }); }
+  catch (e) { console.error('[gtd-durable] tick error:', e.message); }
+
   let users = [];
   try { users = fs.readdirSync(baseUsersDir).filter(u => /^[a-zA-Z0-9_-]+$/.test(u)); } catch { return; }
 
@@ -719,6 +867,7 @@ module.exports = {
   readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE, checklistAutologinUrl,
+  durableStore, runDueDurable, reconcileOrphanedRunning, claimNextDurableItem,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
   CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS, MAX_FIRES_PER_TICK, FIRE_LEASE_MS,
   _atomicWrite,

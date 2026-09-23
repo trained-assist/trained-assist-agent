@@ -2,10 +2,15 @@
   "vitest": [
     "tests/runner-e2e.test.js",
     "tests/quick-answers.test.js",
-    "tests/unit/intake-files-endpoint.test.js"
+    "tests/unit/intake-files-endpoint.test.js",
+    "tests/unit/durable-plan-persistence.test.js",
+    "tests/unit/hh-disconnect-safety.test.js",
+    "tests/action-provider-registry.test.js",
+    "tests/mcp-action-routing.test.js"
   ],
   "node": [
     "test/run-ingress.test.cjs",
+    "test/gtd-durable-wiring.test.cjs",
     "test/intake-media-retention.test.cjs",
     "test/admission-status.test.cjs",
     "test/lane-granularity.test.cjs",
