@@ -300,29 +300,36 @@ async function resumePendingTasks(secrets) {
       id: p.userId, name: p.username, username: p.username, workDir,
       profileId: p.profileId, telegramUserId: p.telegramUserId,
     };
-    const fireResume = () => runTask({
-      taskId: `${p.username}-resume-${Date.now()}`,
-      user, task: p.task, context: p.context || null,
-      engine, sessionId: p.sessionId || null,
-      contextFromSession: p.contextFromSession || null,
-      forceClaude: true, projectId: p.projectId || null,
-      initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
-      resumedAfterRestart: true, resumeAttempts: attempt,
-      secrets, internalGtd: !!p.internalGtd,
-    }).then(reply => {
-      // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
-      if (p.internalGtd && p.sessionId) require('./gtd-controller').settleResumedGtd(workDir, p.sessionId, reply);
-    }).catch(err => {
-      console.error(`[resume] user=${p.username} error:`, err.message);
-      if (!p.internalGtd) notifyFailure(p, '⚠️ Не удалось продолжить задачу после перезапуска. Повтори запрос.');
-    });
+    const fireResume = async () => {
+      try {
+        // runTask journals its replacement synchronously before returning its promise.
+        // Keep the old durable entry throughout backoff and until that handoff succeeds.
+        const running = runTask({
+          taskId: `${p.username}-resume-${Date.now()}`,
+          user, task: p.task, context: p.context || null,
+          engine, sessionId: p.sessionId || null,
+          contextFromSession: p.contextFromSession || null,
+          forceClaude: true, projectId: p.projectId || null,
+          initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
+          resumedAfterRestart: true, resumeAttempts: attempt,
+          secrets, internalGtd: !!p.internalGtd,
+          mode: p.mode, continuationCount: p.continuationCount,
+          initiatedAt: p.initiatedAt, threadId: p.threadId,
+        });
+        clearPendingTask(p.taskId);
+        const reply = await running;
+        // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
+        if (p.internalGtd && p.sessionId) require('./gtd-controller').settleResumedGtd(workDir, p.sessionId, reply);
+      } catch (err) {
+        console.error(`[resume] user=${p.username} error:`, err.message);
+        if (!p.internalGtd) await notifyFailure(p, '⚠️ Не удалось продолжить задачу после перезапуска. Повтори запрос.');
+      }
+    };
     const delayMs = getRetryDelayMs(attempt) || 0;
     if (delayMs > 0) setTimeout(fireResume, delayMs);
     else fireResume();
-    // runTask journals the new task id once fireResume() actually runs; drop the old entry
-    // now regardless, otherwise the next restart within the window would re-run this task
-    // a second time while the delayed attempt is still pending.
-    clearPendingTask(p.taskId);
+    // A process restart destroys its timers. Leave the journal intact while waiting
+    // so the next process can schedule the same attempt again without losing work.
     await new Promise(r => setTimeout(r, 200)); // stagger multiple resumes
   }
 }
