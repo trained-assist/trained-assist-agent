@@ -11,11 +11,10 @@ const require = createRequire(import.meta.url);
 const { DurableTaskStore } = require('../../src/durable-task-store');
 
 const cleanup = [];
+// :memory: — these are unit tests for the store's logic, not its on-disk WAL
+// behavior, so there's no need for real files.
 function tmpStore() {
-  const dir = mkdtempSync(join(tmpdir(), 'dts-'));
-  const store = new DurableTaskStore(join(dir, 'state.db'));
-  cleanup.push(dir);
-  return store;
+  return new DurableTaskStore(':memory:');
 }
 afterEach(() => {
   for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true });
