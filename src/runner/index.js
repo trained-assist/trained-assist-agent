@@ -1309,7 +1309,7 @@ function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engi
   }
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID() }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1650,6 +1650,15 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? `[AGENT PROJECT NOTES — твои заметки о накопленном опыте в этом проекте]\n${projectNotes}`
     : '';
 
+  // Voice 2026-09-23 (simplest version): this run is an automatic retry of the SAME task after
+  // it crashed/hung — tell the agent what happened last time instead of blindly re-running the
+  // identical input. In-memory only (passed through the recursive runTask() call, see the three
+  // retry sites below), never written to disk — unlike the reverted per-project ledger (#1173),
+  // there is no cross-session file/schema to own; it only lives for this one retry chain.
+  const lastAttemptErrorSection = lastAttemptError
+    ? `[⚠️ ПРОШЛАЯ ПОПЫТКА ЭТОЙ ЖЕ ЗАДАЧИ УПАЛА — это автоматический повтор]\nПричина: ${lastAttemptError.reason}\nОшибка: ${String(lastAttemptError.errorText || '').slice(0, 1000)}\nЗадача ниже — тот же запрос, что и в прошлый раз. Учти причину сбоя и действуй по своему усмотрению: попробуй иначе, обойди проблему или доведи до конца другим способом.`
+    : '';
+
   // If a quick-answer API call just failed, inject the error so Claude knows what happened.
   // The error is written to vacancy state before returning null; read it once here and clear it.
   let vacancyApiErrorSection = '';
@@ -1694,7 +1703,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   //  project + cross-profile collector; no in-session GitHub issue creation. See intent-engine
   //  BUG_OR_FEATURE_INTENT and src/bugs-collector.js.)
 
-  let baseContext = [timeoutSection, notesSection, projectNotesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
+  let baseContext = [timeoutSection, notesSection, projectNotesSection, lastAttemptErrorSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   let prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
@@ -1964,6 +1973,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         retryCount: retryCount + 1,
         continuationCount, mode, projectId, internalGtd, engine,
         executionId,
+        lastAttemptError: { reason: `быстрый сбой при запуске (код ${exitCode})`, errorText: codexErrorMsg || `exit ${exitCode}` },
       });
       return { queuedRetry };
     }
@@ -2034,6 +2044,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         resumedAfterRestart: true, resumeAttempts: resumeAttempts + 1,
         continuationCount, mode, projectId, internalGtd, engine,
         executionId,
+        lastAttemptError: { reason: `восстановление после перезапуска сервера не удалось (${reason})`, errorText: codexErrorMsg || fullOutput.text.trim().slice(-1000) },
       });
       return { queuedRetry };
     }
@@ -2295,6 +2306,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       incompleteRetryAttempts: nextAttempt,
       continuationCount, mode, projectId, internalGtd, engine,
       executionId,
+      lastAttemptError: { reason: `работа прервана (${incompleteReason})`, errorText: codexErrorMsg || fullOutput.text.trim().slice(-1000) },
     });
     const queuedRetry = delayMs > 0
       ? new Promise((resolve, reject) => setTimeout(() => { fireRetry().then(resolve, reject); }, delayMs))
