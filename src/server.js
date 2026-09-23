@@ -1122,7 +1122,13 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
+      const { username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
+      // `/run`'s `userId` field has always meant the Telegram chat to stream into, not a
+      // user identity. `chatId` is the forward-looking wire name for that same value (see
+      // plan generic-naming-conventions-refactoring, P1-A) — accepted here first, taking
+      // priority when both are sent, so tg-bot can start sending it (PR-B) ahead of dropping
+      // `userId` (PR-D). Callers still sending only `userId` see no behavior change.
+      const userId = payload.chatId ?? payload.userId;
       if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))) return json(res, 400, { error: 'invalid audience' });
       if (initiatedAt != null && (!Number.isSafeInteger(initiatedAt) || initiatedAt < 0 || initiatedAt > Date.now() + 30000)) return json(res, 400, { error: 'invalid initiatedAt' });
       if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return json(res, 400, { error: 'invalid threadId' });

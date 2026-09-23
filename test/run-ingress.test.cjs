@@ -16,7 +16,8 @@ function fixture(t) {
  };
  vm.createContext(sandbox);vm.runInContext(`async function ingress(req,res) {const url={pathname:'/run'};${source.slice(start,end)}}`,sandbox);
  const send=async(body={})=>{const res={};await sandbox.ingress({method:'POST',body:{userId:42,username:'alice',task:'work',requestId:'request-1',...body}},res);return res;};
- return {root,runs,pending,sandbox,send};
+ const sendRaw=async(body)=>{const res={};await sandbox.ingress({method:'POST',body},res);return res;};
+ return {root,runs,pending,sandbox,send,sendRaw};
 }
 test('lost ACK is deduplicated from persisted receipt after process memory is lost',async t=>{
  const f=fixture(t);const first=await f.send({mode:'deep',projectId:'project'});assert.equal(first.status,202);assert.equal(first.data.durable,true);
@@ -84,6 +85,16 @@ test('R2 refs are fetched and verified before run acceptance, without a legacy s
  const file=path.join(f.root,'users','alice','media','intake',ref.id+'-voice.ogg');assert.deepEqual(fs.readFileSync(file),bytes);
  assert.ok(f.runs[0].task.includes(file));
  const retry=await f.send({fileRefs:[ref]});assert.equal(retry.data.duplicate,true);assert.equal(reads,1);assert.equal(f.runs.length,1);
+});
+test('chatId is accepted as an alias for userId when userId is absent', async t => {
+ const f=fixture(t);
+ const res=await f.sendRaw({chatId:99,username:'alice',task:'work',requestId:'request-chatid'});
+ assert.equal(res.status,202);assert.equal(f.runs[0].user.id,99);
+});
+test('chatId takes priority over userId when both are sent', async t => {
+ const f=fixture(t);
+ const res=await f.send({chatId:99,userId:42,requestId:'request-both'});
+ assert.equal(res.status,202);assert.equal(f.runs[0].user.id,99);
 });
 test('a failed R2 integrity check prevents acknowledgement or text-only launch', async t => {
  const f=fixture(t);f.sandbox.process.env.MEDIA_GATEWAY_URL='https://gateway.example';f.sandbox.secrets.AGENT_SECRET='secret';
