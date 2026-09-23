@@ -11,3 +11,9 @@ Goal: add /oc_ds_or (/oc_deepseek_openrouter) and /oc_ds_go (/oc_deepseek_go) �
 - [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1157
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live (static config file, live via systemd restart of assist-agent.service; no separate build step)
+
+Goal: persist OpenCode per-step usage breakdown (agent/model/cache/cost per step) to usage.json — was computed but discarded after the chat footer, blocking future cost drill-down
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1159
+- [ ] Merged to main
+- [ ] Deployed to prod — verified live (static code path, live via systemd restart of assist-agent.service; no separate build step)
