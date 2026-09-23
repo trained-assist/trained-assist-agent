@@ -12,24 +12,31 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
 function loadHook() {
-  // Clear both modules so AGENT_DATA_DIR is re-read on each test
+  // Clear the store/hook AND data-paths so the workspace root (USERS_DIR) is re-read
   const storePath = require.resolve('../src/artifacts-store.js');
   const hookPath = require.resolve('../src/hooks/post-tool-use-artifacts.js');
+  const dataPaths = require.resolve('../src/data-paths.js');
   delete require.cache[storePath];
   delete require.cache[hookPath];
+  delete require.cache[dataPaths];
   return require('../src/hooks/post-tool-use-artifacts.js');
 }
 
 function loadStore() {
   const storePath = require.resolve('../src/artifacts-store.js');
+  const dataPaths = require.resolve('../src/data-paths.js');
   delete require.cache[storePath];
+  delete require.cache[dataPaths];
   return require('../src/artifacts-store.js');
 }
 
 let tmpDir;
+let prevUsersDir;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'hook-test-'));
+  prevUsersDir = process.env.USERS_DIR;
+  process.env.USERS_DIR = tmpDir;
   process.env.AGENT_DATA_DIR = tmpDir;
   process.env.AGENT_USER_ID = 'alice';
 });
@@ -37,6 +44,8 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
   delete process.env.AGENT_DATA_DIR;
+  if (prevUsersDir === undefined) delete process.env.USERS_DIR;
+  else process.env.USERS_DIR = prevUsersDir;
   delete process.env.AGENT_USER_ID;
 });
 

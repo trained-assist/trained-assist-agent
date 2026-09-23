@@ -11,8 +11,9 @@ const USER_ID = process.env.USER_ID || '';
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function sessionDir() {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  return path.join(dataDir, 'sessions', USER_ID);
+  // Call Tips data lives in the profile workspace (USERS_ROOT/<u>), not the
+  // legacy SYSTEM_ROOT/sessions tree — same root the /calltips-session endpoint reads.
+  return require('../../data-paths').userWorkDir(USER_ID);
 }
 
 function tokenBase() {

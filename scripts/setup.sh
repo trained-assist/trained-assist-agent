@@ -13,8 +13,11 @@ echo "==> Installing Node.js dependencies..."
 cd "$REPO_DIR"
 npm ci --omit=dev
 
-echo "==> Creating data directory..."
-mkdir -p "$HOME/agent-data/sessions"
+echo "==> Creating canonical storage roots..."
+# USERS_DIR = profile workspaces (sessions/projects/contexts), AGENT_DATA_DIR =
+# server-side operational state, AGENT_TOKENS_DIR = per-profile credentials.
+# Do NOT create the deprecated $HOME/agent-data/sessions workspace root.
+mkdir -p "$HOME/agent-data" "$HOME/users" "$HOME/agent-tokens"
 
 echo "==> Installing systemd service..."
 sudo cp "$REPO_DIR/systemd/assist-agent.service" "/etc/systemd/system/$SERVICE.service"
