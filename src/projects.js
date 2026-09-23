@@ -403,6 +403,51 @@ function notesText(workDir, id) {
   }
 }
 
+// ── Last-failure ledger (voice message 2026-09-23: «ты прошлый раз упал вот с этой
+// ошибкой…») ─────────────────────────────────────────────────────────────────────
+// Durable per-project record of the last run that died abnormally. On the NEXT run in
+// the same project the runner injects it as a short prompt block: "you crashed last
+// time with this error; context is saved in the session/files — decide yourself
+// whether to resume or stop and tell the user it's a hard case." The agent, not the
+// runner, decides resume-vs-abort (owner's design: pre-solve unknown failure classes
+// instead of losing them). Written ONLY on abnormal termination (crash/incomplete/
+// quota-dead-end), never on a clean answer or a user Stop. Cleared when a subsequent
+// run in the project completes normally (readAndClearLastFailure with a clean flag).
+const FAILURE_FILE = 'last-failure.json';
+
+function failurePath(workDir, id) {
+  return path.join(projectDir(workDir, id), FAILURE_FILE);
+}
+
+function recordLastFailure(workDir, id, { reason, errorText, sessionId, at = Date.now() } = {}) {
+  if (!workDir || !id) return;
+  try {
+    fs.mkdirSync(projectDir(workDir, id), { recursive: true });
+    atomicWrite(failurePath(workDir, id), JSON.stringify({
+      reason: String(reason || 'unknown').slice(0, 200),
+      errorText: String(errorText || '').slice(0, 4000),
+      sessionId: sessionId || null,
+      at,
+    }, null, 2));
+  } catch (e) {
+    console.warn('[projects] recordLastFailure:', e.message);
+  }
+}
+
+// Returns the stored failure record, or null. `clear=true` also deletes the file —
+// used by the runner AFTER a run finished cleanly, so the ledger never shows a stale
+// "you crashed last time" note for a project whose last run was fine.
+function readAndClearLastFailure(workDir, id, { clear = false } = {}) {
+  if (!workDir || !id) return null;
+  try {
+    const rec = JSON.parse(fs.readFileSync(failurePath(workDir, id), 'utf8'));
+    if (clear) { try { fs.unlinkSync(failurePath(workDir, id)); } catch {} }
+    return rec;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   TYPES,
   parseTypedName,
@@ -422,6 +467,8 @@ module.exports = {
   decideNewSessionProject,
   profileText,
   notesText,
+  recordLastFailure,
+  readAndClearLastFailure,
   setProjectSummary,
   needsSummary,
   renameProject,

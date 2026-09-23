@@ -1391,6 +1391,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
   //     so we never block silently here.
   let boundProjectId = null;
+  let lastFailure = null; // project's last-failure ledger, read at binding time
   try {
     if (sessionExists && activeSessionId) {
       const s = sessions.getSession(user.workDir, activeSessionId);
@@ -1414,6 +1415,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience });
       const dir = projects.projectDir(user.workDir, boundProjectId);
       if (fs.existsSync(dir)) user.cwd = dir; // session runs inside its project
+      // «Ты прошлый раз упал с этой ошибкой» (voice 2026-09-23): the project's durable
+      // last-failure ledger is read HERE, before any of this run's own retries can
+      // record a failure, and injected as a short block (link, not full dump — token
+      // economy). The AGENT decides: resume the saved work, or stop and tell the user
+      // it's a hard case. Cleared only when this run later completes cleanly.
+      lastFailure = projects.readAndClearLastFailure(user.workDir, boundProjectId);
     }
   } catch (e) {
     console.warn('[runner] project binding:', e.message);
@@ -1597,6 +1604,13 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? `[AGENT PROJECT NOTES — твои заметки о накопленном опыте в этом проекте]\n${projectNotes}`
     : '';
 
+  // Last-failure block: the previous run in THIS project died abnormally. Short pointer,
+  // not a full dump (token economy) — details live in the session history/files, which the
+  // agent can open. The agent judges whether resuming makes sense or should stop cleanly.
+  const lastFailureSection = lastFailure
+    ? `[⚠️ ПРОШЛЫЙ ЗАПУСК В ЭТОМ ПРОЕКТЕ УПАЛ]\nПричина: ${lastFailure.reason}\nДетали ошибки: ${lastFailure.errorText ? lastFailure.errorText.slice(0, 500) : '(не зафиксирована)'}\nФайл-лидер: projects/${boundProjectId}/last-failure.json. История: сессия ${lastFailure.sessionId || '—'} (см. sessions/), чек-лист и артефакты — в папке проекта.\nРешай сам: если продолжение имеет смысл — работай от сохранённого состояния; если нет — спокойно остановись и напиши юзеру, в чём сложность.`
+    : '';
+
   // If a quick-answer API call just failed, inject the error so Claude knows what happened.
   // The error is written to vacancy state before returning null; read it once here and clear it.
   let vacancyApiErrorSection = '';
@@ -1641,7 +1655,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   //  project + cross-profile collector; no in-session GitHub issue creation. See intent-engine
   //  BUG_OR_FEATURE_INTENT and src/bugs-collector.js.)
 
-  let baseContext = [timeoutSection, notesSection, projectNotesSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
+  let baseContext = [timeoutSection, notesSection, projectNotesSection, lastFailureSection, reqLogSection, vacancyApiErrorSection, artifactsSection].filter(Boolean).join('\n\n');
   if (sessionContext) baseContext = baseContext ? `${baseContext}\n\n${sessionContext}` : sessionContext;
   const currentTask = sessionContext ? `Пользователь: ${task}` : task;
   let prompt = baseContext ? `${baseContext}\n\n${currentTask}` : currentTask;
@@ -1895,6 +1909,15 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`
       : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
+    // Durable per-project ledger: the NEXT run in this project must know it crashed
+    // (voice 2026-09-23). Crash-class exits are abnormal by definition.
+    if (boundProjectId && !sessionState.userStopped) {
+      projects.recordLastFailure(user.workDir, boundProjectId, {
+        reason: usageLimitHit ? `usage limit: ${engine}` : `crash: exit ${exitCode}`,
+        errorText: codexErrorMsg || `exit code ${exitCode}`,
+        sessionId: activeSessionId,
+      });
+    }
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
     else await tgSend(BOT_TOKEN, chatId, crashMsg);
     return crashMsg;
@@ -1953,6 +1976,15 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       ? `⚠️ Работа прервана (${reason}) — не помогло и после ${incompleteRetryAttempts} автоматических попыток. Отправь «продолжай», чтобы попробовать вручную ещё раз.`
       : `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
     console.warn(`[${taskId}] incomplete engine=${engine} exit=${exitCode} signal=${processSignal || '-'} terminal=${terminalSuccess} resumedAfterRestart=${resumedAfterRestart} resumeAttempts=${resumeAttempts} incompleteRetryAttempts=${incompleteRetryAttempts}`);
+    // Durable per-project ledger: the task died without a confirmed final answer —
+    // the next run in this project must see why (voice 2026-09-23).
+    if (boundProjectId) {
+      projects.recordLastFailure(user.workDir, boundProjectId, {
+        reason: `incomplete: ${incompleteReason || reason}`,
+        errorText: codexErrorMsg || fullOutput.text.trim().slice(-1000),
+        sessionId: activeSessionId,
+      });
+    }
   }
 
   // OpenCode-only: a quota/rate-limit or one-time-config error on the CURRENT ladder rung
@@ -2045,6 +2077,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           return { queuedRetry };
         }
         const tooBigMsg = `⛔ Запрос слишком большой для всех моделей лестницы профиля «${ocProfileName}» — разбей задачу на более мелкие части и отправь по шагам.`;
+        if (boundProjectId) projects.recordLastFailure(user.workDir, boundProjectId, { reason: 'context overflow: весь лестничный профиль', errorText: preLadderText, sessionId: activeSessionId });
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tooBigMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tooBigMsg));
         else await tgSend(BOT_TOKEN, chatId, tooBigMsg);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, tooBigMsg);
@@ -2053,6 +2086,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (verdict.class === 'config') {
         setAuthFailedFlag({ reason: 'CONFIG_ONE_TIME', error_text: preLadderText, engine: 'opencode' });
         const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
+        if (boundProjectId) projects.recordLastFailure(user.workDir, boundProjectId, { reason: `config: ${verdict.model}`, errorText: preLadderText, sessionId: activeSessionId });
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg));
         else await tgSend(BOT_TOKEN, chatId, configMsg);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, configMsg);
@@ -2239,6 +2273,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Preserve interrupted progress for continuation, distinctly from the user-facing status.
   if (incomplete && activeSessionId && fullOutput.text.trim()) {
     sessions.appendReply(user.workDir, activeSessionId, `[Незавершённый ход; промежуточный текст, не итог]\n${fullOutput.text.trim()}`);
+  }
+  // Clean terminal → clear the project's last-failure ledger so the next run isn't
+  // shown a stale "you crashed last time" note. Only when we got a confirmed answer.
+  if (!incomplete && boundProjectId) {
+    projects.readAndClearLastFailure(user.workDir, boundProjectId, { clear: true });
   }
   {
   // Append assistant reply to session history
