@@ -48,7 +48,9 @@ function withFakeConnectedService(username) {
   ok(/⚙️ OpenCode · free/.test(card), `pin shows this workDir's own oc profile (free), got: ${card}`);
   // free's top rung is resolved through the ladder (issue #1061 Фаза 1-2), not a stale
   // ocCfg.model read — profiles.json no longer has a top-level `model` field.
-  ok(/mimo-v2\.5/.test(card), `pin shows free's actual resolved model, got: ${card}`);
+  // xiaomi/mimo-v2.5:free (the previous top rung) was removed as a dead model in #1164 —
+  // nemotron-3-super-120b-a12b:free is now first in the ladder.
+  ok(/nemotron-3-super-120b-a12b/.test(card), `pin shows free's actual resolved model, got: ${card}`);
   fs.unlinkSync(staleFile);
 }
 
