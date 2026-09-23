@@ -1336,7 +1336,16 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     startedAt: Date.now(),
   });
 
-  fs.mkdirSync(user.workDir, { recursive: true });
+  // Watchdog step 1b (issue #942 [011], 1/4): this function has many early returns (chat
+  // mismatch, nalog-expired, user-stop, crash/retry branches, auto-continuation, ...) between
+  // the phase='running' write above and normal completion. Historically, any exit path that
+  // forgot to call clearPendingTask()/set a more specific terminal phase left the journal
+  // entry stranded at phase='running' forever if the process then died before the outer
+  // runTask() wrapper's own finally (src/runner/index.js runTask()) ran — e.g. a hard kill.
+  // This is a safety net only: paths that already correctly clear/finalize the file are
+  // unaffected (the guard below is a no-op once the file is gone or has a specific phase).
+  let _runTaskError;
+  try {
   const isAutoFile = rawTask && rawTask.startsWith("[Файл сохранён:");
   if (!isAutoFile && !internalGtd) {
     clearPendingContinuation(user.username); // cancel any pending soft-continuation from previous response
@@ -1805,6 +1814,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     activeTimers, tgEdit, tgSend, outputCallback,
     engineBin, engineArgs, mcpConfig, ocProfileOverrides,
     cwd: user.cwd || user.workDir,
+    // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
+    // same 30s tick claude-runner.js already runs for the inactivity check, so a
+    // future watchdog (step 2+) can tell "still alive, just slow" apart from "the
+    // OS process died and nobody ever wrote a terminal state". savePendingTask does
+    // a partial merge ({...previous, ...params}) so this only touches the one field.
+    onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
   });
   const {
     fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
@@ -2447,6 +2462,36 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   }
 
   return result;
+  } catch (e) {
+    _runTaskError = e;
+    throw e;
+  } finally {
+    // Terminal-write safety net (watchdog step 1b): if the journal entry for THIS taskId is
+    // still sitting at phase='running', no exit path above already gave it a more specific
+    // terminal phase or cleared it (e.g. clearPendingTask on the chat-mismatch guard, or the
+    // outer runTask() wrapper's own finally on the common return paths) — write an explicit
+    // terminal phase instead of leaving it to rot. Deliberately does NOT delete the file (that
+    // would just reproduce today's silent-delete semantics).
+    //
+    // Skip entirely during a server restart: sessionState.restartInterrupted's `return
+    // { deferred: true }` path (above) deliberately LEAVES phase='running' so the next
+    // process's resumePendingTasks() picks the task back up — writing 'interrupted' here
+    // would not break resumability (isTaskResumable only looks at age, not phase) but would
+    // still be wrong/misleading for a path that is not actually a gap, just an intentional
+    // handoff. restartShutdown is the same module-level flag runTask()'s own finally already
+    // checks for the identical reason (src/runner/index.js runTask()).
+    if (!restartShutdown) {
+      try {
+        const file = path.join(PENDING_DIR, `${taskId}.json`);
+        const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (current && current.phase === 'running') {
+          savePendingTask(taskId, { phase: _runTaskError !== undefined ? 'error' : 'interrupted' });
+        }
+      } catch (e) {
+        if (e.code !== 'ENOENT') console.warn(`[${taskId}] terminal-phase safety net failed:`, e.message);
+      }
+    }
+  }
 }
 
 function interruptForRestart() {
