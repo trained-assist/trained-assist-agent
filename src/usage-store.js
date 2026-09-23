@@ -29,8 +29,9 @@ function loadUsage(workDir) {
  * @param {number} [entry.cache_read_input_tokens]
  * @param {number} [entry.cache_creation_input_tokens]
  * @param {number} [entry.cost_usd] - cost in USD (for OpenCode, provided by the engine)
+ * @param {Array}  [entry.breakdown] - per-step [{agent, model, input, output, cacheRead, cacheWrite, cost}] (OpenCode multi-agent runs)
  */
-function recordUsage(workDir, { taskId, sessionId, engine, model, input_tokens = 0, output_tokens = 0, cache_read_input_tokens = 0, cache_creation_input_tokens = 0, cost_usd }) {
+function recordUsage(workDir, { taskId, sessionId, engine, model, input_tokens = 0, output_tokens = 0, cache_read_input_tokens = 0, cache_creation_input_tokens = 0, cost_usd, breakdown }) {
   try {
     const data = loadUsage(workDir);
     data.totals.input_tokens  += input_tokens;
@@ -40,6 +41,7 @@ function recordUsage(workDir, { taskId, sessionId, engine, model, input_tokens =
     data.totals.tasks         += 1;
     const entry = { taskId, sessionId, at: Date.now(), engine, model, input_tokens, output_tokens, cache_read: cache_read_input_tokens, cache_write: cache_creation_input_tokens };
     if (cost_usd != null) entry.cost_usd = cost_usd;
+    if (breakdown && breakdown.length) entry.breakdown = breakdown;
     data.log.push(entry);
     if (data.log.length > MAX_LOG_ENTRIES) data.log.splice(0, data.log.length - MAX_LOG_ENTRIES);
     fs.writeFileSync(usagePath(workDir), JSON.stringify(data, null, 2));
