@@ -55,6 +55,17 @@ function getSessionFor(username, sessionId) {
   };
 }
 
+// Stop the running task for one session, scoped to the chat it's attached to
+// (see stopUserTask's comment — a profile's workDir/activeTimers is shared
+// across chats, so an unscoped kill would also hit a different chat's task).
+// Shared by both the cookie-authed /web/stop/:id route and the bearer-gated
+// /web/stop-bearer route (external frontends can't hold a WEB_JWT cookie).
+function stopSessionFor(username, sessionId) {
+  const session = getSession(userWorkDir(username), sessionId);
+  const chatId = session ? (session.liveChatId ?? session.ownerChatId) : null;
+  return stopUserTask(username, chatId);
+}
+
 // Resolve session status: running (process alive) or from stored field, fallback completed
 function sessionStatus(username, session) {
   if (isTaskRunning(username)) {
@@ -152,13 +163,10 @@ async function handleWebRoute(req, url, res, secrets) {
     if (!username) return json(res, 401, { error: 'unauthorized' }), true;
     if (!checkOrigin(req, secrets)) return json(res, 403, { error: 'forbidden' }), true;
 
-    // Scope the kill to the chat this session is actually attached to — the
-    // profile's workDir (and therefore activeTimers by username) is shared
-    // across chats, so an unscoped stopUserTask(username) would also kill a
-    // different chat's unrelated running task.
-    const stopSession = getSession(userWorkDir(username), sessionId);
-    const stopChatId = stopSession ? (stopSession.liveChatId ?? stopSession.ownerChatId) : null;
-    stopUserTask(username, stopChatId);
+    const sessionId = p.slice('/web/stop/'.length);
+    if (!sessionId || !SESSION_ID_RE.test(sessionId)) return json(res, 400, { error: 'invalid session id' }), true;
+
+    stopSessionFor(username, sessionId);
     return json(res, 200, { ok: true }), true;
   }
 
@@ -281,4 +289,4 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
   });
 }
 
-module.exports = { handleWebRoute, listSessionsFor, getSessionFor, streamWebTask };
+module.exports = { handleWebRoute, listSessionsFor, getSessionFor, streamWebTask, stopSessionFor };

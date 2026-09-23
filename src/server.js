@@ -1123,22 +1123,23 @@ ${recent || '(пока нет)'}
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
       const { username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
-      // `/run`'s `userId` field has always meant the Telegram chat to stream into, not a
-      // user identity. `chatId` is the forward-looking wire name for that same value (see
-      // plan generic-naming-conventions-refactoring, P1-A) — accepted here first, taking
-      // priority when both are sent, so tg-bot can start sending it (PR-B) ahead of dropping
-      // `userId` (PR-D). Callers still sending only `userId` see no behavior change.
-      const userId = payload.chatId ?? payload.userId;
+      // `chatId` is the canonical field for the Telegram chat to stream into (plan
+      // generic-naming-conventions-refactoring, P1-C). `userId` is now a legacy wire
+      // alias, normalized once right here — PR-D drops tg-bot's `userId` send, PR-E
+      // (optional) will stop accepting it. Response bodies below are unchanged
+      // (still `invalid userId`/`missing fields`) so this is not a client-visible
+      // behavior change, only an internal rename.
+      const chatId = payload.chatId ?? payload.userId;
       if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))) return json(res, 400, { error: 'invalid audience' });
       if (initiatedAt != null && (!Number.isSafeInteger(initiatedAt) || initiatedAt < 0 || initiatedAt > Date.now() + 30000)) return json(res, 400, { error: 'invalid initiatedAt' });
       if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return json(res, 400, { error: 'invalid threadId' });
-      if (!userId || !username) return json(res, 400, { error: 'missing fields' });
+      if (!chatId || !username) return json(res, 400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
       if (!task && !forceClaude && !fileBase64 && !(fileRefs && fileRefs.length)) return json(res, 400, { error: 'missing fields' });
       if (requestId && !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))
         return json(res, 400, { error: 'invalid requestId' });
-      if (!/^-?\d{1,20}$/.test(String(userId))) {
-        console.log('[/run] 400 invalid userId:', userId);
+      if (!/^-?\d{1,20}$/.test(String(chatId))) {
+        console.log('[/run] 400 invalid chatId (legacy field name userId):', chatId);
         return json(res, 400, { error: 'invalid userId' });
       }
       if (telegramUserId && !/^\d{1,20}$/.test(String(telegramUserId))) {
@@ -1182,15 +1183,15 @@ ${recent || '(пока нет)'}
       // (see AUDIENCE-SCOPE-SPEC) — e.g. the recruiter bot passes 'recruiter' so its
       // sessions never mix with the general-purpose bot's. Defaults to 'default', which
       // is byte-for-byte identical to pre-audience behavior.
-      const user = { id: userId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
-      trackChat(userId);
+      const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
+      trackChat(chatId);
 
       // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
       // Code whose own Read tool hands images to the model natively — so a photo attachment
       // is otherwise invisible to that engine (just an opaque path in the note below). Run it
       // through vision OCR up front and fold the extracted text into the note. Claude/Codex are
       // left alone: no known gap, and no point paying for a call the model doesn't need.
-      const runEngine = profiles.getEngine(workDir, userId);
+      const runEngine = profiles.getEngine(workDir, chatId);
       async function buildFileNote(filePath, mimeType) {
         const typeNote = mimeType ? ` (${mimeType})` : '';
         let note = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;

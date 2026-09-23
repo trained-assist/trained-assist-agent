@@ -18,6 +18,20 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
+
+// Same running-task row on every progress edit: kill it (⛔) or feed it more
+// context without waiting for it to finish (➕). Mirrors the web UI's
+// Стоп/Дополнить pair (trained-assist-web#33) — the tg-bot's `sup|` callback
+// handler owns the actual restart-with-supplement flow.
+const runningControls = taskId => ({ reply_markup: { inline_keyboard: [[
+  { text: '⛔ Стоп', callback_data: `stop|${taskId}` },
+  { text: '➕ Дополнить', callback_data: `sup|${taskId}` },
+]] } });
+// progressEdit is best-effort+coalesced (see comment above `tgEdit` in
+// tg-stream.js) — a 429 drop returns {ok:false}, a coalesce-skip returns
+// {ok:true, skipped:true}. Either way the buttons did NOT reach the chat, so
+// the "shown" flag must stay false and retry on the next tick.
+const editLanded = result => !!(result && result.ok && !result.skipped);
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-restart (all engines)
 
@@ -188,6 +202,8 @@ function formatToolActivity(name, input = {}) {
  *   ocProfileOverrides (optional, opencode only — {model, agent} from profiles.getOcProfile,
  *   folded into the same per-invocation OPENCODE_CONFIG file),
  *   formatToolActivity, readOcAgentModels
+ *   onHeartbeat (optional, () => void — called on the existing 30s inactivity-check tick so the
+ *   pending-task journal's lastHeartbeatAt stays fresh while the process is alive; issue #942 [011])
  *
  * Returns a plain result object — never throws for process-level failures:
  *   { fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
@@ -200,7 +216,7 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
-    ocProfileOverrides,
+    ocProfileOverrides, onHeartbeat,
   } = opts;
 
   const proc = spawn(engineBin, engineArgs, {
@@ -279,17 +295,24 @@ async function runEngineProcess(opts) {
     await Promise.allSettled([...progressEdits]);
   }
 
-  // Heartbeat: show elapsed seconds while Claude hasn't produced output yet
+  // Heartbeat: show elapsed seconds while Claude hasn't produced output yet.
+  // stopButtonShown only flips once the edit actually lands — progressEdit is
+  // best-effort+coalesced (issue: a 429/coalesce drop on the one tick that
+  // carried the buttons used to mark them "shown" anyway, so a single dropped
+  // edit permanently hid ⛔/➕ for the rest of the task with no retry).
+  // Once the threshold passes, EVERY progress edit must carry the ⛔/➕ markup.
+  // editMessageText without reply_markup clears the keyboard, so sending markup
+  // only on the first landing (and bare text afterwards) makes the buttons
+  // visible for one tick and then vanish on the next — the reported bug.
   let stopButtonShown = false;
   if (msgId) {
     heartbeatTimer = setInterval(async () => {
       if (outputStarted) return;
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
-      const extra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
-        ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
-        : {};
-      await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, extra).catch(() => {});
+      if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+      const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {});
+      if (stopButtonShown && editLanded(result)) stopButtonShown = true;
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -315,25 +338,24 @@ async function runEngineProcess(opts) {
       try {
         const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
         const secs = Math.round((Date.now() - thinkingStart) / 1000);
-        const stopExtra = (!stopButtonShown && secs >= STOP_BUTTON_AFTER_SECS)
-          ? (stopButtonShown = true, { reply_markup: { inline_keyboard: [[{ text: '⛔ Стоп', callback_data: `stop|${taskId}` }]] } })
-          : {};
+        if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+        const stopExtra = stopButtonShown ? runningControls(taskId) : {};
         if (snippet) {
           // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
           const silentMins = Math.round((Date.now() - lastOutputAt) / 60000);
           const silentSuffix = silentMins >= 1 ? ` — молчит ${silentMins}мин` : '';
           const activitySuffix = lastActivity ? `\n\n⚡ ${lastActivity} (${secs}с)${silentSuffix}` : `\n\n⚡ Пишу… (${secs}с)${silentSuffix}`;
           const newText = `🧠 ${snippet}${activitySuffix}`;
-          if (newText === lastSent && !stopExtra.reply_markup) return;
+          if (newText === lastSent) return;
           lastSent = newText;
-          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
+          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra);
         } else {
           // No text yet (e.g. Claude running tools) — show activity + elapsed
           const label = lastActivity || 'Думаю…';
           const newText = `🧠 ${label} (${secs}с)`;
-          if (newText === lastSent && !stopExtra.reply_markup) return;
+          if (newText === lastSent) return;
           lastSent = newText;
-          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra).catch(() => {});
+          if (msgId) await progressEdit(BOT_TOKEN, chatId, msgId, newText, stopExtra);
         }
       } finally {
         streamEditInProgress = false;
@@ -536,7 +558,10 @@ async function runEngineProcess(opts) {
 
       // Inactivity check: if no stdout for 5 min, kill + auto-restart (works for all engines).
       // Checked every 30s; lastOutputAt updated on any raw stdout chunk before JSON parsing.
+      // Same tick also heartbeats the pending-task journal (issue #942 [011] watchdog step 1a) —
+      // piggybacking on this existing interval instead of adding a second timer.
       inactivityCheckTimer = setInterval(() => {
+        if (onHeartbeat) { try { onHeartbeat(); } catch (e) { console.warn(`[${taskId}] heartbeat write failed:`, e.message); } }
         if (timedOut || sessionState.userStopped) return;
         const silentMs = Date.now() - lastOutputAt;
         if (silentMs >= INACTIVITY_TIMEOUT_MS) {
@@ -598,6 +623,11 @@ module.exports = {
   // exposed for tests — MCP translation helpers (codex/opencode wiring)
   codexMcpArgs,
   writeOpencodeMcpConfig,
+  // exposed for tests — ⛔/➕ button delivery gate (issue: flag used to flip
+  // before confirming the edit landed, permanently hiding buttons after one
+  // 429/coalesce drop)
+  editLanded,
+  runningControls,
   // constants exposed for tests
-  _const: { STREAM_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, MAX_MSG_LEN, CLAUDE_TIMEOUT_MS, WARN_TIMEOUT_MS, INACTIVITY_TIMEOUT_MS },
+  _const: { STREAM_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, STOP_BUTTON_AFTER_SECS, MAX_MSG_LEN, CLAUDE_TIMEOUT_MS, WARN_TIMEOUT_MS, INACTIVITY_TIMEOUT_MS },
 };
