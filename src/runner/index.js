@@ -518,7 +518,7 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // /active_checklist — list all open GTD records for this user, plus a one-click
+  // /show_active_cheklist — list all open GTD records for this user, plus a one-click
   // link into checklist.trainedassist.store (no password needed, see checklistAutologinUrl).
   if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
     return (async () => {
@@ -897,10 +897,10 @@ function buildContextCard(username, workDir, chatId) {
       if (openRecs.length === 1) {
         const r = openRecs[0];
         const preview = (r.originalTask || '').slice(0, 40);
-        lines.push(`📋 Чеклист: «${preview}» · ${_relativeTime(r.dueAt)} · /active_checklist · /checklist_turn_off`);
+        lines.push(`📋 Чеклист: «${preview}» · ${_relativeTime(r.dueAt)} · /show_active_cheklist · /checklist_turn_off`);
       } else if (openRecs.length > 1) {
         const next = openRecs.reduce((a, b) => a.dueAt < b.dueAt ? a : b);
-        lines.push(`📋 ${openRecs.length} чек-листа · след. ${_relativeTime(next.dueAt)} · /active_checklist · /checklist_turn_off`);
+        lines.push(`📋 ${openRecs.length} чек-листа · след. ${_relativeTime(next.dueAt)} · /show_active_cheklist · /checklist_turn_off`);
       }
     } catch (e) { console.warn('[runner] gtd pin:', e.message); }
   }
@@ -2342,7 +2342,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? formatOcFooter(opencodeUsage, opencodeBreakdown)
     : formatCostFooter(claudeUsage, claudeModel);
   const gtdFooter = (!internalGtd && !incomplete && user.workDir)
-    ? (() => { try { return require('../gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
+    ? (() => { try { return require('../gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /show_active_cheklist · /checklist_turn_off' : ''; } catch { return ''; } })()
     : '';
   const final = (result + costFooter).slice(-MAX_MSG_LEN) + gtdFooter;
 
