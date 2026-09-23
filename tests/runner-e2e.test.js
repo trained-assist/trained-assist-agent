@@ -982,7 +982,12 @@ describe('terminal answer delivery', () => {
     };
     try {
       streamScript([tool, { type: 'result', subtype: 'success', result: 'Финальный отчёт' }]);
-      await chat('Проверь проект и исправь найденные дефекты');
+      // Fresh chat id: progress edits coalesce per chat — an edit is skipped if one
+      // already landed for that chat <1.2s ago (tg-stream `lastEditAt`). The default
+      // test chat id is reused across tests, so its coalesce window can already be
+      // open and the event-driven progress edit below would be skipped, leaving
+      // nothing in flight to wait for. A unique id guarantees the edit is sent.
+      await chat('Проверь проект и исправь найденные дефекты', { userId: 555000123 });
       expect(progressFinished).toBe(true);
       expect(tgTexts().at(-1)).toContain('Финальный отчёт');
     } finally { writeNormalClaudeScript(); }
