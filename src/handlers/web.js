@@ -310,6 +310,25 @@ async function handleWeb(req, url, res, ctx) {
     return streamWebTask({ req, res, secrets, username, task: message.trim(), sessionId: id });
   }
 
+  // ── POST /web/stop-bearer — stop a running task from an external frontend ──
+  // The write-side twin of /web/reply-bearer for the Stop button: without this,
+  // the Cloudflare session-manager worker had no way to SIGTERM a real agent
+  // session (it could only mark its own local demo session idle), so "Остановить
+  // выполнение" silently did nothing for real Telegram/agent-backed sessions.
+  if (req.method === 'POST' && url.pathname === '/web/stop-bearer') {
+    const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+    const auth = req.headers['authorization'] || '';
+    if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+    const { username, id } = body || {};
+    if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+    if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return json(res, 400, { error: 'invalid session id' });
+    const { stopSessionFor } = require('../web-routes');
+    stopSessionFor(username, id);
+    return json(res, 200, { ok: true });
+  }
+
   // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
   if (req.method === 'POST' && url.pathname === '/web/auth') {
     let body;
