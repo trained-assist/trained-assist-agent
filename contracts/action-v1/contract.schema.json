@@ -1,0 +1,375 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:trained-assist:action-contract:v1",
+  "title": "Action/provider/cron v1 contracts; runtime wiring deferred",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "projectId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^(?!.*\\.\\.)[\\p{L}\\p{N}][\\p{L}\\p{N}_.-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "arguments": {
+      "type": "object"
+    },
+    "trigger": {
+      "enum": [
+        "user",
+        "cron",
+        "durable_task",
+        "webhook",
+        "system"
+      ]
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "profileId": {
+          "$ref": "#/$defs/id"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "action": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "maxLength": 120
+        },
+        "arguments": {
+          "$ref": "#/$defs/arguments"
+        },
+        "trigger": {
+          "$ref": "#/$defs/trigger"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "traceId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "version",
+        "profileId",
+        "projectId",
+        "action",
+        "arguments",
+        "trigger",
+        "idempotencyKey"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_ARGUMENTS",
+            "ACTION_NOT_FOUND",
+            "FORBIDDEN",
+            "APPROVAL_REQUIRED",
+            "PROVIDER_UNAVAILABLE",
+            "TIMEOUT",
+            "CONFLICT",
+            "ACTION_FAILED",
+            "OUTCOME_UNKNOWN"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "executionId": {
+              "$ref": "#/$defs/id"
+            },
+            "status": {
+              "const": "succeeded"
+            },
+            "output": {}
+          },
+          "required": [
+            "version",
+            "executionId",
+            "status",
+            "output"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "executionId": {
+              "$ref": "#/$defs/id"
+            },
+            "status": {
+              "enum": [
+                "failed",
+                "rejected",
+                "unknown"
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          },
+          "required": [
+            "version",
+            "executionId",
+            "status",
+            "error"
+          ]
+        }
+      ]
+    },
+    "descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "maxLength": 120
+        },
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "object"
+            }
+          }
+        },
+        "allowedTriggers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trigger"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "effect": {
+          "enum": [
+            "read",
+            "write",
+            "external_message",
+            "destructive"
+          ]
+        },
+        "requiresApproval": {
+          "type": "boolean"
+        },
+        "retrySafety": {
+          "enum": [
+            "read_only",
+            "idempotent",
+            "unsafe"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "inputSchema",
+        "allowedTriggers",
+        "effect",
+        "requiresApproval",
+        "retrySafety"
+      ]
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "providerId": {
+          "$ref": "#/$defs/id"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/descriptor"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "version",
+        "providerId",
+        "actions"
+      ]
+    },
+    "cron_create": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "schedule": {
+          "type": "string",
+          "pattern": "^\\S+( \\S+){4}$"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "maxLength": 120
+        },
+        "arguments": {
+          "$ref": "#/$defs/arguments"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "schedule",
+        "timezone",
+        "action",
+        "arguments"
+      ]
+    },
+    "cron_list": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "required": []
+    },
+    "cron_get": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "cron_delete": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "cron_run_now": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "id",
+        "idempotencyKey"
+      ]
+    },
+    "cron_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "patch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "schedule": {
+              "type": "string",
+              "pattern": "^\\S+( \\S+){4}$"
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1
+            },
+            "action": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "maxLength": 120
+            },
+            "arguments": {
+              "$ref": "#/$defs/arguments"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "minProperties": 1
+        }
+      },
+      "required": [
+        "id",
+        "patch"
+      ]
+    }
+  }
+}

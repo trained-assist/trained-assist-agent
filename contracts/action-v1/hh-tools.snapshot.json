@@ -1,0 +1,976 @@
+{
+  "sourceRepository": "trained-assist/trained-assist-hh-skill",
+  "sourceCommit": "f38a12fc098a7f7aba4e24c90d79287eadaec629",
+  "tools": [
+    {
+      "name": "hh_connect",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_status",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_set_token",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "HH access token"
+          },
+          "refresh_token": {
+            "type": "string",
+            "description": "HH refresh token (optional but recommended)"
+          },
+          "employer_id": {
+            "type": "string",
+            "description": "Employer ID — find it in hh.ru company URL or /me response"
+          }
+        },
+        "required": [
+          "access_token"
+        ]
+      }
+    },
+    {
+      "name": "hh_set_active_vacancy",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "string",
+            "description": "Vacancy ID to set as active. Omit to list all vacancies."
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_deactivate_vacancy",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "string",
+            "description": "Vacancy ID to stop tracking."
+          }
+        },
+        "required": [
+          "vacancy_id"
+        ]
+      }
+    },
+    {
+      "name": "hh_list_vacancies",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived",
+              "hidden"
+            ],
+            "description": "Vacancy status filter (default: active)"
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_list_responses",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "string",
+            "description": "Vacancy ID from hh_list_vacancies"
+          },
+          "state": {
+            "type": "string",
+            "description": "Filter by state: response, consider, phone_interview, assessment, interview, offer, hired, discard. Default: response (new responses)"
+          },
+          "page": {
+            "type": "number",
+            "description": "Page number (default 0)"
+          }
+        },
+        "required": [
+          "vacancy_id"
+        ]
+      }
+    },
+    {
+      "name": "hh_search_resumes",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "string",
+            "description": "ID вакансии — HH подберёт похожие резюме автоматически (рекомендуемый способ для быстрого старта холодного поиска)."
+          },
+          "text": {
+            "description": "Поисковая фраза(ы). Строка или массив строк — каждая уточняет поиск.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "area": {
+            "description": "ID региона(ов) из /areas (например \"2\" — СПб). Строка или массив.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "professional_role": {
+            "description": "ID профессиональной роли(ей) из /professional_roles. Строка или массив — НЕ через запятую.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "experience": {
+            "description": "Опыт работы: noExperience | between1And3 | between3And6 | moreThan6. Строка или массив.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "skill": {
+            "description": "ID ключевых навыков (из подсказок HH). Строка или массив.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "age_from": {
+            "type": "number"
+          },
+          "age_to": {
+            "type": "number"
+          },
+          "salary_from": {
+            "type": "number"
+          },
+          "salary_to": {
+            "type": "number"
+          },
+          "order_by": {
+            "type": "string",
+            "description": "Сортировка, см. resume_search_order в справочнике HH. По умолчанию — релевантность."
+          },
+          "page": {
+            "type": "number",
+            "description": "Номер страницы, с 0 (по умолчанию 0)."
+          },
+          "per_page": {
+            "type": "number",
+            "description": "Кол-во на странице, макс 100 (по умолчанию 20)."
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_evaluate_resume",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resume_id": {
+            "type": "string",
+            "description": "ID резюме из hh_search_resumes."
+          },
+          "ats_config": {
+            "type": "object",
+            "description": "ATS config от hh_extract_ats_config (или свой). Обязательные поля: knockout[], required[], preferred[], pass_threshold, review_threshold."
+          }
+        },
+        "required": [
+          "resume_id",
+          "ats_config"
+        ]
+      }
+    },
+    {
+      "name": "hh_invite_resume",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resume_id": {
+            "type": "string",
+            "description": "ID резюме (из hh_search_resumes)."
+          },
+          "vacancy_id": {
+            "type": "string",
+            "description": "ID вакансии, на которую приглашаем."
+          },
+          "message": {
+            "type": "string",
+            "description": "Текст приглашения кандидату (на email)."
+          },
+          "send_sms": {
+            "type": "boolean",
+            "description": "Также отправить SMS-уведомление (стандартный текст, не редактируется). По умолчанию false."
+          }
+        },
+        "required": [
+          "resume_id",
+          "vacancy_id"
+        ]
+      }
+    },
+    {
+      "name": "hh_funnel_stats",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "string",
+            "description": "Vacancy ID. Omit to read from context (active_vacancy)."
+          },
+          "notify_threshold": {
+            "type": "number",
+            "description": "Optional 0-100 ATS score cutoff. When set (>0), also returns new_responses_above_threshold / new_responses_pending_score by reading each new candidate's cached ats_result — no LLM call, unscored candidates just count as pending."
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_extract_ats_config",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_text": {
+            "type": "string",
+            "description": "Full vacancy description text"
+          }
+        },
+        "required": [
+          "vacancy_text"
+        ]
+      }
+    },
+    {
+      "name": "hh_evaluate_candidate",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "negotiation_id": {
+            "type": "string",
+            "description": "Negotiation ID from hh_list_responses"
+          },
+          "ats_config": {
+            "type": "object",
+            "description": "ATS config from hh_extract_ats_config (or custom). Must have: knockout[], required[], preferred[], pass_threshold, review_threshold."
+          }
+        },
+        "required": [
+          "negotiation_id",
+          "ats_config"
+        ]
+      }
+    },
+    {
+      "name": "hh_generate_message",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "negotiation_id": {
+            "type": "string",
+            "description": "Negotiation ID"
+          },
+          "message_type": {
+            "type": "string",
+            "enum": [
+              "initial",
+              "followup",
+              "invite_call",
+              "rejection"
+            ],
+            "description": "Message type (default: initial). rejection — uses stored template, no LLM"
+          },
+          "ats_result": {
+            "type": "object",
+            "description": "ATS evaluation result from hh_evaluate_candidate (optional — improves message quality)"
+          },
+          "vacancy_context": {
+            "type": "string",
+            "description": "Brief vacancy description for context (1-2 sentences)"
+          }
+        },
+        "required": [
+          "negotiation_id"
+        ]
+      }
+    },
+    {
+      "name": "hh_set_rejection_template",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "description": "New template text with {firstName} placeholder. Omit to just view current template."
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_get_messages",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "negotiation_id": {
+            "type": "string",
+            "description": "Negotiation ID"
+          }
+        },
+        "required": [
+          "negotiation_id"
+        ]
+      }
+    },
+    {
+      "name": "hh_send_message",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "negotiation_id": {
+            "type": "string",
+            "description": "Negotiation ID"
+          },
+          "message": {
+            "type": "string",
+            "description": "Message text to send"
+          }
+        },
+        "required": [
+          "negotiation_id",
+          "message"
+        ]
+      }
+    },
+    {
+      "name": "hh_batch_evaluate",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "string",
+            "description": "Vacancy ID. Omit to use the active vacancy from context (hh_set_active_vacancy)."
+          },
+          "ats_config": {
+            "type": "object",
+            "description": "ATS config from hh_extract_ats_config. Omit to use saved config from context."
+          },
+          "max_days_inactive": {
+            "type": "number",
+            "description": "Skip candidates with no activity for this many days (default: 14)"
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_regenerate_messages",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_id": {
+            "type": "string",
+            "description": "Vacancy ID. Omit to use the active vacancy from context (hh_set_active_vacancy)."
+          },
+          "ats_config": {
+            "type": "object",
+            "description": "ATS config override. Omit to use saved config from context — this is what you want right after editing the config."
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_draft_review_page",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "description": "Candidates array from hh_batch_evaluate results"
+          },
+          "vacancy_id": {
+            "type": "string",
+            "description": "Vacancy ID — picks the right per-vacancy ATS config for draft caching. Omit to use the active vacancy from context."
+          },
+          "vacancy_name": {
+            "type": "string",
+            "description": "Vacancy name for the page title"
+          },
+          "vacancy_context": {
+            "type": "string",
+            "description": "Brief vacancy description for message generation context"
+          },
+          "output_path": {
+            "type": "string",
+            "description": "Where to save the HTML file (default: ~/agent-data/hh-review-{timestamp}.html)"
+          }
+        },
+        "required": [
+          "candidates",
+          "vacancy_name"
+        ]
+      }
+    },
+    {
+      "name": "hh_move_candidate",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "negotiation_id": {
+            "type": "string",
+            "description": "Negotiation ID"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "consider",
+              "phone_interview",
+              "assessment",
+              "interview",
+              "offer",
+              "hired",
+              "discard"
+            ],
+            "description": "Target action/state"
+          }
+        },
+        "required": [
+          "negotiation_id",
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "hh_bulk_reject",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vacancy_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of vacancy IDs to process"
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "States to reject from (default: all active stages)"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "If true — show what would be rejected without actually doing it"
+          }
+        },
+        "required": [
+          "vacancy_ids"
+        ]
+      }
+    },
+    {
+      "name": "hh_open_ats_editor",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_candidate_profile",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "negotiation_id": {
+            "type": "string",
+            "description": "Negotiation ID"
+          },
+          "vacancy_context": {
+            "type": "string",
+            "description": "Role context for the profile (what to highlight)"
+          },
+          "ats_result": {
+            "type": "object",
+            "description": "ATS result from hh_evaluate_candidate (optional)"
+          }
+        },
+        "required": [
+          "negotiation_id"
+        ]
+      }
+    },
+    {
+      "name": "hh_vacancy_get_draft",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_vacancy_update_draft",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Job title"
+          },
+          "description_md": {
+            "type": "string",
+            "description": "Full job description in Markdown"
+          },
+          "area_name": {
+            "type": "string",
+            "description": "City/region name in Russian"
+          },
+          "salary_from": {
+            "type": "number"
+          },
+          "salary_to": {
+            "type": "number"
+          },
+          "salary_currency": {
+            "type": "string",
+            "enum": [
+              "RUR",
+              "USD",
+              "EUR"
+            ]
+          },
+          "salary_gross": {
+            "type": "boolean"
+          },
+          "experience": {
+            "type": "string",
+            "enum": [
+              "noExperience",
+              "between1And3",
+              "between3And6",
+              "moreThan6"
+            ]
+          },
+          "employment": {
+            "type": "string",
+            "enum": [
+              "full",
+              "part",
+              "project",
+              "volunteer",
+              "probation"
+            ]
+          },
+          "schedule": {
+            "type": "string",
+            "enum": [
+              "fullDay",
+              "shift",
+              "flexible",
+              "remote",
+              "flyInFlyOut"
+            ]
+          },
+          "key_skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "company_name": {
+            "type": "string"
+          },
+          "company_description": {
+            "type": "string"
+          },
+          "hiring_stages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Этапы отбора, например [\"Скрининг\", \"Интервью\", \"Оффер\"]"
+          },
+          "response_letter_required": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_vacancy_create_draft",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "name",
+          "description_md"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Job title"
+          },
+          "description_md": {
+            "type": "string",
+            "description": "Full job description in Markdown with sections: ## Обязанности, ## Требования, ## Условия"
+          },
+          "area_name": {
+            "type": "string",
+            "description": "City in Russian, e.g. Москва"
+          },
+          "salary_from": {
+            "type": "number"
+          },
+          "salary_to": {
+            "type": "number"
+          },
+          "salary_currency": {
+            "type": "string",
+            "enum": [
+              "RUR",
+              "USD",
+              "EUR"
+            ],
+            "default": "RUR"
+          },
+          "experience": {
+            "type": "string",
+            "enum": [
+              "noExperience",
+              "between1And3",
+              "between3And6",
+              "moreThan6"
+            ]
+          },
+          "employment": {
+            "type": "string",
+            "enum": [
+              "full",
+              "part",
+              "project",
+              "volunteer",
+              "probation"
+            ],
+            "default": "full"
+          },
+          "schedule": {
+            "type": "string",
+            "enum": [
+              "fullDay",
+              "shift",
+              "flexible",
+              "remote",
+              "flyInFlyOut"
+            ],
+            "default": "fullDay"
+          },
+          "key_skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "company_name": {
+            "type": "string"
+          },
+          "company_description": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "hh_vacancy_publish_page",
+      "source": "90-hh.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_discover",
+      "source": "91-hh-discovery.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "What user wants to do, e.g. \"create vacancy\", \"get cities\", \"change status\""
+          },
+          "call_endpoint": {
+            "type": "string",
+            "description": "Optional: also call this HH endpoint and return live data, e.g. \"/me\" or \"/dictionaries\""
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "hh_api_call",
+      "source": "91-hh-discovery.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "DELETE"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "HH API path with variables resolved, e.g. \"/employer/vacancies/active\" or \"/vacancies/123456\""
+          },
+          "body": {
+            "type": "object",
+            "description": "Request body for POST/PUT"
+          }
+        },
+        "required": [
+          "method",
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "cold_message_generate",
+      "source": "91b-hh-outreach.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resume_url": {
+            "type": "string",
+            "description": "URL резюме на HH (hh.ru/resume/...)"
+          },
+          "resume_id": {
+            "type": "string",
+            "description": "ID резюме напрямую"
+          },
+          "resume_text": {
+            "type": "string",
+            "description": "Текст резюме вручную, если нет доступа к HH"
+          },
+          "vacancy_description": {
+            "type": "string",
+            "description": "Краткое описание вакансии — что ищем, ключевые требования"
+          },
+          "tone": {
+            "type": "string",
+            "enum": [
+              "formal",
+              "friendly",
+              "startup"
+            ],
+            "description": "Тон сообщения (по умолчанию: friendly)"
+          },
+          "length": {
+            "type": "string",
+            "enum": [
+              "short",
+              "medium"
+            ],
+            "description": "Длина сообщения (по умолчанию: medium)"
+          }
+        },
+        "required": [
+          "vacancy_description"
+        ]
+      }
+    },
+    {
+      "name": "rejection_with_feedback",
+      "source": "91b-hh-outreach.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "candidate_name": {
+            "type": "string",
+            "description": "Имя кандидата"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Причина отказа: experience_mismatch | overqualified | location | salary | culture_fit | или произвольная строка"
+          },
+          "role": {
+            "type": "string",
+            "description": "Название роли (необязательно)"
+          },
+          "positive_note": {
+            "type": "string",
+            "description": "Что понравилось в кандидате (необязательно)"
+          },
+          "tone": {
+            "type": "string",
+            "enum": [
+              "formal",
+              "human"
+            ],
+            "description": "Тон письма (по умолчанию: human)"
+          }
+        },
+        "required": [
+          "candidate_name",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "hh_proactive_search",
+      "source": "92-hh-proactive.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_proactive_scoring_prompt",
+      "source": "92-hh-proactive.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_proactive_queries",
+      "source": "92-hh-proactive.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "view",
+              "update",
+              "reset"
+            ],
+            "description": "Действие: view | update | reset"
+          },
+          "queries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Новый список фраз (только для action=update)"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "hh_proactive_view",
+      "source": "92-hh-proactive.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hh_proactive_schedule",
+      "source": "92-hh-proactive.js",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "enable",
+              "disable"
+            ],
+            "description": "status | enable | disable"
+          },
+          "interval_hours": {
+            "type": "number",
+            "description": "Интервал запуска в часах (для action=enable, по умолчанию 24)"
+          },
+          "notify_threshold": {
+            "type": "number",
+            "description": "Минимальная оценка кандидата (0-100%, нормализовано под критерии вакансии) для попадания в Telegram-уведомление о новых кандидатах. 0 (по умолчанию) — уведомлять обо всех новых, без фильтра. Задаётся вместе с action=enable."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  ]
+}
