@@ -405,9 +405,20 @@ async function runEngineProcess(opts) {
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
             claudeResult = lastAssistantMsg;
-            claudeUsage = event.usage || null;
+            // Codex names its cache fields differently from Claude's `result` event
+            // (cached_input_tokens/cache_write_input_tokens vs. cache_read_input_tokens/
+            // cache_creation_input_tokens) — normalize here so every downstream consumer
+            // (cost calc, footer, usage-store) can read the Claude-shaped field names
+            // regardless of engine.
+            claudeUsage = event.usage
+              ? {
+                  ...event.usage,
+                  cache_read_input_tokens: event.usage.cached_input_tokens || 0,
+                  cache_creation_input_tokens: event.usage.cache_write_input_tokens || 0,
+                }
+              : null;
             if (claudeUsage) {
-              console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cached_input_tokens || 0} cache_write=${claudeUsage.cache_write_input_tokens || 0}`);
+              console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens} cache_write=${claudeUsage.cache_creation_input_tokens}`);
             }
           } else if (event.type === 'turn.failed' || event.type === 'error') {
             console.warn(`[${taskId}] codex ${event.type}:`, JSON.stringify(event).slice(0, 500));
