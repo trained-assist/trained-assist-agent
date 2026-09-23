@@ -3,7 +3,8 @@
     "tests/runner-e2e.test.js",
     "tests/quick-answers.test.js",
     "tests/unit/intake-files-endpoint.test.js",
-    "tests/unit/durable-plan-persistence.test.js"
+    "tests/unit/durable-plan-persistence.test.js",
+    "tests/unit/hh-disconnect-safety.test.js"
   ],
   "node": [
     "test/run-ingress.test.cjs",

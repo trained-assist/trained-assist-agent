@@ -1187,6 +1187,14 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
+  // Handle complete credential-disconnect requests before broad connect/status patterns.
+  if (userId && HH_DISCONNECT_INTENT.test(task)) {
+    const revoked = revokeService(userId, 'hh');
+    if (revoked === 'hh') return '✅ HeadHunter отключён — токен удалён. Чтобы подключить снова: /hh_connect';
+    if (revoked === 'not_found') return '⚠️ HeadHunter не подключён. Скажи /hh_connect чтобы добавить.';
+    return '⚠️ Не удалось отключить HeadHunter. Удаление токена не подтверждено.';
+  }
+
   // Session summaries (durable artifact) — handled here (async) so we can generate
   // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
   if (workDir) {
@@ -1478,16 +1486,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     if (HH_SCAN_INTENT.test(task)) return await hhManualScan(userId, workDir).catch(() => '⚠️ Не удалось запустить скан.');
   }
 
-  // /hh_disconnect — revoke HH token. Outside the hhConnected gate so it works
-  // both when a token is saved (revoke it) and when no token exists (idempotent
-  // "HH не подключён"). Slash form bypasses verifyQuickAnswerIntent because
-  // task starts with '/'.
-  if (userId && HH_DISCONNECT_INTENT.test(task)) {
-    const revoked = revokeService(userId, 'hh');
-    return revoked === 'not_found'
-      ? '⚠️ HeadHunter не подключён. Скажи /hh_connect чтобы добавить.'
-      : '✅ HeadHunter отключён — токен удалён. Чтобы подключить снова: /hh_connect';
-  }
+
 
   return null;
 }
