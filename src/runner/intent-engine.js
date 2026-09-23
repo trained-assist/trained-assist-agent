@@ -473,7 +473,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     if (raw === 'deepseek') {
       profiles.setOcProfile(workDir, 'deepseek');
       const opencodeGoToggle = require('../opencode-go-toggle');
-      const modeLabel = opencodeGoToggle.getMode() === 'go' ? 'Go (opencode-go/deepseek-v4.1-flash)' : 'OpenRouter (openrouter/deepseek/deepseek-v4-flash-0731)';
+      const modeLabel = opencodeGoToggle.getMode() === 'go' ? 'Go (opencode-go/deepseek-v4.1-flash)' : 'OpenRouter (openrouter/z-ai/glm-5.3-flash)';
       return `✅ OpenCode профиль → DEEPSEEK — общий, единая модель на всех ролях\n\nПрименён только для твоего профиля. Реальный шлюз (Go или OpenRouter) переключается общим VM-тумблером — сейчас: ${modeLabel}. Ручное переключение: /oc_go, /oc_openrouter. Авто-переключение на OpenRouter при упоре в лимит Go, авто-возврат через ~5ч.`;
     }
     const profileFile = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${raw}.json`);
@@ -497,7 +497,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const mode = ocGoToggleM[1].toLowerCase();
     const opencodeGoToggle = require('../opencode-go-toggle');
     opencodeGoToggle.setMode(mode, { auto: false });
-    const label = mode === 'go' ? 'Go (opencode-go/deepseek-v4.1-flash)' : 'OpenRouter (openrouter/deepseek/deepseek-v4-flash-0731)';
+    const label = mode === 'go' ? 'Go (opencode-go/deepseek-v4.1-flash)' : 'OpenRouter (openrouter/z-ai/glm-5.3-flash)';
     const stickyNote = mode === 'openrouter' ? ' Останется на OpenRouter, пока не переключишь обратно (/oc_go) — это ручное переключение, само не вернётся через 5ч (в отличие от авто-переключения при лимите).' : '';
     return `✅ Общий тумблер OpenCode Go/OpenRouter (VM-wide) → ${label}\n\nВлияет на всех, кто использует профиль «deepseek» (/oc_deepseek), а не только на твой.${stickyNote}`;
   }
