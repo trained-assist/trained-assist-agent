@@ -40,7 +40,7 @@ Environment=HH_PLATFORM_URL=https://136-65-7-197.sslip.io/agent
 Environment=VACANCY_REMOTE_STORE_URL=https://platform.recruiter-assistant.ru
 Environment=VM_NAME=gcp-main
 Environment=GCP_PROJECT=alesa-personal-assistent
-Environment=ANTHROPIC_MODEL=claude-sonnet-5
+Environment=ANTHROPIC_MODEL=claude-opus-5-5
 
 [Install]
 WantedBy=multi-user.target
