@@ -191,11 +191,12 @@ const CURRENT_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 // same chatId (see AUDIENCE-SCOPE-SPEC). Falsy or 'default' → EXACTLY the pre-existing
 // filename, so every existing pointer on disk keeps resolving unchanged. Only a truthy
 // non-default audience gets its own pointer file.
-function _currentSessionFile(chatId, audience) {
+function _currentSessionFile(chatId, audience, threadId = null) {
+  const suffix = Number.isInteger(threadId) && threadId > 0 ? `-${threadId}` : '';
   if (!audience || audience === 'default') {
-    return chatId ? `current-session-${chatId}.json` : CURRENT_SESSION_FILE;
+    return chatId ? `current-session-${chatId}${suffix}.json` : CURRENT_SESSION_FILE;
   }
-  return chatId ? `current-session-${audience}-${chatId}.json` : `current-session-${audience}.json`;
+  return chatId ? `current-session-${audience}-${chatId}${suffix}.json` : `current-session-${audience}.json`;
 }
 
 function getCurrentSessionId(workDir, chatId, audience) {
