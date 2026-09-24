@@ -111,7 +111,7 @@ function readOcAgentModels() {
 
 // Build the argv for the selected engine (claude/codex/opencode).
 // Returns [bin, args].
-function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user }) {
+function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user, resumeSessionId = null }) {
   const opencodeModelResolved = opencodeModel || process.env.OPENCODE_MODEL || null;
   if (engine === 'codex') {
     // Validated 2026-09-23: capping raw tool-output tokens cuts the *uncached* input
@@ -143,6 +143,10 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
   }
   return [process.env.CLAUDE_BIN || 'claude', [
     '--dangerously-skip-permissions',
+    // Native resume (#1234 Sub-2): continue the REAL Claude session — full history, tool
+    // state, plan — instead of rebuilding a lossy context after a restart. Validated live:
+    // `claude --resume <session_id> --print "…"` recalls earlier turns. Absent → new session.
+    ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
     '--output-format', 'stream-json',
     '--verbose',
     '--mcp-config', mcpConfig,

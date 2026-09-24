@@ -38,7 +38,7 @@ test('SIGTERM handler flags the restart and exits without draining', () => {
 
 const { isTaskResumable } = require('../src/pending-task-resume');
 
-function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0 }) {
+function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engineSessionIds = {} }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
   const calls = [], runs = [], cleared = [], delays = [];
@@ -50,6 +50,9 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0 }) {
     getRetryDelayMs: attempt => retryDelayMs(attempt),
     getPendingTasks: () => pending,
     clearPendingTask: id => cleared.push(id),
+    // Native-resume id lookup (#1234). Default: none on disk → fallback path (the pre-#1234
+    // behavior these tests were written for). Tests that exercise native resume pass ids here.
+    getEngineSessionId: (workDir, sessionId, engine) => engineSessionIds[engine] || null,
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
     runTask: opts => { runs.push(opts); return Promise.resolve(); },
   };
@@ -121,6 +124,7 @@ test('a resumed task that fails to start tells the user', async () => {
     setTimeout: fn => { fn(); return 0; }, process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
     getRetryDelayMs: () => 0,
     getPendingTasks: () => pending, clearPendingTask() {},
+    getEngineSessionId: () => null,
     fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return {}; },
     runTask: () => Promise.reject(new Error('boom')),
   };
@@ -144,4 +148,35 @@ test('stale entries are cleared; recent-but-expired ones notify, very old ones s
   assert.deepEqual(h.cleared, ['recent-expired', 'ancient', 'gtd']);
   assert.equal(h.calls.length, 1, 'only the recent user task is announced');
   assert.match(h.calls[0].body.text, /не возобновилась/);
+});
+
+// ── Native resume (#1234 Sub-2) — degradation guards ───────────────────────────────────────
+// These exist so a refactor of resumePendingTasks cannot silently drop native resume back to a
+// lossy context rebuild (invisible at runtime — it "works", just badly).
+
+test('native resume: known engine session id → resumeSessionId passed + a short continuation prompt', async () => {
+  const h = resumeHarness({ pending: [task()], engineSessionIds: { claude: 'sid-from-disk' } });
+  await h.resume();
+  assert.equal(h.runs.length, 1);
+  assert.equal(h.runs[0].resumeSessionId, 'sid-from-disk', 'the engine session id must be handed to the runner');
+  assert.match(h.runs[0].task, /ПРОДОЛЖЕНИЕ/, 'native resume sends a continuation prompt, not the replayed task');
+  assert.notEqual(h.runs[0].task, 'work', 'original task must not be replayed on a native resume');
+  assert.deepEqual(h.calls, [], 'still silent on success');
+});
+
+test('native resume: journal id wins over the durable session record', async () => {
+  const h = resumeHarness({
+    pending: [task({ engineSessionId: 'sid-from-journal' })],
+    engineSessionIds: { claude: 'sid-from-disk' },
+  });
+  await h.resume();
+  assert.equal(h.runs[0].resumeSessionId, 'sid-from-journal', 'the freshest id (journal, written mid-run) must win');
+});
+
+test('fallback: no engine session id anywhere → null resumeSessionId + original task replayed', async () => {
+  const h = resumeHarness({ pending: [task()] }); // engineSessionIds defaults to {}
+  await h.resume();
+  assert.equal(h.runs.length, 1);
+  assert.equal(h.runs[0].resumeSessionId, null, 'no id → no --resume (fresh run, pre-#1234 behavior)');
+  assert.equal(h.runs[0].task, 'work', 'fallback replays the original task');
 });

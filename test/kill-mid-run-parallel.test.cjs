@@ -37,6 +37,9 @@ function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50, s
     // the current for-loop is iterating over, only what the *next* resumePendingTasks() call sees.
     getPendingTasks: () => journal.slice(),
     clearPendingTask: id => { cleared.push(id); const i = journal.findIndex(p => p.taskId === id); if (i >= 0) journal.splice(i, 1); },
+    // Native-resume lookup (#1234): none on disk here → the pre-#1234 fallback path these
+    // tests assert on. (Native resume itself is covered in instant-restart.test.cjs.)
+    getEngineSessionId: () => null,
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
     runTask: opts => { if (startError) throw startError; runs.push(opts); return Promise.resolve(); },
   };
