@@ -994,7 +994,7 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   }
   const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
   const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy, candidateStatusOf } = require('../hh-proactive-search');
-  const pageComments = loadCandidateComments(username);
+  const pageComments = loadCandidateComments(username, vacancyId);
   // Render from the unified all-candidates store (search + manual, accumulated
   // across runs) rather than only the latest search-results snapshot — keeps the
   // rest of `results` (vacancy_title, stats, searched_at) from the snapshot.
@@ -1155,7 +1155,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/comment') {
   if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
   try {
     const { saveCandidateComment } = require('../hh-proactive-search');
-    saveCandidateComment(username, candidate_id, { text: String(text).slice(0, 1000) });
+    saveCandidateComment(username, candidate_id, { text: String(text).slice(0, 1000) }, body.vacancy_id);
     return json(res, 200, { ok: true });
   } catch (e) {
     return json(res, 500, { error: e.message });

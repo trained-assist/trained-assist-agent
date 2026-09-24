@@ -6,9 +6,6 @@ const os = require('os');
 const { readHhToken } = require('./hh-utils');
 const { userWorkDir } = require('./data-paths');
 
-const HH_API_BASE = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
-const HH_CONTACT = process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru';
-
 const { resolveSearchAreas, searchResumes } = require('./hh-cold-search-transport');
 
 // Significant words (4+ chars) from a criterion name, used for cheap substring matching
@@ -530,14 +527,14 @@ function buildProactiveDigest({ vacancyTitle, newCount, totalNewCount, totalSeen
 
 // --- Candidate comments (for search refinement) ---
 
-function commentsPath(username) {
+function commentsPath(username, vacancyId) {
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  return path.join(dataDir, 'hh', String(username), 'proactive', 'candidate-comments.json');
+  return path.join(dataDir, 'hh', String(username), 'proactive', vacancyId ? `candidate-comments-${encodeURIComponent(vacancyId)}.json` : 'candidate-comments.json');
 }
 
-function loadCandidateComments(username) {
+function loadCandidateComments(username, vacancyId) {
   try {
-    const raw = fs.readFileSync(commentsPath(username), 'utf8');
+    const raw = fs.readFileSync(commentsPath(username, vacancyId), 'utf8');
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (e) {
@@ -546,10 +543,10 @@ function loadCandidateComments(username) {
   }
 }
 
-function saveCandidateComment(username, candidateId, commentData) {
-  const comments = loadCandidateComments(username);
+function saveCandidateComment(username, candidateId, commentData, vacancyId) {
+  const comments = loadCandidateComments(username, vacancyId);
   comments[String(candidateId)] = { ...commentData, updatedAt: new Date().toISOString() };
-  const file = commentsPath(username);
+  const file = commentsPath(username, vacancyId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.tmp-' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(comments, null, 2), 'utf8');
@@ -598,8 +595,8 @@ function setCandidateStatus(username, candidateId, status, vacancyId) {
 // Extract search exclusion hints from candidate comments.
 // These are comments that describe what we DON'T want (typically negative feedback).
 // Returns an array of strings like ["не из Новосибирска", "без опыта в рознице"].
-function getSearchExclusions(username) {
-  const comments = loadCandidateComments(username);
+function getSearchExclusions(username, vacancyId) {
+  const comments = loadCandidateComments(username, vacancyId);
   return Object.values(comments)
     .map(c => (c.text || '').trim())
     .filter(Boolean);
@@ -765,7 +762,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   // generation haven't changed (detected via configHash). Two vacancies never share the
   // same query file, so switching between them doesn't corrupt each other's cache.
   const forceRegen = Boolean(options.forceRegenQueries);
-  const exclusions = getSearchExclusions(username);
+  const exclusions = getSearchExclusions(username, vacancyKey);
   // configHash covers ATS fields + current exclusion comments so that:
   // 1. editing the vacancy criteria invalidates the cache (same as before)
   // 2. adding a recruiter comment ("не из Новосибирска") also invalidates it,

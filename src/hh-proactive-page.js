@@ -621,7 +621,7 @@ async function saveComment(candidateId, btn) {
     const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/comment', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, text }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, text, vacancy_id: VACANCY_ID }),
     });
     const data = await res.json();
     if (data.error) { btn.textContent = 'Ошибка'; return; }
