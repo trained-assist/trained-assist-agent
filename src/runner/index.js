@@ -1268,7 +1268,7 @@ function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engi
   }
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1749,7 +1749,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = buildEngineCommand({
     engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel,
-    mcpConfig, systemPromptFile, user,
+    mcpConfig, systemPromptFile, user, resumeSessionId,
   });
 
   // Per-profile OpenCode model ladder (max|value|free|russian), resolved to the flat
@@ -1990,6 +1990,36 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : processError ? `ошибка запуска`
       : 'нет подтверждённого финального ответа';
     incompleteReason = reason;
+
+    // Native-resume fallback (#1234 Sub-2): a `--resume <id>` attempt can fail fast when the
+    // engine session is gone (expired transcript, cwd changed, engine GC'd it). Fall back ONCE
+    // to the pre-#1234 path — a fresh run with rebuilt context — instead of burning the whole
+    // restart-retry budget on a resume that cannot succeed. resumeSessionId is NOT carried into
+    // the retry, so the next attempt takes the normal context-rebuild path; resumeFallbackDone
+    // is belt-and-braces against re-entering this branch.
+    if (resumeSessionId && !resumeFallbackDone && !restartShutdown) {
+      console.warn(`[${taskId}] resume: fallback reason=native_resume_failed engine=${engine} (${reason})`);
+      const fallbackMsg = '↩️ Не удалось продолжить сессию движка — перезапускаю с восстановленным контекстом.';
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg));
+      else await tgSend(BOT_TOKEN, chatId, fallbackMsg);
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+        errorText: reason, action: 'native_resume_fallback',
+      });
+      const queuedRetry = runTask({
+        initiatedAt, threadId,
+        taskId: `${user.username}-resume-fb-${Date.now()}`,
+        user, task, context,
+        sessionId: activeSessionId,
+        forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
+        resumedAfterRestart, resumeAttempts,
+        continuationCount, mode, projectId, internalGtd, engine,
+        executionId,
+        resumeFallbackDone: true,
+        lastAttemptError: { reason: `нативный resume не удался (${reason})`, errorText: codexErrorMsg || fullOutput.text.trim().slice(-1000) },
+      });
+      return { queuedRetry };
+    }
 
     // A task resumed after a server restart that fails again is our fault, not the
     // user's task — auto-retry a bounded number of times instead of dead-ending on
