@@ -40,6 +40,8 @@ function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50, s
     // Native-resume lookup (#1234): none on disk here → the pre-#1234 fallback path these
     // tests assert on. (Native resume itself is covered in instant-restart.test.cjs.)
     getEngineSessionId: () => null,
+    isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
+    recordResume: () => {},
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
     runTask: opts => { if (startError) throw startError; runs.push(opts); return Promise.resolve(); },
   };

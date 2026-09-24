@@ -41,7 +41,7 @@ const { isTaskResumable } = require('../src/pending-task-resume');
 function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engineSessionIds = {} }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
-  const calls = [], runs = [], cleared = [], delays = [];
+  const calls = [], runs = [], cleared = [], delays = [], resumeKinds = [];
   const sandbox = {
     path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise,
@@ -50,6 +50,10 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engi
     getRetryDelayMs: attempt => retryDelayMs(attempt),
     getPendingTasks: () => pending,
     clearPendingTask: id => cleared.push(id),
+    // Journal hygiene (#1239): drop pings, don't resume them.
+    isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
+    // Resume metric (#1240): capture kind/engine so tests can assert it.
+    recordResume: (kind, engine) => resumeKinds.push({ kind, engine }),
     // Native-resume id lookup (#1234). Default: none on disk → fallback path (the pre-#1234
     // behavior these tests were written for). Tests that exercise native resume pass ids here.
     getEngineSessionId: (workDir, sessionId, engine) => engineSessionIds[engine] || null,
@@ -58,7 +62,7 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engi
   };
   vm.createContext(sandbox);
   vm.runInContext(`${serverSrc.slice(start, end)}; this.resume = resumePendingTasks;`, sandbox);
-  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, delays, now };
+  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, delays, resumeKinds, now };
 }
 
 const task = (over = {}) => ({ taskId: 'alice-1', username: 'alice', userId: 42, task: 'work', initialMsgId: 7,
@@ -125,6 +129,8 @@ test('a resumed task that fails to start tells the user', async () => {
     getRetryDelayMs: () => 0,
     getPendingTasks: () => pending, clearPendingTask() {},
     getEngineSessionId: () => null,
+    isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
+    recordResume: () => {},
     fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return {}; },
     runTask: () => Promise.reject(new Error('boom')),
   };
@@ -162,6 +168,7 @@ test('native resume: known engine session id → resumeSessionId passed + a shor
   assert.match(h.runs[0].task, /ПРОДОЛЖЕНИЕ/, 'native resume sends a continuation prompt, not the replayed task');
   assert.notEqual(h.runs[0].task, 'work', 'original task must not be replayed on a native resume');
   assert.deepEqual(h.calls, [], 'still silent on success');
+  assert.deepEqual(h.resumeKinds, [{ kind: 'native', engine: 'claude' }], 'metric records a native resume (#1240)');
 });
 
 test('native resume: journal id wins over the durable session record', async () => {
@@ -179,9 +186,10 @@ test('fallback: no engine session id anywhere → null resumeSessionId + origina
   assert.equal(h.runs.length, 1);
   assert.equal(h.runs[0].resumeSessionId, null, 'no id → no --resume (fresh run, pre-#1234 behavior)');
   assert.equal(h.runs[0].task, 'work', 'fallback replays the original task');
+  assert.deepEqual(h.resumeKinds, [{ kind: 'fallback', engine: 'claude' }], 'metric records a fallback (#1240)');
 });
 
-test('native resume: codex wired (Sub-3); opencode still falls back (Sub-4 pending)', async () => {
+test('native resume: claude, codex and opencode are all wired', async () => {
   const hc = resumeHarness({ pending: [task({ engine: 'codex' })], engineSessionIds: { codex: 'thr-x' } });
   await hc.resume();
   assert.equal(hc.runs[0].resumeSessionId, 'thr-x', 'codex native resume must be wired');
@@ -189,5 +197,27 @@ test('native resume: codex wired (Sub-3); opencode still falls back (Sub-4 pendi
 
   const ho = resumeHarness({ pending: [task({ engine: 'opencode' })], engineSessionIds: { opencode: 'ses-x' } });
   await ho.resume();
-  assert.equal(ho.runs[0].resumeSessionId, null, 'opencode takes the context-rebuild path until Sub-4');
+  assert.equal(ho.runs[0].resumeSessionId, 'ses-x', 'opencode native resume must be wired (Sub-4)');
+  assert.equal(ho.runs[0].engine, 'opencode');
+});
+
+// ── Journal hygiene (#1239) — degradation guards ───────────────────────────────────────────
+test('a ping journaled at restart time is dropped, not resumed as a task', async () => {
+  const h = resumeHarness({ pending: [task({ task: '[Сообщение 1]\nдвижется?' })] });
+  await h.resume();
+  assert.equal(h.runs.length, 0, 'a ping must never be replayed to the engine');
+  assert.deepEqual(h.cleared, ['alice-1'], 'the non-task journal entry is dropped');
+  assert.deepEqual(h.calls, [], 'dropping a ping is silent (re-pinging is trivial)');
+});
+
+test('a real task alongside pings is still resumed', async () => {
+  const h = resumeHarness({ pending: [
+    task({ taskId: 'ping', task: 'упало?' }),
+    task({ taskId: 'real', task: 'сделай отчёт по продажам за неделю' }),
+  ] });
+  await h.resume();
+  assert.equal(h.runs.length, 1, 'exactly the real task resumes');
+  assert.equal(h.runs[0].task, 'сделай отчёт по продажам за неделю');
+  assert.ok(h.cleared.includes('ping'), 'the ping entry is dropped');
+  assert.ok(h.cleared.includes('real'), 'the resumed real task entry is cleared after handoff (as before)');
 });

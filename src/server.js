@@ -3,6 +3,8 @@ const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(r
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { isTaskResumable } = require('./pending-task-resume');
+const { isNonTaskMessage } = require('./resume-hygiene');
+const { recordResume, getResumeStats } = require('./resume-stats');
 const { getRetryDelayMs } = require('./retry-policy');
 const { refreshHhToken } = require('./hh-utils');
 const http = require('http');
@@ -272,6 +274,14 @@ async function resumePendingTasks(secrets) {
   for (const p of pending) {
     const now = Date.now();
     const age = now - (p.startedAt || 0);
+    // Journal hygiene (#1239): never resume a ping / status question — replaying "движется?"
+    // as a task is nonsense and was exactly the "user pings, session resumes with a question"
+    // symptom. Drop it silently (a ping needs no apology, and re-pinging is trivial).
+    if (isNonTaskMessage(p.task)) {
+      clearPendingTask(p.taskId);
+      console.log(`[resume] dropped non-task ${p.taskId} (user=${p.username}): "${String(p.task).slice(0, 40)}"`);
+      continue;
+    }
     const resumable = isTaskResumable(p, now, RESUME_WINDOW_MS);
     if (!resumable) {
       // Stale entries would otherwise block GTD indefinitely: isTaskRunning() reads this journal.
@@ -287,10 +297,11 @@ async function resumePendingTasks(secrets) {
     const attempt = (p.resumeAttempts || 0) + 1;
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
 
-    // Native resume (#1234): claude (Sub-2) and codex (Sub-3) are wired. Source: the pending
-    // journal (written mid-run, survives SIGKILL) with the durable session record as fallback.
-    // opencode (Sub-4) still takes the context-rebuild path until its resume path is validated.
-    const NATIVE_RESUME_ENGINES = ['claude', 'codex'];
+    // Native resume (#1234): claude (Sub-2), codex (Sub-3) and opencode (Sub-4) are wired.
+    // Source: the pending journal (written mid-run, survives SIGKILL) with the durable session
+    // record as fallback. opencode is safe by construction — an id only exists if it previously
+    // ran successfully; otherwise nativeResumeId is null and the old path is unchanged.
+    const NATIVE_RESUME_ENGINES = ['claude', 'codex', 'opencode'];
     const nativeResumeId = NATIVE_RESUME_ENGINES.includes(engine)
       ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, engine) : null))
       : null;
@@ -313,6 +324,7 @@ async function resumePendingTasks(secrets) {
     // Delayed via retry-policy's shared backoff schedule so a deploy flurry (several restarts in
     // quick succession) gets a chance to settle before we retry, instead of hammering the same
     // failure immediately on every restart.
+    recordResume(nativeResumeId ? 'native' : 'fallback', engine); // #1240: measure native-vs-fallback
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
       profileId: p.profileId, telegramUserId: p.telegramUserId,
@@ -1011,6 +1023,7 @@ ${recent || '(пока нет)'}
         memory: { totalMb: Math.round(totalMem / 1048576), usedMb: Math.round(usedMem / 1048576), freeMb: Math.round(freeMem / 1048576) },
         disk,
         uptime: process.uptime(),
+        resume: getResumeStats(), // #1240: native vs fallback post-restart resumes
       });
     }
 

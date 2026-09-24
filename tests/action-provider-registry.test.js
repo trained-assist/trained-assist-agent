@@ -136,3 +136,60 @@ describe('provider registration v2', () => {
     checkError(() => r.register({ version: 1, providerId: 'legacy2', actions: [action({ name: 'other' })], contextFields: [] }), 'INVALID_ARGUMENTS');
   });
 });
+
+describe('provider metadata + surface lookup', () => {
+  const readAction = (name = 'recruiting_query_candidates_page') =>
+    action({ name, allowedTriggers: ['user'], effect: 'read', retrySafety: 'read_only' });
+  const manifestV2 = () => ({
+    version: 2,
+    providerId: 'recruiting',
+    actions: [readAction()],
+    contextFields: [{ key: 'active_vacancy', label: 'Активная вакансия', type: 'string', source: 'context_store' }],
+    collections: [{ name: 'candidates', schemaVersion: 1 }],
+    connections: [{ id: 'headhunter', label: 'HeadHunter', requiredFor: ['recruiting_query_candidates_page'] }],
+    webSurfaces: [{ id: 'candidates', title: 'Кандидаты', access: 'private_profile', queryAction: 'recruiting_query_candidates_page' }],
+  });
+
+  it('retains and exposes declared v2 sections', () => {
+    const r = new ActionProviderRegistry();
+    r.register(manifestV2());
+    const meta = r.getProvider('recruiting');
+    expect(meta.version).toBe(2);
+    expect(meta.contextFields.map(f => f.key)).toEqual(['active_vacancy']);
+    expect(meta.collections.map(c => c.name)).toEqual(['candidates']);
+    expect(meta.connections.map(c => c.id)).toEqual(['headhunter']);
+    expect(meta.webSurfaces.map(s => s.id)).toEqual(['candidates']);
+    expect(r.listProviders()).toEqual(['recruiting']);
+  });
+
+  it('resolves a surface by id and returns null for unknown provider/surface', () => {
+    const r = new ActionProviderRegistry();
+    r.register(manifestV2());
+    expect(r.getSurface('recruiting', 'candidates')).toEqual({
+      id: 'candidates', title: 'Кандидаты', access: 'private_profile', queryAction: 'recruiting_query_candidates_page',
+    });
+    expect(r.getSurface('recruiting', 'nope')).toBeNull();
+    expect(r.getSurface('unknown', 'candidates')).toBeNull();
+    expect(r.getProvider('unknown')).toBeNull();
+  });
+
+  it('normalizes a v1 provider to empty domain sections', () => {
+    const r = new ActionProviderRegistry();
+    r.register({ version: 1, providerId: 'legacy', actions: [action()] });
+    expect(r.getProvider('legacy')).toMatchObject({
+      version: 1, providerId: 'legacy', contextFields: [], collections: [], connections: [], webSurfaces: [],
+    });
+    expect(r.getSurface('legacy', 'anything')).toBeNull();
+  });
+
+  it('does not leak metadata on a failed v2 registration or to caller mutation', () => {
+    const r = new ActionProviderRegistry();
+    checkError(() => r.register({ ...manifestV2(), contextFields: [] }), 'INVALID_ARGUMENTS');
+    expect(r.getProvider('recruiting')).toBeNull();
+
+    r.register(manifestV2());
+    r.getProvider('recruiting').webSurfaces.length = 0;
+    r.getSurface('recruiting', 'candidates').title = 'mutated';
+    expect(r.getSurface('recruiting', 'candidates').title).toBe('Кандидаты');
+  });
+});
