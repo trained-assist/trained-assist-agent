@@ -3,6 +3,7 @@ const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(r
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { isTaskResumable } = require('./pending-task-resume');
+const { isNonTaskMessage } = require('./resume-hygiene');
 const { getRetryDelayMs } = require('./retry-policy');
 const { refreshHhToken } = require('./hh-utils');
 const http = require('http');
@@ -272,6 +273,14 @@ async function resumePendingTasks(secrets) {
   for (const p of pending) {
     const now = Date.now();
     const age = now - (p.startedAt || 0);
+    // Journal hygiene (#1239): never resume a ping / status question — replaying "движется?"
+    // as a task is nonsense and was exactly the "user pings, session resumes with a question"
+    // symptom. Drop it silently (a ping needs no apology, and re-pinging is trivial).
+    if (isNonTaskMessage(p.task)) {
+      clearPendingTask(p.taskId);
+      console.log(`[resume] dropped non-task ${p.taskId} (user=${p.username}): "${String(p.task).slice(0, 40)}"`);
+      continue;
+    }
     const resumable = isTaskResumable(p, now, RESUME_WINDOW_MS);
     if (!resumable) {
       // Stale entries would otherwise block GTD indefinitely: isTaskRunning() reads this journal.

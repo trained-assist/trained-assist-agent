@@ -50,6 +50,8 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engi
     getRetryDelayMs: attempt => retryDelayMs(attempt),
     getPendingTasks: () => pending,
     clearPendingTask: id => cleared.push(id),
+    // Journal hygiene (#1239): drop pings, don't resume them.
+    isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
     // Native-resume id lookup (#1234). Default: none on disk → fallback path (the pre-#1234
     // behavior these tests were written for). Tests that exercise native resume pass ids here.
     getEngineSessionId: (workDir, sessionId, engine) => engineSessionIds[engine] || null,
@@ -125,6 +127,7 @@ test('a resumed task that fails to start tells the user', async () => {
     getRetryDelayMs: () => 0,
     getPendingTasks: () => pending, clearPendingTask() {},
     getEngineSessionId: () => null,
+    isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
     fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return {}; },
     runTask: () => Promise.reject(new Error('boom')),
   };
@@ -190,4 +193,25 @@ test('native resume: codex wired (Sub-3); opencode still falls back (Sub-4 pendi
   const ho = resumeHarness({ pending: [task({ engine: 'opencode' })], engineSessionIds: { opencode: 'ses-x' } });
   await ho.resume();
   assert.equal(ho.runs[0].resumeSessionId, null, 'opencode takes the context-rebuild path until Sub-4');
+});
+
+// ── Journal hygiene (#1239) — degradation guards ───────────────────────────────────────────
+test('a ping journaled at restart time is dropped, not resumed as a task', async () => {
+  const h = resumeHarness({ pending: [task({ task: '[Сообщение 1]\nдвижется?' })] });
+  await h.resume();
+  assert.equal(h.runs.length, 0, 'a ping must never be replayed to the engine');
+  assert.deepEqual(h.cleared, ['alice-1'], 'the non-task journal entry is dropped');
+  assert.deepEqual(h.calls, [], 'dropping a ping is silent (re-pinging is trivial)');
+});
+
+test('a real task alongside pings is still resumed', async () => {
+  const h = resumeHarness({ pending: [
+    task({ taskId: 'ping', task: 'упало?' }),
+    task({ taskId: 'real', task: 'сделай отчёт по продажам за неделю' }),
+  ] });
+  await h.resume();
+  assert.equal(h.runs.length, 1, 'exactly the real task resumes');
+  assert.equal(h.runs[0].task, 'сделай отчёт по продажам за неделю');
+  assert.ok(h.cleared.includes('ping'), 'the ping entry is dropped');
+  assert.ok(h.cleared.includes('real'), 'the resumed real task entry is cleared after handoff (as before)');
 });
