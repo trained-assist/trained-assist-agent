@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
             assert h['Cache-Control']=='no-store' and h['Referrer-Policy']=='no-referrer'
         for path in ['/web/login.html','/hh/candidate?neg_id=x','/vacancy/user/id']:
             s,h,b=request(path);assert s==200 and b.decode()==path+'|https'
-        for path in ['/hh/proactive?username=alice&token=signed&vacancy_id=v1&list=starred','/api/hh/proactive/candidates?username=alice&token=signed&vacancy_id=v1']:
+        for path in ['/p/cold-candidates-report-designer-137230181', '/p/private-report?password=a%2Bb&format=source', '/hh/proactive?username=alice&token=signed&vacancy_id=v1&list=starred','/api/hh/proactive/candidates?username=alice&token=signed&vacancy_id=v1']:
             s,h,b=request(path);assert s==200 and b.decode()=='/agent'+path+'|https', (s,b)
             assert h['Cache-Control']=='no-store' and h['Referrer-Policy']=='no-referrer'
         for action in ['search','comment','set-status','add-manual','import-seen','ai-score','vacancy-state']:

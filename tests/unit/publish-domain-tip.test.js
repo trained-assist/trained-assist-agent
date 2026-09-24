@@ -32,11 +32,19 @@ describe('publish_page domain_tip', () => {
     return require('../../src/mcp-skills/tools/97-publish.js').tools;
   }
 
-  it('nudges when falling back to a raw sslip.io host', async () => {
+  it('migrates the old GCP publishing origin to the branded route', async () => {
     process.env.AGENT_PUBLIC_URL = 'https://136-65-7-197.sslip.io/agent';
     tools = freshTools();
     const res = await tools.publish_page.handler({ content: 'hello', slug: 'test-page' });
-    expect(res.url).toContain('sslip.io');
+    expect(res.url).toBe('https://recruiter-assistant.ru/p/test-page');
+    expect(res.domain_tip).toBeUndefined();
+  });
+
+  it('still nudges for an unrelated infrastructure host', async () => {
+    process.env.AGENT_PUBLIC_URL = 'https://192-0-2-10.sslip.io/agent';
+    tools = freshTools();
+    const res = await tools.publish_page.handler({ content: 'hello', slug: 'other-host' });
+    expect(res.url).toBe('https://192-0-2-10.sslip.io/agent/p/other-host');
     expect(res.domain_tip).toMatch(/set_publish_domain/);
   });
 
