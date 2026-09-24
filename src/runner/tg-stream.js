@@ -144,11 +144,20 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
   // still 429s, actually wait it out instead of dropping — see MAX_STARVE_STREAK.
   const forced = _isStarved(deliveryKey, messageId);
   // Telegram's own 429 backoff: once a chat is flood-limited, skip ALL progress
-  // edits for it until retry_after closes. This is a chat-wide gate, not a
-  // per-message race — it must NOT advance the starve streak (forcing through a
-  // flood would just re-429). Best-effort only: terminal edits still go through
-  // so the final result can land the moment the flood allows.
+  // edits for it until retry_after closes. Best-effort only: terminal edits still
+  // go through so the final result can land the moment the flood allows.
+  //
+  // The gate DOES advance the starve streak (contrast with the original, which
+  // left the streak at 0 "to avoid re-429"). Without it the force-through
+  // backstop above is unreachable while a chat is flooded: a live chat keeps
+  // extending the window (sibling sessions + GTD + quick-answers share the same
+  // per-chat flood bucket), every tick is skipped as `!forced`, `forced` never
+  // becomes true, and the counter freezes at its first landed value forever —
+  // the surviving half of the "Думаю… (2с)" bug (#1282 fixed the coalesce path,
+  // not this one). Counting the skip lets MAX_STARVE_STREAK fire, which forces
+  // the next attempt to WAIT OUT the window instead of skipping it.
   if (!forced && bestEffort && _floodBlocked(deliveryKey)) {
+    _recordDrop(deliveryKey, messageId);
     return { ok: true, skipped: true };
   }
   if (!forced && _coalesceTracked(deliveryKey, coalesce)) {
