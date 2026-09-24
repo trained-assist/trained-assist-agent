@@ -40,10 +40,10 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
     config=config.replace('/etc/letsencrypt/live/recruiter-assistant.ru/fullchain.pem',str(d/'cert.pem')).replace('/etc/letsencrypt/live/recruiter-assistant.ru/privkey.pem',str(d/'key.pem'))
     config=config.replace('127.0.0.1:8080',f'127.0.0.1:{upstream.server_port}')
     config=config.replace('proxy_pass https://136-65-7-197.sslip.io',f'proxy_pass https://127.0.0.1:{cold.server_port}')
-    config=config.replace('proxy_ssl_server_name on;', 'proxy_ssl_server_name on; proxy_ssl_name localhost;')
+    config=config.replace('proxy_ssl_server_name on;', 'proxy_ssl_server_name on; proxy_ssl_name localhost; proxy_ssl_session_reuse off;')
     config=config.replace('/etc/ssl/certs/ca-certificates.crt',str(d/'root.pem'))
     # Clone the actual report proxy with the old depth in the SAME nginx
-    # instance: no process restart/listener race and no localhost IPv6 fallback.
+    # instance: no listener race, IPv6 fallback or TLS session reuse across depths.
     start=config.index('    location ^~ /p/ {')
     end=config.index('\n    }',start)+len('\n    }')
     negative=config[start:end].replace('location ^~ /p/', 'location = /__negative_chain').replace('proxy_ssl_verify_depth 3;', 'proxy_ssl_verify_depth 1;')
