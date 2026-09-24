@@ -115,6 +115,12 @@ function atomicWrite(obj) {
   fs.fsyncSync(fd);
   fs.closeSync(fd);
   fs.renameSync(tmp, CRED_PATH);
+  // fsync the directory so the rename itself is durable across a crash/power loss, not just the
+  // file contents. Best-effort: some platforms refuse fsync on a directory handle.
+  try {
+    const dfd = fs.openSync(path.dirname(CRED_PATH), 'r');
+    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+  } catch { /* best-effort */ }
 }
 
 async function refresh(refreshToken) {
@@ -150,7 +156,15 @@ async function main() {
     return;
   }
   if (!FORCE && !withinMargin) { log('token still fresh — skipping'); return; }
-  if (!oauth.refreshToken && !oauth.refresh_token) throw new Error('no refresh token present in credentials');
+  const hasRefresh = oauth.refreshToken || oauth.refresh_token;
+  if (!hasRefresh) {
+    // A partial credential file (access token but no refresh token) is exactly the state a bad
+    // relay push leaves behind — never overwrite further, and say so clearly instead of a generic
+    // "no refresh token".
+    throw new Error((oauth.accessToken || oauth.access_token)
+      ? 'credentials are partial (access token present, refresh token missing) — refusing to touch; restore from ~/.claude/credentials-backups/ or re-login'
+      : 'no refresh token present in credentials');
+  }
 
   if (!acquireLock()) { log('could not acquire lock (peer refreshing) — skipping this run'); return; }
   try {
@@ -176,4 +190,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { log('ERROR:', e.message); process.exitCode = 1; });
+main().catch((e) => { console.error(`[claude-token-refresh ${new Date().toISOString()}] ERROR:`, e.message); process.exitCode = 1; });
