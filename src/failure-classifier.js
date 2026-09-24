@@ -60,6 +60,11 @@ const RULES = [
   { class: 'TRANSIENT', pattern: /\b503\b/ },
   { class: 'TRANSIENT', pattern: /\b502\b/ },
   { class: 'TRANSIENT', pattern: /econnreset|econnrefused|etimedout|socket hang up/i },
+  // opencode keeps ALL runs of the VM in one SQLite file (~/.local/share/opencode/opencode.db).
+  // Two concurrent runs (different chats/users) → "Unexpected error / database is locked"
+  // for one of them. Reproduced on the sandbox smoke (#1311 C5): 1 of 4 parallel runs failed,
+  // the same run alone succeeded. Local contention → retry, not a model/config failure.
+  { class: 'TRANSIENT', pattern: /database is locked|SQLITE_BUSY/i },
 
   // TOOL_ERROR — the agent's own tool call failed, not the model/provider.
   { class: 'TOOL_ERROR', pattern: /tool[_\s-]?(call|use)[^.]{0,20}(failed|error)/i },
