@@ -134,6 +134,7 @@ beforeAll(async () => {
   const { proc, port } = await startServer({
     PORT: '13580',
     SECRETS_SOURCE: 'env',
+    OPENROUTER_API_KEY: '',
     TELEGRAM_BOT_TOKEN: 'test-tg-token-hh-proactive',
     AGENT_SECRET: SECRET,
     AGENT_TOKENS_DIR: tokensDir,
@@ -360,5 +361,26 @@ describe('POST /api/hh/proactive/set-status + list= tabs', () => {
       username: MULTI_VAC_UID, token: multiVacToken(), candidate_id: 'does-not-exist', status: 'archived',
     });
     expect(r.status).toBe(400);
+  });
+});
+
+describe('vacancy-scoped detail readers (#1232)', () => {
+  it('AI detail reads requested A even when B has the newest snapshot', async () => {
+    const dir = join(dataDir, 'hh', TEST_UID, 'proactive');
+    mkdirSync(dir, { recursive: true });
+    for (const [id, date] of [['reader-A', '2026-09-23'], ['reader-B', '2026-09-24']]) {
+      writeFileSync(join(dir, `search-results-${id}.json`), JSON.stringify({ vacancy_id: id, searched_at: date,
+        ats_config: { vacancy_title: id }, candidates: [{ id: `candidate-${id}`, experience: [] }] }));
+    }
+    const r = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/ai-score`, {
+      username: TEST_UID, token: proactiveToken(), vacancy_id: 'reader-A', candidate_id: 'candidate-reader-B',
+    });
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe('candidate not found');
+    const a = await post(`http://127.0.0.1:${serverPort}/api/hh/proactive/ai-score`, {
+      username: TEST_UID, token: proactiveToken(), vacancy_id: 'reader-A', candidate_id: 'candidate-reader-A',
+    });
+    expect(a.status).toBe(500);
+    expect(a.body.error).toContain('OpenRouter API key not configured');
   });
 });

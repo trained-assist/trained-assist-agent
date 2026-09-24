@@ -301,19 +301,13 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
       const secrets = secretsArg || {};
 
       for (const username of fs.readdirSync(hhTokensBase)) {
-        const schedule = loadSchedule(username);
-        if (!schedule?.enabled) continue;
-
-        const intervalMs = (schedule.interval_hours || 24) * 60 * 60 * 1000;
-        const lastRun = schedule.last_run ? new Date(schedule.last_run).getTime() : 0;
-        if (Date.now() - lastRun < intervalMs) continue;
-
         const workDir = path.join(BASE_USERS_DIR, username);
         if (!fs.existsSync(workDir)) continue;
 
         console.log(`[proactive-scheduler] starting run for user=${username}`);
         try {
-          await runProactiveSearch(username, workDir, {
+          await require('./hh-cold-search-schedule').runDueSearches(username, workDir, vacancyId => runProactiveSearch(username, workDir, {
+            vacancyId,
             refreshAccessToken: (u) => refreshHhToken(u, secrets),
             proactiveUrl: buildProactiveUrlForScheduler(username),
             alwaysNotify: true,
@@ -339,9 +333,7 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
                 signal: AbortSignal.timeout(10_000),
               });
             },
-          });
-          schedule.last_run = new Date().toISOString();
-          saveSchedule(username, schedule);
+          }));
           console.log(`[proactive-scheduler] done for user=${username}`);
         } catch (e) {
           console.error(`[proactive-scheduler] error for user=${username}:`, e.message);

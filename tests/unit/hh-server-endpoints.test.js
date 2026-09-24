@@ -411,8 +411,8 @@ describe('POST /hh/send-and-reject', () => {
     expect(partial.body).toMatchObject({ ok: false, message_sent: true });
     expect(mockHh.state.messages['neg-001']).toEqual([body.message]);
     mockHh.state.failDiscard = false;
-    expect((await post(url, body, authHeader())).body.ok).toBe(true);
-    expect((await post(url, body, authHeader())).body.ok).toBe(true);
+    expect((await post(url, body, authHeader())).body).toMatchObject({ ok: true });
+    expect((await post(url, body, authHeader())).body).toMatchObject({ ok: true });
     expect(mockHh.state.messages['neg-001']).toEqual([body.message]);
     expect(mockHh.state.discarded.has('neg-001')).toBe(true);
   });

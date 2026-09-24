@@ -6,22 +6,7 @@ const os = require('os');
 const { readHhToken } = require('./hh-utils');
 const { userWorkDir } = require('./data-paths');
 
-const HH_API_BASE = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
-const HH_CONTACT = process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru';
-
-async function hhResumeSearch(query, token) {
-  const params = new URLSearchParams({ text: query, area: '1', page: '0', per_page: '50', order_by: 'relevance' });
-  const res = await fetch(`${HH_API_BASE}/resumes?${params}`, {
-    signal: AbortSignal.timeout(20_000),
-    headers: {
-      Authorization: `Bearer ${token.access_token}`,
-      'User-Agent': `trained-assist-agent/1.0 (${HH_CONTACT})`,
-      'HH-User-Agent': `trained-assist-agent/1.0 (${HH_CONTACT})`,
-    },
-  });
-  if (!res.ok) throw new Error(`HH resumes ${res.status} for "${query}"`);
-  return res.json();
-}
+const { resolveSearchAreas, searchResumes } = require('./hh-cold-search-transport');
 
 // Significant words (4+ chars) from a criterion name, used for cheap substring matching
 // against a candidate's title/positions/companies before the AI does the real evaluation.
@@ -319,11 +304,15 @@ function allCandidatesPath(username) {
   return path.join(dataDir, 'hh', String(username), 'proactive', 'all-candidates.json');
 }
 
-function loadAllCandidates(username) {
+function loadAllCandidates(username, vacancyId) {
   try {
     const raw = fs.readFileSync(allCandidatesPath(username), 'utf8');
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    const store = parsed && typeof parsed === 'object' ? parsed : {};
+    if (!vacancyId) return store;
+    return Object.fromEntries(Object.entries(store)
+      .filter(([, c]) => candidateMatchesVacancy(c, vacancyId))
+      .map(([id, c]) => [id, candidateForVacancy(c, vacancyId)]));
   } catch (e) {
     if (e.code !== 'ENOENT') console.error('[proactive-search] all-candidates read failed:', e.message);
     return {};
@@ -362,6 +351,14 @@ function candidateMatchesVacancy(candidate, vacancyId) {
   return ids.map(String).includes(String(vacancyId));
 }
 
+function candidateForVacancy(candidate, vacancyId) {
+  const scoped = candidate.vacancy_data?.[String(vacancyId)];
+  if (scoped) return { ...candidate, ...scoped };
+  if (candidate.vacancy_ids?.length === 1 && String(candidate.vacancy_ids[0]) === String(vacancyId)) return candidate;
+  return { ...candidate, status: 'active', score: 0, score_pct: 0, tag: 'REVIEW',
+    plus_tags: [], yellow_tags: [], red_tags: [], summary_why: '', summary_pitch: '' };
+}
+
 // Merge a batch of freshly-scored/enriched search candidates into the unified store.
 // Existing records (e.g. manually-added, or already found+annotated) are NOT clobbered
 // wholesale — we merge new fields in while preserving the original found_at/source so
@@ -378,9 +375,21 @@ function mergeSearchCandidatesIntoAll(username, candidates, foundAtById, vacancy
     const id = String(c.id);
     const existing = store[id];
     const foundAt = (foundAtById && foundAtById[id]) || existing?.found_at || now;
+    const vacancyData = { ...(existing?.vacancy_data || {}) };
+    if (existing?.vacancy_ids?.length === 1 && !vacancyData[existing.vacancy_ids[0]]) {
+      const { vacancy_data, ...legacy } = existing;
+      vacancyData[existing.vacancy_ids[0]] = legacy;
+    }
+    if (vacancyId) {
+      const prior = vacancyData[String(vacancyId)] || {};
+      vacancyData[String(vacancyId)] = { ...prior, ...c,
+        status: prior.status || 'active', status_changed_at: prior.status_changed_at,
+        found_at: prior.found_at || foundAt };
+    }
     store[id] = {
       ...existing,
       ...c,
+      vacancy_data: vacancyData,
       source: existing?.source === 'manual' ? 'manual' : 'search',
       found_at: foundAt,
       vacancy_ids: mergeVacancyId(existing?.vacancy_ids, vacancyId),
@@ -518,14 +527,14 @@ function buildProactiveDigest({ vacancyTitle, newCount, totalNewCount, totalSeen
 
 // --- Candidate comments (for search refinement) ---
 
-function commentsPath(username) {
+function commentsPath(username, vacancyId) {
   const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  return path.join(dataDir, 'hh', String(username), 'proactive', 'candidate-comments.json');
+  return path.join(dataDir, 'hh', String(username), 'proactive', vacancyId ? `candidate-comments-${encodeURIComponent(vacancyId)}.json` : 'candidate-comments.json');
 }
 
-function loadCandidateComments(username) {
+function loadCandidateComments(username, vacancyId) {
   try {
-    const raw = fs.readFileSync(commentsPath(username), 'utf8');
+    const raw = fs.readFileSync(commentsPath(username, vacancyId), 'utf8');
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (e) {
@@ -534,10 +543,10 @@ function loadCandidateComments(username) {
   }
 }
 
-function saveCandidateComment(username, candidateId, commentData) {
-  const comments = loadCandidateComments(username);
+function saveCandidateComment(username, candidateId, commentData, vacancyId) {
+  const comments = loadCandidateComments(username, vacancyId);
   comments[String(candidateId)] = { ...commentData, updatedAt: new Date().toISOString() };
-  const file = commentsPath(username);
+  const file = commentsPath(username, vacancyId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.tmp-' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(comments, null, 2), 'utf8');
@@ -561,24 +570,33 @@ function candidateStatusOf(candidate) {
 // Persist a status transition on the unified store. `status_changed_at` drives
 // the starred/archived tab sort ("newest on top") — the main active tab sorts
 // by score instead (see handlers/hh.js).
-function setCandidateStatus(username, candidateId, status) {
+function setCandidateStatus(username, candidateId, status, vacancyId) {
   if (!CANDIDATE_STATUSES.includes(status)) {
     throw new Error(`invalid status "${status}" — must be one of ${CANDIDATE_STATUSES.join(', ')}`);
   }
   const store = loadAllCandidates(username);
   const id = String(candidateId);
   if (!store[id]) throw new Error('candidate not found');
-  store[id].status = status;
-  store[id].status_changed_at = new Date().toISOString();
+  if (vacancyId) {
+    if (!candidateMatchesVacancy(store[id], vacancyId)) throw new Error('candidate not found in vacancy');
+    const view = candidateForVacancy(store[id], vacancyId);
+    const { vacancy_data, ...fields } = view;
+    store[id].vacancy_data = { ...store[id].vacancy_data, [String(vacancyId)]: {
+      ...fields, status, status_changed_at: new Date().toISOString(),
+    } };
+  } else {
+    store[id].status = status;
+    store[id].status_changed_at = new Date().toISOString();
+  }
   saveAllCandidates(username, store);
-  return store[id];
+  return vacancyId ? candidateForVacancy(store[id], vacancyId) : store[id];
 }
 
 // Extract search exclusion hints from candidate comments.
 // These are comments that describe what we DON'T want (typically negative feedback).
 // Returns an array of strings like ["не из Новосибирска", "без опыта в рознице"].
-function getSearchExclusions(username) {
-  const comments = loadCandidateComments(username);
+function getSearchExclusions(username, vacancyId) {
+  const comments = loadCandidateComments(username, vacancyId);
   return Object.values(comments)
     .map(c => (c.text || '').trim())
     .filter(Boolean);
@@ -657,28 +675,16 @@ ${exclusionsBlock}
 
 // Scoring explanation shown to the recruiter on request — built from the latest actual
 // run's ats_config + generated queries, not a static domain-specific description.
-function buildScoringPromptText(username) {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  const dir = path.join(dataDir, 'hh', String(username), 'proactive');
-  let latest = null;
-  try {
-    const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json')).sort();
-    if (files.length) latest = JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8'));
-  } catch {}
-
-  if (!latest) {
-    return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
-  }
-
-  // Prefer the live context-store config if available — it's always current.
-  // Fall back to the results-file snapshot so the function still works without a running session.
-  let rawConfig = latest.ats_config || {};
-  try {
-    const ctxFile = path.join(userWorkDir(username), 'contexts', 'hh', 'ats_config.json');
-    const ctxRaw = JSON.parse(fs.readFileSync(ctxFile, 'utf8'));
-    if (ctxRaw?.value && typeof ctxRaw.value === 'object') rawConfig = ctxRaw.value;
-  } catch { /* no context store — use results file */ }
-
+function buildScoringPromptText(username, vacancyId) {
+  const workDir = userWorkDir(username);
+  const { readSearchContext } = require('./hh-cold-search-context');
+  const id = vacancyId || readSearchContext(workDir, 'active_vacancy')?.id;
+  if (!id) return 'Сначала выбери вакансию.';
+  const file = require('./hh-cold-search-snapshots').latestProactiveFile(username, id);
+  if (!file) return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
+  const latest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // Explain the criteria actually used in this run, not a newer config or another vacancy.
+  const rawConfig = latest.ats_config || {};
   const cfg = normalizeAtsConfig(rawConfig);
   const queriesStr = (latest.search_queries || []).map(q => `• "${q}"`).join('\n') || '—';
   const knockoutStr = (cfg.knockout || []).map(k => `• ${k}`).join('\n') || '(не задано)';
@@ -702,76 +708,37 @@ ${prefStr}
 PASS/REVIEW считаются относительно суммы весов этой вакансии — точную оценку даёт следующий шаг.
 
 🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
-Топ-30 по предварительному скорингу + ВСЕ новые кандидаты этого прогона (даже если не попали в топ-30) прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест кандидаты по именам не попадают — только счётчик и ссылка на страницу со списком.`;
+До 30 лучших кандидатов по предварительному скорингу и до 50 новых вне этого списка (кроме первого запуска) оцениваются AI по тем же критериям; неизменившиеся оценки берутся из кэша — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест кандидаты по именам не попадают — только счётчик и ссылка на страницу со списком.`;
 }
 
 // HH resume search with optional one-shot refresh on token-expired (401/403).
 // `refreshAccessToken` is an optional async fn (username) => newAccessToken|null.
 // server.js wires it to refreshHhToken() so the proactive-search path auto-survives
 // the same 14-day access_token expiry that /hh/review already handles (916a938).
-async function hhResumeSearchWithRefresh(query, token, username, refreshAccessToken) {
-  const tryFetch = (tok) => hhResumeSearch(query, tok);
-  try {
-    return await tryFetch(token);
-  } catch (e) {
-    if (refreshAccessToken && /HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
-      const fresh = await refreshAccessToken(username);
-      if (fresh) {
-        try {
-          return await tryFetch({ access_token: fresh });
-        } catch (e2) {
-          console.error(`[proactive-search] query "${query}" failed after refresh:`, e2.message);
-          return { items: [] };
-        }
-      }
-    }
-    console.error(`[proactive-search] query "${query}" failed:`, e.message);
-    return { items: [] };
-  }
+async function runProactiveSearch(username, workDir, options = {}) {
+  const release = require('./hh-cold-search-lock').acquireSearchLock(username);
+  try { return await runProactiveSearchUnlocked(username, workDir, options); }
+  finally { release(); }
 }
 
-async function runProactiveSearch(username, workDir, options = {}) {
+async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   const refreshAccessToken = typeof options.refreshAccessToken === 'function' ? options.refreshAccessToken : null;
   let token = readHhToken(username);
   if (!token) throw new Error(`HH токен не найден для пользователя "${username}"`);
 
-  const atsCtxFile = path.join(workDir, 'contexts', 'hh', 'ats_config.json');
-  let atsConfig;
-  try {
-    const raw = JSON.parse(fs.readFileSync(atsCtxFile, 'utf8'));
-    atsConfig = raw.value;
-  } catch {
-    throw new Error('ATS конфиг не найден. Сначала настрой вакансию и критерии оценки.');
+  const { resolveSearchContext } = require('./hh-cold-search-context');
+  const resolved = resolveSearchContext(workDir, options.vacancyId);
+  const vacancyKey = resolved.vacancyId;
+  const atsConfig = normalizeAtsConfig(resolved.config);
+  let activeVacancy = resolved.vacancy;
+  // Older selection tools stored only title/id. Fetch the actual region instead
+  // of guessing from a city name or broadening the search silently.
+  const hasArea = obj => Object.prototype.hasOwnProperty.call(obj || {}, 'area');
+  if (!hasArea(options) && !hasArea(atsConfig.filters) && !hasArea(atsConfig)
+      && (!activeVacancy?.area || typeof activeVacancy.area === 'string' && !/^\d+$/.test(activeVacancy.area))) {
+    activeVacancy = await require('./hh-utils').hhFetch(`/vacancies/${encodeURIComponent(vacancyKey)}`, token);
   }
-  if (!atsConfig) throw new Error('ATS конфиг пуст. Настрой критерии оценки кандидатов.');
-
-  // Normalize legacy (UI: title/required_skills[].skill) and current (LLM:
-  // vacancy_title/required[].name) shapes into one canonical shape. Without this,
-  // scoreCandidate / generateSearchQueries silently read empty criteria and the
-  // search returns 30 random "Аналитик данных" for a "Финансовый советник" vacancy.
-  atsConfig = normalizeAtsConfig(atsConfig);
-
-  // Resolve vacancy ID early — fail fast rather than silently using a shared "unknown"
-  // bucket that collides across vacancies. A real vacancy_id is required so that:
-  //   1. seen-ids for two different vacancies stay in separate buckets
-  //   2. cached search queries are keyed per-vacancy and don't leak between configs
-  let activeVacancy = null;
-  try {
-    activeVacancy = JSON.parse(fs.readFileSync(path.join(workDir, 'contexts', 'hh', 'active_vacancy.json'), 'utf8'))?.value;
-  } catch (e) {
-    if (!(e instanceof SyntaxError) && e.code !== 'ENOENT') throw e;
-  }
-
-  let vacancyKey = atsConfig.vacancy_id ? String(atsConfig.vacancy_id) : '';
-  if (!vacancyKey && activeVacancy?.id) vacancyKey = String(activeVacancy.id);
-  if (!vacancyKey) {
-    throw new Error('Не удалось определить ID вакансии. Вызови hh_set_active_vacancy или hh_extract_ats_config заново — vacancy_id должен быть задан перед запуском поиска.');
-  }
-
-  // Guard: active vacancy changed after this config was extracted for a different one.
-  if (activeVacancy?.id && atsConfig.vacancy_id && atsConfig.vacancy_id !== activeVacancy.id) {
-    throw new Error(`ATS конфиг настроен для другой вакансии («${atsConfig.vacancy_title || atsConfig.vacancy_id}»), а активна «${activeVacancy.title || activeVacancy.id}». Вызови hh_extract_ats_config заново для текущей вакансии.`);
-  }
+  const searchAreas = resolveSearchAreas(atsConfig, activeVacancy, options);
 
   // Read OpenRouter key for AI enrichment + query generation
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -783,7 +750,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
   // generation haven't changed (detected via configHash). Two vacancies never share the
   // same query file, so switching between them doesn't corrupt each other's cache.
   const forceRegen = Boolean(options.forceRegenQueries);
-  const exclusions = getSearchExclusions(username);
+  const exclusions = getSearchExclusions(username, vacancyKey);
   // configHash covers ATS fields + current exclusion comments so that:
   // 1. editing the vacancy criteria invalidates the cache (same as before)
   // 2. adding a recruiter comment ("не из Новосибирска") also invalidates it,
@@ -807,7 +774,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
   const allCandidates = new Map();
 
   for (const query of queries) {
-    const data = await hhResumeSearchWithRefresh(query, token, username, refreshAccessToken);
+    const data = await searchResumes(query, token, username, { areas: searchAreas, refreshAccessToken });
     for (const r of (data.items || [])) {
       if (r.id && !allCandidates.has(r.id)) allCandidates.set(r.id, r);
     }
@@ -856,12 +823,11 @@ async function runProactiveSearch(username, workDir, options = {}) {
   // the top-30 never gets marked seen or surfaced as "new" and silently vanishes
   // forever (recruiter never sees them, digest never mentions them).
   const collectedIds = scored.map(c => c.id).filter(Boolean);
-  let seenInfo = { newIds: new Set(), newCount: 0, totalSeenAfter: 0, firstRun: false };
-  try {
-    seenInfo = mergeSeenIds(username, vacancyKey, collectedIds);
-  } catch (e) {
-    console.error('[proactive-search] seen-ids merge failed:', e.message);
-  }
+  const seenBucketBefore = loadSeenIds(username)[vacancyKey] || {};
+  const newIds = new Set(collectedIds.filter(id => !seenBucketBefore[id]));
+  const seenInfo = { newIds, newCount: newIds.size,
+    totalSeenAfter: Object.keys(seenBucketBefore).length + newIds.size,
+    firstRun: Object.keys(seenBucketBefore).length === 0 };
 
   const top30 = scored.slice(0, 30);
   const top30Ids = new Set(top30.map(c => c.id));
@@ -881,11 +847,20 @@ async function runProactiveSearch(username, workDir, options = {}) {
   }
   const toEnrich = [...top30, ...newButNotTop30];
 
-  let enriched = toEnrich;
-  if (orKey && toEnrich.length > 0) {
+  const previous = loadAllCandidates(username, vacancyKey);
+  const assessmentHash = c => require('crypto').createHash('sha256').update(JSON.stringify({ candidate: c, config: atsConfig })).digest('hex');
+  const pending = [];
+  const cached = [];
+  for (const c of toEnrich) {
+    const hash = assessmentHash(c);
+    if (previous[c.id]?.assessment_hash === hash && previous[c.id]?.plus_tags) cached.push({ ...previous[c.id], ...c });
+    else pending.push({ ...c, assessment_hash: hash });
+  }
+  let enriched = [...cached, ...pending];
+  if (orKey && pending.length > 0) {
     console.log(`[proactive-search] enriching ${toEnrich.length} candidates with AI (top-30 + ${newButNotTop30.length} new)…`);
     try {
-      enriched = await enrichCandidates(toEnrich, atsConfig, orKey);
+      enriched = [...cached, ...await enrichCandidates(pending, atsConfig, orKey)];
     } catch (e) {
       console.error('[proactive-search] enrichment failed:', e.message);
     }
@@ -900,39 +875,36 @@ async function runProactiveSearch(username, workDir, options = {}) {
   fs.mkdirSync(outDir, { recursive: true });
 
   // Mark is_new on candidates that appear for the first time
-  const markedCandidates = enriched.map(c => ({
-    ...c,
-    is_new: seenInfo.newIds.has(c.id),
+  const enrichedById = new Map(enriched.map(c => [c.id, c]));
+  // Persist the full collected pool, including candidates outside the enrichment
+  // budget. A candidate must exist durably before it can become "seen".
+  const markedCandidates = scored.map(c => ({
+    ...(enrichedById.get(c.id) || c), is_new: seenInfo.newIds.has(c.id),
+    ai_pending: enrichedById.has(c.id),
   }));
-
-  // Merge into the unified all-candidates store so the proactive page can render a
-  // single accumulating list (search + manual) instead of only the latest snapshot.
-  // found_at comes from the per-vacancy seen-ids bucket (date the id was first seen)
-  // when available, so re-running search doesn't reset "when we found this person".
-  try {
-    const seenBucket = loadSeenIds(username)[vacancyKey] || {};
-    const foundAtById = {};
-    for (const c of markedCandidates) {
-      if (c.id && seenBucket[c.id]) foundAtById[c.id] = new Date(seenBucket[c.id]).toISOString();
-    }
-    mergeSearchCandidatesIntoAll(username, markedCandidates, foundAtById, vacancyKey);
-  } catch (e) {
-    console.error('[proactive-search] all-candidates merge failed:', e.message);
+  const foundAtById = {};
+  for (const c of markedCandidates) {
+    foundAtById[c.id] = new Date(seenBucketBefore[c.id] || now).toISOString();
   }
+  mergeSearchCandidatesIntoAll(username, markedCandidates, foundAtById, vacancyKey);
+  mergeSeenIds(username, vacancyKey, collectedIds);
 
-  const outFile = path.join(outDir, `search-results-${dateStr}.json`);
+  const outFile = path.join(outDir, `search-results-${dateStr}-${vacancyKey}.json`);
   const output = {
     vacancy_id: vacancyKey,
     vacancy_title: atsConfig.vacancy_title || 'Вакансия',
     search_queries: queries,
+    search_area_ids: searchAreas,
     searched_at: now.toISOString(),
     total_collected: allCandidates.size,
     total_after_knockout: scored.length,
-    ai_enriched: Boolean(orKey),
+    ai_enriched: enriched.length > 0 && enriched.every(c => Array.isArray(c.plus_tags)),
+    ai_pending_count: enriched.filter(c => !Array.isArray(c.plus_tags)).length,
     ats_config: atsConfig,
     candidates: markedCandidates,
   };
-  fs.writeFileSync(outFile, JSON.stringify(output, null, 2), 'utf8');
+  fs.writeFileSync(outFile + '.tmp-' + process.pid, JSON.stringify(output, null, 2), 'utf8');
+  fs.renameSync(outFile + '.tmp-' + process.pid, outFile);
 
   const pass_count = enriched.filter(c => c.tag === 'PASS').length;
   const review_count = enriched.filter(c => c.tag === 'REVIEW').length;
@@ -959,7 +931,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
     const schedule = loadSchedule(username) || {};
     const notifyThreshold = options.notifyThreshold !== undefined
       ? Number(options.notifyThreshold) || 0
-      : Number(schedule.notify_threshold) || 0;
+      : Number(schedule.vacancies?.[vacancyKey]?.notify_threshold ?? schedule.notify_threshold) || 0;
     const newCandidates = notifyThreshold > 0
       ? allNewCandidates.filter(c => (c.score_pct ?? 0) >= notifyThreshold)
       : allNewCandidates;
@@ -996,6 +968,7 @@ async function runProactiveSearch(username, workDir, options = {}) {
     vacancy_id: vacancyKey,
     vacancy_title: output.vacancy_title,
     ai_enriched: output.ai_enriched,
+    ai_pending_count: output.ai_pending_count,
     new_count: seenInfo.newCount,
     new_ids: Array.from(seenInfo.newIds),
     total_seen: seenInfo.totalSeenAfter,
@@ -1007,40 +980,47 @@ async function runProactiveSearch(username, workDir, options = {}) {
 // Called by the 5-min background cron so enrichment happens automatically
 // without waiting for the user to open the web page.
 async function scoreUnscoredProactiveCandidates(username, options = {}) {
-  const refreshAccessToken = typeof options.refreshAccessToken === 'function' ? options.refreshAccessToken : null;
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  const proactiveDir = path.join(dataDir, 'hh', String(username), 'proactive');
-  if (!fs.existsSync(proactiveDir)) return 0;
-
-  const files = fs.readdirSync(proactiveDir)
-    .filter(f => f.startsWith('search-results-') && f.endsWith('.json'))
-    .sort().reverse();
-  if (!files.length) return 0;
-
-  const file = path.join(proactiveDir, files[0]);
-  let results;
-  try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return 0; }
-
-  const candidates = results.candidates || [];
-  const unscored = candidates.filter(c => !c.plus_tags);
-  if (!unscored.length) return 0;
-
-  const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-  const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
-  const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
-  if (!orKey) return 0;
-
-  const atsConfig = results.ats_config || {};
-  const enriched = await enrichCandidates(unscored, atsConfig, orKey);
-
-  for (const c of enriched) {
-    const idx = candidates.findIndex(x => x.id === c.id);
-    if (idx >= 0) Object.assign(candidates[idx], c);
-  }
-  results.candidates = candidates;
-  fs.writeFileSync(file, JSON.stringify(results, null, 2), 'utf8');
-
-  return enriched.filter(c => c.plus_tags).length;
+  let release;
+  try { release = require('./hh-cold-search-lock').acquireSearchLock(username); }
+  catch (error) { if (error.code === 'SEARCH_BUSY') return 0; throw error; }
+  try {
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const dir = path.join(dataDir, 'hh', String(username), 'proactive');
+    const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    const keyFile = path.join(tokensBase, String(username), 'openrouter');
+    const key = fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
+    if (!key) return 0;
+    const latest = new Map();
+    for (const name of fs.readdirSync(dir).filter(f => /^search-results-.*\.json$/.test(f))) {
+      const file = path.join(dir, name);
+      let results;
+      try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { continue; }
+      if (!results.vacancy_id) continue;
+      const prior = latest.get(String(results.vacancy_id));
+      if (!prior || Date.parse(results.searched_at) > Date.parse(prior.results.searched_at)) latest.set(String(results.vacancy_id), { file, results });
+    }
+    // Keep the existing total budget of 30 per profile, shared across vacancies.
+    let remaining = 30, completed = 0, vacanciesLeft = latest.size;
+    for (const { file, results } of latest.values()) {
+      if (remaining <= 0) break;
+      const candidates = results.candidates || [];
+      const allowance = Math.ceil(remaining / vacanciesLeft--);
+      const unscored = candidates.filter(c => c.ai_pending !== false && !c.plus_tags).slice(0, allowance);
+      if (!unscored.length) continue;
+      remaining -= unscored.length;
+      const enriched = await enrichCandidates(unscored, results.ats_config || {}, key);
+      for (const candidate of enriched) {
+        const idx = candidates.findIndex(c => c.id === candidate.id);
+        if (idx >= 0) Object.assign(candidates[idx], candidate);
+      }
+      mergeSearchCandidatesIntoAll(username, enriched, {}, results.vacancy_id);
+      const temp = file + '.tmp-' + process.pid;
+      fs.writeFileSync(temp, JSON.stringify(results, null, 2), 'utf8');
+      fs.renameSync(temp, file);
+      completed += enriched.filter(c => c.plus_tags).length;
+    }
+    return completed;
+  } finally { release(); }
 }
 
 // Per-user proactive search schedule config.
@@ -1093,6 +1073,7 @@ module.exports = {
   mergeSearchCandidatesIntoAll,
   addManualCandidate,
   candidateMatchesVacancy,
+  candidateForVacancy,
   parseResumeId,
 // Per-vacancy query store
   atsConfigHash,

@@ -108,7 +108,7 @@ function setUpUserWorkDir(user, requiredCriterion) {
     filters: { min_experience_years: 1 },
   };
   writeFileSync(join(ctxDir, 'ats_config.json'), JSON.stringify({ value: atsConfig }));
-  writeFileSync(join(ctxDir, 'active_vacancy.json'), JSON.stringify({ value: { id: user.vacancyId, title: user.vacancyTitle } }));
+  writeFileSync(join(ctxDir, 'active_vacancy.json'), JSON.stringify({ value: { id: user.vacancyId, title: user.vacancyTitle, area: { id: '1' } } }));
 
   // Pre-seed the query cache so generateSearchQueries (needs an LLM key) is
   // never called — this test is about routing/isolation, not query generation.
@@ -202,6 +202,6 @@ describe('proactive HH digest — per-profile isolation under concurrency', () =
     const bobFile = join(dataDir, 'hh', BOB.username, 'proactive');
     expect(existsSync(aliceFile)).toBe(true);
     expect(existsSync(bobFile)).toBe(true);
-    expect(existsSync(join(dataDir, 'hh', ALICE.username, 'proactive', `search-results-${new Date().toISOString().slice(0, 10)}.json`))).toBe(true);
+    expect(existsSync(join(dataDir, 'hh', ALICE.username, 'proactive', `search-results-${new Date().toISOString().slice(0, 10)}-${ALICE.vacancyId}.json`))).toBe(true);
   }, 20_000);
 });

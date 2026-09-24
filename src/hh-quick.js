@@ -53,7 +53,7 @@ async function hhMyVacancies(userId, workDir) {
   if (items.length === 1 && workDir) {
     const v = items[0];
     await writeHhContext(workDir, 'hh', 'active_vacancy', {
-      id: v.id, title: v.name, set_at: new Date().toISOString(),
+      id: v.id, title: v.name, area: v.area, set_at: new Date().toISOString(),
     }).catch(() => { /* non-fatal */ });
   }
 
