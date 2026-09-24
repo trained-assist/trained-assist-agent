@@ -456,6 +456,14 @@ async function main() {
       return json(res, 200, { status: 'alive', uptime: process.uptime(), vm: VM_NAME, commit: GIT_COMMIT });
     }
 
+    // GET /readiness — no auth, "can this server accept work?" (distinct from liveness).
+    // 200 when ready; 503 when a critical dependency is down. A single unavailable engine does
+    // not make the server unready as long as a fallback engine is usable (spec §13).
+    if (req.method === 'GET' && url.pathname === '/readiness') {
+      const { ready, checks } = require('./readiness').computeReadiness();
+      return json(res, ready ? 200 : 503, { ready, checks, vm: VM_NAME, commit: GIT_COMMIT, uptime: process.uptime() });
+    }
+
     // GET /p/:slug — serve a published page (no auth, public)
     const pageServeMatch = url.pathname.match(/^\/p\/([a-z0-9][a-z0-9-]{0,79})$/);
     if (req.method === 'GET' && pageServeMatch) {
