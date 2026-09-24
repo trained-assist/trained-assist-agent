@@ -169,6 +169,19 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath
     };
   }
 
+  // Freelance skill lives in a sibling checkout (trained-assist-freelance-skill),
+  // same pattern as hh-skills. Projects are stored per profile at
+  // USERS_ROOT/<USER_ID>/Фриланс проекты (the skill resolves USER_ID + USERS_DIR
+  // from this env), so a profile's freelance work stays in that profile's root.
+  const freelanceSkillIndex = path.join(__dirname, '..', '..', 'trained-assist-freelance-skill', 'src', 'mcp-skills', 'index.js');
+  if (fs.existsSync(freelanceSkillIndex)) {
+    config.mcpServers['freelance-skills'] = {
+      command: 'node',
+      args: [freelanceSkillIndex],
+      env: mcpToolEnv,
+    };
+  }
+
   const configPath = path.join(workDir, '.mcp.json');
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   return configPath;

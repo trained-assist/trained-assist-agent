@@ -18,9 +18,11 @@ const SKILL_NAMES = {
 
 // toolFilenames: contents of mcp-skills/tools/ (local skills only — hh was extracted).
 // hhSkillExtractedPresent: whether the extracted hh-skills sibling repo is checked out.
-function computeSkillsList(toolFilenames, hhSkillExtractedPresent) {
+// freelanceSkillExtractedPresent: whether the freelance-skills sibling repo is checked out.
+function computeSkillsList(toolFilenames, hhSkillExtractedPresent, freelanceSkillExtractedPresent) {
   const skills = toolFilenames.map(f => SKILL_NAMES[f]).filter(Boolean);
   if (hhSkillExtractedPresent) skills.push('hh');
+  if (freelanceSkillExtractedPresent) skills.push('freelance');
   return skills;
 }
 
