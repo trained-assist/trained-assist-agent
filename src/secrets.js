@@ -1,3 +1,5 @@
+const { missingBotTokens } = require('./bot-registry');
+
 const REQUIRED = ['TELEGRAM_BOT_TOKEN', 'AGENT_SECRET'];
 const OPTIONAL = ['RECRUITER_BOT_TOKEN', 'FREELANCE_BOT_TOKEN', 'ANTHROPIC_API_KEY', 'DEEPGRAM_API_KEY', 'BOT_SECRET', 'CF_API_TOKEN', 'OPERATOR_CHAT_ID', 'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'HH_CLIENT_ID', 'HH_CLIENT_SECRET', 'OPENAI_API_KEY', 'FAL_KEY', 'IDEOGRAM_API_KEY', 'RECRAFT_API_KEY', 'OPENROUTER_API_KEY', 'GITHUB_ISSUES_TOKEN', 'WEB_JWT_SECRET', 'WEB_VERIFY_SECRET', 'CHECKLIST_API_KEY'];
 
@@ -51,7 +53,8 @@ function loadFromEnv() {
   return Object.fromEntries(names.map(n => [n, process.env[n] || null]));
 }
 
-async function loadSecrets() {
+// Raw values keyed by secret name (GCP Secret Manager first, env fallback).
+async function loadSecretValues() {
   let values;
 
   if (process.env.SECRETS_SOURCE === 'env') {
@@ -69,11 +72,25 @@ async function loadSecrets() {
     }
   }
 
+  return values;
+}
+
+async function loadSecrets() {
+  const values = await loadSecretValues();
+
   for (const name of REQUIRED) {
     if (!values[name]) throw new Error(`Required secret missing: ${name}`);
   }
 
+  // An enabled bot without its token must be loud, not a silent 503 on every
+  // delivery to that audience (2026-09-24 RECRUITER_BOT_TOKEN incident, epic #1342).
+  const missingBots = missingBotTokens(values);
+  for (const b of missingBots) {
+    console.error(`[secrets] BOT TOKEN MISSING: bot "${b.botId}" (audience ${b.audience}) is enabled in bots.registry but ${b.token_secret_name} did not load — its delivery will fail`);
+  }
+
   return {
+    MISSING_BOTS: missingBots.map(b => b.botId),
     BOT_TOKEN: values.TELEGRAM_BOT_TOKEN,
     RECRUITER_BOT_TOKEN: values.RECRUITER_BOT_TOKEN,
     FREELANCE_BOT_TOKEN: values.FREELANCE_BOT_TOKEN,
@@ -99,4 +116,25 @@ async function loadSecrets() {
   };
 }
 
-module.exports = { loadSecrets };
+// Boot-time operator alert for enabled bots without a token. Sent via the classic
+// bot (a REQUIRED secret, so always present) — never via the broken bot itself.
+async function alertMissingBotTokens(secrets, { fetchImpl = fetch } = {}) {
+  const missing = secrets?.MISSING_BOTS || [];
+  const chatId = secrets?.OPERATOR_CHAT_ID || '1714048'; // same fallback as server.js operator notices
+  if (!missing.length || !secrets.BOT_TOKEN) return false;
+  const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+  const text = `🚨 Агент стартовал без токена бота: ${missing.join(', ')}.\nДоставка этим ботам будет падать (503). Проверь секрет в GCP Secret Manager (infra/env-manifest.json → bots.registry).`;
+  try {
+    const res = await fetchImpl(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+      method: 'POST', signal: AbortSignal.timeout(8000),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+    return !!res?.ok;
+  } catch (e) {
+    console.error('[secrets] missing-bot alert failed:', e.message);
+    return false;
+  }
+}
+
+module.exports = { loadSecrets, loadSecretValues, alertMissingBotTokens, REQUIRED, OPTIONAL };

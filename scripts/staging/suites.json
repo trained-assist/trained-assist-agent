@@ -25,6 +25,7 @@
     "test/instant-restart.test.cjs",
     "test/intake-gate.test.cjs",
     "test/bot-delivery.test.cjs",
+    "test/bot-registry.test.cjs",
     "test/reproject-sandbox.test.cjs",
     "test/chat-pinned-project.test.cjs"
   ]

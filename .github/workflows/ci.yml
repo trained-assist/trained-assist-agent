@@ -271,6 +271,9 @@ jobs:
             chmod 600 /home/vova/secrets.env
             node scripts/register-hook.js
             DEPLOY_ENV=gcp bash scripts/deploy.sh
+            # Epic #1342: a bot whose token vanished from Secret Manager turns this deploy red
+            # instead of freezing that bot's users silently (2026-09-24 RECRUITER_BOT_TOKEN).
+            node scripts/check-bot-secrets.js
 
   deploy-ru:
     needs: [ci, staging-gate, merge]

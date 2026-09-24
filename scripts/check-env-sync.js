@@ -132,6 +132,38 @@ if (reqMatch && optMatch) {
   }
 }
 
+// Validate the bot registry (epic #1342): every bot's token must be loaded by
+// secrets.js AND documented in a Secret-Manager-backed manifest section — a bot
+// token that lives nowhere checkable is exactly how RECRUITER_BOT_TOKEN vanished
+// silently on 2026-09-24.
+console.log('\n[bot registry]');
+{
+  const bots = manifest.bots?.registry;
+  if (!Array.isArray(bots) || bots.length === 0) {
+    fail('infra/env-manifest.json: bots.registry is missing or empty');
+  } else {
+    const codeNames = new Set([reqMatch?.[1] || '', optMatch?.[1] || ''].join(',').match(/'([^']+)'/g)?.map(s => s.replace(/'/g, '')) || []);
+    const inSm = new Set([
+      ...manifest.github_actions_secrets.app.filter(s => s.gcp_sm).map(s => s.name),
+      ...manifest.gcp_secret_manager_only.secrets.map(s => s.name),
+    ]);
+    const seen = { botId: new Set(), audience: new Set(), token_secret_name: new Set() };
+    let botErrors = 0;
+    for (const b of bots) {
+      for (const f of ['botId', 'audience', 'token_secret_name']) {
+        if (!b[f]) { fail(`bot ${JSON.stringify(b)}: missing ${f}`); botErrors++; continue; }
+        if (seen[f].has(b[f])) { fail(`bots.registry: duplicate ${f} "${b[f]}"`); botErrors++; }
+        seen[f].add(b[f]);
+      }
+      if (!b.token_secret_name) continue;
+      if (!codeNames.has(b.token_secret_name)) { fail(`bot "${b.botId}": ${b.token_secret_name} is not loaded by src/secrets.js (add to OPTIONAL)`); botErrors++; }
+      if (!inSm.has(b.token_secret_name)) { fail(`bot "${b.botId}": ${b.token_secret_name} is not in Secret Manager per manifest (gcp_sm:true or gcp_secret_manager_only)`); botErrors++; }
+    }
+    if (!seen.audience.has('default')) { fail('bots.registry: no "default" audience bot'); botErrors++; }
+    if (botErrors === 0) ok(`All ${bots.length} registry bots are loaded by secrets.js and backed by Secret Manager`);
+  }
+}
+
 // Summary
 console.log('\n' + '='.repeat(60));
 if (errors === 0) {
