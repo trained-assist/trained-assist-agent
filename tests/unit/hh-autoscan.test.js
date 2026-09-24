@@ -111,6 +111,8 @@ describe('proactiveUrlFor', () => {
     const url = a.proactiveUrlFor(UID);
     expect(url).toContain('https://example.test/hh/proactive?username=');
     expect(url).toMatch(/token=[a-f0-9]{16}$/);
+    const scheduler = require('../../src/hh-negotiations').createHhNegotiations({});
+    expect(scheduler.buildProactiveUrlForScheduler(UID)).toBe(url);
     delete process.env.HH_COLD_SEARCH_PUBLIC_URL;
     delete process.env.AGENT_SECRET;
   });
