@@ -70,3 +70,21 @@ test('keeps the end of long input where waiting instructions or task details arr
   }});
   assert.ok(prompt.includes('LAST DETAIL'));
 });
+
+// Regression: a model that adds stray text/punctuation (or a leading "Ответ:")
+// must still map to the label. Exact-match parsing made a chatty-but-correct
+// model silently hold the buffer forever.
+test('parses the label when the model adds stray text', async () => {
+  assert.equal((await checkCompleteness('сделай отчёт', 'key', { fetchImpl: fakeFetch('Ответ: clear.') })).level, 'clear');
+  assert.equal((await checkCompleteness('сделай отчёт', 'key', { fetchImpl: fakeFetch('likely\n') })).level, 'likely');
+  assert.equal((await checkCompleteness('сделай отчёт', 'key', { fetchImpl: fakeFetch('  insufficient, похоже') })).level, 'insufficient');
+});
+
+// Regression: the gate must not be pointed at a reasoning model that leaves
+// content null under a tiny max_tokens (that silently held every batch).
+test('gate request is a small, non-reasoning completion with a sane token budget', async () => {
+  let body;
+  await checkCompleteness('сделай отчёт', 'key', { fetchImpl: async (_, options) => { body = JSON.parse(options.body); return fakeFetch('clear')(); } });
+  assert.ok(body.max_tokens >= 8, 'max_tokens must allow a label to be emitted');
+  assert.ok(!/glm-5\.3-flash/.test(body.model), 'must not use the reasoning model that returns content:null');
+});
