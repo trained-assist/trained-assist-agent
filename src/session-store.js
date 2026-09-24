@@ -362,6 +362,32 @@ function setLastOcModel(workDir, id, role, model) {
   }
 }
 
+// Native session id of the underlying engine CLI (claude `session_id` / codex `thread_id` /
+// opencode `sessionID`), keyed by engine. The agent session id (`s-…`) is our own; this is the
+// CLI's, and it is what makes a real native resume possible after a restart (issue #1234).
+// A session can switch engines mid-life (/switch2*), so keep one id per engine.
+function getEngineSessionId(workDir, id, engine) {
+  const full = getSession(workDir, id);
+  return full?.engineSessions?.[engine] || null;
+}
+
+function setEngineSessionId(workDir, id, engine, engineSessionId) {
+  if (!id || !engine || !engineSessionId) return false;
+  try {
+    const fp = sessionFilePath(workDir, id);
+    if (!fs.existsSync(fp)) return false;
+    const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    full.engineSessions = full.engineSessions || {};
+    if (full.engineSessions[engine] === engineSessionId) return true; // idempotent — skip the rewrite
+    full.engineSessions[engine] = engineSessionId;
+    atomicWrite(fp, JSON.stringify(full, null, 2));
+    return true;
+  } catch (e) {
+    console.warn('[session-store] setEngineSessionId:', e.message);
+    return false;
+  }
+}
+
 /** True when a session's stored summary is missing or stale (messages grew since). */
 function needsSummary(meta) {
   if (!meta) return false;
@@ -389,6 +415,7 @@ module.exports = {
   createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
   getCurrentSessionId, setCurrentSessionId, claimLiveChatId, resolveChatSession, archiveSessions, setSummary, needsSummary,
   getLastOcModel, setLastOcModel, setSessionProject,
+  getEngineSessionId, setEngineSessionId,
   // Back-compat alias for the pre-rename name (see PROFILE-RENAME-SPEC.md); remove once no caller uses it.
   claimOwnerChatId: claimLiveChatId,
 };

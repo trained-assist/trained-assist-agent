@@ -216,7 +216,7 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
-    ocProfileOverrides, onHeartbeat,
+    ocProfileOverrides, onHeartbeat, onEngineSessionId,
   } = opts;
 
   const proc = spawn(engineBin, engineArgs, {
@@ -257,6 +257,7 @@ async function runEngineProcess(opts) {
   let fullOutput = { text: '' };
   let claudeResult = null;  // text from result event
   let claudeErrorText = null; // result-event text ONLY when event.is_error — genuine provider error, never answer prose (#1227)
+  let engineSessionId = null; // native CLI session id (claude session_id / codex thread_id / opencode sessionID) — for real --resume (#1234)
   let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
   let terminalSuccess = false; // explicit engine completion, never inferred from narration
   let processSignal = null;
@@ -378,6 +379,18 @@ async function runEngineProcess(opts) {
       try {
         const event = JSON.parse(line);
         firstJsonEventSeen = true;
+        // Capture the engine's native session id the first time it appears, so a later
+        // restart can resume the REAL session instead of rebuilding a lossy context (#1234).
+        // One field per engine, checked generically: claude puts `session_id` on every event
+        // (init included), codex emits `thread_id` in `thread.started`, opencode emits
+        // `sessionID`. Fired once; the callback persists it durably (survives SIGKILL).
+        if (!engineSessionId) {
+          const sid = event.session_id || event.thread_id || event.sessionID;
+          if (sid) {
+            engineSessionId = sid;
+            try { onEngineSessionId?.(sid); } catch (e) { console.warn(`[${taskId}] onEngineSessionId:`, e.message); }
+          }
+        }
         if (engine === 'opencode') {
           if (event.type === 'text' && typeof event.part?.text === 'string') {
             fullOutput.text += event.part.text;
@@ -619,7 +632,7 @@ async function runEngineProcess(opts) {
   }
 
   return {
-    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, terminalSuccess,
+    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, engineSessionId, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
     lastActivity, exitCode, processSignal, processError, timedOut,
     inactivityKill, outputPersistenceError, codexErrorMsg, sessionState,
