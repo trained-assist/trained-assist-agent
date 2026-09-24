@@ -10,10 +10,8 @@ const os = require('os');
 const fs = require('fs');
 
 const { receiveConnect, readConnectPending, consumeConnectPending } = require('../user-tokens');
-const { startNalogLogin, confirmNalogCode } = require('../nalog-login');
 const { startGetcourseLogin, mergeConfig: mergeGetcourseConfig } = require('../getcourse-login');
 const { connectSite } = require('../site-connector');
-const { nalogFormHtml, nalogCodeFormHtml } = require('../connect-forms/nalog');
 const { getcourseFormHtml } = require('../connect-forms/getcourse');
 const { gdriveFormHtml, gdriveSuccessHtml, gdriveErrorHtml } = require('../connect-forms/gdrive');
 const { hhSuccessHtml, hhErrorHtml, hhLandingHtml, hhConfirmHtml } = require('../connect-forms/hh');
@@ -52,19 +50,6 @@ function readBody(req, maxBytes = 1_048_576) {
   });
 }
 
-function tgNotifyNalog(botToken, chatId, expires) {
-  const expiresStr = expires ? new Date(expires).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : '~1 час';
-  const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  fetch(`${tgBase}/bot${botToken}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: `✅ Налог.ру подключён! Данные авторизации сохранены — действуют до ${expiresStr} (МСК).\n\nТеперь можно работать с чеками НПД. Управление доступами: /secrets_list`,
-    }),
-  }).catch(e => console.error('[nalog] tg notify failed:', e.message));
-}
-
 function tgNotifyGetcourse(botToken, chatId, domain, level, cookiesCount) {
   const lines = [`✅ GetCourse подключён! [${domain}]`];
   if (level.includes('L1')) lines.push('• API ключ: ✓ (управление учениками)');
@@ -82,39 +67,9 @@ async function handleConnect(req, url, res, ctx) {
   const { readChatId, secrets, GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REDIRECT_URI,
           HH_CLIENT_ID, HH_CLIENT_SECRET, HH_REDIRECT_URI, HH_CALLBACK_PATH } = ctx;
 
-// ── GET /connect/nalog/code?sessionId=XXX — 2FA code entry page ─────────
-if (req.method === 'GET' && url.pathname === '/connect/nalog/code') {
-  const sessionId = url.searchParams.get('sessionId') || '';
-  if (!/^[a-f0-9]{32}$/.test(sessionId)) {
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' })
-      .end('<p>Неверная ссылка. Запросите новую через Telegram.</p>');
-    return;
-  }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-    .end(nalogCodeFormHtml(sessionId));
-  return;
-}
-
-// ── POST /connect/nalog/code — confirm 2FA code (no AGENT_SECRET needed) ──
-if (req.method === 'POST' && url.pathname === '/connect/nalog/code') {
-  const body = await readBody(req);
-  let payload;
-  try { payload = JSON.parse(body); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
-  const { session, code } = payload;
-  if (!session || !code) { res.writeHead(400).end(JSON.stringify({ error: 'missing session or code' })); return; }
-  if (!/^[a-f0-9]{32}$/.test(session)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid session' })); return; }
-  if (!/^\d{4,8}$/.test(code.trim())) { res.writeHead(400).end(JSON.stringify({ error: 'invalid code format' })); return; }
-
-  const result = await confirmNalogCode(session, code.trim());
-  if (result.error) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: result.error })); return; }
-
-  res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, expires: result.expires }));
-  if (result.userId) {
-    const chatId = readChatId(result.userId);
-    if (chatId) tgNotifyNalog(secrets.BOT_TOKEN, chatId, result.expires);
-  }
-  return;
-}
+// nalog.ru login (/connect/nalog, /connect/nalog/code) moved to the RU edge
+// service (src/ru-edge.js) — Госуслуги/ESIA and lknpd.nalog.ru are geo-blocked
+// outside Russia, so the Playwright login must run with an RU IP. See issue #1288.
 
 // ── GET /connect/gdrive/start?t=TOKEN — redirect to Google OAuth2 ────────
 if (req.method === 'GET' && url.pathname === '/connect/gdrive/start') {
@@ -448,53 +403,10 @@ const connectMatch = url.pathname.match(/^\/connect\/([a-z0-9_-]+)$/);
 if (connectMatch) {
   const service = connectMatch[1];
 
-  // ── nalog — multi-step browser login via Госуслуги ──────────────────────
-  if (service === 'nalog') {
-    if (req.method === 'GET') {
-      const t = url.searchParams.get('t') || '';
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(nalogFormHtml(t));
-      return;
-    }
-
-    if (req.method === 'POST') {
-      const body = await readBody(req);
-      let payload;
-      try { payload = JSON.parse(body); } catch { res.writeHead(400).end(JSON.stringify({ error: 'bad json' })); return; }
-      const { t, login, password } = payload;
-      if (!t || !login || !password) { res.writeHead(400).end(JSON.stringify({ error: 'missing fields' })); return; }
-      if (!/^[a-f0-9]{32}$/.test(t)) { res.writeHead(400).end(JSON.stringify({ error: 'invalid token' })); return; }
-
-      const pending = receiveConnect(t);
-      if (!pending) { res.writeHead(403).end(JSON.stringify({ error: 'invalid or expired token' })); return; }
-      if (pending.service !== 'nalog') { res.writeHead(403).end(JSON.stringify({ error: 'service mismatch' })); return; }
-      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(pending.uid)) { res.writeHead(403).end(JSON.stringify({ error: 'invalid uid' })); return; }
-
-      // Browser login may take 30–60s; form sets fetch timeout to 90s
-      const result = await startNalogLogin(pending.uid, login, password);
-
-      if (result.error) {
-        res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: result.error }));
-        return;
-      }
-
-      if (result.status === 'ok') {
-        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ status: 'ok', expires: result.expires }));
-        const nalogChatId = readChatId(pending.uid);
-        if (nalogChatId) tgNotifyNalog(secrets.BOT_TOKEN, nalogChatId, result.expires);
-        return;
-      }
-
-      if (result.status === 'need_code') {
-        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ status: 'need_code', sessionId: result.sessionId }));
-        return;
-      }
-
-      res.writeHead(500).end(JSON.stringify({ error: 'unexpected result' }));
-      return;
-    }
-
-    res.writeHead(405).end(); return;
-  }
+  // nalog.ru (service === 'nalog', legacy own-hosted login form) moved to the
+  // RU edge service — see src/ru-edge.js. The active onboarding path is the
+  // ZeroCreds 'nalog-creds' flow below, which POSTs to /tokens (server.js),
+  // not through this /connect/:service dispatcher.
 
   // ── hh — redirect to OAuth2 start ───────────────────────────────────────
   if (service === 'hh') {

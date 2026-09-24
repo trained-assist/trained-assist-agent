@@ -21,7 +21,7 @@ const REQUIRED_EXPORTS = [
   'stopTask',
   'stopUserTask',
   'killTaskByUsername',
-  'clearPendingContinuation',
+  'reconcileSoftContinuations', // Startup migration retires legacy speculative timers.
 ];
 
 for (const name of REQUIRED_EXPORTS) {

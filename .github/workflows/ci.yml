@@ -23,8 +23,15 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci --include=dev
+      - name: Install Chromium for response review scenario
+        run: npx playwright install --with-deps chromium
       - name: Replay mandatory user scenarios
         run: npm run test:staging
+      - name: Verify recruiter domain with real nginx
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nginx
+          python3 scripts/test-recruiter-nginx.py
       - name: Save scenario results and tested revision
         if: always()
         uses: actions/upload-artifact@v4
@@ -300,29 +307,16 @@ jobs:
             export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
             export PREV_COMMIT=$(git rev-parse HEAD)
             git reset --hard FETCH_HEAD
-            printf 'TELEGRAM_BOT_TOKEN=%s\nANTHROPIC_API_KEY=%s\nAGENT_SECRET=%s\nDEEPGRAM_API_KEY=%s\nBOT_SECRET=%s\nAGENT_PUBLIC_URL=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nOPENCODE_MODEL=%s\nOPENCODE_PROFILE=%s\n' \
+            # ru-edge (src/ru-edge.js, issue #1288) has no Claude Code, no runner,
+            # no MCP — only TELEGRAM_BOT_TOKEN (Telegram notifications) and
+            # AGENT_SECRET (auth gate + calling GCP back) are required.
+            printf 'TELEGRAM_BOT_TOKEN=%s\nAGENT_SECRET=%s\nAGENT_PUBLIC_URL=%s\n' \
               '${{ secrets.TELEGRAM_BOT_TOKEN }}' \
-              '${{ secrets.ANTHROPIC_API_KEY }}' \
               '${{ secrets.AGENT_SECRET }}' \
-              '${{ secrets.DEEPGRAM_API_KEY }}' \
-              '${{ secrets.BOT_SECRET }}' \
               'https://platform.recruiter-assistant.ru' \
-              '${{ secrets.INN_DADATA_TOKEN }}' \
-              '${{ secrets.INN_DADATA_SECRET }}' \
-              '${{ secrets.INN_CHECKO_KEY }}' \
-              '${{ secrets.OPENAI_API_KEY }}' \
-              '${{ secrets.FAL_KEY }}' \
-              '${{ secrets.IDEOGRAM_API_KEY }}' \
-              '${{ secrets.RECRAFT_API_KEY }}' \
-              '${{ secrets.OPENROUTER_API_KEY }}' \
-              '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
-              '${{ secrets.GITHUB_ISSUES_TOKEN }}' \
-              '' \
-              '${{ secrets.OPENCODE_PROFILE }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
-            node scripts/register-hook.js
-            DEPLOY_ENV=ru AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy.sh
+            AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy-ru-edge.sh
 
   notify-merge-queue:
     needs: [deploy-gcp, deploy-ru]

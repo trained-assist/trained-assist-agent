@@ -9,10 +9,10 @@ function fixture(t) {
  const start=source.indexOf("    if (req.method === 'POST' && url.pathname === '/run') {");
  const end=source.indexOf('    // POST /action',start);
  const runs=[];const pending=new Map();
- const sandbox={fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
+ const sandbox={deliverySecrets:require('../src/bot-delivery').deliverySecrets,withDedupLock:require('../src/request-dedup-lock').withDedupLock,fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
   isValidProjectId:()=>true,trackChat:()=>{},getPendingTasks:()=>[...pending.values()],atomicJson,profiles,
   readBody:async req=>JSON.stringify(req.body),json:(res,status,data)=>Object.assign(res,{status,data}),
-  runTask:opts=>{pending.set(opts.taskId,opts);runs.push(opts);return Promise.resolve();},
+  runTask:opts=>{pending.set(opts.taskId,{...opts,audience:opts.user.audience});runs.push(opts);return Promise.resolve();},
  };
  vm.createContext(sandbox);vm.runInContext(`async function ingress(req,res) {const url={pathname:'/run'};${source.slice(start,end)}}`,sandbox);
  const send=async(body={})=>{const res={};await sandbox.ingress({method:'POST',body:{userId:42,username:'alice',task:'work',requestId:'request-1',...body}},res);return res;};
@@ -103,4 +103,66 @@ test('a failed R2 integrity check prevents acknowledgement or text-only launch',
  const ref={storage:'r2',version:1,id:'d'.repeat(64),name:'doc.pdf',size:3,sha256:'0'.repeat(64)};
  const response=await f.send({fileRefs:[ref]});assert.equal(response.status,503);assert.equal(f.runs.length,0);
  assert.equal(fs.existsSync(path.join(f.root,'accepted-requests','request-1.json')),false);
+});
+
+test('recruiter delivery fails closed before acceptance when its credential is absent', async t => {
+ const f=fixture(t);f.sandbox.secrets.BOT_TOKEN='classic';
+ assert.equal((await f.send({audience:'recruiter'})).status,503);
+ assert.equal(f.runs.length,0);
+ assert.equal((await f.send({audience:'unregistered'})).status,400);
+});
+test('identical request IDs from different bots do not suppress each other',async t=>{
+ const f=fixture(t);f.sandbox.secrets.RECRUITER_BOT_TOKEN='recruiter';
+ const a=await f.send(),b=await f.send({audience:'recruiter'});
+ assert.equal(a.status,202);assert.equal(b.status,202);assert.notEqual(a.data.taskId,b.data.taskId);
+ assert.equal(f.runs.length,2);assert.equal(f.runs[1].user.audience,'recruiter');
+ assert.equal((await f.send({audience:'recruiter'})).data.duplicate,true);
+});
+
+test('rollout preserves lost-ACK deduplication for legacy receipts without audience', async t=>{
+ const f=fixture(t);f.sandbox.secrets.RECRUITER_BOT_TOKEN='recruiter';
+ const dir=path.join(f.root,'accepted-requests');fs.mkdirSync(dir);
+ fs.writeFileSync(path.join(dir,'alice-request-1.json'),JSON.stringify({taskId:'alice-request-1',acceptedAt:Date.now()}));
+ const result=await f.send({audience:'recruiter'});
+ assert.equal(result.status,202);assert.equal(result.data.duplicate,true);assert.equal(f.runs.length,0);
+});
+
+test('freelance (3rd bot, issue #1302) fails closed before acceptance when its credential is absent, and resolves independent receipts once configured', async t=>{
+ const f=fixture(t);f.sandbox.secrets.BOT_TOKEN='classic';
+ assert.equal((await f.send({audience:'freelance'})).status,503);
+ assert.equal(f.runs.length,0);
+ f.sandbox.secrets.FREELANCE_BOT_TOKEN='freelance';f.sandbox.secrets.RECRUITER_BOT_TOKEN='recruiter';
+ const a=await f.send(),b=await f.send({audience:'recruiter'}),c=await f.send({audience:'freelance'});
+ assert.equal(a.status,202);assert.equal(b.status,202);assert.equal(c.status,202);
+ const ids=[a.data.taskId,b.data.taskId,c.data.taskId];
+ assert.equal(new Set(ids).size,3,'each audience gets its own taskId, sharing the same requestId');
+ assert.equal(f.runs.length,3);assert.equal(f.runs[2].user.audience,'freelance');
+ assert.equal((await f.send({audience:'freelance'})).data.duplicate,true);
+});
+
+test('a concurrent duplicate POST for the same requestId runs admission exactly once (issue #1302 §3.4)', async t=>{
+ const f=fixture(t);
+ const crypto=require('node:crypto');const bytes=Buffer.from('race-original');
+ const ref={storage:'r2',version:1,id:'e'.repeat(64),name:'voice.ogg',mime:'audio/ogg',size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+ const materialize=require('../src/r2-media').materializeR2;
+ f.sandbox.process.env.MEDIA_GATEWAY_URL='https://gateway.example';f.sandbox.secrets.AGENT_SECRET='secret';
+ let releaseFirst;const gate=new Promise(r=>{releaseFirst=r;});let fetches=0;
+ f.sandbox.require=name=>name==='./r2-media'?{materializeR2:opts=>materialize({...opts,fetchImpl:async url=>{
+  fetches++;await gate;return new Response(bytes);
+ }})}:name==='./restart-execution'?{currentExecution:()=>null}:require(name);
+ // First POST starts admission and blocks mid-flight (inside the mutex, awaiting media
+ // materialization) until releaseFirst() is called below.
+ const first=f.send({fileRefs:[ref]});
+ await new Promise(r=>setImmediate(r));
+ // Second POST with the SAME requestId must queue behind the first (per-key mutex),
+ // not race it into a second materialize/runTask call.
+ const second=f.send({fileRefs:[ref]});
+ await new Promise(r=>setTimeout(r,10));
+ assert.equal(f.runs.length,0,'neither request has been admitted yet — the first is still gated');
+ releaseFirst();
+ const [r1,r2]=await Promise.all([first,second]);
+ assert.equal(r1.status,202);assert.equal(r1.data.duplicate,undefined);
+ assert.equal(r2.status,202);assert.equal(r2.data.duplicate,true);
+ assert.equal(f.runs.length,1,'admission ran exactly once despite the concurrent duplicate');
+ assert.equal(fetches,1,'the second request never re-materializes media — it saw the receipt the first one wrote');
 });

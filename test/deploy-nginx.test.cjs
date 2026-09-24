@@ -39,3 +39,28 @@ test('both public agent routes retain the 20 MiB upload limit',()=>{
   assert.match(agentLocation[1],/client_max_body_size\s+20m\s*;/,name);
  }
 });
+
+function apex(f) {
+ const src=path.join(f.dir,'repo/infra/nginx/recruiter-assistant.conf');
+ const dst=path.join(f.dir,'nginx/sites-enabled/recruiter-assistant');
+ fs.writeFileSync(src,'GOOD apex');
+ return {src,dst};
+}
+test('RU apex is opt-in until certificate and DNS preparation',t=>{
+ const f=fixture(t),a=apex(f);assert.equal(f.run({DEPLOY_ENV:'ru'}).status,0);assert.equal(fs.existsSync(a.dst),false);
+});
+test('RU installs apex explicitly and maintains it on later deployments',t=>{
+ const f=fixture(t),a=apex(f);assert.equal(f.run({DEPLOY_ENV:'ru',DEPLOY_RECRUITER_APEX:'1'}).status,0);
+ assert.equal(fs.readFileSync(a.dst,'utf8'),'GOOD apex');fs.writeFileSync(a.src,'GOOD updated');
+ assert.equal(f.run({DEPLOY_ENV:'ru'}).status,0);assert.equal(fs.readFileSync(a.dst,'utf8'),'GOOD updated');
+ assert.equal(fs.readFileSync(f.dst,'utf8'),'GOOD old');
+});
+test('invalid RU apex is rolled back without touching platform',t=>{
+ const f=fixture(t),a=apex(f);fs.writeFileSync(a.src,'BAD');
+ const platform=path.join(f.dir,'nginx/sites-enabled/platform');fs.writeFileSync(platform,'GOOD platform');
+ assert.equal(f.run({DEPLOY_ENV:'ru',DEPLOY_RECRUITER_APEX:'1'}).status,1);
+ assert.equal(fs.existsSync(a.dst),false);assert.equal(fs.readFileSync(platform,'utf8'),'GOOD platform');
+});
+test('GCP cannot install the RU apex even when flag is set',t=>{
+ const f=fixture(t),a=apex(f);assert.equal(f.run({DEPLOY_RECRUITER_APEX:'1'}).status,0);assert.equal(fs.existsSync(a.dst),false);
+});

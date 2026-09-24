@@ -358,7 +358,26 @@ async function extractAndSave(page, browser, userId) {
     const dir = path.join(os.homedir(), 'agent-tokens', String(userId));
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'nalog'), JSON.stringify(tokens, null, 2), { mode: 0o600 });
-    console.log('[nalog-login] token saved, userId=%s, expires=%s', userId, tokens.expires);
+    console.log('[nalog-login] token saved locally, userId=%s, expires=%s', userId, tokens.expires);
+
+    // Push the token to GCP too (issue #1288): this module now runs only on the
+    // RU edge, which holds no other per-user state — 10-nalog.js and the expiry
+    // scheduler both read from GCP's ~/agent-tokens, not this machine's.
+    const sinkUrl = process.env.NALOG_TOKEN_SINK_URL;
+    if (sinkUrl && process.env.AGENT_SECRET) {
+      try {
+        const sinkRes = await fetch(`${sinkUrl.replace(/\/$/, '')}/nalog/token-store`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.AGENT_SECRET}` },
+          body: JSON.stringify({ username: String(userId), tokens }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!sinkRes.ok) console.error('[nalog-login] token sink push failed: HTTP', sinkRes.status);
+        else console.log('[nalog-login] token pushed to sink for userId=%s', userId);
+      } catch (e) {
+        console.error('[nalog-login] token sink push error:', e.message);
+      }
+    }
 
     return { status: 'ok', expires: tokens.expires, userId };
   } catch (e) {

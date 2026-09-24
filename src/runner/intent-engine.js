@@ -358,7 +358,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const createMatch = rest.match(/^(?:new|new project|новый|создать|создай|create|add)\s+(.+)$/i);
     if (createMatch) {
       const meta = projects.createProject(workDir, createMatch[1].trim(), { audience });
-      projects.setActiveProjectId(workDir, meta.id, chatId, { audience });
+      projects.setActiveProjectId(workDir, meta.id, chatId, { audience, pinned: true });
       return `✅ Проект создан и выбран: «${meta.name}» (${meta.label}).\nНовые сессии пойдут в него. Список: \`/project\``;
     }
 
@@ -392,7 +392,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
         return [head, ...parts].join('\n');
       });
       return [
-        '📁 Проекты (▶️ — активный, новые сессии идут в него):',
+        '📁 Проекты (▶️ — проект этого чата, новые сессии идут в него):',
         '',
         lines.join('\n\n'),
         '',
@@ -413,8 +413,8 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
         || list.find(p => (p.name || '').toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
     }
     if (!target) return `Проект «${rest}» не найден. Список проектов: \`/project\``;
-    projects.setActiveProjectId(workDir, target.id, chatId, { audience });
-    return `▶️ Активный проект: «${target.name}» (${target.label}).\nСледующие новые сессии пойдут в него. Список: \`/project\``;
+    projects.setActiveProjectId(workDir, target.id, chatId, { audience, pinned: true });
+    return `📌 Проект чата: «${target.name}» (${target.label}).\nВсе новые сессии этого чата пойдут в него без вопроса. Сменить: \`/project\``;
   }
 
   // /switch2klod, /switch2codex — see ENGINE_SWITCH_INTENT above.
@@ -495,7 +495,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     if (!fs.existsSync(profileFile)) return `⚠️ Профиль '${raw}' не найден (.opencode/profiles/${raw}.json)`;
     profiles.setOcProfile(workDir, raw);
     const PROFILE_LABELS = {
-      max:      'MAX — лестница GPT-5.6/6 Astra → DeepSeek (дефолт)',
+      max:      'MAX — лестница GPT-6/5.6 Luna → DeepSeek (дефолт)',
       value:    'VALUE — DeepSeek V4 Flash → GLM → Qwen',
       free:     'FREE — только бесплатный inference (MiMo/Nemotron)',
       russian:  'RUSSIAN — GigaChat Pro/Ultra/Max',
@@ -1194,6 +1194,21 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
+  const notificationIntents = require('../domains/hh/intents');
+  if (userId && workDir && (notificationIntents.HH_NOTIFY_OFF_INTENT.test(task) || notificationIntents.HH_NOTIFY_ON_INTENT.test(task))) {
+    return 'Уведомления холодного поиска выключены: функция удалена для всех пользователей. Настройки автопоиска не изменены.';
+  }
+
+  if (notificationIntents.HH_SEARCH_OFF_INTENT.test(task) && userId && workDir) {
+    try {
+      require('../hh-cold-search-schedule').disableSearches(userId, workDir);
+      return 'Автопоиск выключен для всех вакансий профиля. Ручной поиск доступен.';
+    } catch { return 'Не удалось остановить автопоиск. Попробуй ещё раз.'; }
+  }
+  // Never mistake notification settings or a quoted complaint for new responses.
+  if (notificationIntents.HH_NOTIFICATION_REQUEST.test(task)) return null;
+  // Engineering complaints containing quoted recruiter commands are full tasks.
+  if (require('../domains/hh/intents').HH_SERVICE_CHANGE_INTENT.test(task) && /hh|хх|отклик|кандидат/i.test(task)) return null;
   // Handle complete credential-disconnect requests before broad connect/status patterns.
   if (userId && HH_DISCONNECT_INTENT.test(task)) {
     const revoked = revokeService(userId, 'hh');
@@ -1452,6 +1467,8 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   }
 
   if (userId && workDir && hhConnected) {
+    // Product changes and quoted broken bot replies must reach the full agent.
+    if (require('../domains/hh/intents').HH_SERVICE_CHANGE_INTENT.test(task)) return null;
     const hhIntents = [HH_STATUS_INTENT, HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT,
       HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT,
       HH_WHERE_PROMPT_INTENT, HH_SHOW_ATS_CONFIG_INTENT, HH_STYLE_INTENT,

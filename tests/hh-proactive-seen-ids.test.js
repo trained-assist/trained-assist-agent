@@ -8,7 +8,6 @@
  *   4. switching vacancy → independent buckets
  *   5. seen file write is atomic (tmp+rename) and survives a crash mid-write
  *   6. corrupted JSON file → treated as empty (resilient read)
- *   7. buildProactiveDigest produces a short, scannable Telegram message
  *   8. union of new_ids across N runs === total distinct IDs (lossless)
  */
 
@@ -23,7 +22,6 @@ const {
   loadSeenIds,
   saveSeenIds,
   mergeSeenIds,
-  buildProactiveDigest,
   seenIdsPath,
 } = require('../src/hh-proactive-search.js');
 
@@ -137,62 +135,5 @@ describe('mergeSeenIds — lossless contract (no candidate dropped between runs)
     // The big check: nothing dropped.
     expect(unionOfNews.size).toBe(allSeen.size);
     expect(allSeen.size).toBe(53);
-  });
-});
-
-describe('buildProactiveDigest — Telegram message format', () => {
-  // Multi-vacancy step 4/6 (owner directive): cold search results are never listed by
-  // name in Telegram — one line of counts + a link to the results page.
-  it('shows a one-line count summary and link, never candidate names', () => {
-    const text = buildProactiveDigest({
-      vacancyTitle: 'Финансовый советник',
-      newCount: 3,
-      totalSeen: 47,
-      url: 'https://example/hh/proactive',
-    });
-    expect(text).toContain('🧊 Холодный поиск: 3 новых');
-    expect(text).toContain('«Финансовый советник»');
-    expect(text).toContain('всего в базе: 47');
-    expect(text).toContain('https://example/hh/proactive');
-    expect(text.split('\n').length).toBe(1);
-  });
-
-  it('omits the link line entirely when no url is given', () => {
-    const text = buildProactiveDigest({
-      vacancyTitle: 'X',
-      newCount: 15,
-      totalSeen: 100,
-      url: '',
-    });
-    expect(text).not.toContain('http');
-    expect(text).toContain('15 новых');
-  });
-
-  // Owner report (2026-09-22): the background scheduler used to stay silent on a
-  // "nothing found" run, which looked identical to "the scheduler is broken". The
-  // fix makes the scheduler always send this digest, so its wording must read fine
-  // at zero — both "no new candidates at all" and "new ones, none above threshold".
-  it('reads as a clean confirmation when zero candidates are new', () => {
-    const text = buildProactiveDigest({
-      vacancyTitle: 'Private Banking Sales',
-      newCount: 0,
-      totalNewCount: 0,
-      totalSeen: 467,
-      url: 'https://example/hh/proactive',
-    });
-    expect(text).toContain('🧊 Холодный поиск: 0 новых кандидатов');
-    expect(text).toContain('всего в базе: 467');
-  });
-
-  it('reports "0 above threshold out of N new" when the threshold filters everyone out', () => {
-    const text = buildProactiveDigest({
-      vacancyTitle: 'Private Banking Sales',
-      newCount: 0,
-      totalNewCount: 3,
-      totalSeen: 467,
-      threshold: 82,
-      url: 'https://example/hh/proactive',
-    });
-    expect(text).toContain('0 сильных кандидатов (≥82%) из 3 новых');
   });
 });

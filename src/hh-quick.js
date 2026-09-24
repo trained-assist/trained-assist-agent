@@ -84,7 +84,7 @@ async function hhFunnelStats(userId, workDir) {
 
   const STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer', 'hired', 'discard'];
   const LABELS = {
-    response: 'Новые', consider: 'Рассмотрение', phone_interview: 'Телефон',
+    response: 'Неразобранные', consider: 'Рассмотрение', phone_interview: 'Телефон',
     assessment: 'Тест', interview: 'Интервью', offer: 'Оффер', hired: 'Нанят', discard: 'Отклонён',
   };
 
@@ -111,7 +111,7 @@ async function hhFunnelStats(userId, workDir) {
 
   return [
     `📊 ${vacancy.title}`,
-    `Новых: ${counts.response || 0} | В работе: ${activeTotal} | Отклонено: ${counts.discard || 0}`,
+    `Неразобранных: ${counts.response || 0} | В работе: ${activeTotal} | Отклонено: ${counts.discard || 0}`,
     '',
     ...lines,
   ].join('\n');
@@ -136,9 +136,9 @@ async function hhNewResponses(userId, workDir) {
   } catch { return null; }
 
   const count = data.found || 0;
-  if (!count) return `💼 ${vacancy.title}\n\nНовых откликов нет.`;
+  if (!count) return `💼 ${vacancy.title}\n\nНеразобранных откликов нет.`;
 
-  return `💼 ${vacancy.title} — новых откликов: ${count}. Смотри и оценивай здесь: ${hhReviewUrl(userId, vacancy.id)}`;
+  return `💼 ${vacancy.title} — неразобранных откликов: ${count}. Смотри и оценивай здесь: ${hhReviewUrl(userId, vacancy.id)}`;
 }
 
 // HH_PLATFORM_URL overrides AGENT_PUBLIC_URL for HH-specific pages (review, ATS editor).
@@ -171,7 +171,8 @@ function hhReviewUrl(userId, vacancyId) {
   const token = hhReviewToken(userId);
   const tokenParam = token ? `&token=${token}` : '';
   const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
-  return `${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}${vacancyParam}`;
+  const base = (process.env.HH_COLD_SEARCH_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+  return `${base}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}${vacancyParam}`;
 }
 
 // "покажи страницу ревью кандидатов" — no API call
@@ -315,7 +316,7 @@ function hhStatus(userId) {
 
   const reviewToken = hhReviewToken(userId);
   const tokenParam  = reviewToken ? `&token=${reviewToken}` : '';
-  const reviewUrl   = `${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}`;
+  const reviewUrl   = hhReviewUrl(userId);
 
   return [
     '📊 HH статус:',

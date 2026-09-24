@@ -20,15 +20,20 @@ function json(res, status, data) {
 }
 
 function readBody(req, maxBytes = 1_048_576) {
+  return readBodyBuffer(req, maxBytes).then(buf => buf.toString());
+}
+function readBodyBuffer(req, maxBytes = 1_048_576) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;
+    let rejected = false;
     req.on('data', c => {
+      if (rejected) return;
       total += c.length;
-      if (total > maxBytes) { req.destroy(); return reject(new Error('body too large')); }
+      if (total > maxBytes) { rejected = true; return reject(new Error('body too large')); }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks)); });
     req.on('error', reject);
   });
 }
@@ -267,6 +272,37 @@ async function handleWeb(req, url, res, ctx) {
     }
   }
 
+  // ── POST /web/intake-file-bearer — store one web attachment durably ──────
+  // The Cloudflare worker owns browser uploads first. Before a real run/reply it
+  // copies each file here so the agent can materialize it into media/intake and
+  // hand the model a real local path. Auth uses the same WEB_VERIFY/AGENT bearer.
+  if (req.method === 'POST' && url.pathname === '/web/intake-file-bearer') {
+    const verifySecret = secrets.WEB_VERIFY_SECRET || secrets.AGENT_SECRET;
+    const auth = req.headers['authorization'] || '';
+    if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
+    const username = req.headers['x-username'] || '';
+    const id = req.headers['x-file-id'] || '';
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+    if (!/^[a-f0-9]{16,64}$/.test(id)) return json(res, 400, { error: 'invalid file id' });
+    let buf;
+    try { buf = await readBodyBuffer(req, 3 * 1024 * 1024); }
+    catch { return json(res, 413, { error: 'file too large' }); }
+    if (!buf.length) return json(res, 400, { error: 'empty file' });
+    const rawName = decodeURIComponent(req.headers['x-filename'] || 'file');
+    const safeName = path.basename(rawName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+    const mime = req.headers['content-type'] || 'application/octet-stream';
+    const { userWorkDir } = require('../data-paths');
+    const storeDir = path.join(userWorkDir(username), 'media', 'intake-store', id);
+    try {
+      fs.mkdirSync(storeDir, { recursive: true });
+      fs.writeFileSync(path.join(storeDir, 'data'), buf, { mode: 0o600 });
+      fs.writeFileSync(path.join(storeDir, 'meta.json'), JSON.stringify({ name: safeName, mime, size: buf.length, buffered: true }), { mode: 0o600 });
+    } catch (e) {
+      return json(res, 503, { error: 'attachment store failed' });
+    }
+    return json(res, 200, { id, name: safeName, mime, size: buf.length });
+  }
+
   // ── POST /web/run-bearer — start a task from an external frontend (bearer) ─
   // The write-side twin of /web/sessions-list: an external UI (the Cloudflare
   // session-manager worker at app.trainedassist.store) can't hold a WEB_JWT
@@ -283,12 +319,30 @@ async function handleWeb(req, url, res, ctx) {
     if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
     let body;
     try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-    const { username, task, sessionId } = body || {};
+    const { username, task, sessionId, projectId, fileRefs, requestId } = body || {};
     if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
-    if (!task || typeof task !== 'string' || !task.trim()) return json(res, 400, { error: 'task required' });
-    const { streamWebTask } = require('../web-routes');
+    if (requestId != null && !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) return json(res, 400, { error: 'invalid requestId' });
+    const refs = Array.isArray(fileRefs) ? fileRefs : [];
+    const taskText = typeof task === 'string' ? task.trim() : '';
+    if (!taskText && !refs.length) return json(res, 400, { error: 'task or attachment required' });
+    if (projectId != null && !require('../valid-project-id').isValidProjectId(projectId)) return json(res, 400, { error: 'invalid projectId' });
+    const { streamWebTask, prepareWebTaskFiles, claimWebMutation } = require('../web-routes');
+    let prepared;
+    try { prepared = prepareWebTaskFiles(username, taskText, refs); }
+    catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }
     const sid = (sessionId && /^[a-zA-Z0-9_-]+$/.test(sessionId)) ? sessionId : null;
-    return streamWebTask({ req, res, secrets, username, task: task.trim(), sessionId: sid });
+    let claim;
+    try { claim = claimWebMutation(username, requestId || null, { kind: 'run', sessionId: sid }); }
+    catch { return json(res, 503, { error: 'could not persist mutation receipt' }); }
+    if (claim.invalid) return json(res, 400, { error: 'invalid requestId' });
+    if (!claim.claimed) return json(res, 409, {
+      error: 'duplicate request already accepted', duplicate: true,
+      requestId, state: claim.receipt?.state || 'accepted', sessionId: claim.receipt?.sessionId || null,
+    });
+    return streamWebTask({
+      req, res, secrets, username, task: prepared.task, sessionId: sid,
+      projectId: projectId || null, fileRefs: prepared.fileRefs, requestId: requestId || null,
+    });
   }
 
   // ── POST /web/reply-bearer — resume a session from an external frontend ────
@@ -302,12 +356,29 @@ async function handleWeb(req, url, res, ctx) {
     if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
     let body;
     try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-    const { username, id, message } = body || {};
+    const { username, id, message, fileRefs, requestId } = body || {};
     if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
     if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return json(res, 400, { error: 'invalid session id' });
-    if (!message || typeof message !== 'string' || !message.trim()) return json(res, 400, { error: 'message required' });
-    const { streamWebTask } = require('../web-routes');
-    return streamWebTask({ req, res, secrets, username, task: message.trim(), sessionId: id });
+    if (requestId != null && !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) return json(res, 400, { error: 'invalid requestId' });
+    const refs = Array.isArray(fileRefs) ? fileRefs : [];
+    const messageText = typeof message === 'string' ? message.trim() : '';
+    if (!messageText && !refs.length) return json(res, 400, { error: 'message or attachment required' });
+    const { streamWebTask, prepareWebTaskFiles, claimWebMutation } = require('../web-routes');
+    let prepared;
+    try { prepared = prepareWebTaskFiles(username, messageText, refs); }
+    catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }
+    let claim;
+    try { claim = claimWebMutation(username, requestId || null, { kind: 'reply', sessionId: id }); }
+    catch { return json(res, 503, { error: 'could not persist mutation receipt' }); }
+    if (claim.invalid) return json(res, 400, { error: 'invalid requestId' });
+    if (!claim.claimed) return json(res, 409, {
+      error: 'duplicate request already accepted', duplicate: true,
+      requestId, state: claim.receipt?.state || 'accepted', sessionId: claim.receipt?.sessionId || id,
+    });
+    return streamWebTask({
+      req, res, secrets, username, task: prepared.task, sessionId: id,
+      fileRefs: prepared.fileRefs, requestId: requestId || null,
+    });
   }
 
   // ── POST /web/stop-bearer — stop a running task from an external frontend ──
@@ -325,8 +396,10 @@ async function handleWeb(req, url, res, ctx) {
     if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
     if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return json(res, 400, { error: 'invalid session id' });
     const { stopSessionFor } = require('../web-routes');
-    stopSessionFor(username, id);
-    return json(res, 200, { ok: true });
+    const stopped = stopSessionFor(username, id);
+    return stopped
+      ? json(res, 200, { ok: true, id })
+      : json(res, 409, { ok: false, error: 'session is not running', id });
   }
 
   // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────

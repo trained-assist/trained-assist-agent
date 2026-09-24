@@ -148,7 +148,7 @@ const HH_DIGEST_TASK = `SCHEDULED: HH мониторинг — быстрый д
 
 Формат блока (повторяется для каждой вакансии, разделяй пустой строкой):
 📊 HH | {название вакансии}
-Новых откликов: {new_responses}
+Неразобранных откликов: {new_responses}
 Непрочитанных: {unread_messages ?? 'н/д'}
 Активных всего: {active_total}
 
@@ -162,11 +162,11 @@ const HH_DIGEST_TASK = `SCHEDULED: HH мониторинг — быстрый д
 • Принят: {hired}
 (Отклонено за всё время: {discard})
 
-Если порог (шаг 2) > 0 И в ответе hh_funnel_stats пришли new_responses_above_threshold/new_responses_pending_score — ЗАМЕНИ строку «Новых откликов: {new_responses}» на:
-Новых откликов: {new_responses} (из них ≥{notify_threshold}%: {new_responses_above_threshold}{, если new_responses_pending_score > 0: ", ещё не оценено: {new_responses_pending_score}"})
-Если порог выключен (0) — оставь строку «Новых откликов: {new_responses}» как есть, без изменений.
+Если порог (шаг 2) > 0 И в ответе hh_funnel_stats пришли new_responses_above_threshold/new_responses_pending_score — ЗАМЕНИ строку «Неразобранных откликов: {new_responses}» на:
+Неразобранных откликов: {new_responses} (из них ≥{notify_threshold}%: {new_responses_above_threshold}{, если new_responses_pending_score > 0: ", ещё не оценено: {new_responses_pending_score}"})
+Если порог выключен (0) — оставь строку «Неразобранных откликов: {new_responses}» как есть, без изменений.
 
-Если у вакансии new_responses > 0 — добавь под её блоком: «Есть {N} новых откликов — запусти hh_batch_evaluate({vacancy_id: "<id>"}) для оценки.» (обязательно с vacancy_id, если вакансий больше одной). Если порог включён, замени {N} на new_responses_above_threshold, если он есть.
+Если у вакансии new_responses > 0 — добавь под её блоком: «Есть {N} неразобранных откликов — запусти hh_batch_evaluate({vacancy_id: "<id>"}) для оценки.» (обязательно с vacancy_id, если вакансий больше одной). Если порог включён, замени {N} на new_responses_above_threshold, если он есть.
 
 Если вакансия ровно одна — формат не меняется (один блок, без нумерации и заголовков-разделителей).`.trim();
 

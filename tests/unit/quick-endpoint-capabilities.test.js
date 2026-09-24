@@ -206,4 +206,12 @@ describe('computeSkillsList', () => {
   it('omits hh when the extracted sibling repo is absent (CI reality post-#942)', () => {
     expect(computeSkillsList(['30-weeek.js'], false)).toEqual(['weeek']);
   });
+
+  it('adds freelance when its sibling repo is present', () => {
+    expect(computeSkillsList(['30-weeek.js'], false, true)).toEqual(['weeek', 'freelance']);
+  });
+
+  it('omits freelance when its sibling repo is absent', () => {
+    expect(computeSkillsList(['30-weeek.js'], true, false)).toEqual(['weeek', 'hh']);
+  });
 });

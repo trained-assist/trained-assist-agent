@@ -16,6 +16,21 @@ function updateSchedule(username, workDir, vacancyId, patch) {
   saveSchedule(username, { ...saved, enabled: Object.values(vacancies).some(v => v.enabled), vacancies });
   return vacancies[vacancyId];
 }
+// No vacancy argument means an explicit profile-wide stop, independent of selection.
+function disableSearches(username, workDir, vacancyId) {
+  if (vacancyId) return updateSchedule(username, workDir, vacancyId, { enabled: false });
+  const saved = loadSchedule(username) || {};
+  const vacancies = Object.fromEntries(Object.entries(getSchedules(username, workDir))
+    .map(([id, state]) => [id, { ...state, enabled: false }]));
+  saveSchedule(username, { ...saved, enabled: false, vacancies });
+  require('./hh-autoscan').disable(username);
+  return { enabled: false, vacancies };
+}
+// Compatibility for old callers. Telegram cold-search notifications were retired.
+// These functions never alter scheduling or create a delivery path.
+function setNotifications() { return { notifications_enabled: false, retired: true }; }
+function deliveryEnabled() { return false; }
+function notificationsEnabled() { return false; }
 async function runDueSearches(username, workDir, runSearch, now = Date.now()) {
   const tracked = new Set(readActiveVacancies(workDir).map(v => String(v.id)));
   const outcomes = [];
@@ -42,4 +57,4 @@ async function runDueSearches(username, workDir, runSearch, now = Date.now()) {
   }
   return outcomes;
 }
-module.exports = { getSchedules, updateSchedule, runDueSearches };
+module.exports = { setNotifications, deliveryEnabled, getSchedules, updateSchedule, disableSearches, notificationsEnabled, runDueSearches };

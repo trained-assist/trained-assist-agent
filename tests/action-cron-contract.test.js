@@ -60,6 +60,17 @@ describe('versioned action/provider contracts', () => {
     const missing = { ...action }; delete missing.requiresApproval;
     expect(valid({ version: 1, providerId: 'recruiting', actions: [missing] })).toBe(false);
   });
+  it('carries optional origin/channel without adding a trigger', () => {
+    const valid = check('invocation');
+    expect(valid({ ...invocation, origin: 'web', channel: 'surface:candidates' })).toBe(true);
+    for (const origin of ['web', 'mcp', 'telegram', 'api', 'cron-service', 'durable']) {
+      expect(valid({ ...invocation, origin })).toBe(true);
+    }
+    expect(valid({ ...invocation, origin: 'smtp' })).toBe(false);
+    expect(valid({ ...invocation, channel: '' })).toBe(false);
+    // origin does not replace trigger: an unknown trigger is still rejected
+    expect(valid({ ...invocation, origin: 'web', trigger: 'surface' })).toBe(false);
+  });
 });
 
 describe('generic cron API input contracts', () => {
@@ -137,6 +148,16 @@ describe('SQLite contract constraints (not a runtime scheduler)', () => {
       insertExecution(db, 'one');
       expect(() => db.exec("UPDATE action_executions SET status = 'done'")).toThrow(/CHECK/);
       expect(() => insertExecution(db, 'bad', 'p1', null, 'new', 'missing', 1000)).toThrow(/FOREIGN KEY/);
+    } finally { db.close(); }
+  });
+  it('records origin/channel alongside trigger, not as a trigger', () => {
+    const db = database();
+    try {
+      insertExecution(db, 'one');
+      db.prepare("UPDATE action_executions SET origin = 'web', channel = 'surface:candidates' WHERE id = 'one'").run();
+      expect(db.prepare("SELECT trigger, origin, channel FROM action_executions WHERE id = 'one'").get())
+        .toEqual({ trigger: 'cron', origin: 'web', channel: 'surface:candidates' });
+      expect(() => db.prepare("UPDATE action_executions SET origin = 'smtp' WHERE id = 'one'").run()).toThrow(/CHECK/);
     } finally { db.close(); }
   });
 });

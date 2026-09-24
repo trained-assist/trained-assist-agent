@@ -508,23 +508,6 @@ function saveStoredQueries(username, vacancyId, queries, configHash) {
   fs.renameSync(tmp, file);
 }
 
-// Build a short Telegram digest for a successful proactive run.
-// Multi-vacancy step 4/6 (owner directive): Telegram never lists candidate names for
-// cold search either ("мы в телеге не отвечаем холодный поиск, вот тебе ссылка") —
-// one line with counts, then a link to the results page. `newCandidates` is no longer
-// rendered here; callers may keep passing it (e.g. for other consumers), it's ignored.
-function buildProactiveDigest({ vacancyTitle, newCount, totalNewCount, totalSeen, url, threshold }) {
-  const total = Number.isFinite(totalNewCount) ? totalNewCount : newCount;
-  // threshold>0 and some candidates got filtered out → say so, otherwise keep the
-  // original unqualified "N новых кандидатов" wording unchanged.
-  const countLine = (threshold > 0 && total !== newCount)
-    ? `${newCount} сильных кандидатов (≥${threshold}%) из ${total} новых`
-    : `${newCount} новых кандидатов`;
-  const head = `🧊 Холодный поиск: ${countLine} для «${vacancyTitle || 'вакансии'}» (всего в базе: ${totalSeen}).`;
-  const link = url ? ` Смотри здесь: ${url}` : '';
-  return `${head}${link}`;
-}
-
 // --- Candidate comments (for search refinement) ---
 
 function commentsPath(username, vacancyId) {
@@ -909,55 +892,6 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   const pass_count = enriched.filter(c => c.tag === 'PASS').length;
   const review_count = enriched.filter(c => c.tag === 'REVIEW').length;
 
-  // Fire-and-forget notify: tell the recruiter about new candidates in their chat.
-  // notifyChat is injected by the caller (server.js / 92-hh-proactive.js) so this
-  // module stays Telegram-free — easier to test, and the same mergeSeenIds works
-  // for cron-driven and ad-hoc runs alike.
-  const notifyChat = typeof options.notifyChat === 'function' ? options.notifyChat : null;
-  // options.alwaysNotify (set by the 30-min background scheduler in hh-negotiations.js,
-  // NOT by the on-demand hh_proactive_search tool) means: send a confirmation even when
-  // zero candidates qualify. The scheduler is the recruiter's only signal that an
-  // unattended run happened at all — going silent on "0 new" or "all below threshold"
-  // looked identical to "the scheduler is broken" (owner report, 2026-09-22). The
-  // on-demand tool already reports 0-results in its own chat reply, so it keeps the
-  // old skip-when-nothing-qualifies behavior to avoid a duplicate message.
-  if (notifyChat && (options.alwaysNotify || seenInfo.newCount > 0)) {
-    const allNewCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
-    // Recruiter-configurable noise filter (schedule.notify_threshold, 0-100, default 0 =
-    // no filter, set via hh_proactive_schedule action=enable). Without it every run pings
-    // Telegram with the raw new-candidate count even when none of them are actually
-    // relevant ("4 новых", "10 новых" — owner ask: filter to only the strong ones).
-    // options.notifyThreshold lets a caller override per-run; otherwise read from schedule.
-    const schedule = loadSchedule(username) || {};
-    const notifyThreshold = options.notifyThreshold !== undefined
-      ? Number(options.notifyThreshold) || 0
-      : Number(schedule.vacancies?.[vacancyKey]?.notify_threshold ?? schedule.notify_threshold) || 0;
-    const newCandidates = notifyThreshold > 0
-      ? allNewCandidates.filter(c => (c.score_pct ?? 0) >= notifyThreshold)
-      : allNewCandidates;
-    if (newCandidates.length > 0 || options.alwaysNotify) {
-      // options.proactiveUrl is built by the caller BEFORE vacancyKey is resolved here
-      // (it doesn't know which vacancy will run yet), so append vacancy_id at this end
-      // instead of asking every caller to guess it in advance.
-      const baseUrl = typeof options.proactiveUrl === 'string' ? options.proactiveUrl : '';
-      const proactiveUrlWithVacancy = baseUrl
-        ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}vacancy_id=${encodeURIComponent(vacancyKey)}`
-        : '';
-      Promise.resolve()
-        .then(() => notifyChat({
-          username,
-          vacancyTitle: output.vacancy_title,
-          newCount: newCandidates.length,
-          totalNewCount: seenInfo.newCount,
-          totalSeen: seenInfo.totalSeenAfter,
-          firstRun: seenInfo.firstRun,
-          newCandidates,
-          threshold: notifyThreshold,
-          proactiveUrl: proactiveUrlWithVacancy,
-        }))
-        .catch(e => console.error('[proactive-search] notify failed:', e.message));
-    }
-  }
 
   return {
     file: outFile,
@@ -1058,7 +992,6 @@ module.exports = {
   loadSeenIds,
   saveSeenIds,
   mergeSeenIds,
-  buildProactiveDigest,
   seenIdsPath,
   loadCandidateComments,
   saveCandidateComment,

@@ -1,3 +1,4 @@
+const { taskDelivery } = require('../bot-delivery');
 const { atomicJson } = require('../atomic-json');
 let restartShutdown = false;
 const fs = require('fs');
@@ -74,31 +75,18 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
 
-// Anthropic pricing per 1M tokens (USD), updated August 2025
-const MODEL_PRICING = {
-  opus:   { in: 15.00, out: 75.00, cacheRead: 1.50,  cacheWrite: 18.75 },
-  sonnet: { in: 3.00,  out: 15.00, cacheRead: 0.30,  cacheWrite: 3.75  },
-  haiku:  { in: 0.80,  out: 4.00,  cacheRead: 0.08,  cacheWrite: 1.00  },
-};
-
-function formatCostFooter(usage, model) {
+// Telegram cards report token usage only; monetary estimates are not displayed.
+function formatCostFooter(usage) {
   if (!usage) return '';
-  const m = (model || '').toLowerCase();
-  const price = m.includes('opus') ? MODEL_PRICING.opus
-              : m.includes('haiku') ? MODEL_PRICING.haiku
-              : MODEL_PRICING.sonnet;
   const inp = usage.input_tokens || 0;
   const out = usage.output_tokens || 0;
   const cr  = usage.cache_read_input_tokens || 0;
   const cw  = usage.cache_creation_input_tokens || 0;
-  const cost = (inp * price.in + out * price.out + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000;
   const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
-  const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
   const parts = [`вход ${fmt(inp)}`, `выход ${fmt(out)}`];
   if (cw > 0) parts.push(`кэш +${fmtK(cw)}`);
-  if (cr > 0) parts.push(`кэш /${fmtK(cr)}`);
-  parts.push(`~${costStr}`);
+  if (cr > 0) parts.push(`кэш ${fmtK(cr)}`);
   return `\n\nИспользование: ${parts.join(' · ')}`;
 }
 
@@ -109,8 +97,6 @@ function formatOcFooter(usage, breakdown) {
   if (!usage) return '';
   const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
   const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
-  const cost = usage.cost || 0;
-  const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
   let model = '';
   if (breakdown) {
     for (const s of breakdown) {
@@ -119,8 +105,7 @@ function formatOcFooter(usage, breakdown) {
   }
   const parts = [`вход ${fmt(usage.input)}`, `выход ${fmt(usage.output)}`];
   if (usage.cacheWrite > 0) parts.push(`кэш +${fmtK(usage.cacheWrite)}`);
-  if (usage.cacheRead > 0) parts.push(`кэш /${fmtK(usage.cacheRead)}`);
-  parts.push(`~${costStr}`);
+  if (usage.cacheRead > 0) parts.push(`кэш ${fmtK(usage.cacheRead)}`);
   const m = model ? ` ${model}` : '';
   return `\n\nИспользование${m}: ${parts.join(' · ')}`;
 }
@@ -153,7 +138,6 @@ const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-restart (all engines)
-const MAX_SOFT_CONTINUATIONS = 3; // auto-continue after "still working" response, max 3 rounds
 const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth 1 retry
 const MAX_QUICK_RETRIES = 1; // cap so a repeatable crash doesn't loop forever
 const MAX_RESUME_ATTEMPTS = 3; // cap on auto-retries for a task resumed after a server restart — a
@@ -213,40 +197,12 @@ function getPendingTasks() {
     .filter(Boolean);
 }
 
-// ── Soft-continuation journal — survives process restart ─────────────────────
-// The in-memory pendingContinuations Map (below) drives the live 3-min timer,
-// but a restart during that window used to lose it silently: the user was told
-// "Продолжу через ~3 мин", the process restarted, and nothing ever continued
-// — no error, no notice, just a broken promise. Mirrors the PENDING_DIR journal
-// pattern so reconcileSoftContinuations() (called at startup, see server.js)
-// can re-arm or fire whatever was scheduled when the process went down.
-const SOFT_CONT_DIR = path.join(
-  process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
-  'soft-continuations'
-);
-
-function _softContFile(username) { return path.join(SOFT_CONT_DIR, `${username}.json`); }
-
-function saveSoftContinuationFile(username, record) {
-  atomicJson(_softContFile(username), record);
+// Legacy timers are retired on startup; completed answers never authorize new work.
+const { retireSoftContinuations } = require('./retire-soft-continuations');
+async function reconcileSoftContinuations(secrets) {
+  return retireSoftContinuations({ editMessage: (record, text) =>
+    tgEdit(secrets.BOT_TOKEN, record.chatId, record.msgId, text, { reply_markup: { inline_keyboard: [] } }) });
 }
-
-function clearSoftContinuationFile(username) {
-  try { fs.unlinkSync(_softContFile(username)); } catch (e) { if (e.code !== 'ENOENT') console.warn('[runner] clearSoftContinuationFile:', e.message); }
-}
-
-function listSoftContinuations() {
-  if (!fs.existsSync(SOFT_CONT_DIR)) return [];
-  // Same defensive read as getPendingTasks: one malformed record must not
-  // abort reconciliation for every other user's soft-continuation.
-  return fs.readdirSync(SOFT_CONT_DIR).filter(f => f.endsWith('.json'))
-    .map(f => {
-      try { return JSON.parse(fs.readFileSync(path.join(SOFT_CONT_DIR, f), 'utf8')); }
-      catch (e) { console.warn(`[runner] listSoftContinuations: skipping malformed ${f}:`, e.message); return null; }
-    })
-    .filter(Boolean);
-}
-
 
 // ── Concurrency model ────────────────────────────────────────────────────────
 //
@@ -284,31 +240,38 @@ const {
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
 const activeTimers = new Map();
 
-// Soft-incomplete continuation state.
-// Map<username, { timer: NodeJS.Timeout, chatId, msgId, sessionId }>
-const pendingContinuations = new Map();
-
-function setPendingContinuation(username, data, timer) {
-  const existing = pendingContinuations.get(username);
-  if (existing?.timer) clearTimeout(existing.timer);
-  pendingContinuations.set(username, { ...data, timer });
-}
-
-function clearPendingContinuation(username) {
-  const entry = pendingContinuations.get(username);
-  if (entry?.timer) clearTimeout(entry.timer);
-  pendingContinuations.delete(username);
-  clearSoftContinuationFile(username);
+// Ownership matcher for a specific taskId (#1303). Aligned with the #1302 §3.2
+// rule used by stopUserTask/killTaskByUsername: EXACT username (never a taskId
+// string-prefix), audience normalized to 'default', and chatId compared only
+// when both the task state and the caller carry one — a private-chat chatId is
+// the Telegram user's own id, identical no matter which bot is messaged, so it
+// cannot disambiguate audiences by itself. Kept in one place so the taskId stop
+// path can never drift from the username-scoped path.
+function taskOwnedBy(state, owner) {
+  if (!state || !owner || typeof owner.username !== 'string' || !owner.username) return false;
+  if (state.username !== owner.username) return false;
+  if ((state.audience || 'default') !== (owner.audience || 'default')) return false;
+  if (owner.chatId != null && state.chatId != null && String(state.chatId) !== String(owner.chatId)) return false;
+  return true;
 }
 
 /**
- * Extend the timeout for a running task by another CLAUDE_TIMEOUT_MS.
- * Called from server.js POST /tasks/:taskId/extend-timeout which the
- * session_extend_timeout MCP tool invokes.
+ * Stop one running task by its exact taskId.
+ *
+ * `owner` is REQUIRED (#1303): AGENT_SECRET is shared by every first-party
+ * gateway and therefore proves nothing about who owns a taskId. Without an
+ * owner match, any caller that knows a taskId could SIGTERM another profile's
+ * or another bot's task. owner = { username (required), audience?, chatId? },
+ * matched by taskOwnedBy. A missing or mismatching owner returns
+ * { ok:false, forbidden:true } and the task keeps running.
  */
-function stopTask(taskId) {
+function stopTask(taskId, owner = null) {
   const s = activeTimers.get(taskId);
   if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
+  if (!taskOwnedBy(s, owner)) {
+    console.warn(`[runner] stopTask refused: owner missing/mismatch for ${taskId}`);
+    return { ok: false, forbidden: true, error: 'forbidden: task belongs to another owner' };
+  }
   s.userStopped = true;
   try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopTask SIGTERM:', e.message); }
   console.log(`[${taskId}] stopped by user`);
@@ -317,15 +280,23 @@ function stopTask(taskId) {
 
 // Stop running task(s) for a given username (used by the /stop quick command).
 // One profile's workDir is deliberately shared across multiple Telegram chats
-// (see runTask's queueKey comment), so a plain-text "стоп" typed in one chat
-// must NOT reach into another chat's running task or orphaned process — pass
-// chatId to scope the kill to the task that chat actually started. Omit chatId
-// only for genuinely profile-wide callers (e.g. /gtd_stop's explicit hard-stop).
-function stopUserTask(username, chatId = null) {
+// (see runTask's queueKey comment) AND — since #1302 — across multiple bots
+// (audience: 'default', 'recruiter', 'freelance', ...) sharing that same profile.
+// chatId alone cannot disambiguate bots: in a private chat, chatId is the
+// Telegram user's own id, identical no matter which bot they're messaging — so
+// audience must scope the kill too, not just chatId. Pass chatId to scope to the
+// chat that actually started the task; omit chatId only for genuinely
+// profile-wide callers (e.g. /gtd_stop's explicit hard-stop) within that audience.
+// Omitting audience scopes to 'default' — never "every audience" (#1302 §3.2/§2).
+function stopUserTask(username, chatId = null, audience = null) {
+  const scopedAudience = audience || 'default';
   let stopped = false;
   for (const [taskId, s] of activeTimers.entries()) {
-    if (!taskId.startsWith(username + '-') || !s.proc) continue;
-    if (chatId != null && s.chatId != null && String(s.chatId) !== String(chatId)) continue;
+    if (!s.proc) continue;
+    // Single shared ownership rule (#1303) — exact username + audience (+ chatId
+    // when both sides carry one), never a taskId prefix. Keeps this path and
+    // stopTask(taskId, owner) from drifting apart.
+    if (!taskOwnedBy(s, { username, audience: scopedAudience, chatId })) continue;
     s.userStopped = true;
     try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
     console.log(`[${taskId}] stopped by user command`);
@@ -334,10 +305,11 @@ function stopUserTask(username, chatId = null) {
 
   // Fallback: kill orphaned Claude processes (e.g. from before a service restart)
   // The mcp-config path contains the username, so we can grep the process list.
-  // Orphans carry no chat attribution, so this fallback only runs for a genuinely
-  // profile-wide stop (chatId omitted) — otherwise it would kill another chat's
-  // orphan under a chat-scoped "стоп", recreating the cross-chat leak this guards.
-  if (!stopped && !chatId) {
+  // Orphans carry no chat/audience attribution, so this fallback only runs for a
+  // genuinely profile-wide default-audience stop (chatId omitted, audience
+  // omitted/default) — otherwise it would kill another chat's or another bot's
+  // orphan under a scoped "стоп", recreating the cross-chat/cross-bot leak this guards.
+  if (!stopped && !chatId && scopedAudience === 'default') {
     try {
       const { execSync } = require('child_process');
       // Find PIDs of claude processes for this user by mcp-config path
@@ -360,6 +332,11 @@ function stopUserTask(username, chatId = null) {
   return stopped;
 }
 
+/**
+ * Extend the timeout for a running task by another CLAUDE_TIMEOUT_MS.
+ * Called from server.js POST /tasks/:taskId/extend-timeout which the
+ * session_extend_timeout MCP tool invokes.
+ */
 function extendTaskTimeout(taskId) {
   const s = activeTimers.get(taskId);
   if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
@@ -371,10 +348,11 @@ function extendTaskTimeout(taskId) {
   return { ok: true, extendCount: s.extendCount, extensionsLeft: 8 - s.extendCount, newDeadlineMins: 15 };
 }
 
-function isTaskRunning(username) {
-  const prefix = `${username}-`;
-  for (const [taskId] of activeTimers.entries()) {
-    if (taskId.startsWith(prefix)) return true;
+// audience omitted -> 'default' only, never "any audience" (#1302 §3.2/§2).
+function isTaskRunning(username, audience = null) {
+  const scopedAudience = audience || 'default';
+  for (const s of activeTimers.values()) {
+    if (s.username === username && (s.audience || 'default') === scopedAudience) return true;
   }
   return false;
 }
@@ -407,16 +385,41 @@ function isSessionRunning(sessionId) {
   return false;
 }
 
-/**
- * Kill any running Claude process for a given username.
- * Finds all entries in activeTimers whose taskId starts with `${username}-`
- * and sends SIGTERM. Returns how many tasks were killed.
- */
-function killTaskByUsername(username) {
-  let killed = 0;
-  const prefix = `${username}-`;
+// Exact-session stop for web/API callers. Deliberately has NO profile-wide
+// fallback: failure to find the requested session must never kill a sibling
+// Telegram/web task that happens to share the same profile.
+function stopSessionTask(username, sessionId) {
+  if (!username || !sessionId) return false;
+  let stopped = false;
   for (const [taskId, state] of activeTimers.entries()) {
-    if (!taskId.startsWith(prefix)) continue;
+    if (state.username !== username || !state?.proc) continue;
+    if (state.sessionId !== sessionId) continue;
+    state.userStopped = true;
+    try {
+      state.proc.kill('SIGTERM');
+      stopped = true;
+      console.log(`[${taskId}] stopped by exact session ${sessionId}`);
+    } catch (e) {
+      console.warn('[runner] stopSessionTask SIGTERM:', e.message);
+    }
+  }
+  return stopped;
+}
+
+/**
+ * Kill any running Claude process for a given username, scoped to one audience.
+ * audience omitted -> 'default' only, never "every audience" (#1302 §3.2/§2) —
+ * killing every bot's task for a profile in one call is a deliberately separate,
+ * explicit action this function does not perform.
+ * Returns how many tasks were killed.
+ */
+function killTaskByUsername(username, audience = null) {
+  const scopedAudience = audience || 'default';
+  let killed = 0;
+  for (const [taskId, state] of activeTimers.entries()) {
+    // Same shared ownership rule (#1303); this caller is deliberately profile-wide
+    // within one audience, so it passes no chatId.
+    if (!taskOwnedBy(state, { username, audience: scopedAudience })) continue;
     try {
       if (state.proc) {
         state.userStopped = true;
@@ -445,14 +448,16 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
+  opts = taskDelivery(opts);
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
     const chatId = opts.user.id;
-    // Chat-scoped: a plain "стоп" typed in one chat must only touch this chat's
-    // task/GTD tracking, not a profile-mate's — workDir is shared across chats.
-    const stopped = stopUserTask(username, chatId);
+    // Chat- and audience-scoped: a plain "стоп" typed in one chat must only touch
+    // this chat's task/GTD tracking, not a profile-mate's or another bot's —
+    // workDir is shared across chats AND audiences (#1302 §3.2).
+    const stopped = stopUserTask(username, chatId, opts.user.audience);
     let gtdCancelled = 0;
     if (workDir) {
       try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
@@ -479,7 +484,7 @@ function runTask(opts) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
     const chatId = opts.user.id;
-    stopUserTask(username, chatId);
+    stopUserTask(username, chatId, opts.user.audience);
     let gtdCancelled = 0;
     if (workDir) {
       try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
@@ -570,7 +575,7 @@ function runTask(opts) {
     const username = opts.user.username;
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
-    const stopped = stopUserTask(username, chatId);
+    const stopped = stopUserTask(username, chatId, opts.user.audience);
     // Clear this chat's queue so the next task doesn't wait behind a stuck one.
     chatQueue.clearChat(chatId);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
@@ -592,7 +597,7 @@ function runTask(opts) {
   if (SKIP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const chatId = opts.user.id;
-    const stopped = stopUserTask(username, chatId);
+    const stopped = stopUserTask(username, chatId, opts.user.audience);
     const msg = stopped
       ? '⏭ Текущая задача пропущена. Следующая начнётся автоматически.'
       : '✅ Нет активной задачи для пропуска.';
@@ -642,9 +647,9 @@ function runTask(opts) {
     workDir: opts.user.workDir, task: opts.task, context: opts.context,
     sessionId: opts.sessionId, contextFromSession: opts.contextFromSession,
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode, userMessageRecorded: opts.userMessageRecorded,
-    projectId: opts.projectId, newProjectName: opts.newProjectName, engine: opts.engine,
+    projectId: opts.projectId, projectPicked: opts.projectPicked, newProjectName: opts.newProjectName, engine: opts.engine,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId, fileRefs: opts.fileRefs,
-    profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
+    profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId, audience: opts.user.audience,
     continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
     resumedAfterRestart: opts.resumedAfterRestart, resumeAttempts: opts.resumeAttempts,
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
@@ -758,6 +763,17 @@ function buildContextCard(username, workDir, chatId) {
 
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
+  // Chat's project (issue #1312, «чат = проект»): every new session of this chat goes
+  // into it. Pinned = explicit user choice; otherwise the last-used one.
+  try {
+    // Show the line ONLY when a new session really goes there without asking (#1318):
+    // pinned, or the profile's single project. ≥2 projects and no pin → the bot will ask,
+    // so a «📁 Проект» line would be a lie.
+    const d = chatId ? projects.decideNewSessionProject(workDir, chatId) : null;
+    const pmeta = d && d.action === 'auto' ? d.project : null;
+    if (pmeta) lines.push(`📁 Проект: ${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''} · сменить: /project`);
+  } catch (e) { console.warn('[runner] project pin line:', e.message); }
+
   // HH: active vacancy(ies) + ATS config / scoring status.
   // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
   // the legacy singleton active_vacancy.json is the fallback for profiles that never
@@ -796,8 +812,8 @@ function buildContextCard(username, workDir, chatId) {
         if (tok && vac.id) {
           const vacQs = multi ? `&vacancy_id=${encodeURIComponent(vac.id)}` : '';
           const hasProactive = _hasProactiveResults(dataDir, username, multi ? vac.id : null);
-          const proactiveLink = hasProactive ? ` · [Поиск →](${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${tok}${vacQs})` : '';
-          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok}${vacQs})${proactiveLink}`);
+          const proactiveLink = hasProactive ? ` · [Поиск →](${require('../hh-autoscan').proactiveUrlFor(username, multi ? vac.id : null)})` : '';
+          lines.push(`🔗 [Кандидаты →](${require('../hh-quick').hhReviewUrl(username, vac.id)}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok}${vacQs})${proactiveLink}`);
         }
       });
     }
@@ -1113,6 +1129,7 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
     'законченный отдельный путь действия, а не шаг одного общего плана.',
     'НЕ меню: единая последовательность шагов одного плана, вопрос да/нет,',
     'список фактов без выбора, один рекомендованный вариант без альтернатив.',
+    'Служебные команды /command и управление чеклистом НЕ являются меню вариантов.',
     'Если это меню — верни короткие ярлыки (2-4 слова, БЕЗ номеров и слова "вариант"),',
     'по одному на альтернативу, в порядке появления в тексте.',
     'Ответь СТРОГО JSON: {"menu": true, "labels": ["...", "..."]} или {"menu": false}.',
@@ -1142,37 +1159,6 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
   } catch (e) {
     console.warn('[menu-detect]', e.message);
     return null;
-  }
-}
-
-async function classifyTaskCompleteness(text, apiKey, { timeoutMs = 8000 } = {}) {
-  const t = String(text || '').trim();
-  if (t.length < 80) return { incomplete: false };
-  const orKey = apiKey || process.env.OPENROUTER_API_KEY;
-  if (!orKey) return { incomplete: false };
-  const model = process.env.GTD_INTENT_MODEL || 'google/gemini-2.5-flash';
-  try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model, temperature: 0, max_tokens: 40,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: 'Classify AI assistant responses. Reply only with compact JSON.' },
-          { role: 'user', content: `Last ~2000 chars of agent response:\n${t.slice(-2000)}\n\nIs this response semantically INCOMPLETE — the agent is still working, watching logs, waiting for a background process, said "checking", "tail", "watching", "started X", "waiting for CI/PR"?\n\nJSON: {"incomplete":bool,"auto_continue":bool,"reason":"still_working|pr_pending|ci_pending|waiting_user|done"}\nauto_continue=false if waiting for an external event requiring human action (PR review, CI fix, OAuth). Something running in background but no human action needed → auto_continue=true.` },
-        ],
-      }),
-    });
-    if (!res.ok) return { incomplete: false };
-    const data = await res.json();
-    const raw = data?.choices?.[0]?.message?.content || '';
-    const obj = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, '').trim());
-    return { incomplete: !!obj.incomplete, auto_continue: !!obj.auto_continue, reason: obj.reason || 'unknown' };
-  } catch (e) {
-    console.warn('[soft-incomplete]', e.message);
-    return { incomplete: false };
   }
 }
 
@@ -1268,7 +1254,7 @@ function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engi
   }
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1288,9 +1274,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const audience = user.audience || 'default';
 
   savePendingTask(taskId, {
-    phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir, audience,
     profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
-    task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
+    task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, projectPicked, newProjectName,
     initialMsgId, pinnedMsgId, initiatedAt, threadId, resumedAfterRestart, resumeAttempts,
     startedAt: Date.now(),
   });
@@ -1305,10 +1291,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // unaffected (the guard below is a no-op once the file is gone or has a specific phase).
   let _runTaskError;
   try {
-  const isAutoFile = rawTask && rawTask.startsWith("[Файл сохранён:");
-  if (!isAutoFile && !internalGtd) {
-    clearPendingContinuation(user.username); // cancel any pending soft-continuation from previous response
-  }
   initLog(user.workDir);
   ensureProfileLayoutSkill(user.workDir, user.username);
   ensureSkillDir(user.workDir, 'prompts', 'Промпты и критерии, специфичные для этого профиля. Перезаписывают общие настройки из flexi-consult/.');
@@ -1394,29 +1376,20 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
   //     so we never block silently here.
   let boundProjectId = null;
+  let pinProject = false; // explicit user choice → becomes the chat's pinned project (#1312)
   try {
-    if (sessionExists && activeSessionId) {
-      const s = sessions.getSession(user.workDir, activeSessionId);
-      boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId, audience);
-    } else if (projectId && projects.getProject(user.workDir, projectId)) {
-      boundProjectId = projectId; // explicit choice from the gateway picker
-    } else if (newProjectName) {
-      // gateway "➕ Новый проект" — provisional name derived from the first message
-      boundProjectId = projects.createProject(user.workDir, newProjectName, { audience }).id;
-    } else {
-      const decision = projects.decideNewSessionProject(user.workDir, chatId, undefined, audience);
-      if (decision.action === 'auto') {
-        boundProjectId = decision.project.id;
-      } else if (decision.action === 'create') {
-        boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }, { audience }).id;
-      } else { // 'ask' — gateway didn't pass a choice; fall back so we never block silently
-        boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
-      }
-    }
+    const continuing = !!(sessionExists && activeSessionId);
+    const s = continuing ? sessions.getSession(user.workDir, activeSessionId) : null;
+    const r = projects.resolveRunProject(user.workDir, {
+      chatId, audience, continuing, continuingProjectId: s && s.projectId,
+      projectId, projectPicked, newProjectName,
+    });
+    boundProjectId = r.projectId;
+    pinProject = r.pin;
     if (boundProjectId) {
       const dir = projects.resolveProjectDir(user.workDir, boundProjectId);
       if (dir) {
-        projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience });
+        projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience, pinned: pinProject });
         user.cwd = dir; // session runs inside its project
       } else {
         // Project folder is gone — e.g. archived/merged by a projects reorg since this
@@ -2398,16 +2371,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // plan|{sid}). Тап безопасен из one-shot — callback сам форсирует deep+forceClaude
   // (см. tg-bot callbacks.js), так что кнопка не обязана ждать явного deep-режима.
   // Плана нет → кнопки нет (actionButtons/oneshotActionMarkup и так null, §9.2).
+  // Classify only the model answer. Runtime cost/GTD footers are controls,
+  // not proposals, and are absent from the model conversation on a later tap.
   let finalMarkup = null;
   let buttonReason = internalGtd ? 'internalGtd-suppressed' : 'no-session';
   if (!internalGtd && !incomplete) {
     if (activeSessionId) {
-      const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
+      const hasPlan = await detectPlanInAnswer(result, secrets.OPENROUTER_API_KEY);
       if (hasPlan) {
         finalMarkup = { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] };
         buttonReason = 'plan';
       } else {
-        const menuLabels = await detectMenuInAnswer(final, secrets.OPENROUTER_API_KEY);
+        const menuLabels = await detectMenuInAnswer(result, secrets.OPENROUTER_API_KEY);
         finalMarkup = menuLabels
           ? { inline_keyboard: menuLabels.map((label, idx) => [{ text: `${idx + 1}. ${label}`.slice(0, 60), callback_data: `menu|${activeSessionId}|${idx}` }]) }
           : actionButtons(activeSessionId, { deep: finalDeep });
@@ -2447,33 +2422,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra);
   }
 
-  // Soft-incomplete: if task looks unfinished, schedule auto-continuation after 3 min.
-  // Fires async after delivery — does not block the response. The record is journaled
-  // to disk (see saveSoftContinuationFile) so a server restart during the 3-min window
-  // doesn't silently drop the promise made to the user in the footer below — see
-  // reconcileSoftContinuations(), called at startup from server.js.
-  if (!incomplete && !internalGtd && chatId && msgId && result && continuationCount < MAX_SOFT_CONTINUATIONS) {
-    classifyTaskCompleteness(result, secrets.OPENROUTER_API_KEY).then(async (cls) => {
-      if (!cls.incomplete || !cls.auto_continue) return;
-      const delayMs = 3 * 60 * 1000;
-      const timeStr = new Date(Date.now() + delayMs).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Moscow" });
-      const footer = `\n\n⏱ Выглядит незавершённым. Продолжу через ~3 мин (в ${timeStr}) — напишите что-нибудь, чтобы отменить.`;
-      await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}${footer}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
-      console.log(`[soft-incomplete] username=${user.username} reason=${cls.reason} round=${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
-      const record = {
-        username: user.username, workDir: user.workDir, profileId: user.profileId, telegramUserId: user.telegramUserId,
-        chatId, msgId, sessionId: activeSessionId, pinnedMsgId, engine, internalGtd,
-        task, finalText: final, reason: cls.reason, continuationCount, dueAt: Date.now() + delayMs,
-      };
-      saveSoftContinuationFile(user.username, record);
-      const timer = setTimeout(() => {
-        if (!pendingContinuations.has(user.username)) return; // cancelled by new message
-        pendingContinuations.delete(user.username);
-        fireSoftContinuation(record, secrets).catch(() => {});
-      }, delayMs);
-      setPendingContinuation(user.username, { chatId, msgId, sessionId: activeSessionId }, timer);
-    }).catch(() => {});
-  }
+  // A completed answer is terminal. Do not classify prose to schedule another
+  // paid run or promise a timer. Explicit continuation and durable recovery of
+  // interrupted tasks remain separate paths.
 
   }
 
@@ -2492,7 +2443,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         const gtd = require('../gtd-controller');
         const checklistArgs = {
           workDir: user.workDir, sessionId: activeSessionId, chatId,
-          username: user.username, projectDir: user.cwd || null,
+          username: user.username, projectDir: user.cwd || null, audience: user.audience || 'default',
         };
         if (explicitMode === 'deep') {
           // Осознанный launch — «⏻ Запустить проработку» (workrun). Свободный текст
@@ -2556,64 +2507,11 @@ function interruptForRestart() {
   }
 }
 
-// Fires one journaled soft-continuation record: clears its own disk entry first
-// (so a crash mid-fire can't double-run it), restores the delivered message
-// (drops the "Продолжу через ~3 мин" footer), then re-opens the session. Shared
-// by the live setTimeout callback and reconcileSoftContinuations() below.
-async function fireSoftContinuation(record, secrets) {
-  clearSoftContinuationFile(record.username);
-  const { BOT_TOKEN } = secrets;
-  await tgEdit(BOT_TOKEN, record.chatId, record.msgId, `🧠 ${record.finalText}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
-  console.log(`[soft-incomplete] fire username=${record.username} reason=${record.reason} round=${record.continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
-  const user = {
-    id: record.chatId, name: record.username, username: record.username, workDir: record.workDir,
-    profileId: record.profileId, telegramUserId: record.telegramUserId,
-  };
-  return runTask({
-    taskId: `${record.username}-${Date.now()}`,
-    user,
-    task: `[АВТОПРОДОЛЖЕНИЕ ${record.continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}] Предыдущий ответ выглядел незавершённым (${record.reason}). Посмотри историю сессии — там видно что сделано. Продолжи работу. Оригинальная задача:\n${record.task}`,
-    context: '',
-    sessionId: record.sessionId,
-    forceClaude: true,
-    initialMsgId: null,
-    pinnedMsgId: record.pinnedMsgId,
-    secrets,
-    continuationCount: record.continuationCount + 1,
-    internalGtd: record.internalGtd,
-    engine: record.engine,
-  });
-}
-
-// Startup reconciliation for the soft-continuation journal (mirrors resumePendingTasks
-// in server.js, called alongside it). Overdue records fire immediately; records still
-// within their window get their remaining delay re-armed so a restart never silently
-// drops the "I'll continue in ~3 min" promise shown to the user.
-async function reconcileSoftContinuations(secrets) {
-  for (const record of listSoftContinuations()) {
-    const remaining = (record.dueAt || 0) - Date.now();
-    if (remaining <= 0) {
-      console.log(`[soft-incomplete] reconcile: firing overdue username=${record.username}`);
-      fireSoftContinuation(record, secrets).catch(e => console.error('[soft-incomplete] reconcile fire:', e.message));
-    } else {
-      console.log(`[soft-incomplete] reconcile: re-arming username=${record.username} in ${Math.round(remaining / 1000)}s`);
-      const timer = setTimeout(() => {
-        if (!pendingContinuations.has(record.username)) return; // cancelled by new message
-        pendingContinuations.delete(record.username);
-        fireSoftContinuation(record, secrets).catch(() => {});
-      }, remaining);
-      setPendingContinuation(record.username, { chatId: record.chatId, msgId: record.msgId, sessionId: record.sessionId }, timer);
-    }
-  }
-}
-
 module.exports = {
   interruptForRestart, MAX_RESUME_ATTEMPTS,
   runTask, getQuickAnswer, runQuickAnswer, shouldAttemptQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  isTaskRunning, isSessionRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
-  clearPendingContinuation, reconcileSoftContinuations,
-  // Exported for soft-continuation journal tests only
-  _softCont: { saveSoftContinuationFile, clearSoftContinuationFile, listSoftContinuations, SOFT_CONT_DIR },
+  isTaskRunning, isSessionRunning, stopSessionTask, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  reconcileSoftContinuations,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
   // Exported for pin-state tests only

@@ -2,8 +2,8 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { webAuth } = require('./web-auth');
 const { listSessions, getSession, getCurrentSessionId } = require('./session-store');
-const { isTaskRunning, runTask, stopUserTask } = require('./runner');
-const { userWorkDir } = require('./data-paths');
+const { isSessionRunning, runTask, stopSessionTask } = require('./runner');
+const { userWorkDir, SYSTEM_ROOT } = require('./data-paths');
 
 // Per-task SSE emitters: taskId → EventEmitter
 const taskEmitters = new Map();
@@ -11,9 +11,57 @@ const taskEmitters = new Map();
 const PING_INTERVAL_MS = 15_000;
 const USERNAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 const SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
+const REQUEST_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 
 function json(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+}
+
+function webMutationReceiptPath(username, requestId) {
+  return path.join(SYSTEM_ROOT, 'web-mutations', username, `${requestId}.json`);
+}
+
+// Durable claim: create-once with O_EXCL semantics. A duplicate requestId can
+// never start a second agent task, including after process restart.
+function claimWebMutation(username, requestId, meta = {}) {
+  if (!requestId) return { claimed: true, receipt: null };
+  if (!USERNAME_RE.test(username) || !REQUEST_ID_RE.test(requestId)) {
+    return { claimed: false, invalid: true, receipt: null };
+  }
+  const fs = require('fs');
+  const fp = webMutationReceiptPath(username, requestId);
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  const receipt = {
+    requestId, username, state: 'accepted', acceptedAt: Date.now(),
+    kind: meta.kind || null, sessionId: meta.sessionId || null,
+  };
+  try {
+    const fd = fs.openSync(fp, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(receipt, null, 2));
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    return { claimed: true, receipt };
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    try { return { claimed: false, receipt: JSON.parse(fs.readFileSync(fp, 'utf8')) }; }
+    catch { return { claimed: false, receipt: { requestId, username, state: 'accepted' } }; }
+  }
+}
+
+function completeWebMutation(username, requestId, patch = {}) {
+  if (!requestId || !USERNAME_RE.test(username) || !REQUEST_ID_RE.test(requestId)) return;
+  const fs = require('fs');
+  const fp = webMutationReceiptPath(username, requestId);
+  try {
+    const current = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    const next = { ...current, ...patch, updatedAt: Date.now() };
+    const tmp = `${fp}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, fp);
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[web-mutation] receipt update failed:', e.message);
+  }
 }
 
 // Shared session readers — used by both the cookie-authed /web/* routes below
@@ -23,15 +71,16 @@ function json(res, status, body) {
 function listSessionsFor(username, limit = 20) {
   const workDir = userWorkDir(username);
   const cap = Math.min(parseInt(limit, 10) || 20, 50);
-  const running = isTaskRunning(username);
-  return listSessions(workDir, cap).map((s, i) => ({
+  return listSessions(workDir, cap).map((s) => ({
     id: s.id,
     topic: s.topic,
     lastAt: s.lastAt,
     createdAt: s.createdAt,
     messageCount: s.messageCount,
     lastUserMessage: s.lastUserMessage,
-    status: (running && i === 0) ? 'running' : (s.status || 'completed'),
+    summary: s.summary || null,
+    projectId: s.projectId || null,
+    status: isSessionRunning(s.id) ? 'running' : (s.status || 'completed'),
   }));
 }
 
@@ -43,14 +92,15 @@ function getSessionFor(username, sessionId) {
   if (!meta) return null;
   const session = getSession(workDir, sessionId);
   if (!session) return null;
-  const running = isTaskRunning(username);
   return {
     id: session.id,
     topic: session.topic,
     createdAt: session.createdAt,
     lastAt: session.lastAt,
     messageCount: session.messageCount,
-    status: running && index[0]?.id === sessionId ? 'running' : (session.status || 'completed'),
+    summary: session.summary || meta.summary || null,
+    projectId: session.projectId || meta.projectId || null,
+    status: isSessionRunning(sessionId) ? 'running' : (session.status || 'completed'),
     messages: session.messages || [],
   };
 }
@@ -61,9 +111,8 @@ function getSessionFor(username, sessionId) {
 // Shared by both the cookie-authed /web/stop/:id route and the bearer-gated
 // /web/stop-bearer route (external frontends can't hold a WEB_JWT cookie).
 function stopSessionFor(username, sessionId) {
-  const session = getSession(userWorkDir(username), sessionId);
-  const chatId = session ? (session.liveChatId ?? session.ownerChatId) : null;
-  return stopUserTask(username, chatId);
+  if (!sessionId || !getSession(userWorkDir(username), sessionId)) return false;
+  return stopSessionTask(username, sessionId);
 }
 
 // Resolve session status: running (process alive) or from stored field, fallback completed
@@ -166,8 +215,10 @@ async function handleWebRoute(req, url, res, secrets) {
     const sessionId = p.slice('/web/stop/'.length);
     if (!sessionId || !SESSION_ID_RE.test(sessionId)) return json(res, 400, { error: 'invalid session id' }), true;
 
-    stopSessionFor(username, sessionId);
-    return json(res, 200, { ok: true }), true;
+    const stopped = stopSessionFor(username, sessionId);
+    return stopped
+      ? (json(res, 200, { ok: true, sessionId }), true)
+      : (json(res, 409, { ok: false, error: 'session is not running', sessionId }), true);
   }
 
   return false;
@@ -225,9 +276,44 @@ function checkOrigin(req, secrets) {
   return false;
 }
 
-async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
+function prepareWebTaskFiles(username, task, fileRefs) {
+  if (!Array.isArray(fileRefs) || !fileRefs.length) return { task, fileRefs: [] };
+  const fs = require('fs');
   const workDir = userWorkDir(username);
-  const taskId = `${username}-web-${Date.now()}`;
+  const uploadsDir = path.join(workDir, 'media', 'intake');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  let effectiveTask = task || '';
+  const normalized = [];
+
+  for (const ref of fileRefs) {
+    if (!ref || typeof ref.id !== 'string' || !/^[a-f0-9]{16,64}$/.test(ref.id)) {
+      const err = new Error('invalid fileRef'); err.statusCode = 400; throw err;
+    }
+    const storeDir = path.join(workDir, 'media', 'intake-store', ref.id);
+    const src = path.join(storeDir, 'data');
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(path.join(storeDir, 'meta.json'), 'utf8')); } catch {}
+    const rawName = ref.name || meta.name || 'file';
+    const safeName = path.basename(rawName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+    const mime = ref.mime || ref.type || meta.mime || 'application/octet-stream';
+    const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
+    try {
+      fs.copyFileSync(src, filePath);
+      const fd = fs.openSync(filePath, 'r');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    } catch (e) {
+      const err = new Error('attachment not persisted'); err.statusCode = 503; throw err;
+    }
+    const note = `[Файл сохранён: ${filePath} (${mime}). Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+    effectiveTask = effectiveTask ? `${note}\n\n${effectiveTask}` : note;
+    normalized.push({ id: ref.id, name: safeName, mime });
+  }
+  return { task: effectiveTask, fileRefs: normalized };
+}
+
+async function streamWebTask({ req, res, secrets, username, task, sessionId, projectId = null, fileRefs = [], requestId = null }) {
+  const workDir = userWorkDir(username);
+  const taskId = requestId ? `${username}-web-${requestId}` : `${username}-web-${Date.now()}`;
 
   const emitter = new EventEmitter();
   taskEmitters.set(taskId, emitter);
@@ -274,6 +360,8 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
     secrets: { TELEGRAM_BOT_TOKEN: secrets.BOT_TOKEN, ...secrets },
     initialMsgId: null,
     pinnedMsgId: null,
+    projectId: projectId || null,
+    fileRefs,
     outputCallback: (text) => emitter.emit('chunk', text),
   }).then(() => {
     // sessionId may have been created inside _runTask. The runner persists the
@@ -283,10 +371,15 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
     if (!realId) {
       try { realId = getCurrentSessionId(workDir) || null; } catch {}
     }
+    completeWebMutation(username, requestId, { state: 'done', sessionId: realId || null, taskId });
     finish('done', realId);
   }).catch((err) => {
+    completeWebMutation(username, requestId, { state: 'error', error: err?.message || 'task failed', taskId });
     finish('error', err?.message || 'task failed');
   });
 }
 
-module.exports = { handleWebRoute, listSessionsFor, getSessionFor, streamWebTask, stopSessionFor };
+module.exports = {
+  handleWebRoute, listSessionsFor, getSessionFor, prepareWebTaskFiles,
+  claimWebMutation, completeWebMutation, streamWebTask, stopSessionFor,
+};

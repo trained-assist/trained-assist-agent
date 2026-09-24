@@ -38,7 +38,7 @@ ok(multi.includes('deepseek-v4-flash-0731'), 'multi shows real model name');
 ok(!multi.includes('review(') && !multi.includes('run('), 'no per-agent tags');
 
 // 5) totals present
-ok(single.includes('~$'), 'has cost');
+ok(!single.includes('$') && !multi.includes('$'), 'no monetary estimate in OpenCode cards');
 ok(multi.includes('12\u202f345') || multi.includes('12 345'), 'has formatted input total');
 ok(multi.includes('67\u202f890') || multi.includes('67 890'), 'has formatted output total');
 
@@ -50,6 +50,17 @@ const cf = formatCostFooter({ input_tokens: 1000, output_tokens: 500, cache_read
 ok(!cf.includes('📊') && !cf.includes('💾'), 'claude footer no icons');
 ok(!body(cf).includes('\n'), 'claude footer body single line');
 ok(cf.includes('вход') && cf.includes('выход'), 'claude footer words');
+
+// Token-only contract replaces the former required-price assertion (owner request 2026-09-24).
+const example = { input_tokens: 42, output_tokens: 20028, cache_creation_input_tokens: 42900, cache_read_input_tokens: 977500 };
+const expected = '\n\nИспользование: вход 42 · выход 20\u202f028 · кэш +42.9K · кэш 977.5K';
+for (const model of ['opus', 'sonnet', 'haiku', 'unknown']) {
+  ok(formatCostFooter(example, model) === expected, `Claude ${model}: tokens and cache only`);
+}
+ok(formatOcFooter({ input: 42, output: 20028, cacheWrite: 42900, cacheRead: 977500, cost: 999 }, null) === expected, 'OpenCode: same tokens, ignores cost');
+ok(formatCostFooter(null) === '', 'Claude null usage stays empty');
+ok(formatCostFooter({}) === '\n\nИспользование: вход 0 · выход 0', 'zero usage has no price or empty cache labels');
+ok(!cf.includes('$'), 'Claude card has no monetary estimate');
 
 console.log(`\noc-footer: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -9,7 +9,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-function freshWebRoutes({ getSession, stopUserTask, webAuth }) {
+function freshWebRoutes({ getSession, stopSessionTask, webAuth }) {
   for (const key of Object.keys(require.cache)) {
     if (key.includes('/src/web-routes.js') || key.includes('/src/session-store.js') ||
         key.includes('/src/runner/index.js') || key.includes('/src/web-auth.js')) {
@@ -19,7 +19,7 @@ function freshWebRoutes({ getSession, stopUserTask, webAuth }) {
   const sessionStore = require('../src/session-store');
   sessionStore.getSession = getSession;
   const runner = require('../src/runner');
-  runner.stopUserTask = stopUserTask;
+  runner.stopSessionTask = stopSessionTask;
   if (webAuth) {
     const webAuthMod = require('../src/web-auth');
     webAuthMod.webAuth = webAuth;
@@ -34,24 +34,24 @@ function fakeRes() {
   return res;
 }
 
-test('stopSessionFor scopes the kill to the session\'s own chat', () => {
+test('stopSessionFor targets the exact session id, never a chat/profile fallback', () => {
   const calls = [];
   const wr = freshWebRoutes({
-    getSession: (workDir, id) => (id === 's-1' ? { id, liveChatId: 42 } : null),
-    stopUserTask: (username, chatId) => calls.push({ username, chatId }),
+    getSession: (workDir, id) => (id === 's-1' ? { id, liveChatId: null } : null),
+    stopSessionTask: (username, sessionId) => { calls.push({ username, sessionId }); return true; },
   });
-  wr.stopSessionFor('alice', 's-1');
-  assert.deepEqual(calls, [{ username: 'alice', chatId: 42 }]);
+  assert.equal(wr.stopSessionFor('alice', 's-1'), true);
+  assert.deepEqual(calls, [{ username: 'alice', sessionId: 's-1' }]);
 });
 
-test('stopSessionFor passes null chatId when the session has none on record', () => {
+test('stopSessionFor refuses unknown sessions without any profile-wide fallback', () => {
   const calls = [];
   const wr = freshWebRoutes({
     getSession: () => null,
-    stopUserTask: (username, chatId) => calls.push({ username, chatId }),
+    stopSessionTask: (...args) => { calls.push(args); return true; },
   });
-  wr.stopSessionFor('bob', 's-unknown');
-  assert.deepEqual(calls, [{ username: 'bob', chatId: null }]);
+  assert.equal(wr.stopSessionFor('bob', 's-unknown'), false);
+  assert.deepEqual(calls, []);
 });
 
 test('POST /web/stop/:id extracts sessionId from the URL before calling stopSessionFor (was: ReferenceError, ' +
@@ -59,7 +59,7 @@ test('POST /web/stop/:id extracts sessionId from the URL before calling stopSess
   const calls = [];
   const wr = freshWebRoutes({
     getSession: (workDir, id) => (id === 's-7' ? { id, ownerChatId: 9 } : null),
-    stopUserTask: (username, chatId) => calls.push({ username, chatId }),
+    stopSessionTask: (username, sessionId) => { calls.push({ username, sessionId }); return true; },
     webAuth: () => 'carol',
   });
   const req = { method: 'POST', headers: { origin: 'http://localhost:3001' } };
@@ -68,5 +68,5 @@ test('POST /web/stop/:id extracts sessionId from the URL before calling stopSess
   const handled = await wr.handleWebRoute(req, url, res, {});
   assert.equal(handled, true);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(calls, [{ username: 'carol', chatId: 9 }]);
+  assert.deepEqual(calls, [{ username: 'carol', sessionId: 's-7' }]);
 });

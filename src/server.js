@@ -2,6 +2,8 @@
 const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
+const { deliverySecrets, taskDelivery } = require('./bot-delivery');
+const { withDedupLock } = require('./request-dedup-lock');
 const { isTaskResumable } = require('./pending-task-resume');
 const { isNonTaskMessage } = require('./resume-hygiene');
 const { recordResume, getResumeStats } = require('./resume-stats');
@@ -28,9 +30,7 @@ const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary, getEngineSessionId } = require('./session-store');
 const { generateSummary } = require('./session-summary');
-const { startNalogLogin } = require('./nalog-login');
 const { startGetcourseLogin } = require('./getcourse-login');
-const { storeApplication } = require('./hh-vacancy');
 const { processMishaUpdate } = require('./misha-bot');
 const { createHhNegotiations } = require('./hh-negotiations');
 
@@ -42,6 +42,32 @@ const PORT = process.env.PORT || 3001;
 // Single source of truth (src/data-paths.js) — do not re-derive from HOME.
 const BASE_USERS_DIR = dataPaths.USERS_ROOT;
 const userWorkDir = dataPaths.userWorkDir;
+
+// RU-IP edge (src/ru-edge.js, issue #1288) — thin RU-only service holding the
+// nalog.ru/ESIA Playwright login (geo-blocked outside Russia). This agent never
+// runs Playwright against lknpd.nalog.ru/gosuslugi.ru directly any more; it
+// delegates over HTTP and the edge pushes the resulting token back via
+// POST /nalog/token-store.
+const RU_EDGE_URL = (process.env.RU_EDGE_URL || 'https://platform.recruiter-assistant.ru').replace(/\/$/, '');
+
+// Delegates a nalog.ru login attempt to the RU edge (Playwright + Госуслуги/ESIA
+// need a Russian IP). Mirrors the old local startNalogLogin() return shape:
+// {status:'ok', expires} | {status:'need_code', sessionId} | {error}.
+async function ruEdgeNalogStartLogin(userId, login, password) {
+  try {
+    const res = await fetch(`${RU_EDGE_URL}/nalog/start-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.AGENT_SECRET || ''}` },
+      body: JSON.stringify({ userId, login, password }),
+      signal: AbortSignal.timeout(90_000), // browser login can take 30-60s
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && !data.error) return { error: `RU edge returned HTTP ${res.status}` };
+    return data;
+  } catch (e) {
+    return { error: `Не удалось связаться с RU edge: ${e.message}` };
+  }
+}
 
 // /run idempotency window (see the requestId handling below): in-memory only,
 // resets on restart — acceptable because it's guarding against a retry racing
@@ -63,6 +89,9 @@ function rememberRequestId(id, taskId) {
 const { createNoticeDeduper } = require('./tg-notice-dedupe');
 const tokenNoticeDeduper = createNoticeDeduper();
 const noticeAlreadySent = (chatId, text) => tokenNoticeDeduper.alreadySent(chatId, text);
+
+// ZeroCreds destination preflight detection — see src/zerocreds-preflight.js.
+const { isZeroCredsPreflight } = require('./zerocreds-preflight');
 
 // Narrow ("specialized") bots delegate into a real profile instead of owning their
 // own. @cmr_management_bot ("misha") IS Flexi Consulting — its data (6 expo projects,
@@ -128,13 +157,12 @@ function scheduleNalogExpiryChecks(secrets) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: chatId, text: '🔄 Токен Налог.ру истёк — обновляю автоматически...' }),
           }).catch(() => {});
-          startNalogLogin(username, creds.login, creds.password).then(result => {
-            const AGENT_PUB = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+          ruEdgeNalogStartLogin(username, creds.login, creds.password).then(result => {
             let text;
             if (result.status === 'ok') {
               text = `✅ Налог.ру — токен обновлён автоматически. Действует до ${result.expires ? new Date(result.expires).toLocaleString('ru-RU') : '?'}.`;
             } else if (result.status === 'need_code') {
-              const codeUrl = `${AGENT_PUB}/connect/nalog/code?sessionId=${result.sessionId}`;
+              const codeUrl = `${RU_EDGE_URL}/connect/nalog/code?sessionId=${result.sessionId}`;
               text = `📱 Нужен код из SMS для Госуслуг:\n\n👉 ${codeUrl}\n\nСсылка действительна 25 минут.`;
             } else {
               text = `❌ Не удалось обновить токен Налог.ру: ${result.error}\n\nСкажите «подключи налог» чтобы обновить данные.`;
@@ -252,6 +280,9 @@ function scheduleGtdController(secrets) {
 // exceeds RESUME_WINDOW_MS, so "age < ABANDONED_NOTICE_MS" can never hold if they're equal).
 const RESUME_WINDOW_MS = 2 * 60 * 60 * 1000;    // re-run tasks interrupted within this window
 const ABANDONED_NOTICE_MS = 6 * 60 * 60 * 1000; // older but not ancient: tell the user it is gone
+// Sent instead of the original task when the engine already holds the conversation (native resume)
+// or when there is no task text to replay (forceClaude callbacks). An empty prompt stalls engines.
+const CONTINUATION_PROMPT = '[ПРОДОЛЖЕНИЕ] Сервер перезапустился и прервал тебя. Продолжи с того места, где остановился.';
 
 async function resumePendingTasks(secrets) {
   if (!secrets?.BOT_TOKEN) return;
@@ -260,16 +291,21 @@ async function resumePendingTasks(secrets) {
   if (pending.length === 0) return;
 
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const tgCall = (method, body) =>
-    fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/${method}`, {
+  const tgCall = (token, method, body) =>
+    fetch(`${TG_BASE}/bot${token}/${method}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     }).catch(() => {});
   // Failure notice: replaces the task's status message when it has one, else sends a new one.
-  const notifyFailure = (p, text) => p.initialMsgId
-    ? tgCall('editMessageText', { chat_id: p.userId, message_id: p.initialMsgId, text })
-    : tgCall('sendMessage', { chat_id: p.userId, text });
+  const notifyFailure = (p, text) => {
+    let token;
+    try { token = taskDelivery({ user: { audience: p.audience, workDir: p.workDir || path.join(BASE_USERS_DIR, p.username) }, sessionId: p.sessionId, secrets }).secrets.BOT_TOKEN; }
+    catch (e) { console.error('[resume] delivery unavailable:', e.message); return Promise.resolve(); }
+    return p.initialMsgId
+      ? tgCall(token, 'editMessageText', { chat_id: p.userId, message_id: p.initialMsgId, text })
+      : tgCall(token, 'sendMessage', { chat_id: p.userId, text });
+  };
 
   for (const p of pending) {
     const now = Date.now();
@@ -294,7 +330,12 @@ async function resumePendingTasks(secrets) {
     }
 
     const engine = p.engine || 'claude';
-    const attempt = (p.resumeAttempts || 0) + 1;
+    // The attempt counter is OWNED BY THE RUNNER: it advances only when a resume actually FAILS
+    // (runner/index.js retry block). This boot path must NOT advance it — a restart that kills an
+    // in-flight resume is not a failure, and counting it as one burned the whole budget on a
+    // deploy flurry (34 restarts/day), so a perfectly resumable task "gave up after 3 attempts"
+    // without a single genuine failure. Reuse the journaled number; a fresh task starts at 1.
+    const attempt = p.resumeAttempts || 1;
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
 
     // Native resume (#1234): claude (Sub-2), codex (Sub-3) and opencode (Sub-4) are wired.
@@ -306,10 +347,10 @@ async function resumePendingTasks(secrets) {
       ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, engine) : null))
       : null;
     // With a native resume the engine already holds the task, so replaying it is redundant (and
-    // risks redoing finished steps); send a short "keep going" instead.
-    const resumeTask = nativeResumeId
-      ? '[ПРОДОЛЖЕНИЕ] Сервер перезапустился и прервал тебя. Продолжи с того места, где остановился.'
-      : p.task;
+    // risks redoing finished steps); send a short "keep going" instead. Same when there is no task
+    // text at all (forceClaude callbacks) — there is nothing to replay, and an empty prompt would
+    // stall the engine.
+    const resumeTask = (nativeResumeId || !p.task) ? CONTINUATION_PROMPT : p.task;
     console.log(`[resume] ${nativeResumeId ? 'native' : 'fallback'} engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(resumeTask).slice(0, 60)}"`);
 
     if (attempt > MAX_RESUME_ATTEMPTS) {
@@ -327,7 +368,7 @@ async function resumePendingTasks(secrets) {
     recordResume(nativeResumeId ? 'native' : 'fallback', engine); // #1240: measure native-vs-fallback
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
-      profileId: p.profileId, telegramUserId: p.telegramUserId,
+      profileId: p.profileId, telegramUserId: p.telegramUserId, audience: p.audience,
     };
     const fireResume = async () => {
       try {
@@ -338,7 +379,7 @@ async function resumePendingTasks(secrets) {
           user, task: resumeTask, context: p.context || null,
           engine, sessionId: p.sessionId || null,
           contextFromSession: p.contextFromSession || null,
-          forceClaude: true, projectId: p.projectId || null,
+          forceClaude: true, projectId: p.projectId || null, projectPicked: p.projectPicked === true,
           initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
           resumedAfterRestart: true, resumeAttempts: attempt,
           resumeSessionId: nativeResumeId || null,
@@ -449,23 +490,23 @@ async function main() {
       return;
     }
 
-    // GET /vacancy/:username/:vacancyId — public vacancy landing page (no auth)
-    const vacancyPageMatch = url.pathname.match(/^\/vacancy\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)$/);
-    if (req.method === 'GET' && vacancyPageMatch) {
-      const [, username, vacancyId] = vacancyPageMatch;
-      const htmlPath = path.join(os.homedir(), 'users', username, 'vacancy-drafts', `${vacancyId}.html`);
-      try {
-        const html = fs.readFileSync(htmlPath, 'utf8');
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
-      } catch {
-        res.writeHead(404).end('Vacancy not found');
-      }
-      return;
-    }
+    // Vacancy landing pages (GET /vacancy/:username/:vacancyId, POST /vacancy/store,
+    // POST /apply/:username/:vacancyId) moved to the RU edge service — see
+    // src/ru-edge.js. Vacancy hosting stays on platform.recruiter-assistant.ru by
+    // owner decision (issue #1288); this agent still publishes to it via
+    // publishVacancyPage() in src/hh-vacancy.js (VACANCY_REMOTE_STORE_URL), unchanged.
 
     // GET /health — no auth, liveness check for smoke tests and monitoring
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, { status: 'alive', uptime: process.uptime(), vm: VM_NAME, commit: GIT_COMMIT });
+    }
+
+    // GET /readiness — no auth, "can this server accept work?" (distinct from liveness).
+    // 200 when ready; 503 when a critical dependency is down. A single unavailable engine does
+    // not make the server unready as long as a fallback engine is usable (spec §13).
+    if (req.method === 'GET' && url.pathname === '/readiness') {
+      const { ready, checks } = require('./readiness').computeReadiness();
+      return json(res, ready ? 200 : 503, { ready, checks, vm: VM_NAME, commit: GIT_COMMIT, uptime: process.uptime() });
     }
 
     // GET /p/:slug — serve a published page (no auth, public)
@@ -548,6 +589,7 @@ async function main() {
         url.pathname !== '/web/verify' && url.pathname !== '/web/projects' &&
         url.pathname !== '/web/project-create' &&
         url.pathname !== '/web/sessions-list' && url.pathname !== '/web/session-get' &&
+        url.pathname !== '/web/intake-file-bearer' &&
         url.pathname !== '/web/run-bearer' && url.pathname !== '/web/reply-bearer' &&
         url.pathname !== '/web/reproject-preview' && url.pathname !== '/web/reproject-adjust' &&
         url.pathname !== '/web/reproject-apply' && url.pathname !== '/web/reproject-revert') {
@@ -680,6 +722,23 @@ ${recent || '(пока нет)'}
     if (auth !== `Bearer ${secrets.AGENT_SECRET}`) {
       res.writeHead(401).end(JSON.stringify({ error: 'unauthorized' }));
       return;
+    }
+
+    // POST /nalog/token-store — receive a nalog.ru token pushed by the RU edge
+    // after a Playwright login (initial or post-2FA). The RU edge holds no
+    // per-user state of its own; this agent (GCP) is the token's home, since
+    // that's where 10-nalog.js and the expiry scheduler read it from.
+    if (req.method === 'POST' && url.pathname === '/nalog/token-store') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, tokens } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      if (!tokens || typeof tokens !== 'object' || !tokens.auth_token) return json(res, 400, { error: 'missing tokens.auth_token' });
+      const dir = path.join(dataPaths.TOKENS_ROOT, username);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'nalog'), JSON.stringify(tokens, null, 2), { mode: 0o600 });
+      console.log('[nalog/token-store] saved token for username=%s expires=%s', username, tokens.expires);
+      return json(res, 200, { ok: true });
     }
 
     // Compat for the bot's /restart command: "request" restarts right away (reply first,
@@ -839,21 +898,6 @@ ${recent || '(пока нет)'}
       return json(res, 200, { ok: true, url: issueData.html_url, number: issueData.number });
     }
 
-    // POST /vacancy/store — receive and persist a vacancy landing page HTML from another VM
-    if (req.method === 'POST' && url.pathname === '/vacancy/store') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-      const { username, vacancyId, html } = body || {};
-      if (!username || !vacancyId || !html) return json(res, 400, { error: 'missing fields' });
-      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username) || !/^[a-zA-Z0-9_-]{1,64}$/.test(vacancyId)) {
-        return json(res, 400, { error: 'invalid username or vacancyId' });
-      }
-      const draftsDir = path.join(os.homedir(), 'users', username, 'vacancy-drafts');
-      fs.mkdirSync(draftsDir, { recursive: true });
-      fs.writeFileSync(path.join(draftsDir, `${vacancyId}.html`), html, 'utf8');
-      const pageUrl = `https://platform.recruiter-assistant.ru/vacancy/${username}/${vacancyId}`;
-      return json(res, 200, { ok: true, url: pageUrl });
-    }
 
     // GET /capabilities?userId=XXX — list services with tokens on this machine
     if (req.method === 'GET' && url.pathname === '/capabilities') {
@@ -871,7 +915,9 @@ ${recent || '(пока нет)'}
       // hh skill was extracted (#942) — its MCP tools no longer live under toolsDir,
       // so detect it the same way src/mcp-action.js does: sibling checkout present.
       const HH_SKILL_SIBLING = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
-      const skills = computeSkillsList(toolFilenames, fs.existsSync(HH_SKILL_SIBLING));
+      // freelance skill is also a sibling checkout (trained-assist-freelance-skill).
+      const FREELANCE_SKILL_SIBLING = path.join(__dirname, '..', '..', 'trained-assist-freelance-skill', 'src', 'mcp-skills', 'index.js');
+      const skills = computeSkillsList(toolFilenames, fs.existsSync(HH_SKILL_SIBLING), fs.existsSync(FREELANCE_SKILL_SIBLING));
       const upsell_text = process.env.AGENT_UPSELL_TEXT ||
         'За HH-рекрутингом, налогами, задачами Weeek и другим — обратитесь к @super_personal_assistant_bot';
       return json(res, 200, { capabilities, skills, upsell_text });
@@ -1036,26 +1082,47 @@ ${recent || '(пока нет)'}
       return json(res, result.ok ? 200 : 404, result);
     }
 
-    // POST /tasks/:taskId/stop — kill a specific running Claude process by taskId
+    // POST /tasks/:taskId/stop — kill a specific running Claude process by taskId.
+    // Ownership-checked (#1303): AGENT_SECRET alone is NOT ownership — it is shared
+    // by every first-party gateway, so on its own it lets any of them stop any
+    // profile's/bot's task just by knowing its taskId. The caller must name the
+    // owner (username required; audience defaults to 'default'; chatId optional),
+    // matched by the same exact-username/audience rule #1302 §3.2 uses for
+    // /tasks/stop. Missing owner or mismatch -> 403 and the task keeps running.
+    // No Telegram callback calls this route (the bot's Stop button uses the
+    // username-scoped /tasks/stop), so no existing caller is broken.
     if (req.method === 'POST' && /^\/tasks\/[^/]+\/stop$/.test(url.pathname)) {
-      const taskId = url.pathname.split('/')[2];
+      const taskId = decodeURIComponent(url.pathname.split('/')[2]);
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch { payload = null; }
+      const username = payload?.username;
+      const audience = payload?.audience;
+      const chatId = payload?.chatId ?? payload?.userId ?? null;
+      if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 403, { error: 'forbidden: owner username required' });
+      if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience)))
+        return json(res, 400, { error: 'invalid audience' });
       const { stopTask } = require('./runner');
-      const result = stopTask(taskId);
+      const result = stopTask(taskId, { username, audience: audience || 'default', chatId });
+      if (result.forbidden) return json(res, 403, { error: result.error });
       return json(res, result.ok ? 200 : 404, result);
     }
 
-    // POST /tasks/stop — kill any running Claude process for a user by username
-    // Body: { username: string }
+    // POST /tasks/stop — kill any running Claude process for a user by username,
+    // scoped to one audience/bot (default 'default' — never "every audience", #1302 §3.2).
+    // Body: { username: string, audience?: string }
     if (req.method === 'POST' && url.pathname === '/tasks/stop') {
       const body = await readBody(req);
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'bad json' }); }
-      const { username } = payload || {};
+      const { username, audience } = payload || {};
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
+      if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience)))
+        return json(res, 400, { error: 'invalid audience' });
       const { killTaskByUsername } = require('./runner');
-      const killed = killTaskByUsername(username);
-      return json(res, 200, { ok: true, killed });
+      const killed = killTaskByUsername(username, audience || null);
+      return json(res, 200, { ok: true, killed, audience: audience || 'default' });
     }
 
     // GET /tasks/running?username=xxx — ground truth for whether a Claude
@@ -1068,8 +1135,13 @@ ${recent || '(пока нет)'}
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
+      // audience scopes which bot's task this checks — omitted -> 'default' only,
+      // never "any audience" (#1302 §3.2/§2).
+      const audience = url.searchParams.get('audience');
+      if (audience != null && !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))
+        return json(res, 400, { error: 'invalid audience' });
       const { isTaskRunning } = require('./runner');
-      return json(res, 200, { running: isTaskRunning(username) });
+      return json(res, 200, { running: isTaskRunning(username, audience || null), audience: audience || 'default' });
     }
 
     // GET /projects?username=xxx — TYPED project list (projects.js), most-used first
@@ -1136,8 +1208,20 @@ ${recent || '(пока нет)'}
         const countByProject = {};
         for (const s of allSess) if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
 
-        const d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience);
-        const out = { action: d.action, active: d.active || null };
+        let d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience);
+        // Pinned chat, but the task is confidently about another project → ask (suggested
+        // first, pinned second) instead of binding silently. Any doubt keeps the pin.
+        if (d.action === 'auto' && d.pinned && taskParam && (process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY)) {
+          try {
+            const match = require('./project-match');
+            const all = projects.listProjects(workDir, audience);
+            const verdict = await match.classifyTaskProject(taskParam, all, { pinnedId: d.project.id });
+            d = match.applyMismatch(d, verdict, { allProjects: all });
+            if (d.mismatch) console.log(`[project-decision] pin mismatch: ${d.mismatch.pinned} → ${d.mismatch.suggested} (${d.mismatch.confidence})`);
+          } catch (e) { console.warn('[project-decision] mismatch check:', e.message); }
+        }
+        const out = { action: d.action, active: d.active || null, pinned: d.pinned ? d.project.id : null };
+        if (d.mismatch) out.mismatch = d.mismatch;
 
         // Data gap fix: a project's 3-sense summary used to be generated ONLY in the
         // sessions-list intent for the ACTIVE project, so at picker time most projects
@@ -1182,7 +1266,7 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
+      const { username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, projectPicked, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
       // `chatId` is the canonical field for the Telegram chat to stream into (plan
       // generic-naming-conventions-refactoring, P1-C). `userId` is now a legacy wire
       // alias, normalized once right here — PR-D drops tg-bot's `userId` send, PR-E
@@ -1222,103 +1306,128 @@ ${recent || '(пока нет)'}
         return json(res, 400, { error: 'invalid newProjectName' });
 
       if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
-      const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
-      const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
-      if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
-        return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
-      }
-      const workDir = path.join(BASE_USERS_DIR, username);
-      fs.mkdirSync(workDir, { recursive: true });
-
-      // cwd defaults to workDir; the runner's project-binding block resolves the real
-      // cwd from the bound project (projectId passed here, or the session's stored one).
-      const cwd = workDir;
-
-      // Owner canonical name = PROFILE (never «user»; see docs/PROFILE-RENAME-SPEC.md).
-      // `profileId` is the owner identifier going forward; the gateway may send it
-      // explicitly, but until it does we alias the existing `username` field (same
-      // string value) so both repos migrate independently — no flag-day break.
-      const profileId = payload.profileId ?? username;
-      // audience scopes sessions/projects per bot/surface sharing this username+chatId
-      // (see AUDIENCE-SCOPE-SPEC) — e.g. the recruiter bot passes 'recruiter' so its
-      // sessions never mix with the general-purpose bot's. Defaults to 'default', which
-      // is byte-for-byte identical to pre-audience behavior.
-      const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
-      trackChat(chatId);
-
-      // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
-      // Code whose own Read tool hands images to the model natively — so a photo attachment
-      // is otherwise invisible to that engine (just an opaque path in the note below). Run it
-      // through vision OCR up front and fold the extracted text into the note. Claude/Codex are
-      // left alone: no known gap, and no point paying for a call the model doesn't need.
-      const runEngine = profiles.getEngine(workDir, chatId);
-      async function buildFileNote(filePath, mimeType) {
-        const typeNote = mimeType ? ` (${mimeType})` : '';
-        let note = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
-        if (runEngine === 'opencode' && mimeType && mimeType.startsWith('image/') && secrets.OPENROUTER_API_KEY) {
-          const vision = await mediaVision.extractImageText({ filePath, mimeType, openrouterKey: secrets.OPENROUTER_API_KEY });
-          if (vision.ok) note += `\n[Распознано на изображении:\n${vision.text}]`;
+      // Validate delivery before accepting durable work; never leak replies to the default bot.
+      try { deliverySecrets(secrets, audience); }
+      catch (e) { return json(res, /not configured/.test(e.message) ? 503 : 400, { error: e.message }); }
+      const requestOwner = audience && audience !== 'default' ? `${username}-${audience}` : username;
+      const dedupKey = requestId ? JSON.stringify([audience || 'default', username, String(chatId), requestId]) : null;
+      // Per-key in-process mutex around check -> media -> journal -> receipt (#1302 §3.4):
+      // two concurrent POSTs sharing (audience, username, chatId, requestId) must not both
+      // pass the duplicate-receipt/pending check below before either has written anything.
+      // This serializes only overlapping requests for the SAME key — distinct requests never
+      // contend. It protects in-process concurrency only; a crash mid-sequence is still
+      // recovered by the existing receipt/pending-journal records (durable dedup), not by
+      // this lock — no separate admission DB is introduced.
+      const admit = async () => {
+        const taskId = requestId ? `${requestOwner}-${requestId}` : `${requestOwner}-${require('crypto').randomUUID()}`;
+        const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
+        // Preserve ACK-loss deduplication for requests accepted before bot-scoped IDs.
+        // Legacy receipts have no audience: conservatively acknowledge rather than replay work.
+        if (requestId && audience && audience !== 'default') {
+          const legacyId = `${username}-${requestId}`;
+          const legacyReceipt = path.join(path.dirname(receipt), `${legacyId}.json`);
+          if ((fs.existsSync(legacyReceipt) && !JSON.parse(fs.readFileSync(legacyReceipt, 'utf8')).audience) || getPendingTasks().some(p => p.taskId === legacyId && (!p.audience || p.audience === audience))) {
+            return json(res, 202, { taskId: legacyId, requestId, durable: true, duplicate: true });
+          }
         }
-        return note;
-      }
-
-      // Save attached file (base64) to workDir and prepend path info to the task.
-      let effectiveTask = task || '';
-      if (fileBase64 && fileName) {
-        const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-        const uploadsDir = path.join(workDir, 'media', 'intake');
-        fs.mkdirSync(uploadsDir, { recursive: true });
-        const filePath = path.join(uploadsDir, `${require('crypto').randomUUID()}-${safeName}`);
-        try {
-          const fd = fs.openSync(filePath, 'wx', 0o600);
-          try { fs.writeFileSync(fd, Buffer.from(fileBase64, 'base64')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-          const dirFd = fs.openSync(uploadsDir, 'r');
-          try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-          const fileNote = await buildFileNote(filePath, fileMimeType);
-          effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
-        } catch (e) {
-          console.error('[/run] file save error:', e.message);
-          return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
+        if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
+          return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
         }
-      }
+        const workDir = path.join(BASE_USERS_DIR, username);
+        fs.mkdirSync(workDir, { recursive: true });
 
-      // Copy durably-stored intake files (photos/voice/docs referenced by id,
-      // written via PUT /intake-files) into the task's media dir — same
-      // path/notice as the fileBase64 branch, just sourced from disk not the body.
-      if (Array.isArray(fileRefs)) {
-        const uploadsDir = path.join(workDir, 'media', 'intake');
-        for (const ref of fileRefs) {
-          if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) return json(res, 400, { error: 'invalid fileRef' });
-          const src = path.join(BASE_USERS_DIR, username, 'media', 'intake-store', ref.id, 'data');
+        // cwd defaults to workDir; the runner's project-binding block resolves the real
+        // cwd from the bound project (projectId passed here, or the session's stored one).
+        const cwd = workDir;
+
+        // Owner canonical name = PROFILE (never «user»; see docs/PROFILE-RENAME-SPEC.md).
+        // `profileId` is the owner identifier going forward; the gateway may send it
+        // explicitly, but until it does we alias the existing `username` field (same
+        // string value) so both repos migrate independently — no flag-day break.
+        const profileId = payload.profileId ?? username;
+        // audience scopes sessions/projects per bot/surface sharing this username+chatId
+        // (see AUDIENCE-SCOPE-SPEC) — e.g. the recruiter bot passes 'recruiter' so its
+        // sessions never mix with the general-purpose bot's. Defaults to 'default', which
+        // is byte-for-byte identical to pre-audience behavior.
+        const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
+        trackChat(chatId);
+
+        // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
+        // Code whose own Read tool hands images to the model natively — so a photo attachment
+        // is otherwise invisible to that engine (just an opaque path in the note below). Run it
+        // through vision OCR up front and fold the extracted text into the note. Claude/Codex are
+        // left alone: no known gap, and no point paying for a call the model doesn't need.
+        const runEngine = profiles.getEngine(workDir, chatId);
+        async function buildFileNote(filePath, mimeType) {
+          const typeNote = mimeType ? ` (${mimeType})` : '';
+          let note = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+          if (runEngine === 'opencode' && mimeType && mimeType.startsWith('image/') && secrets.OPENROUTER_API_KEY) {
+            const vision = await mediaVision.extractImageText({ filePath, mimeType, openrouterKey: secrets.OPENROUTER_API_KEY });
+            if (vision.ok) note += `\n[Распознано на изображении:\n${vision.text}]`;
+          }
+          return note;
+        }
+
+        // Save attached file (base64) to workDir and prepend path info to the task.
+        let effectiveTask = task || '';
+        if (fileBase64 && fileName) {
+          const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+          const uploadsDir = path.join(workDir, 'media', 'intake');
+          fs.mkdirSync(uploadsDir, { recursive: true });
+          const filePath = path.join(uploadsDir, `${require('crypto').randomUUID()}-${safeName}`);
           try {
-            const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-            fs.mkdirSync(uploadsDir, { recursive: true });
-            const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
-            if (ref.storage === 'r2') {
-              await require('./r2-media').materializeR2({ ref, username, destination: filePath,
-                gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
-            } else {
-              if (ref.storage) throw new Error('Unknown media storage');
-              fs.copyFileSync(src, filePath);
-            }
-            const fd = fs.openSync(filePath, 'r');
-            try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+            const fd = fs.openSync(filePath, 'wx', 0o600);
+            try { fs.writeFileSync(fd, Buffer.from(fileBase64, 'base64')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
             const dirFd = fs.openSync(uploadsDir, 'r');
             try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-            const fileNote = await buildFileNote(filePath, ref.mime);
+            const fileNote = await buildFileNote(filePath, fileMimeType);
             effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
           } catch (e) {
-            console.error('[/run] fileRef copy error:', e.message);
+            console.error('[/run] file save error:', e.message);
             return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
           }
         }
-      }
 
-      // runTask journals synchronously, before any await or acknowledgement.
-      const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
-      completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
-      if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
-      json(res, 202, { taskId, requestId, durable: true });
+        // Copy durably-stored intake files (photos/voice/docs referenced by id,
+        // written via PUT /intake-files) into the task's media dir — same
+        // path/notice as the fileBase64 branch, just sourced from disk not the body.
+        if (Array.isArray(fileRefs)) {
+          const uploadsDir = path.join(workDir, 'media', 'intake');
+          for (const ref of fileRefs) {
+            if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) return json(res, 400, { error: 'invalid fileRef' });
+            const src = path.join(BASE_USERS_DIR, username, 'media', 'intake-store', ref.id, 'data');
+            try {
+              const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+              fs.mkdirSync(uploadsDir, { recursive: true });
+              const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
+              if (ref.storage === 'r2') {
+                await require('./r2-media').materializeR2({ ref, username, destination: filePath,
+                  gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
+              } else {
+                if (ref.storage) throw new Error('Unknown media storage');
+                fs.copyFileSync(src, filePath);
+              }
+              const fd = fs.openSync(filePath, 'r');
+              try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+              const dirFd = fs.openSync(uploadsDir, 'r');
+              try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+              const fileNote = await buildFileNote(filePath, ref.mime);
+              effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
+            } catch (e) {
+              console.error('[/run] fileRef copy error:', e.message);
+              return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
+            }
+          }
+        }
+
+        // runTask journals synchronously, before any await or acknowledgement.
+        const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, projectPicked: projectPicked === true, newProjectName: newProjectName || null });
+        completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
+        if (requestId) atomicJson(receipt, { taskId, audience: audience || 'default', acceptedAt: Date.now() });
+        json(res, 202, { taskId, requestId, durable: true });
+      };
+      if (dedupKey) await withDedupLock(dedupKey, admit);
+      else await admit();
       return;
     }
 
@@ -1354,123 +1463,14 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // CORS preflight for /apply (form is hosted on chillai.space, different origin)
-    if (req.method === 'OPTIONS' && /^\/apply\//.test(url.pathname)) {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Max-Age': '86400',
-      });
-      res.end();
-      return;
-    }
-
-    // POST /apply/:username/:vacancyId — no auth, public endpoint for candidate applications
-    if (req.method === 'POST' && /^\/apply\/[a-zA-Z0-9_-]+\/vac-\d+$/.test(url.pathname)) {
-      const parts = url.pathname.split('/');
-      const applyUsername = parts[2];
-      const vacancyId = parts[3];
-      const workDir = path.join(BASE_USERS_DIR, applyUsername);
-
-      let fields = {};
-      try {
-        const ct = req.headers['content-type'] || '';
-        if (ct.includes('multipart/form-data')) {
-          // Parse multipart from raw bytes to preserve UTF-8 text correctly
-          const rawBuf = await readBodyBuffer(req);
-          const boundary = ct.match(/boundary=([^\s;]+)/)?.[1];
-          if (boundary) {
-            const sep = Buffer.from(`--${boundary}`);
-            const parts2 = splitBuffer(rawBuf, sep);
-            for (const part of parts2) {
-              const headerEnd = indexOfSeq(part, Buffer.from('\r\n\r\n'));
-              if (headerEnd === -1) continue;
-              const header = part.slice(0, headerEnd).toString();
-              const value = part.slice(headerEnd + 4);
-              const m = header.match(/Content-Disposition:[^\n]*name="([^"]+)"/);
-              if (m && m[1] !== 'resume') {
-                // Strip trailing \r\n that multipart adds before next boundary
-                const text = value.slice(-2).equals(Buffer.from('\r\n')) ? value.slice(0, -2) : value;
-                fields[m[1]] = text.toString('utf8').trim();
-              }
-            }
-          }
-        } else {
-          const body = await readBody(req);
-          if (ct.includes('application/json')) {
-            fields = JSON.parse(body);
-          } else if (ct.includes('application/x-www-form-urlencoded')) {
-            for (const pair of body.split('&')) {
-              const [k, v] = pair.split('=');
-              if (k) fields[decodeURIComponent(k)] = decodeURIComponent(v || '');
-            }
-          }
-        }
-      } catch (e) {
-        console.error('[apply] parse error:', e.message);
-        res.writeHead(400, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'invalid request body' }));
-        return;
-      }
-
-      const corsHeaders = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
-      function applyJson(status, data) {
-        res.writeHead(status, corsHeaders);
-        res.end(JSON.stringify(data));
-      }
-
-      const email = String(fields.email || '').trim();
-      const phone = String(fields.phone || '').trim();
-      if (!email || !phone) return applyJson(400, { error: 'email and phone are required' });
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return applyJson(400, { error: 'invalid email' });
-
-      try {
-        const app = storeApplication(workDir, vacancyId, {
-          name: String(fields.name || '').trim().slice(0, 200),
-          email,
-          phone: phone.slice(0, 30),
-          telegram: String(fields.telegram || '').trim().slice(0, 100),
-          message: String(fields.message || '').trim().slice(0, 3000),
-        }, null, null);
-
-        // Notify recruiter via Telegram if chatId is known
-        const chatIdFile = path.join(process.env.HOME || '/home/vova', 'agent-tokens', applyUsername, '.chatid');
-        const chatId = fs.existsSync(chatIdFile) ? fs.readFileSync(chatIdFile, 'utf8').trim() : null;
-        if (chatId && secrets.BOT_TOKEN) {
-          const notifLines = [
-            `📬 Новый отклик на вакансию!`,
-            '',
-            app.name ? `👤 ${app.name}` : '👤 (имя не указано)',
-            `📧 ${app.email}`,
-            `📞 ${app.phone}`,
-            app.telegram ? `✈️ ${app.telegram}` : null,
-            app.message ? `\n💬 ${app.message.slice(0, 300)}` : null,
-          ].filter(Boolean).join('\n');
-          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            signal: AbortSignal.timeout(8000),
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, text: notifLines }),
-          }).catch(e => console.error('[apply] tg notify error:', e.message));
-        }
-
-        return applyJson(200, { ok: true });
-      } catch (e) {
-        console.error('[apply] store error:', e.message);
-        return applyJson(500, { error: 'failed to store application' });
-      }
-    }
-
     if (req.method === 'POST' && url.pathname === '/tokens') {
       const body = await readBody(req);
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
       // Preflight: ZeroCreds tests reachability before showing the form to the user.
-      // Respond immediately without writing anything.
-      if (payload._zerocreds_preflight === true) return json(res, 200, { ok: true, preflight: true });
+      // Respond immediately without writing anything. See isZeroCredsPreflight().
+      if (isZeroCredsPreflight(payload, req.headers)) return json(res, 200, { ok: true, preflight: true });
 
       const userId = payload.userId || url.searchParams.get('userId');
       const label = payload.label || url.searchParams.get('label');
@@ -1552,15 +1552,14 @@ ${recent || '(пока нет)'}
               body: JSON.stringify({ chat_id: nalogChatId, text: '⏳ Данные получены — вхожу в Госуслуги...' }),
             }).catch(() => {});
           }
-          startNalogLogin(String(userId), creds.login, creds.password).then(result => {
+          ruEdgeNalogStartLogin(String(userId), creds.login, creds.password).then(result => {
             const chatId2 = readChatId(String(userId));
             if (!chatId2 || !secrets.BOT_TOKEN) return;
-            const AGENT_PUB = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
             let text;
             if (result.status === 'ok') {
               text = `✅ Налог.ру подключён! Токен действует до ${result.expires ? new Date(result.expires).toLocaleString('ru-RU') : '?'}.`;
             } else if (result.status === 'need_code') {
-              const codeUrl = `${AGENT_PUB}/connect/nalog/code?sessionId=${result.sessionId}`;
+              const codeUrl = `${RU_EDGE_URL}/connect/nalog/code?sessionId=${result.sessionId}`;
               text = `📱 Введите код из SMS / приложения Госуслуги:\n\n👉 ${codeUrl}\n\nСсылка действительна 25 минут.`;
             } else {
               text = `❌ Не удалось войти в Госуслуги: ${result.error}\n\nПроверьте логин/пароль и повторите: «подключи налог»`;
@@ -1722,7 +1721,7 @@ ${recent || '(пока нет)'}
         return json(res, 200, result);
       } catch (e) {
         console.error('[intake-gate] error:', e.message);
-        return json(res, 200, { level: 'clear', complete: true }); // fail open — never trap the user
+        return json(res, 200, { level: 'insufficient', complete: false }); // preserve intake; manual launch remains available
       }
     }
 
@@ -1843,52 +1842,10 @@ ${recent || '(пока нет)'}
     if (await handleHhAuthed(req, url, res, { ...hhCtx, secrets }) !== false) return;
 
 
-    // POST /playwright-fetch — run headless Playwright on this VM and return page content.
-    // Used by the ru_browser_fetch MCP skill so GCP sessions can fetch RU-geo-blocked pages.
-    if (req.method === 'POST' && url.pathname === '/playwright-fetch') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); }
-      catch { return json(res, 400, { error: 'bad json' }); }
-
-      const { url: targetUrl, selector, waitFor, script, screenshot } = body || {};
-      if (!targetUrl || typeof targetUrl !== 'string') return json(res, 400, { error: 'url required' });
-
-      const { chromium } = require('playwright');
-      let browser;
-      try {
-        browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-        const context = await browser.newContext({
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        });
-        const page = await context.newPage();
-        await page.goto(targetUrl, { waitUntil: waitFor || 'domcontentloaded', timeout: 30000 });
-
-        const title = await page.title();
-        let text = null, scriptResult = null, screenshotB64 = null;
-
-        if (script) {
-          scriptResult = await page.evaluate(script);
-        }
-        if (screenshot) {
-          const buf = await page.screenshot({ type: 'png', fullPage: false });
-          screenshotB64 = buf.toString('base64');
-        }
-        if (selector) {
-          const el = await page.$(selector);
-          text = el ? await el.innerText() : null;
-        } else if (!screenshot) {
-          text = await page.innerText('body');
-        }
-
-        console.log(`[playwright-fetch] ok url=${targetUrl} title="${title}"`);
-        return json(res, 200, { ok: true, url: targetUrl, title, text, scriptResult, screenshot: screenshotB64 });
-      } catch (e) {
-        console.error('[playwright-fetch] error:', e.message);
-        return json(res, 500, { error: 'playwright_failed', message: e.message });
-      } finally {
-        if (browser) await browser.close().catch(() => {});
-      }
-    }
+    // POST /playwright-fetch moved to the RU edge service (src/ru-edge.js) — the
+    // ru_browser_fetch/ru_browser_screenshot MCP skills already call
+    // platform.recruiter-assistant.ru directly (src/mcp-skills/tools/22-ru-browser.js),
+    // unchanged by this migration.
 
     // POST /report — create GitHub issue from user bug report / feature request
     if (req.method === 'POST' && url.pathname === '/report') {
@@ -2028,8 +1985,6 @@ scheduleProactiveSearchRuns(secrets);
     shuttingDown = true;
     interruptForRestart();
     server.close();
-    // Close any open Playwright browsers so Node exits cleanly
-    try { require('./nalog-login').closeAll(); } catch {}
     process.exit(0);
   };
   process.once('SIGTERM', shutdown);
@@ -2067,25 +2022,6 @@ function readBodyBuffer(req, maxBytes = 1_048_576) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
-}
-
-function indexOfSeq(buf, seq) {
-  for (let i = 0; i <= buf.length - seq.length; i++) {
-    if (buf.slice(i, i + seq.length).equals(seq)) return i;
-  }
-  return -1;
-}
-
-function splitBuffer(buf, sep) {
-  const parts = [];
-  let start = 0;
-  let pos;
-  while ((pos = indexOfSeq(buf.slice(start), sep)) !== -1) {
-    parts.push(buf.slice(start, start + pos));
-    start += pos + sep.length;
-  }
-  parts.push(buf.slice(start));
-  return parts.filter(p => p.length > 0);
 }
 
 // True only when the vacancy's ats_config.interview_config has real, recruiter-provided

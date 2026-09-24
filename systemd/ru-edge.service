@@ -1,0 +1,45 @@
+[Unit]
+Description=Trained Assist — RU-IP edge (nalog.ru login, RU-geo-blocked fetch, vacancy pages)
+After=network.target
+OnFailure=assist-agent-notify-failure.service
+
+[Service]
+Type=simple
+User=vova
+WorkingDirectory=/home/vova/trained-assist-agent
+ExecStartPre=/bin/bash -c 'pids=$(lsof -ti tcp:8080 2>/dev/null); [ -n "$pids" ] && { echo "[pre-start] killing PIDs on :8080: $pids"; kill -9 $pids 2>/dev/null; sleep 1; }; true'
+ExecStart=/usr/bin/node src/ru-edge.js
+KillMode=mixed
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=300
+StartLimitBurst=10
+TimeoutStopSec=15
+
+Environment=NODE_ENV=production
+Environment=PORT=8080
+# Canonical storage roots — set explicitly so a restart/HOME change can never
+# silently relocate them. This service holds no Claude workspaces, only vacancy
+# drafts (USERS_DIR) and the per-user .chatid file it reads for notifications
+# (AGENT_TOKENS_DIR) — it never writes a nalog token here, that goes to GCP.
+Environment=USERS_DIR=/home/vova/users
+Environment=AGENT_TOKENS_DIR=/home/vova/agent-tokens
+Environment=VM_NAME=ru-vm
+
+# Non-GCP: load secrets from env vars instead of GCP Secret Manager
+Environment=SECRETS_SOURCE=env
+
+# Route Telegram API through the GCP proxy (Hostland blocks 149.154.x.x)
+Environment=TELEGRAM_API_URL=https://136-65-7-197.sslip.io/tg-proxy
+
+# Where a completed nalog.ru login gets pushed — GCP is where 10-nalog.js and
+# the expiry scheduler actually read the token from (all Claude runs there now).
+Environment=NALOG_TOKEN_SINK_URL=https://recruiter-assistant.ru
+
+# Secrets loaded from /home/vova/secrets.env (not in git — set manually on the VM).
+# Only TELEGRAM_BOT_TOKEN and AGENT_SECRET are required — no Claude/Anthropic
+# secrets belong on this box any more (see issue #1288).
+EnvironmentFile=-/home/vova/secrets.env
+
+[Install]
+WantedBy=multi-user.target

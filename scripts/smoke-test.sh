@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Smoke tests — run after deploy to verify core functionality
+# Smoke tests — run after deploy to verify core functionality of the full
+# Claude Code agent (GCP only since issue #1288 — nalog.ru/ESIA login,
+# vacancy pages, and playwright-fetch live on the RU edge now, see
+# scripts/smoke-test-ru-edge.sh).
 # Usage: AGENT_SECRET=xxx AGENT_URL=http://host:port bash scripts/smoke-test.sh
 
 AGENT_URL="${AGENT_URL:-http://localhost:3001}"
@@ -55,59 +58,6 @@ STATUS=$(_curl -o /dev/null -w "%{http_code}" -X POST \
   -d '{"userId":5367135237,"username":"zemtest","task":"echo smoke"}' \
   "$AGENT_URL/run")
 [ "$STATUS" = "202" ] && ok "202 accepted" || fail "Expected 202, got $STATUS"
-
-# 7. GET /connect/nalog — form renders (no auth needed)
-echo "[7] GET /connect/nalog returns 200 (form)"
-STATUS=$(_curl -o /dev/null -w "%{http_code}" "$AGENT_URL/connect/nalog?t=abc")
-[ "$STATUS" = "200" ] && ok "200 form rendered" || fail "Expected 200, got $STATUS"
-
-# 8. POST /connect/nalog — missing fields → 400
-echo "[8] POST /connect/nalog missing fields returns 400"
-STATUS=$(_curl -o /dev/null -w "%{http_code}" -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"t":"aabbccddeeff00112233445566778899"}' \
-  "$AGENT_URL/connect/nalog")
-[ "$STATUS" = "400" ] && ok "400 on missing fields" || fail "Expected 400, got $STATUS"
-
-# 9. POST /connect/nalog — invalid token format → 400
-echo "[9] POST /connect/nalog invalid token format returns 400"
-STATUS=$(_curl -o /dev/null -w "%{http_code}" -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"t":"INVALID","login":"a","password":"b"}' \
-  "$AGENT_URL/connect/nalog")
-[ "$STATUS" = "400" ] && ok "400 on invalid token" || fail "Expected 400, got $STATUS"
-
-# 10. POST /connect/nalog — nonexistent pending token → 403
-echo "[10] POST /connect/nalog nonexistent token returns 403"
-STATUS=$(_curl -o /dev/null -w "%{http_code}" -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"t":"aabbccddeeff00112233445566778899","login":"a","password":"b"}' \
-  "$AGENT_URL/connect/nalog")
-[ "$STATUS" = "403" ] && ok "403 on unknown token" || fail "Expected 403, got $STATUS"
-
-# 11. POST /connect/nalog/code — missing fields → 400
-echo "[11] POST /connect/nalog/code missing fields returns 400"
-STATUS=$(_curl -o /dev/null -w "%{http_code}" -X POST \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  "$AGENT_URL/connect/nalog/code")
-[ "$STATUS" = "400" ] && ok "400 on missing session/code" || fail "Expected 400, got $STATUS"
-
-# 12. POST /connect/nalog/code — invalid code format → 400
-echo "[12] POST /connect/nalog/code invalid code format returns 400"
-STATUS=$(_curl -o /dev/null -w "%{http_code}" -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"session":"aabbccddeeff00112233445566778899","code":"abc"}' \
-  "$AGENT_URL/connect/nalog/code")
-[ "$STATUS" = "400" ] && ok "400 on non-numeric code" || fail "Expected 400, got $STATUS"
-
-# 13. POST /connect/nalog/code — valid format but unknown session → 400
-echo "[13] POST /connect/nalog/code unknown session returns 400"
-STATUS=$(_curl -o /dev/null -w "%{http_code}" -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"session":"aabbccddeeff00112233445566778899","code":"123456"}' \
-  "$AGENT_URL/connect/nalog/code")
-[ "$STATUS" = "400" ] && ok "400 on unknown session" || fail "Expected 400, got $STATUS"
 
 echo ""
 echo "=== Result: $PASS passed, $FAIL failed ==="

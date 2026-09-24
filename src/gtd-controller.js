@@ -437,7 +437,7 @@ function computeMaxIterations(checklist) {
 // Вызывается на успешном завершении WORKRUN (гейт в runner). Если юзер просил
 // довести до конца — пишем durable-запись. Идемпотентно перезаписывает открытую
 // запись сессии (новый workrun с контролем → свежий отсчёт).
-async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKey, projectDir }) {
+async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKey, projectDir, audience }) {
   if (!workDir || !sessionId) return null;
   const intent = await detectIntent(task, { apiKey });
   if (!intent.wanted) return null;
@@ -454,6 +454,7 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
   const maxIterations = computeMaxIterations(checklist);
   const rec = {
     sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
+    audience: audience || 'default',
     createdAt: now,
     dueAt: now + intent.etaMinutes * 60 * 1000,
     etaMinutes: intent.etaMinutes,
@@ -477,7 +478,7 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
 // факт незакрытого checklist.md достаточен, чтобы довести дело до конца.
 // Используется как дефолт для PR-задач: «создал PR → checklist.md с 3 пунктами
 // (CI/merge/деплой) → трекается автоматически», без явной фразы «доведи до конца».
-async function scheduleFromChecklist({ workDir, sessionId, chatId, username, projectDir }) {
+async function scheduleFromChecklist({ workDir, sessionId, chatId, username, projectDir, audience }) {
   if (!workDir || !sessionId || !projectDir) return null;
   const checklist = readChecklist(projectDir);
   if (!checklist || !checklist.items.length || !checklist.items.some(i => !i.done)) return null;
@@ -501,6 +502,7 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
   const maxIterations = computeMaxIterations(checklist);
   const rec = {
     sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
+    audience: audience || 'default',
     createdAt: now,
     dueAt: now + ETA_MIN_CLAMP * 60 * 1000, // чек-лист = обычно быстрые объективные проверки (CI/деплой)
     etaMinutes: ETA_MIN_CLAMP,
@@ -757,6 +759,13 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
 
       if (!canRunSession(username, rec.sessionId)) continue;
       const session = getSession(workDir, rec.sessionId);
+      // rec.audience is durable and wins once set — a session's audience must never
+      // silently override an already-recorded GTD record (see #1302 §3.3). Falls back
+      // to session.audience for legacy GTD records that predate this field.
+      const audience = rec.audience ?? session?.audience ?? 'default';
+      let routeSecrets;
+      try { routeSecrets = require('./bot-delivery').deliverySecrets(secrets, audience); }
+      catch (e) { console.error('[gtd] delivery unavailable:', e.message); continue; }
       if (!session) { clearGtd(workDir, rec.sessionId); continue; }
 
       // Дешёвая пре-проверка ПЕРЕД тем как будить дорогого Claude/Codex: объективные
@@ -775,7 +784,7 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
             writeGtd(workDir, rec);
             console.log(`[gtd] closed ${rec.sessionId}: done-precheck (no Claude spent)`);
             const notifyChatId = rec.chatId || session.liveChatId || session.ownerChatId;
-            _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, notifyChatId,
+            _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, notifyChatId,
               `✅ Чек-лист закрыт автопроверкой (CI/merge через GitHub API, без затрат на Claude):\n${pre.items.map(i => `✓ ${i.text}`).join('\n')}`
             ).catch(() => {});
             continue;
@@ -803,14 +812,14 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
         rec.closedReason = 'max-iterations';
         writeGtd(workDir, rec);
         console.log(`[gtd] closed ${rec.sessionId}: max-iterations`);
-        _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+        _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
           `⚠️ GTD: авто-доведение остановлено — превышен лимит попыток. Задача: «${(rec.originalTask || '').slice(0, 100)}»`
         ).catch(() => {});
         continue;
       }
       writeGtd(workDir, rec);
 
-      const user = { id: chatId, name: username, username, workDir };
+      const user = { id: chatId, name: username, username, workDir, audience };
       // sessionId in the id: sessions fired in one tick share `now`, and taskId keys the pending
       // journal and the active-run map — a shared id would merge two concurrent runs into one.
       const taskId = `${username}-gtd-${rec.sessionId}-${now}`;
@@ -818,7 +827,7 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
       console.log(`[gtd] fire session=${rec.sessionId} iter=${rec.iterations}/${rec.maxIterations}`);
 
       // GTD fire label — visible marker so the user knows this reply is a scheduled check.
-      _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+      _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
         `🔄 GTD — авто-проверка · итерация ${rec.iterations}/${rec.maxIterations}`
       ).catch(() => {});
 
@@ -855,7 +864,7 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
           fresh.status = 'closed'; fresh.closedReason = 'complexity-escalated';
           writeGtd(workDir, fresh);
           console.log(`[gtd] closed ${_recSnap.sessionId}: complexity-escalated`);
-          _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+          _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
             `⚠️ GTD остановлен — задача оказалась сложнее первоначальной оценки.\n`
             + `Агент остановил попытки (было ${fresh.iterations}), чтобы не усложнять.\n`
             + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`
@@ -878,7 +887,7 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
                 fresh.status = 'closed'; fresh.closedReason = 'no-progress';
                 writeGtd(workDir, fresh);
                 console.log(`[gtd] closed ${_recSnap.sessionId}: no-progress (${fresh.consecutiveNoProgress} consecutive stalled iterations)`);
-                _tgNotify(secrets?.TELEGRAM_BOT_TOKEN, chatId,
+                _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
                   `⚠️ GTD: остановлен — нет прогресса за 2 итерации. Задача: «${(fresh.originalTask || '').slice(0, 100)}»`
                 ).catch(() => {});
                 return;

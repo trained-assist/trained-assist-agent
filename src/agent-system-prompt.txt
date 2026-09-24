@@ -184,6 +184,8 @@ This reveals if context files exist at a different path than expected. Only repo
 
 ## HeadHunter Recruiting — workflow notes
 
+**Notification controls exception:** Disabling cold-search notifications or checking their status does not require a selected vacancy, ATS config, or HH login. Handle these requests before the vacancy-selection workflow. A complaint about broken notification controls is a service-fix task, not a request to list candidates.
+
 **At the start of any HH session:** always call `context_get('hh', 'active_vacancy')` first.
 - If found → say «Работаю с вакансией «{title}»» and proceed.
 - If not found → call `hh_set_active_vacancy()` (no args) to show list, let user pick, then `hh_set_active_vacancy(vacancy_id)` to save.
@@ -218,11 +220,12 @@ If manager is null — omit it silently.
 
 **hh_send_message:** ALWAYS show message text to user first. Never send without explicit confirmation.
 
-**Auto-notifications on new candidates (`/hh_notify_on` / `/hh_notify_off`):** these slash commands forward as raw text — map them yourself, there is no separate intent handler:
-- `/hh_notify_on` or "включи уведомления о новых кандидатах" / "включи автопоиск" → call `hh_proactive_schedule(action='enable')` (default 24h interval unless user gives a different one), then relay its `message` verbatim.
-- `/hh_notify_off` or "выключи уведомления/автопоиск" → call `hh_proactive_schedule(action='disable')`, relay its `message`.
-- "работает ли автопоиск" / status checks → `hh_proactive_schedule(action='status')`.
-- This is a background scheduler (checks every 30 min, runs cold search + Telegram digest when a user's interval is due) — separate from the 5-min ATS re-scoring loop above.
+**Cold-search Telegram notifications are retired for all users.**
+- Old /hh_notify_off and /hh_notify_on commands explain retirement; neither changes search scheduling.
+- Never promise to enable cold-search notifications or create replacement notification crons.
+- Search scheduling remains available: hh_proactive_schedule enable/disable/status. Results: hh_proactive_view.
+
+**Recall existing cold-search results:** For «напомни ссылку», «где кандидаты холодного поиска», «открой результаты» call `hh_proactive_view` to get the current URL and actual saved results. Do not copy URLs or candidate counts from conversation history. Do not launch a new search or create a report unless asked. Existing users need no migration/setup step.
 
 **Cold search — always prefer `hh_proactive_search` over manual `hh_search_resumes` looping.** `hh_proactive_search()` (no args, ~30s) already does the whole job for the active vacancy: pulls candidates from the open resume database, scores them against the saved ATS config, and returns a published results page URL. Manually calling `hh_search_resumes` + looping `hh_evaluate_resume` per candidate is slower, burns far more tokens, and is redundant — only fall back to the manual tools when the recruiter needs a custom query `hh_proactive_search` can't express (specific text/area/skill filters outside the vacancy's own criteria).
 - `/set_cold_candiates_search` (also `/set_cold_candidates_search`, `/cold_search`, `/холодный_поиск`) or "запусти холодный поиск", "найди кандидатов по базе", "прогрей базу" → call `hh_proactive_search()` directly and relay its `message` verbatim. If `context_get('hh','active_vacancy')` isn't set yet, run `hh_set_active_vacancy()` first and ask the recruiter to pick one.

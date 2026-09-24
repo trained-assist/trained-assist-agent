@@ -12,7 +12,7 @@
  *   2. `claude` binary → shell script that outputs our reply JSON
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -156,6 +156,8 @@ let origTgUrl;
 let testTokensRoot;
 let testDataRoot;
 let origDataRoot;
+let origZerocredsUrl;
+let origZerocredsAdmin;
 
 beforeAll(async () => {
   await startTgServer();
@@ -172,6 +174,15 @@ beforeAll(async () => {
   process.env.AGENT_TOKENS_ROOT = testTokensRoot;     // isolate from real ~/agent-tokens/
   process.env.TEST_MODE = '1'; // retry-policy backoff → ms instead of 30s/3min/10min (see src/retry-policy.js)
 
+  // Never let a "подключи X" quick answer create a REAL ZeroCreds session against
+  // production. The ZeroCreds destination preflight would then POST the production
+  // /tokens for this testuser — the duplicate-flood incident of 2026-09-24. Force the
+  // legacy, fully-local connect-link path instead.
+  origZerocredsUrl = process.env.ZEROCREDS_URL;
+  origZerocredsAdmin = process.env.ZEROCREDS_ADMIN_TOKEN;
+  process.env.ZEROCREDS_URL = '';
+  process.env.ZEROCREDS_ADMIN_TOKEN = '';
+
   const mod = require('../src/runner');
   runTask = mod.runTask;
   sessionStore = require('../src/session-store.js');
@@ -182,6 +193,8 @@ afterAll(async () => {
   delete process.env.CLAUDE_BIN;
   delete process.env.AGENT_TOKENS_ROOT;
   delete process.env.TEST_MODE;
+  if (origZerocredsUrl === undefined) delete process.env.ZEROCREDS_URL; else process.env.ZEROCREDS_URL = origZerocredsUrl;
+  if (origZerocredsAdmin === undefined) delete process.env.ZEROCREDS_ADMIN_TOKEN; else process.env.ZEROCREDS_ADMIN_TOKEN = origZerocredsAdmin;
   if (origDataRoot === undefined) delete process.env.AGENT_DATA_DIR;
   else process.env.AGENT_DATA_DIR = origDataRoot;
   rmSync(testDataRoot, { recursive: true, force: true });
@@ -1058,4 +1071,83 @@ describe('terminal answer delivery', () => {
     });
   }
 
+});
+
+
+describe('Completed answers do not authorize speculative continuation', () => {
+  it('does not ask an optimistic LLM to schedule more paid work', { timeout: 15000 }, async () => {
+    setupFakeClaude('Задеплоил и проверил. Ложная кнопка продолжения пока остаётся отдельной неисправленной проблемой.');
+    const requests = [];
+    const originalFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+      if (!String(url).startsWith('https://openrouter.ai/')) return originalFetch(url, options);
+      requests.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+        plan: false, menu: false, incomplete: true, auto_continue: true, reason: 'still_working',
+      }) } }] }) };
+    });
+    try {
+      await runTask({ taskId: `terminal-${Date.now()}`, user: makeUser(), task: 'Исправь обещание запуска',
+        forceClaude: true, mode: 'deep', secrets: { BOT_TOKEN: 'fake:token', OPENROUTER_API_KEY: 'fake' } });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(tgTexts().join(' ')).toContain('Задеплоил и проверил');
+      expect(tgTexts().join(' ')).not.toContain('Продолжу через');
+      expect(requests.some(r => JSON.stringify(r).includes('auto_continue'))).toBe(false);
+      expect(existsSync(join(testDataRoot, 'soft-continuations', `${testUsername}.json`))).toBe(false);
+    } finally { spy.mockRestore(); }
+  });
+});
+
+describe('Originating bot delivery isolation', () => {
+  it('routes status, quick and final replies through recruiter credentials, preserving classic replies', { timeout: 20000 }, async () => {
+    const secrets = { BOT_TOKEN: 'classic:token', RECRUITER_BOT_TOKEN: 'recruiter:token' };
+    for (const [audience, task, token] of [
+      ['recruiter', 'сделай задачу', 'recruiter:token'],
+      ['recruiter', '/ping', 'recruiter:token'],
+      ['default', '/ping', 'classic:token'],
+    ]) {
+      tgLog = [];
+      setupFakeClaude('Ответ 453918');
+      await runTask({ taskId: `route-${audience}-${Date.now()}`, user: { ...makeUser(928311457), audience },
+        task, forceNew: true, mode: 'deep', initialMsgId: 25, secrets });
+      const sent = tgSent();
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.every(call => call.url.startsWith(`/bot${token}/`))).toBe(true);
+      if (task !== '/ping') {
+        expect(sent.some(call => call.body.text.includes('Начинаю работу'))).toBe(true);
+        expect(sent.some(call => call.body.text.includes('453918'))).toBe(true);
+      }
+    }
+    expect(secrets.BOT_TOKEN).toBe('classic:token');
+  });
+});
+
+
+describe('GTD footer is not an assistant menu', () => {
+  it('keeps service controls out of both classifiers and produces no recursive menu', { timeout: 15000 }, async () => {
+    const user = makeUser();
+    const gtd = require('../src/gtd-controller');
+    gtd.writeGtd(user.workDir, { sessionId: 'other-open-checklist', status: 'open' });
+    const answer = 'Исправил и проверил: уведомления выключены, автопоиск продолжает работать. Все обязательные проверки успешно завершились.';
+    setupFakeClaude(answer);
+    const inputs = [];
+    const originalFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+      if (!String(url).startsWith('https://openrouter.ai/')) return originalFetch(url, options);
+      const input = JSON.parse(options.body).messages.find(m => m.role === 'user').content;
+      inputs.push(input);
+      const footer = input.includes('/checklist_turn_off');
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+        plan: false, menu: footer, labels: ['Чеклист активен', 'Отключить чеклист'],
+      }) } }] }) };
+    });
+    try {
+      await runTask({ taskId: `footer-${Date.now()}`, user, task: 'Исправь уведомления',
+        forceClaude: true, mode: 'deep', secrets: { BOT_TOKEN: 'fake:token', OPENROUTER_API_KEY: 'fake' } });
+      expect(inputs.filter(t => t === answer).length).toBe(2);
+      expect(inputs.every(t => !t.includes('/checklist_turn_off'))).toBe(true);
+      expect(tgTexts().at(-1)).toContain('/checklist_turn_off');
+      expect(tgSent().at(-1).body.reply_markup).toEqual({ inline_keyboard: [] });
+    } finally { spy.mockRestore(); gtd.clearGtd(user.workDir, 'other-open-checklist'); }
+  });
 });
