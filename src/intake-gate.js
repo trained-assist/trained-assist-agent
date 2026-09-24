@@ -1,5 +1,13 @@
 // Completeness is permission for delayed automatic launch, never immediate launch.
 // The gateway owns the three-minute quiet period. Unknown/error means hold.
+//
+// The model MUST be a fast NON-reasoning instruct model that answers with the
+// single label token. A reasoning model (the previous `z-ai/glm-5.3-flash`)
+// emits its trace into `reasoning` and leaves `content` null under a tiny
+// max_tokens, so every verdict silently defaulted to `insufficient` — turning
+// the auto-launch gate into a permanent dead-end ("text doesn't launch").
+// Configurable so a model swap never requires a code change again.
+const GATE_MODEL = process.env.INTAKE_GATE_MODEL || 'deepseek/deepseek-chat';
 async function checkCompleteness(text, openrouterKey, { fetchImpl = fetch } = {}) {
   const trimmed = (text || '').trim();
   const hold = { level: 'insufficient', complete: false };
@@ -32,8 +40,8 @@ ${trimmed.length <= 6000 ? trimmed : trimmed.slice(0, 3000) + '\n[середин
       'Authorization': `Bearer ${openrouterKey}`,
     },
     body: JSON.stringify({
-      model: 'z-ai/glm-5.3-flash',
-      max_tokens: 8,
+      model: GATE_MODEL,
+      max_tokens: 16,
       messages: [{ role: 'user', content: prompt }],
     }),
     signal: AbortSignal.timeout(8000),
@@ -43,8 +51,12 @@ ${trimmed.length <= 6000 ? trimmed : trimmed.slice(0, 3000) + '\n[середин
     throw new Error(`OpenRouter API ${res.status}: ${errBody.slice(0, 300)}`);
   }
   const data = await res.json();
-  const answer = (data.choices?.[0]?.message?.content || '').toLowerCase().trim();
-  const level = ['clear', 'likely', 'insufficient'].includes(answer) ? answer : 'insufficient';
+  // Robust parse: some models emit stray whitespace/punctuation or a leading
+  // "Ответ:" — match the label token anywhere rather than requiring an exact
+  // one-word body (which made a chatty-but-correct model silently hold).
+  const answer = (data.choices?.[0]?.message?.content || '').toLowerCase();
+  const match = answer.match(/\b(clear|likely|insufficient)\b/);
+  const level = match ? match[1] : 'insufficient';
   return { level, complete: level !== 'insufficient' };
 }
 
