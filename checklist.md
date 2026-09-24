@@ -121,6 +121,6 @@ Goal: ZeroCreds preflight detection — the real root cause of the 2026-09-24 du
 
 Goal: Ownership-check `POST /tasks/:taskId/stop` (#1303) — a taskId alone must no longer let a shared-AGENT_SECRET gateway stop another profile's/bot's task; caller must name the owner (username + audience, chatId when applicable), mismatch -> 403.
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/PLACEHOLDER
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1321
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live (POST /tasks/:taskId/stop with a foreign owner returns 403, own owner stops)
