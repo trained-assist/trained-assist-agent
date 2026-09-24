@@ -62,9 +62,21 @@ trap on_deploy_error ERR
 
 # Dependencies: only reinstall when they actually changed. Staged in a side directory so a
 # network/npm failure never leaves the live node_modules half-deleted.
+#
+# The lockfile-unchanged fast path used to trust node_modules on disk unconditionally — but
+# node_modules can go stale/broken for reasons the lockfile diff can't see (a previous deploy's
+# npm ci left it partial, disk issue, manual meddling), and an unverified "keeping node_modules"
+# then ships a service that MODULE_NOT_FOUNDs on every boot. Concrete incident: 2026-09-23,
+# node_modules/better-sqlite3 went missing on disk with package.json/package-lock.json fully
+# unchanged — three deploys in a row trusted the stale node_modules, each shipped a crash-looping
+# service, and each deploy's own `systemctl reset-failed` re-armed systemd's StartLimitBurst fuse
+# before it could trip and alert the operator — ~10 minutes of the bot silently unresponsive.
+# `npm ls` is a fast (~1s), no-network, no-mutation read of the dependency tree — cheap enough to
+# run on every deploy as a trust-but-verify check on the skip decision.
 if [ -d "$REPO_DIR/node_modules" ] && [ -n "$PREV_COMMIT" ] &&
-   git -C "$REPO_DIR" diff --quiet "$PREV_COMMIT" HEAD -- package.json package-lock.json; then
-  echo "==> package.json / package-lock.json unchanged — keeping node_modules"
+   git -C "$REPO_DIR" diff --quiet "$PREV_COMMIT" HEAD -- package.json package-lock.json &&
+   npm ls --prefix "$REPO_DIR" --omit=dev --depth=0 >/dev/null 2>&1; then
+  echo "==> package.json / package-lock.json unchanged and node_modules verified intact — keeping it"
 else
   echo "==> Preparing dependencies in an isolated directory..."
   DEPS_STAGE=$(mktemp -d "$REPO_DIR/../.agent-deps.XXXXXX")
