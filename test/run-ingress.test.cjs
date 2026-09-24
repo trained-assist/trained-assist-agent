@@ -12,7 +12,7 @@ function fixture(t) {
  const sandbox={deliverySecrets:require('../src/bot-delivery').deliverySecrets,fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
   isValidProjectId:()=>true,trackChat:()=>{},getPendingTasks:()=>[...pending.values()],atomicJson,profiles,
   readBody:async req=>JSON.stringify(req.body),json:(res,status,data)=>Object.assign(res,{status,data}),
-  runTask:opts=>{pending.set(opts.taskId,opts);runs.push(opts);return Promise.resolve();},
+  runTask:opts=>{pending.set(opts.taskId,{...opts,audience:opts.user.audience});runs.push(opts);return Promise.resolve();},
  };
  vm.createContext(sandbox);vm.runInContext(`async function ingress(req,res) {const url={pathname:'/run'};${source.slice(start,end)}}`,sandbox);
  const send=async(body={})=>{const res={};await sandbox.ingress({method:'POST',body:{userId:42,username:'alice',task:'work',requestId:'request-1',...body}},res);return res;};
