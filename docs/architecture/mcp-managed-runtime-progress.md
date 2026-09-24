@@ -12,6 +12,9 @@ Implemented in this branch:
   supersedes the earlier proposal to build persistent first-party consent UI.
 - Conservative startup cleanup of abandoned owned execution copies preserves
   live child process groups and ambiguous/unrecorded ownership.
+- Atomic runtime generation reload/rollback: admitted calls retain their registry,
+  policy and transport; invalid candidates preserve the active generation.
+  Gateway checks provider/revision/digest again after approval awaits.
 - Runtime composition factory and per-attempt private engine configs/grants.
   Adapter restarts receive a distinct request identity. Release revokes grants.
   Codex/OpenCode translations tested; optional isolated OpenCode output directory.
@@ -39,10 +42,10 @@ Required before PR2 can ship:
 3. Replace legacy HH branches in mcp-action/browser/server capabilities/meta tools.
    Prepare approved exact-SHA HH artifact and explicit profile eligibility before
    rollout: an empty config must not silently remove existing users' HH tools.
-   Refresh source configuration atomically for new calls without disrupting leases.
-5. Real HH/main-bot/second-bot/restart/rollback E2E plus exact-head CI/staging in
+   Wire the tested atomic runtime reload into approved config activation.
+4. Real HH/main-bot/second-bot/restart/rollback E2E plus exact-head CI/staging in
    core and gateway. Gateway must ship after core; no live gateway deploy yet.
-6. PR3 Freelance and PR4 domain surface remain untouched. /domain still absent
+5. PR3 Freelance and PR4 domain surface remain untouched. /domain still absent
    from current main; #1220 dependency must be finished before PR4.
 
 Checks before final checkpoint: core full npm test 1144 passed + one existing

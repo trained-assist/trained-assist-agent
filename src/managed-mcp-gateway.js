@@ -51,7 +51,8 @@ function createManagedMcpGateway({ sources, registry, invokeAction, validateScop
     const trusted = { version: 1, action: params.name, arguments: args, profileId: grant.profileId,
       projectId: grant.projectId, trigger: 'user', origin: 'mcp', channel: 'tool:' + params.name, idempotencyKey };
     const approved = await approvalFor({ ...grant, action: params.name, arguments: args, idempotencyKey });
-    const result = await invokeAction(trusted, { approved: approved === true });
+    const result = await invokeAction(trusted, { approved: approved === true, expectedProviderId: grant.providerId,
+      expectedRevision: source.revision, expectedDigest: source.artifactDigest });
     if (result.status !== 'succeeded') return { isError: true, content: [{ type: 'text', text: JSON.stringify(result.error) }] };
     const output = result.output;
     return output && Array.isArray(output.content) ? output

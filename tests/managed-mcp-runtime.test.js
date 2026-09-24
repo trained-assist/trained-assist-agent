@@ -219,6 +219,45 @@ describe('approved MCP transport and managed policy', () => {
       await expect(requestCore(rpc)).rejects.toMatchObject({ code: 'FORBIDDEN' });
     } finally { await runtime.close(); }
   });
+  it('atomically reloads sources while admitted calls retain their approved generation', async () => {
+    const s = setup({ repository: 'trained-assist/fixture' });
+    const config = { version: 1, sources: s.sources.list() };
+    let unblock, entered;
+    const ready = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { unblock = resolve; });
+    let pause = true;
+    const runtime = await createManagedMcpRuntime({ config, root: s.root,
+      databasePath: path.join(s.root, 'reload.db'), executionRoot: path.join(s.root, 'reload-leases'),
+      socketRoot: path.join(s.root, 'reload-sockets'), validateScope: () => true, validateSession: () => true,
+      resolveContext: () => ({ workDir: s.root, base: {}, capabilities: {} }),
+      readiness: async () => { if (pause) { entered(); await gate; } return true; } });
+    try {
+      const binding = await runtime.bindSession({ profileId: 'alice', sessionId: 'reload-session' });
+      const env = binding.mcpServers['fixture-skills'].env;
+      const rpc = request => requestCore({ socketPath: env.MANAGED_MCP_SOCKET, token: env.MANAGED_MCP_GRANT, request });
+      const marker = path.join(s.root, 'reload-marker');
+      const call = { version: 1, profileId: 'alice', projectId: null, action: 'fixture_write', arguments: { marker }, trigger: 'user', idempotencyKey: 'before-reload' };
+      const active = runtime.invokeAction(call);
+      await ready;
+      const disabled = structuredClone(config); disabled.sources[0].enabled = false;
+      runtime.reload(disabled);
+      pause = false; unblock();
+      expect((await active).status).toBe('succeeded');
+      await expect(runtime.invokeAction({ ...call, idempotencyKey: 'after-reload' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      expect((await rpc({ jsonrpc: '2.0', id: 20, method: 'tools/list' })).tools).toEqual([]);
+      const invalid = structuredClone(config); invalid.sources.push(structuredClone(invalid.sources[0]));
+      expect(() => runtime.reload(invalid)).toThrow('Invalid managed source generation');
+      expect(runtime.sources.get('fixture').enabled).toBe(false);
+      runtime.reload(config);
+      expect((await rpc({ jsonrpc: '2.0', id: 21, method: 'tools/list' })).tools.map(t => t.name)).toContain('fixture_write');
+      expect((await runtime.invokeAction({ ...call, idempotencyKey: 'after-rollback' })).status).toBe('succeeded');
+      await expect(runtime.invokeAction({ ...call, idempotencyKey: 'stale-approval' }, {
+        expectedProviderId: 'fixture', expectedRevision: 'b'.repeat(40), expectedDigest: config.sources[0].artifactDigest,
+      })).rejects.toMatchObject({ code: 'CONFLICT' });
+      expect(fs.readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(2);
+      binding.release();
+    } finally { pause = false; unblock(); await runtime.close(); }
+  });
   it('runs the real stdio adapter through a private socket to invokeAction and a separate approved child', async () => {
     const s = setup(), token = await bind(s.gateway);
     const core = await listenManagedMcp({ gateway: s.gateway, socketRoot: path.join(s.root, 'sockets') });
