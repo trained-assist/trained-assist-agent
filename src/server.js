@@ -3,6 +3,7 @@ const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(r
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { deliverySecrets, taskDelivery } = require('./bot-delivery');
+const { withDedupLock } = require('./request-dedup-lock');
 const { isTaskResumable } = require('./pending-task-resume');
 const { isNonTaskMessage } = require('./resume-hygiene');
 const { recordResume, getResumeStats } = require('./resume-stats');
@@ -1087,18 +1088,21 @@ ${recent || '(пока нет)'}
       return json(res, result.ok ? 200 : 404, result);
     }
 
-    // POST /tasks/stop — kill any running Claude process for a user by username
-    // Body: { username: string }
+    // POST /tasks/stop — kill any running Claude process for a user by username,
+    // scoped to one audience/bot (default 'default' — never "every audience", #1302 §3.2).
+    // Body: { username: string, audience?: string }
     if (req.method === 'POST' && url.pathname === '/tasks/stop') {
       const body = await readBody(req);
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'bad json' }); }
-      const { username } = payload || {};
+      const { username, audience } = payload || {};
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
+      if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience)))
+        return json(res, 400, { error: 'invalid audience' });
       const { killTaskByUsername } = require('./runner');
-      const killed = killTaskByUsername(username);
-      return json(res, 200, { ok: true, killed });
+      const killed = killTaskByUsername(username, audience || null);
+      return json(res, 200, { ok: true, killed, audience: audience || 'default' });
     }
 
     // GET /tasks/running?username=xxx — ground truth for whether a Claude
@@ -1111,8 +1115,13 @@ ${recent || '(пока нет)'}
       const username = url.searchParams.get('username');
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
+      // audience scopes which bot's task this checks — omitted -> 'default' only,
+      // never "any audience" (#1302 §3.2/§2).
+      const audience = url.searchParams.get('audience');
+      if (audience != null && !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))
+        return json(res, 400, { error: 'invalid audience' });
       const { isTaskRunning } = require('./runner');
-      return json(res, 200, { running: isTaskRunning(username) });
+      return json(res, 200, { running: isTaskRunning(username, audience || null), audience: audience || 'default' });
     }
 
     // GET /projects?username=xxx — TYPED project list (projects.js), most-used first
@@ -1267,114 +1276,126 @@ ${recent || '(пока нет)'}
       if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
       // Validate delivery before accepting durable work; never leak replies to the default bot.
       try { deliverySecrets(secrets, audience); }
-      catch (e) { return json(res, audience === 'recruiter' ? 503 : 400, { error: e.message }); }
+      catch (e) { return json(res, /not configured/.test(e.message) ? 503 : 400, { error: e.message }); }
       const requestOwner = audience && audience !== 'default' ? `${username}-${audience}` : username;
-      const taskId = requestId ? `${requestOwner}-${requestId}` : `${requestOwner}-${require('crypto').randomUUID()}`;
-      const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
-      // Preserve ACK-loss deduplication for requests accepted before bot-scoped IDs.
-      // Legacy receipts have no audience: conservatively acknowledge rather than replay work.
-      if (requestId && audience && audience !== 'default') {
-        const legacyId = `${username}-${requestId}`;
-        const legacyReceipt = path.join(path.dirname(receipt), `${legacyId}.json`);
-        if ((fs.existsSync(legacyReceipt) && !JSON.parse(fs.readFileSync(legacyReceipt, 'utf8')).audience) || getPendingTasks().some(p => p.taskId === legacyId && (!p.audience || p.audience === audience))) {
-          return json(res, 202, { taskId: legacyId, requestId, durable: true, duplicate: true });
+      const dedupKey = requestId ? JSON.stringify([audience || 'default', username, String(chatId), requestId]) : null;
+      // Per-key in-process mutex around check -> media -> journal -> receipt (#1302 §3.4):
+      // two concurrent POSTs sharing (audience, username, chatId, requestId) must not both
+      // pass the duplicate-receipt/pending check below before either has written anything.
+      // This serializes only overlapping requests for the SAME key — distinct requests never
+      // contend. It protects in-process concurrency only; a crash mid-sequence is still
+      // recovered by the existing receipt/pending-journal records (durable dedup), not by
+      // this lock — no separate admission DB is introduced.
+      const admit = async () => {
+        const taskId = requestId ? `${requestOwner}-${requestId}` : `${requestOwner}-${require('crypto').randomUUID()}`;
+        const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
+        // Preserve ACK-loss deduplication for requests accepted before bot-scoped IDs.
+        // Legacy receipts have no audience: conservatively acknowledge rather than replay work.
+        if (requestId && audience && audience !== 'default') {
+          const legacyId = `${username}-${requestId}`;
+          const legacyReceipt = path.join(path.dirname(receipt), `${legacyId}.json`);
+          if ((fs.existsSync(legacyReceipt) && !JSON.parse(fs.readFileSync(legacyReceipt, 'utf8')).audience) || getPendingTasks().some(p => p.taskId === legacyId && (!p.audience || p.audience === audience))) {
+            return json(res, 202, { taskId: legacyId, requestId, durable: true, duplicate: true });
+          }
         }
-      }
-      if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
-        return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
-      }
-      const workDir = path.join(BASE_USERS_DIR, username);
-      fs.mkdirSync(workDir, { recursive: true });
-
-      // cwd defaults to workDir; the runner's project-binding block resolves the real
-      // cwd from the bound project (projectId passed here, or the session's stored one).
-      const cwd = workDir;
-
-      // Owner canonical name = PROFILE (never «user»; see docs/PROFILE-RENAME-SPEC.md).
-      // `profileId` is the owner identifier going forward; the gateway may send it
-      // explicitly, but until it does we alias the existing `username` field (same
-      // string value) so both repos migrate independently — no flag-day break.
-      const profileId = payload.profileId ?? username;
-      // audience scopes sessions/projects per bot/surface sharing this username+chatId
-      // (see AUDIENCE-SCOPE-SPEC) — e.g. the recruiter bot passes 'recruiter' so its
-      // sessions never mix with the general-purpose bot's. Defaults to 'default', which
-      // is byte-for-byte identical to pre-audience behavior.
-      const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
-      trackChat(chatId);
-
-      // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
-      // Code whose own Read tool hands images to the model natively — so a photo attachment
-      // is otherwise invisible to that engine (just an opaque path in the note below). Run it
-      // through vision OCR up front and fold the extracted text into the note. Claude/Codex are
-      // left alone: no known gap, and no point paying for a call the model doesn't need.
-      const runEngine = profiles.getEngine(workDir, chatId);
-      async function buildFileNote(filePath, mimeType) {
-        const typeNote = mimeType ? ` (${mimeType})` : '';
-        let note = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
-        if (runEngine === 'opencode' && mimeType && mimeType.startsWith('image/') && secrets.OPENROUTER_API_KEY) {
-          const vision = await mediaVision.extractImageText({ filePath, mimeType, openrouterKey: secrets.OPENROUTER_API_KEY });
-          if (vision.ok) note += `\n[Распознано на изображении:\n${vision.text}]`;
+        if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
+          return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
         }
-        return note;
-      }
+        const workDir = path.join(BASE_USERS_DIR, username);
+        fs.mkdirSync(workDir, { recursive: true });
 
-      // Save attached file (base64) to workDir and prepend path info to the task.
-      let effectiveTask = task || '';
-      if (fileBase64 && fileName) {
-        const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-        const uploadsDir = path.join(workDir, 'media', 'intake');
-        fs.mkdirSync(uploadsDir, { recursive: true });
-        const filePath = path.join(uploadsDir, `${require('crypto').randomUUID()}-${safeName}`);
-        try {
-          const fd = fs.openSync(filePath, 'wx', 0o600);
-          try { fs.writeFileSync(fd, Buffer.from(fileBase64, 'base64')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-          const dirFd = fs.openSync(uploadsDir, 'r');
-          try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-          const fileNote = await buildFileNote(filePath, fileMimeType);
-          effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
-        } catch (e) {
-          console.error('[/run] file save error:', e.message);
-          return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
+        // cwd defaults to workDir; the runner's project-binding block resolves the real
+        // cwd from the bound project (projectId passed here, or the session's stored one).
+        const cwd = workDir;
+
+        // Owner canonical name = PROFILE (never «user»; see docs/PROFILE-RENAME-SPEC.md).
+        // `profileId` is the owner identifier going forward; the gateway may send it
+        // explicitly, but until it does we alias the existing `username` field (same
+        // string value) so both repos migrate independently — no flag-day break.
+        const profileId = payload.profileId ?? username;
+        // audience scopes sessions/projects per bot/surface sharing this username+chatId
+        // (see AUDIENCE-SCOPE-SPEC) — e.g. the recruiter bot passes 'recruiter' so its
+        // sessions never mix with the general-purpose bot's. Defaults to 'default', which
+        // is byte-for-byte identical to pre-audience behavior.
+        const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
+        trackChat(chatId);
+
+        // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
+        // Code whose own Read tool hands images to the model natively — so a photo attachment
+        // is otherwise invisible to that engine (just an opaque path in the note below). Run it
+        // through vision OCR up front and fold the extracted text into the note. Claude/Codex are
+        // left alone: no known gap, and no point paying for a call the model doesn't need.
+        const runEngine = profiles.getEngine(workDir, chatId);
+        async function buildFileNote(filePath, mimeType) {
+          const typeNote = mimeType ? ` (${mimeType})` : '';
+          let note = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+          if (runEngine === 'opencode' && mimeType && mimeType.startsWith('image/') && secrets.OPENROUTER_API_KEY) {
+            const vision = await mediaVision.extractImageText({ filePath, mimeType, openrouterKey: secrets.OPENROUTER_API_KEY });
+            if (vision.ok) note += `\n[Распознано на изображении:\n${vision.text}]`;
+          }
+          return note;
         }
-      }
 
-      // Copy durably-stored intake files (photos/voice/docs referenced by id,
-      // written via PUT /intake-files) into the task's media dir — same
-      // path/notice as the fileBase64 branch, just sourced from disk not the body.
-      if (Array.isArray(fileRefs)) {
-        const uploadsDir = path.join(workDir, 'media', 'intake');
-        for (const ref of fileRefs) {
-          if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) return json(res, 400, { error: 'invalid fileRef' });
-          const src = path.join(BASE_USERS_DIR, username, 'media', 'intake-store', ref.id, 'data');
+        // Save attached file (base64) to workDir and prepend path info to the task.
+        let effectiveTask = task || '';
+        if (fileBase64 && fileName) {
+          const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+          const uploadsDir = path.join(workDir, 'media', 'intake');
+          fs.mkdirSync(uploadsDir, { recursive: true });
+          const filePath = path.join(uploadsDir, `${require('crypto').randomUUID()}-${safeName}`);
           try {
-            const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-            fs.mkdirSync(uploadsDir, { recursive: true });
-            const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
-            if (ref.storage === 'r2') {
-              await require('./r2-media').materializeR2({ ref, username, destination: filePath,
-                gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
-            } else {
-              if (ref.storage) throw new Error('Unknown media storage');
-              fs.copyFileSync(src, filePath);
-            }
-            const fd = fs.openSync(filePath, 'r');
-            try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+            const fd = fs.openSync(filePath, 'wx', 0o600);
+            try { fs.writeFileSync(fd, Buffer.from(fileBase64, 'base64')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
             const dirFd = fs.openSync(uploadsDir, 'r');
             try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-            const fileNote = await buildFileNote(filePath, ref.mime);
+            const fileNote = await buildFileNote(filePath, fileMimeType);
             effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
           } catch (e) {
-            console.error('[/run] fileRef copy error:', e.message);
+            console.error('[/run] file save error:', e.message);
             return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
           }
         }
-      }
 
-      // runTask journals synchronously, before any await or acknowledgement.
-      const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
-      completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
-      if (requestId) atomicJson(receipt, { taskId, audience: audience || 'default', acceptedAt: Date.now() });
-      json(res, 202, { taskId, requestId, durable: true });
+        // Copy durably-stored intake files (photos/voice/docs referenced by id,
+        // written via PUT /intake-files) into the task's media dir — same
+        // path/notice as the fileBase64 branch, just sourced from disk not the body.
+        if (Array.isArray(fileRefs)) {
+          const uploadsDir = path.join(workDir, 'media', 'intake');
+          for (const ref of fileRefs) {
+            if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) return json(res, 400, { error: 'invalid fileRef' });
+            const src = path.join(BASE_USERS_DIR, username, 'media', 'intake-store', ref.id, 'data');
+            try {
+              const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+              fs.mkdirSync(uploadsDir, { recursive: true });
+              const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
+              if (ref.storage === 'r2') {
+                await require('./r2-media').materializeR2({ ref, username, destination: filePath,
+                  gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
+              } else {
+                if (ref.storage) throw new Error('Unknown media storage');
+                fs.copyFileSync(src, filePath);
+              }
+              const fd = fs.openSync(filePath, 'r');
+              try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+              const dirFd = fs.openSync(uploadsDir, 'r');
+              try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+              const fileNote = await buildFileNote(filePath, ref.mime);
+              effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
+            } catch (e) {
+              console.error('[/run] fileRef copy error:', e.message);
+              return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
+            }
+          }
+        }
+
+        // runTask journals synchronously, before any await or acknowledgement.
+        const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
+        completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
+        if (requestId) atomicJson(receipt, { taskId, audience: audience || 'default', acceptedAt: Date.now() });
+        json(res, 202, { taskId, requestId, durable: true });
+      };
+      if (dedupKey) await withDedupLock(dedupKey, admit);
+      else await admit();
       return;
     }
 
