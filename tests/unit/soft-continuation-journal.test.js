@@ -1,85 +1,58 @@
-// Unit tests for the soft-continuation disk journal (src/runner/index.js).
-//
-// Root cause under test: the "Продолжу через ~3 мин" auto-continue used to live
-// only in an in-memory setTimeout — a server restart during that window silently
-// dropped it, with no error and no trace. These tests cover the disk journal that
-// now backs it, so a restart can always re-derive what was pending.
-
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { createRequire } from 'module';
-
+// Replaces journal round-trip tests: the owner retired speculative continuation.
+// Startup must remove stale promises, never re-arm either future or overdue work.
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-
-let tmpDir;
-let prevAgentDataDir;
-
-function freshRunner() {
-  const key = require.resolve('../../src/runner/index.js');
-  if (require.cache[key]) delete require.cache[key];
-  return require('../../src/runner/index.js');
+const { retireSoftContinuations } = require('../../src/runner/retire-soft-continuations');
+let dir;
+afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); });
+function fixture(dueAt = Date.now() + 180000) {
+  dir = mkdtempSync(join(tmpdir(), 'retire-cont-'));
+  mkdirSync(join(dir, 'soft-continuations'));
+  const file = join(dir, 'soft-continuations', 'alice.json');
+  const record = { username: 'alice', chatId: 123, msgId: 456, finalText: 'Результат сохранён.', dueAt };
+  writeFileSync(file, JSON.stringify(record));
+  return { file, record };
 }
-
-beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'soft-cont-test-'));
-  prevAgentDataDir = process.env.AGENT_DATA_DIR;
-  process.env.AGENT_DATA_DIR = tmpDir;
-});
-
-afterEach(() => {
-  if (prevAgentDataDir === undefined) delete process.env.AGENT_DATA_DIR;
-  else process.env.AGENT_DATA_DIR = prevAgentDataDir;
-  rmSync(tmpDir, { recursive: true, force: true });
-});
-
-describe('soft-continuation journal', () => {
-  it('round-trips a record through save → list → clear', () => {
-    const R = freshRunner();
-    const { saveSoftContinuationFile, listSoftContinuations, clearSoftContinuationFile, SOFT_CONT_DIR } = R._softCont;
-
-    expect(SOFT_CONT_DIR.startsWith(tmpDir)).toBe(true);
-    expect(listSoftContinuations()).toEqual([]);
-
-    const record = { username: 'alice', chatId: '1', msgId: 2, sessionId: 's1', dueAt: Date.now() + 180000 };
-    saveSoftContinuationFile('alice', record);
-    expect(existsSync(join(SOFT_CONT_DIR, 'alice.json'))).toBe(true);
-
-    const listed = listSoftContinuations();
-    expect(listed).toHaveLength(1);
-    expect(listed[0]).toMatchObject({ username: 'alice', sessionId: 's1' });
-
-    clearSoftContinuationFile('alice');
-    expect(listSoftContinuations()).toEqual([]);
+describe('retire legacy speculative continuation', () => {
+  it.each([180000, -180000])('retires %i ms deadline without scheduling; repeated boot is idempotent', async offset => {
+    const { file, record } = fixture(Date.now() + offset);
+    const editMessage = vi.fn().mockResolvedValue({});
+    const timer = vi.spyOn(globalThis, 'setTimeout');
+    await retireSoftContinuations({ dataDir: dir, editMessage });
+    expect(editMessage).toHaveBeenCalledWith(record, expect.stringContaining('Автопродолжение по предположению отключено'));
+    expect(editMessage.mock.calls[0][1]).toContain(record.finalText);
+    expect(editMessage.mock.calls[0][1]).not.toContain('Продолжу через');
+    expect(timer).not.toHaveBeenCalled();
+    expect(existsSync(file)).toBe(false);
+    expect(existsSync(`${file}.retired`)).toBe(true);
+    await retireSoftContinuations({ dataDir: dir, editMessage });
+    expect(editMessage).toHaveBeenCalledTimes(1);
   });
-
-  it('clearing a record that was never written does not throw', () => {
-    const R = freshRunner();
-    expect(() => R._softCont.clearSoftContinuationFile('nobody')).not.toThrow();
+  it('retains failed edit for next boot, without re-arming any work', async () => {
+    const { file } = fixture();
+    const editMessage = vi.fn().mockRejectedValueOnce(new Error('network')).mockResolvedValue({});
+    await retireSoftContinuations({ dataDir: dir, editMessage, warn: vi.fn() });
+    expect(existsSync(file)).toBe(true);
+    await retireSoftContinuations({ dataDir: dir, editMessage });
+    expect(existsSync(file)).toBe(false);
+    expect(editMessage).toHaveBeenCalledTimes(2);
   });
-
-  it('survives a fresh module load (simulated process restart)', () => {
-    const R1 = freshRunner();
-    R1._softCont.saveSoftContinuationFile('bob', { username: 'bob', dueAt: Date.now() - 1000 });
-
-    // Re-require with a clean module cache — this is what a real process
-    // restart does: all in-memory state (pendingContinuations Map, timers) is
-    // gone, but anything journaled to disk under AGENT_DATA_DIR is still there.
-    const R2 = freshRunner();
-    const survived = R2._softCont.listSoftContinuations();
-    expect(survived).toHaveLength(1);
-    expect(survived[0].username).toBe('bob');
+  it('treats already-edited Telegram message as success', async () => {
+    const { file } = fixture();
+    await retireSoftContinuations({ dataDir: dir, editMessage: vi.fn().mockRejectedValue(new Error('Bad Request: message is not modified')) });
+    expect(existsSync(`${file}.retired`)).toBe(true);
   });
-
-  it('one malformed JSON file does not abort the whole list — good entries still reconcile', () => {
-    const R = freshRunner();
-    const { saveSoftContinuationFile, listSoftContinuations, SOFT_CONT_DIR } = R._softCont;
-    saveSoftContinuationFile('carol', { username: 'carol', dueAt: Date.now() + 60000 });
-    writeFileSync(join(SOFT_CONT_DIR, 'dave.json'), '{not valid json truncated mid-write');
-
-    const listed = listSoftContinuations();
-    expect(listed).toHaveLength(1);
-    expect(listed[0].username).toBe('carol');
+  it('isolates corrupt records so valid notices still get retired', async () => {
+    fixture();
+    writeFileSync(join(dir, 'soft-continuations', 'broken.json'), '{');
+    const editMessage = vi.fn();
+    const warn = vi.fn();
+    await retireSoftContinuations({ dataDir: dir, editMessage, warn });
+    expect(editMessage).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });
