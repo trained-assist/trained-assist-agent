@@ -1194,6 +1194,8 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
+  // Engineering complaints containing quoted recruiter commands are full tasks.
+  if (require('../domains/hh/intents').HH_SERVICE_CHANGE_INTENT.test(task) && /hh|хх|отклик|кандидат/i.test(task)) return null;
   // Handle complete credential-disconnect requests before broad connect/status patterns.
   if (userId && HH_DISCONNECT_INTENT.test(task)) {
     const revoked = revokeService(userId, 'hh');
@@ -1452,6 +1454,8 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   }
 
   if (userId && workDir && hhConnected) {
+    // Product changes and quoted broken bot replies must reach the full agent.
+    if (require('../domains/hh/intents').HH_SERVICE_CHANGE_INTENT.test(task)) return null;
     const hhIntents = [HH_STATUS_INTENT, HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT,
       HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT,
       HH_WHERE_PROMPT_INTENT, HH_SHOW_ATS_CONFIG_INTENT, HH_STYLE_INTENT,

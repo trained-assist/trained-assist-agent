@@ -141,7 +141,7 @@ describe('hhFunnelStats', () => {
     const result = await hhFunnelStats(TEST_UID, workDir);
 
     expect(result).toContain('Backend Developer');
-    expect(result).toContain('Новых:');
+    expect(result).toContain('Неразобранных:');
     expect(result).toContain('В работе:');
     expect(result).toContain('Отклонено:');
   });
@@ -172,7 +172,7 @@ describe('hhNewResponses', () => {
     const result = await hhNewResponses(TEST_UID, workDir);
 
     expect(result).toContain('Backend Developer');
-    expect(result).toContain('новых откликов');
+    expect(result).toContain('неразобранных откликов');
     expect(result).toContain('/hh/review');
     expect(result).toContain('vacancy_id=vac-001');
     // Multi-vacancy step 4/6: never list candidate names in Telegram — link to web instead.
@@ -187,7 +187,7 @@ describe('hhNewResponses', () => {
 
     const { hhNewResponses } = freshModule();
     const result = await hhNewResponses(TEST_UID, workDir);
-    expect(result).toContain('Новых откликов нет');
+    expect(result).toContain('Неразобранных откликов нет');
   });
 
   it('returns prompt to select vacancy when none active', async () => {
