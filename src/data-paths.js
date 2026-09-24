@@ -98,6 +98,13 @@ function engineHealthDbPath() {
   return path.join(SYSTEM_ROOT, 'engine-health', 'state.db');
 }
 
+// Outgoing Telegram TEXT message ids we may later delete (/clean_up_flood) — keyed by
+// bot token prefix + chat. File artifacts (documents/photos) are deliberately never
+// tracked here: cleanup keeps them.
+function sentMessagesDir() {
+  return path.join(SYSTEM_ROOT, 'sent-messages');
+}
+
 function sessionIndexPath(username) {
   return path.join(USERS_ROOT, String(username), 'sessions.json');
 }
@@ -131,4 +138,5 @@ module.exports = {
   tokenPath,
   durableTaskDbPath,
   engineHealthDbPath,
+  sentMessagesDir,
 };

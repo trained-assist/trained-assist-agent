@@ -724,6 +724,25 @@ ${recent || '(пока нет)'}
       return;
     }
 
+    // POST /cleanup-flood — delete the text messages this agent sent to a chat.
+    // Called by the gateway's /clean_up_flood command (which separately deletes the
+    // messages it sent itself). Body: { chatId, audience }. Files/artifacts are never
+    // tracked here, so the cleanup leaves them in place.
+    if (req.method === 'POST' && url.pathname === '/cleanup-flood') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const chatId = body?.chatId;
+      const audience = body?.audience || 'default';
+      if (!Number.isSafeInteger(chatId)) return json(res, 400, { error: 'invalid chatId' });
+      if (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience)) return json(res, 400, { error: 'invalid audience' });
+      let token;
+      try { token = require('./bot-delivery').deliverySecrets(secrets, audience).BOT_TOKEN; }
+      catch (e) { return json(res, 400, { error: e.message }); }
+      if (!token) return json(res, 503, { error: 'no bot token for audience' });
+      const result = await require('./sent-messages').deleteAll(token, chatId);
+      return json(res, 200, { ok: true, ...result });
+    }
+
     // POST /nalog/token-store — receive a nalog.ru token pushed by the RU edge
     // after a Playwright login (initial or post-2FA). The RU edge holds no
     // per-user state of its own; this agent (GCP) is the token's home, since
