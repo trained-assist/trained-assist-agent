@@ -368,8 +368,10 @@ async function handleWeb(req, url, res, ctx) {
     if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
     if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return json(res, 400, { error: 'invalid session id' });
     const { stopSessionFor } = require('../web-routes');
-    stopSessionFor(username, id);
-    return json(res, 200, { ok: true });
+    const stopped = stopSessionFor(username, id);
+    return stopped
+      ? json(res, 200, { ok: true, id })
+      : json(res, 409, { ok: false, error: 'session is not running', id });
   }
 
   // ── POST /web/auth — login, returns httpOnly JWT cookie ──────────────────
