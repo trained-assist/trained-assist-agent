@@ -32,7 +32,8 @@ async function runDueSearches(username, workDir, runSearch, now = Date.now()) {
     try {
       const result = await runSearch(id);
       updateSchedule(username, workDir, id, { last_success: new Date().toISOString(), last_run: at,
-        status: result.new_count ? 'success' : 'zero_new', error: null });
+        status: result.ai_pending_count ? 'partial' : result.new_count ? 'success' : 'zero_new',
+        ai_pending_count: result.ai_pending_count || 0, error: null });
       outcomes.push({ vacancy_id: id, ok: true });
     } catch (error) {
       updateSchedule(username, workDir, id, { status: 'failed', error: error.message });

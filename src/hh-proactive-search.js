@@ -898,7 +898,8 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
     searched_at: now.toISOString(),
     total_collected: allCandidates.size,
     total_after_knockout: scored.length,
-    ai_enriched: Boolean(orKey),
+    ai_enriched: enriched.length > 0 && enriched.every(c => Array.isArray(c.plus_tags)),
+    ai_pending_count: enriched.filter(c => !Array.isArray(c.plus_tags)).length,
     ats_config: atsConfig,
     candidates: markedCandidates,
   };
@@ -930,7 +931,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
     const schedule = loadSchedule(username) || {};
     const notifyThreshold = options.notifyThreshold !== undefined
       ? Number(options.notifyThreshold) || 0
-      : Number(schedule.notify_threshold) || 0;
+      : Number(schedule.vacancies?.[vacancyKey]?.notify_threshold ?? schedule.notify_threshold) || 0;
     const newCandidates = notifyThreshold > 0
       ? allNewCandidates.filter(c => (c.score_pct ?? 0) >= notifyThreshold)
       : allNewCandidates;
@@ -967,6 +968,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
     vacancy_id: vacancyKey,
     vacancy_title: output.vacancy_title,
     ai_enriched: output.ai_enriched,
+    ai_pending_count: output.ai_pending_count,
     new_count: seenInfo.newCount,
     new_ids: Array.from(seenInfo.newIds),
     total_seen: seenInfo.totalSeenAfter,
@@ -978,41 +980,47 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
 // Called by the 5-min background cron so enrichment happens automatically
 // without waiting for the user to open the web page.
 async function scoreUnscoredProactiveCandidates(username, options = {}) {
-  const refreshAccessToken = typeof options.refreshAccessToken === 'function' ? options.refreshAccessToken : null;
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  const proactiveDir = path.join(dataDir, 'hh', String(username), 'proactive');
-  if (!fs.existsSync(proactiveDir)) return 0;
-
-  const files = fs.readdirSync(proactiveDir)
-    .filter(f => f.startsWith('search-results-') && f.endsWith('.json'))
-    .sort().reverse();
-  if (!files.length) return 0;
-
-  const file = path.join(proactiveDir, files[0]);
-  let results;
-  try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return 0; }
-
-  const candidates = results.candidates || [];
-  const unscored = candidates.filter(c => c.ai_pending !== false && !c.plus_tags).slice(0, 30);
-  if (!unscored.length) return 0;
-
-  const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
-  const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
-  const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
-  if (!orKey) return 0;
-
-  const atsConfig = results.ats_config || {};
-  const enriched = await enrichCandidates(unscored, atsConfig, orKey);
-
-  for (const c of enriched) {
-    const idx = candidates.findIndex(x => x.id === c.id);
-    if (idx >= 0) Object.assign(candidates[idx], c);
-  }
-  results.candidates = candidates;
-  mergeSearchCandidatesIntoAll(username, enriched, {}, results.vacancy_id);
-  fs.writeFileSync(file, JSON.stringify(results, null, 2), 'utf8');
-
-  return enriched.filter(c => c.plus_tags).length;
+  let release;
+  try { release = require('./hh-cold-search-lock').acquireSearchLock(username); }
+  catch (error) { if (error.code === 'SEARCH_BUSY') return 0; throw error; }
+  try {
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const dir = path.join(dataDir, 'hh', String(username), 'proactive');
+    const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
+    const keyFile = path.join(tokensBase, String(username), 'openrouter');
+    const key = fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
+    if (!key) return 0;
+    const latest = new Map();
+    for (const name of fs.readdirSync(dir).filter(f => /^search-results-.*\.json$/.test(f))) {
+      const file = path.join(dir, name);
+      let results;
+      try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { continue; }
+      if (!results.vacancy_id) continue;
+      const prior = latest.get(String(results.vacancy_id));
+      if (!prior || Date.parse(results.searched_at) > Date.parse(prior.results.searched_at)) latest.set(String(results.vacancy_id), { file, results });
+    }
+    // Keep the existing total budget of 30 per profile, shared across vacancies.
+    let remaining = 30, completed = 0, vacanciesLeft = latest.size;
+    for (const { file, results } of latest.values()) {
+      if (remaining <= 0) break;
+      const candidates = results.candidates || [];
+      const allowance = Math.ceil(remaining / vacanciesLeft--);
+      const unscored = candidates.filter(c => c.ai_pending !== false && !c.plus_tags).slice(0, allowance);
+      if (!unscored.length) continue;
+      remaining -= unscored.length;
+      const enriched = await enrichCandidates(unscored, results.ats_config || {}, key);
+      for (const candidate of enriched) {
+        const idx = candidates.findIndex(c => c.id === candidate.id);
+        if (idx >= 0) Object.assign(candidates[idx], candidate);
+      }
+      mergeSearchCandidatesIntoAll(username, enriched, {}, results.vacancy_id);
+      const temp = file + '.tmp-' + process.pid;
+      fs.writeFileSync(temp, JSON.stringify(results, null, 2), 'utf8');
+      fs.renameSync(temp, file);
+      completed += enriched.filter(c => c.plus_tags).length;
+    }
+    return completed;
+  } finally { release(); }
 }
 
 // Per-user proactive search schedule config.
