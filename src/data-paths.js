@@ -88,6 +88,12 @@ function durableTaskDbPath() {
   return path.join(SYSTEM_ROOT, 'durable-tasks', 'state.db');
 }
 
+// Engine health (claude|codex|opencode) — server-wide operational state, separate from
+// credentials and failure history (see src/engine-health.js).
+function engineHealthDbPath() {
+  return path.join(SYSTEM_ROOT, 'engine-health', 'state.db');
+}
+
 function sessionIndexPath(username) {
   return path.join(USERS_ROOT, String(username), 'sessions.json');
 }
@@ -120,4 +126,5 @@ module.exports = {
   sessionFilePath,
   tokenPath,
   durableTaskDbPath,
+  engineHealthDbPath,
 };
