@@ -1206,8 +1206,20 @@ ${recent || '(пока нет)'}
         const countByProject = {};
         for (const s of allSess) if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
 
-        const d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience);
+        let d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience);
+        // Pinned chat, but the task is confidently about another project → ask (suggested
+        // first, pinned second) instead of binding silently. Any doubt keeps the pin.
+        if (d.action === 'auto' && d.pinned && taskParam && (process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY)) {
+          try {
+            const match = require('./project-match');
+            const all = projects.listProjects(workDir, audience);
+            const verdict = await match.classifyTaskProject(taskParam, all);
+            d = match.applyMismatch(d, verdict, { allProjects: all });
+            if (d.mismatch) console.log(`[project-decision] pin mismatch: ${d.mismatch.pinned} → ${d.mismatch.suggested} (${d.mismatch.confidence})`);
+          } catch (e) { console.warn('[project-decision] mismatch check:', e.message); }
+        }
         const out = { action: d.action, active: d.active || null, pinned: d.pinned ? d.project.id : null };
+        if (d.mismatch) out.mismatch = d.mismatch;
 
         // Data gap fix: a project's 3-sense summary used to be generated ONLY in the
         // sessions-list intent for the ACTIVE project, so at picker time most projects
