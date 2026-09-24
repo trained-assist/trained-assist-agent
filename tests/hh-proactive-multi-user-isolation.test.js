@@ -142,6 +142,10 @@ describe('proactive HH digest — per-profile isolation under concurrency', () =
     const aliceWorkDir = setUpUserWorkDir(ALICE, 'Менеджер по продажам');
     const bobWorkDir = setUpUserWorkDir(BOB, 'Саппорт');
 
+    // Scheduled digests require explicit opt-in; missing schedules are disabled.
+    for (const user of [ALICE, BOB]) {
+      require('../src/hh-proactive-search').saveSchedule(user.username, { enabled: true, vacancies: { [user.vacancyId]: { enabled: true } } });
+    }
     const notifications = [];
 
     const [aliceResult, bobResult] = await Promise.all([

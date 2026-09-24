@@ -3,7 +3,7 @@ const { EventEmitter } = require('events');
 const { webAuth } = require('./web-auth');
 const { listSessions, getSession, getCurrentSessionId } = require('./session-store');
 const { isSessionRunning, runTask, stopSessionTask } = require('./runner');
-const { userWorkDir } = require('./data-paths');
+const { userWorkDir, SYSTEM_ROOT } = require('./data-paths');
 
 // Per-task SSE emitters: taskId → EventEmitter
 const taskEmitters = new Map();
@@ -11,9 +11,57 @@ const taskEmitters = new Map();
 const PING_INTERVAL_MS = 15_000;
 const USERNAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 const SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
+const REQUEST_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 
 function json(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+}
+
+function webMutationReceiptPath(username, requestId) {
+  return path.join(SYSTEM_ROOT, 'web-mutations', username, `${requestId}.json`);
+}
+
+// Durable claim: create-once with O_EXCL semantics. A duplicate requestId can
+// never start a second agent task, including after process restart.
+function claimWebMutation(username, requestId, meta = {}) {
+  if (!requestId) return { claimed: true, receipt: null };
+  if (!USERNAME_RE.test(username) || !REQUEST_ID_RE.test(requestId)) {
+    return { claimed: false, invalid: true, receipt: null };
+  }
+  const fs = require('fs');
+  const fp = webMutationReceiptPath(username, requestId);
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  const receipt = {
+    requestId, username, state: 'accepted', acceptedAt: Date.now(),
+    kind: meta.kind || null, sessionId: meta.sessionId || null,
+  };
+  try {
+    const fd = fs.openSync(fp, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(receipt, null, 2));
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    return { claimed: true, receipt };
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    try { return { claimed: false, receipt: JSON.parse(fs.readFileSync(fp, 'utf8')) }; }
+    catch { return { claimed: false, receipt: { requestId, username, state: 'accepted' } }; }
+  }
+}
+
+function completeWebMutation(username, requestId, patch = {}) {
+  if (!requestId || !USERNAME_RE.test(username) || !REQUEST_ID_RE.test(requestId)) return;
+  const fs = require('fs');
+  const fp = webMutationReceiptPath(username, requestId);
+  try {
+    const current = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    const next = { ...current, ...patch, updatedAt: Date.now() };
+    const tmp = `${fp}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, fp);
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[web-mutation] receipt update failed:', e.message);
+  }
 }
 
 // Shared session readers — used by both the cookie-authed /web/* routes below
@@ -263,9 +311,9 @@ function prepareWebTaskFiles(username, task, fileRefs) {
   return { task: effectiveTask, fileRefs: normalized };
 }
 
-async function streamWebTask({ req, res, secrets, username, task, sessionId, projectId = null, fileRefs = [] }) {
+async function streamWebTask({ req, res, secrets, username, task, sessionId, projectId = null, fileRefs = [], requestId = null }) {
   const workDir = userWorkDir(username);
-  const taskId = `${username}-web-${Date.now()}`;
+  const taskId = requestId ? `${username}-web-${requestId}` : `${username}-web-${Date.now()}`;
 
   const emitter = new EventEmitter();
   taskEmitters.set(taskId, emitter);
@@ -323,10 +371,15 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId, pro
     if (!realId) {
       try { realId = getCurrentSessionId(workDir) || null; } catch {}
     }
+    completeWebMutation(username, requestId, { state: 'done', sessionId: realId || null, taskId });
     finish('done', realId);
   }).catch((err) => {
+    completeWebMutation(username, requestId, { state: 'error', error: err?.message || 'task failed', taskId });
     finish('error', err?.message || 'task failed');
   });
 }
 
-module.exports = { handleWebRoute, listSessionsFor, getSessionFor, prepareWebTaskFiles, streamWebTask, stopSessionFor };
+module.exports = {
+  handleWebRoute, listSessionsFor, getSessionFor, prepareWebTaskFiles,
+  claimWebMutation, completeWebMutation, streamWebTask, stopSessionFor,
+};

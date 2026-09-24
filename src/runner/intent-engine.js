@@ -1194,6 +1194,15 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
+  const notificationIntents = require('../domains/hh/intents');
+  if (notificationIntents.HH_NOTIFY_OFF_INTENT.test(task) && userId && workDir) {
+    try {
+      require('../hh-cold-search-schedule').disableSearches(userId, workDir);
+      return 'Автопоиск и уведомления холодного поиска выключены для всех вакансий профиля. Ручной поиск доступен.';
+    } catch { return 'Не удалось сохранить отключение уведомлений холодного поиска. Попробуй ещё раз.'; }
+  }
+  // Never mistake notification settings or a quoted complaint for new responses.
+  if (notificationIntents.HH_NOTIFICATION_REQUEST.test(task)) return null;
   // Engineering complaints containing quoted recruiter commands are full tasks.
   if (require('../domains/hh/intents').HH_SERVICE_CHANGE_INTENT.test(task) && /hh|хх|отклик|кандидат/i.test(task)) return null;
   // Handle complete credential-disconnect requests before broad connect/status patterns.

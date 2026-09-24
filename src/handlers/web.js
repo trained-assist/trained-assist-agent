@@ -319,16 +319,30 @@ async function handleWeb(req, url, res, ctx) {
     if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
     let body;
     try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-    const { username, task, sessionId, projectId, fileRefs } = body || {};
+    const { username, task, sessionId, projectId, fileRefs, requestId } = body || {};
     if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
-    if (!task || typeof task !== 'string' || !task.trim()) return json(res, 400, { error: 'task required' });
+    if (requestId != null && !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) return json(res, 400, { error: 'invalid requestId' });
+    const refs = Array.isArray(fileRefs) ? fileRefs : [];
+    const taskText = typeof task === 'string' ? task.trim() : '';
+    if (!taskText && !refs.length) return json(res, 400, { error: 'task or attachment required' });
     if (projectId != null && !require('../valid-project-id').isValidProjectId(projectId)) return json(res, 400, { error: 'invalid projectId' });
-    const { streamWebTask, prepareWebTaskFiles } = require('../web-routes');
+    const { streamWebTask, prepareWebTaskFiles, claimWebMutation } = require('../web-routes');
     let prepared;
-    try { prepared = prepareWebTaskFiles(username, task.trim(), fileRefs || []); }
+    try { prepared = prepareWebTaskFiles(username, taskText, refs); }
     catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }
     const sid = (sessionId && /^[a-zA-Z0-9_-]+$/.test(sessionId)) ? sessionId : null;
-    return streamWebTask({ req, res, secrets, username, task: prepared.task, sessionId: sid, projectId: projectId || null, fileRefs: prepared.fileRefs });
+    let claim;
+    try { claim = claimWebMutation(username, requestId || null, { kind: 'run', sessionId: sid }); }
+    catch { return json(res, 503, { error: 'could not persist mutation receipt' }); }
+    if (claim.invalid) return json(res, 400, { error: 'invalid requestId' });
+    if (!claim.claimed) return json(res, 409, {
+      error: 'duplicate request already accepted', duplicate: true,
+      requestId, state: claim.receipt?.state || 'accepted', sessionId: claim.receipt?.sessionId || null,
+    });
+    return streamWebTask({
+      req, res, secrets, username, task: prepared.task, sessionId: sid,
+      projectId: projectId || null, fileRefs: prepared.fileRefs, requestId: requestId || null,
+    });
   }
 
   // ── POST /web/reply-bearer — resume a session from an external frontend ────
@@ -342,15 +356,29 @@ async function handleWeb(req, url, res, ctx) {
     if (!verifySecret || auth !== `Bearer ${verifySecret}`) return json(res, 401, { error: 'unauthorized' });
     let body;
     try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-    const { username, id, message, fileRefs } = body || {};
+    const { username, id, message, fileRefs, requestId } = body || {};
     if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
     if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return json(res, 400, { error: 'invalid session id' });
-    if (!message || typeof message !== 'string' || !message.trim()) return json(res, 400, { error: 'message required' });
-    const { streamWebTask, prepareWebTaskFiles } = require('../web-routes');
+    if (requestId != null && !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) return json(res, 400, { error: 'invalid requestId' });
+    const refs = Array.isArray(fileRefs) ? fileRefs : [];
+    const messageText = typeof message === 'string' ? message.trim() : '';
+    if (!messageText && !refs.length) return json(res, 400, { error: 'message or attachment required' });
+    const { streamWebTask, prepareWebTaskFiles, claimWebMutation } = require('../web-routes');
     let prepared;
-    try { prepared = prepareWebTaskFiles(username, message.trim(), fileRefs || []); }
+    try { prepared = prepareWebTaskFiles(username, messageText, refs); }
     catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }
-    return streamWebTask({ req, res, secrets, username, task: prepared.task, sessionId: id, fileRefs: prepared.fileRefs });
+    let claim;
+    try { claim = claimWebMutation(username, requestId || null, { kind: 'reply', sessionId: id }); }
+    catch { return json(res, 503, { error: 'could not persist mutation receipt' }); }
+    if (claim.invalid) return json(res, 400, { error: 'invalid requestId' });
+    if (!claim.claimed) return json(res, 409, {
+      error: 'duplicate request already accepted', duplicate: true,
+      requestId, state: claim.receipt?.state || 'accepted', sessionId: claim.receipt?.sessionId || id,
+    });
+    return streamWebTask({
+      req, res, secrets, username, task: prepared.task, sessionId: id,
+      fileRefs: prepared.fileRefs, requestId: requestId || null,
+    });
   }
 
   // ── POST /web/stop-bearer — stop a running task from an external frontend ──

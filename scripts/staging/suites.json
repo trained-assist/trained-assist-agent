@@ -11,7 +11,9 @@
     "tests/unit/hh-proactive-endpoints.test.js",
     "tests/mcp-skill-source-registry.test.js",
     "tests/unit/soft-continuation-journal.test.js",
-    "tests/unit/hh-response-refresh.test.js"
+    "tests/unit/hh-response-refresh.test.js",
+    "tests/hh-notifications-off.test.js",
+    "tests/unit/hh-notification-routing.test.js"
   ],
   "node": [
     "test/run-ingress.test.cjs",
