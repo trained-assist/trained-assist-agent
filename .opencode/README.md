@@ -12,7 +12,7 @@ skipping rungs that need one-time manual account setup (e.g. Go "Global regions"
 
 | Profile | Use case |
 |---------|----------|
-| `max` | Default — top rung is OpenCode Go (GPT-5.6/6 Astra family), degrades down to paid DeepSeek. Needs `OPENCODE_GO_API_KEY` (GCP only, see below) for its top rungs. |
+| `max` | Default — top rung is OpenCode Go (GPT-6/5.6 Luna family), degrades down to paid DeepSeek. Needs `OPENCODE_GO_API_KEY` (GCP only, see below) for its top rungs. |
 | `value` | Economical but not free — DeepSeek/GLM/Qwen ladder |
 | `free` | Zero cost — only `:free`-tier models, cycles through several |
 | `russian` | Russian-language tasks (recruiting and beyond) — GigaChat Pro/Ultra/Max ladder |

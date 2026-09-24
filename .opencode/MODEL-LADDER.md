@@ -30,12 +30,15 @@ run`, not from Claude/Codex, which go through the separate cross-engine fallback
 
 ## `max` — default profile
 
-Top rung is OpenCode Go's GPT-5.6/6 Astra family (subscription-based, no per-token cost beyond
+Top rung is OpenCode Go's GPT-6/5.6 Luna family (subscription-based, no per-token cost beyond
 the Go plan) — the former `lavish-luna` profile's models, now the top of `max`'s ladder instead
-of a separate profile a user had to opt into by name. Degrades through the GPT-5.6 family
-(Sol → Terra → Luna) before falling to `opencode-go/deepseek-v4.1-flash`, then finally to the
-metered `openrouter/deepseek/deepseek-v4-flash-0731` as a paid last resort so a task never just
-stops because every Go rung rate-limited.
+of a separate profile a user had to opt into by name. Degrades through the GPT-6/5.6 Luna family
+(6-Luna → 5.6-Luna) and GLM-5.3 before falling to `opencode-go/deepseek-v4.1-flash`, then finally
+to the metered `openrouter/deepseek/deepseek-v4-flash-0731` as a paid last resort so a task never
+just stops because every Go rung rate-limited.
+
+> Historical slugs `gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` were retired by the
+> opencode-go gateway and returned a generic `UnknownError`; removed 2026-09-24 (issue #1265).
 
 ## `value` — economical, not free
 
