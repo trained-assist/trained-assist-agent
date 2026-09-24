@@ -39,6 +39,24 @@ describe('isTaskResumable', () => {
     });
   }
 
+  // forceClaude callbacks (inline-button taps: «🔎 Разобраться подробнее» / plan / menu) carry
+  // no task text — runner re-derives it from the session. They must still resume after a restart,
+  // otherwise every such tap that a deploy interrupts gets a bogus "не возобновилась" notice.
+  it('resumes a forceClaude callback with no task text when it is bound to a session', () => {
+    const p = { startedAt: START, username: 'u', userId: 1, task: '', forceClaude: true, sessionId: 's1' };
+    expect(isTaskResumable(p, START + 5_000, 2 * HOUR)).toBe(true);
+  });
+
+  it('refuses a no-task forceClaude request with no session to re-derive it from', () => {
+    const p = { startedAt: START, username: 'u', userId: 1, task: '', forceClaude: true, sessionId: null };
+    expect(isTaskResumable(p, START + 5_000, 2 * HOUR)).toBe(false);
+  });
+
+  it('refuses an empty task that is not a forceClaude callback', () => {
+    const p = { startedAt: START, username: 'u', userId: 1, task: '' };
+    expect(isTaskResumable(p, START + 5_000, 2 * HOUR)).toBe(false);
+  });
+
   it('refuses a null/undefined entry', () => {
     expect(isTaskResumable(null, START + 5_000, 2 * HOUR)).toBe(false);
   });

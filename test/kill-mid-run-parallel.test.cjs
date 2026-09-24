@@ -59,9 +59,9 @@ test('several sessions killed mid-run by the same restart each resume independen
   const seenDelays = [];
   const h = deferredHarness({
     pending: [
-      task({ taskId: 'a-1', username: 'alice', sessionId: 'sess-a', engine: 'claude', resumeAttempts: 0 }),
-      task({ taskId: 'b-1', username: 'bob', sessionId: 'sess-b', engine: 'opencode', resumeAttempts: 1 }),
-      task({ taskId: 'c-1', username: 'carol', sessionId: 'sess-c', engine: 'codex', resumeAttempts: 2 }),
+      task({ taskId: 'a-1', username: 'alice', sessionId: 'sess-a', engine: 'claude', resumeAttempts: 1 }),
+      task({ taskId: 'b-1', username: 'bob', sessionId: 'sess-b', engine: 'opencode', resumeAttempts: 2 }),
+      task({ taskId: 'c-1', username: 'carol', sessionId: 'sess-c', engine: 'codex', resumeAttempts: 3 }),
     ],
     retryDelayMs: attempt => { seenDelays.push(attempt); return attempt * 1000; },
   });
@@ -77,7 +77,7 @@ test('several sessions killed mid-run by the same restart each resume independen
   assert.equal(byUser.carol.sessionId, 'sess-c');
   assert.equal(byUser.carol.engine, 'codex');
   // Each session keeps its own attempt count — one session's crash history never bleeds into another's.
-  assert.deepEqual(seenDelays, [1, 2, 3], 'per-task attempt = own resumeAttempts + 1, in journal order');
+  assert.deepEqual(seenDelays, [1, 2, 3], 'per-task attempt = its own journaled resumeAttempts, in journal order');
   assert.equal(h.cleared.length, 3, 'each old journal entry is dropped exactly once');
   assert.deepEqual(new Set(h.cleared), new Set(['a-1', 'b-1', 'c-1']));
 });
@@ -98,7 +98,7 @@ test('restart during backoff loses timers but retains the task for exactly one r
   alive.flushTimers();
   assert.equal(alive.runs.length, 1);
   assert.deepEqual(alive.cleared, ['a-1']);
-  assert.equal(alive.runs[0].resumeAttempts, 2, 'waiting does not consume retry budget');
+  assert.equal(alive.runs[0].resumeAttempts, 1, 'waiting/restarts never consume retry budget — the runner owns the counter');
   assert.equal(alive.runs[0].sessionId, 's1');
   assert.equal(alive.runs[0].mode, 'deep');
   assert.equal(alive.runs[0].continuationCount, 2);
