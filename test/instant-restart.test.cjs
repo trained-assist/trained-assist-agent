@@ -81,10 +81,10 @@ test('interrupted Claude task is re-run silently and its old journal entry is dr
   assert.deepEqual(h.cleared, ['alice-1'], 'old entry cleared so a second restart does not re-run it');
 });
 
-test('a task that already exhausted MAX_RESUME_ATTEMPTS across restarts is not resumed again', async () => {
-  const h = resumeHarness({ pending: [task({ resumeAttempts: 3 })] });
+test('a task whose resume count is past MAX_RESUME_ATTEMPTS is not resumed again', async () => {
+  const h = resumeHarness({ pending: [task({ resumeAttempts: 4 })] });
   await h.resume();
-  assert.equal(h.runs.length, 0, 'must not fire a 4th resume attempt');
+  assert.equal(h.runs.length, 0, 'must not fire another resume attempt');
   assert.deepEqual(h.cleared, ['alice-1']);
   assert.equal(h.calls.length, 1);
   assert.match(h.calls[0].body.text, /сбой сервера/);
@@ -100,10 +100,10 @@ test('codex/opencode tasks resume the same way claude does, on their own engine'
   assert.deepEqual(h.cleared, ['alice-1']);
 });
 
-test('opencode resume also exhausts MAX_RESUME_ATTEMPTS like claude (no special-cased dead-end)', async () => {
-  const h = resumeHarness({ pending: [task({ engine: 'opencode', resumeAttempts: 3 })] });
+test('opencode resume also honors the MAX_RESUME_ATTEMPTS guard (no special-cased dead-end)', async () => {
+  const h = resumeHarness({ pending: [task({ engine: 'opencode', resumeAttempts: 4 })] });
   await h.resume();
-  assert.equal(h.runs.length, 0, 'must not fire a 4th resume attempt');
+  assert.equal(h.runs.length, 0, 'must not fire another resume attempt');
   assert.deepEqual(h.cleared, ['alice-1']);
   assert.equal(h.calls.length, 1);
   assert.match(h.calls[0].body.text, /сбой сервера/);
@@ -111,11 +111,38 @@ test('opencode resume also exhausts MAX_RESUME_ATTEMPTS like claude (no special-
 
 test('resume waits out the shared backoff schedule before firing, per attempt number', async () => {
   const seen = [];
-  const h = resumeHarness({ pending: [task({ resumeAttempts: 1 })], retryDelayMs: attempt => { seen.push(attempt); return 180_000; } });
+  const h = resumeHarness({ pending: [task({ resumeAttempts: 2 })], retryDelayMs: attempt => { seen.push(attempt); return 180_000; } });
   await h.resume();
-  assert.deepEqual(seen, [2], 'attempt is resumeAttempts+1');
+  assert.deepEqual(seen, [2], 'the journaled attempt number drives the backoff');
   assert.ok(h.delays.includes(180_000), 'the computed backoff delay is actually passed to setTimeout');
   assert.equal(h.runs.length, 1, 'fake setTimeout still runs the callback synchronously in tests');
+});
+
+// The attempt counter is owned by the runner, which advances it only on a GENUINE resume failure.
+// A restart that kills an in-flight resume must NOT advance it — otherwise a deploy flurry
+// (34 restarts/day) burns the whole budget on interruptions and a perfectly resumable task
+// "gives up" without a single real failure. Live prod 2026-09-24 showed exactly this.
+test('a resume interrupted by another restart keeps its attempt number (no budget burn)', async () => {
+  const h = resumeHarness({ pending: [task({ resumedAfterRestart: true, resumeAttempts: 3 })] });
+  await h.resume();
+  assert.equal(h.runs.length, 1, 'an interrupted 3rd attempt is retried, not abandoned');
+  assert.equal(h.runs[0].resumeAttempts, 3, 'attempt number is reused, not incremented on boot');
+  assert.deepEqual(h.calls, [], 'no give-up notice for an interrupted attempt');
+  assert.deepEqual(h.cleared, ['alice-1']);
+});
+
+// forceClaude callbacks («🔎 Разобраться подробнее» and other no-task taps) journal an empty
+// task; the runner re-derives it from the session. They must resume like any other task instead
+// of producing a spurious "Задача была прервана перезапуском и не возобновилась. Повтори запрос."
+test('a forceClaude callback with no task text resumes from its session, not a bogus notice', async () => {
+  const h = resumeHarness({ pending: [task({ task: '', forceClaude: true, mode: 'deep' })] });
+  await h.resume();
+  assert.equal(h.runs.length, 1, 'the callback must be resumed, not abandoned');
+  assert.equal(h.runs[0].sessionId, 's1');
+  assert.equal(h.runs[0].forceClaude, true, 'forceClaude must survive so the runner re-derives the task');
+  assert.match(h.runs[0].task, /ПРОДОЛЖЕНИЕ/, 'an empty task is replaced by a continuation prompt');
+  assert.deepEqual(h.calls, [], 'no "не возобновилась" notice');
+  assert.deepEqual(h.cleared, ['alice-1']);
 });
 
 test('a resumed task that fails to start tells the user', async () => {
@@ -228,8 +255,8 @@ test('restart retains recruiter audience and failure notices never use the class
  const secrets={BOT_TOKEN:'classic',RECRUITER_BOT_TOKEN:'recruiter'};
  const h=resumeHarness({pending:[task({audience:'recruiter'})],secrets});await h.resume();
  assert.equal(h.runs[0].user.audience,'recruiter');
- const failure=resumeHarness({pending:[task({audience:'recruiter',resumeAttempts:3})],secrets});await failure.resume();
+ const failure=resumeHarness({pending:[task({audience:'recruiter',resumeAttempts:4})],secrets});await failure.resume();
  assert.equal(failure.calls.length,1);assert.match(failure.calls[0].url,/botrecruiter\//);
- const missing=resumeHarness({pending:[task({audience:'recruiter',resumeAttempts:3})]});await missing.resume();
+ const missing=resumeHarness({pending:[task({audience:'recruiter',resumeAttempts:4})]});await missing.resume();
  assert.equal(missing.calls.length,0);
 });
