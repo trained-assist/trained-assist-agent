@@ -66,7 +66,9 @@ const GDRIVE_LIST_INTENT      = /(?:мои|покажи|список|какие)
 // "пошарил", "дал доступ", "открыл доступ", "готово" after gdrive setup — user confirming they shared
 const GDRIVE_SHARED_CONFIRM_INTENT = /^(?:пошарил|поделился|расшарил|дал\s+доступ|открыл\s+доступ|готово|ок|сделал|расшарен|добавил)\.?$/i;
 // "можешь читать гугл шит", "умеешь работать с гугл таблицами"
-const GDRIVE_CAPABILITY_INTENT = /(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
+// "можешь превратить pdf в гугл док", "умеешь вытащить данные из pdf" — capability question, not a task.
+const PDF_CAPABILITY_INTENT = /(?:умееш|можешь|сможешь|можно|способен|получится|реально|есть.{0,30}(?:скил|инструм|возможн|функц)).{0,60}(?:pdf|пдф)|(?:pdf|пдф).{0,60}(?:умееш|можешь|сможешь|получится|реально ли)/i;
+const GDRIVE_CAPABILITY_INTENT =/(?:можешь|умеешь|можно|способен|поддержива).{0,40}(?:гугл|google|sheets|docs|csv|таблиц|документ|гшит|spreadsheet)/i;
 const GDRIVE_NOTIF_OFF_INTENT  = /\/gdrive_notif_off|\/google_drive_sharing_notifications_switch_off|выключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|отключи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|не.{0,10}уведомля.{0,30}(?:гугл|google|drive|шаринг|файл)|без.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const GDRIVE_NOTIF_ON_INTENT   = /\/gdrive_notif_on|\/google_drive_sharing_notifications_switch_on|включи.{0,30}(?:уведомлени.{0,30}(?:гугл|google|drive|шаринг)|шаринг.{0,30}уведомлени)|верн.{0,20}уведомлени.{0,30}(?:гугл|google|drive|шаринг)/i;
 const SESSIONS_INTENT       = /^\/sessions$|мои.{0,10}диалог|мои.{0,10}сессии|список.{0,10}диалог|покажи.{0,10}истори|мои.{0,10}задач/i;
@@ -835,6 +837,23 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       return ['📂 Пошаренные файлы:', '', ...lines2].join('\n');
     } catch (e) { console.warn('[runner] gdrive catalog parse:', e.message); }
     return null; // no catalog yet — let Claude call gdrive_list_files to check live
+  }
+
+  // Capability question about PDF — must precede GDRIVE_CAPABILITY_INTENT, which also
+  // matches "pdf в google doc". Fall-through (not the answer) when the message carries an
+  // attached file or continues a live session: then it's a real task about that file.
+  if (PDF_CAPABILITY_INTENT.test(task) && task.length < 250 && !sessionExists && !task.includes('[Файл сохранён:')) {
+    const driveConnected = !!userId && fs.existsSync(path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive'));
+    return [
+      'Да, с PDF работаю — быстро.\n',
+      '📄 Достаю текст, таблицы, реквизиты и любые данные — в текст, Markdown, CSV или JSON',
+      '🔄 Превращаю в нужный формат' + (driveConnected
+        ? ', в том числе в Google Doc или Google Sheet — Google Drive уже подключён, результат положу прямо на диск'
+        : ', в том числе в Google Doc или Google Sheet (для этого скажи «подключи гугл диск»)'),
+      '',
+      '⚡ Обычный PDF с текстом — за секунды. Скан или макет с текстом внутри картинок читаю дольше; если какие-то страницы разобрать плохо, скажу какие.\n',
+      'Пришли файл и напиши, что из него нужно.',
+    ].join('\n');
   }
 
   // "можешь читать гугл шит", "умеешь работать с csv/таблицами"
