@@ -55,6 +55,13 @@ function rememberRequestId(id, taskId) {
   recentRequestIds.set(id, { taskId, at: Date.now() });
 }
 
+// Token-save Telegram notices: suppress byte-identical repeats to the same chat
+// (see src/tg-notice-dedupe.js) — stops automated/retried credential saves from
+// spamming a chat with the same confirmation (duplicate flood of 2026-09-24).
+const { createNoticeDeduper } = require('./tg-notice-dedupe');
+const tokenNoticeDeduper = createNoticeDeduper();
+const noticeAlreadySent = (chatId, text) => tokenNoticeDeduper.alreadySent(chatId, text);
+
 // Narrow ("specialized") bots delegate into a real profile instead of owning their
 // own. @cmr_management_bot ("misha") IS Flexi Consulting — its data (6 expo projects,
 // interviews, contexts) lives under the `flexi-consult` profile, so the bot must
@@ -73,13 +80,13 @@ const { classifyMessage, CLASSIFY_MAX_AGE_MS } = require('./classify-message');
 const { checkCompleteness } = require('./intake-gate');
 
 function readChatId(username) {
-  try { return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', String(username), '.chatid'), 'utf8').trim() || null; }
+  try { return fs.readFileSync(path.join(dataPaths.TOKENS_ROOT, String(username), '.chatid'), 'utf8').trim() || null; }
   catch { return null; }
 }
 
 function scheduleNalogExpiryChecks(secrets) {
   const notified = new Set();
-  const AGENT_TOKENS_DIR = path.join(os.homedir(), 'agent-tokens');
+  const AGENT_TOKENS_DIR = dataPaths.TOKENS_ROOT;
   const CHECK_INTERVAL_MS = 5 * 60 * 1000;
   const NOTIFY_WINDOW_MS  = 10 * 60 * 1000; // notify if expired within last 10 min
 
@@ -1432,7 +1439,7 @@ ${recent || '(пока нет)'}
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 
-      const tokensDir = path.join(process.env.HOME || '/home/vova', 'agent-tokens', String(userId));
+      const tokensDir = path.join(dataPaths.TOKENS_ROOT, String(userId));
       fs.mkdirSync(tokensDir, { recursive: true });
       const storedValue = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
       // If the target path is a directory (e.g. getcourse/ stores a Playwright session),
@@ -1480,13 +1487,12 @@ ${recent || '(пока нет)'}
           }).catch(() => {});
 
           const chatId = readChatId(String(userId));
-          if (chatId && secrets.BOT_TOKEN) tgSend(chatId, svcAction.pendingMsg);
+          if (chatId && secrets.BOT_TOKEN && !noticeAlreadySent(chatId, svcAction.pendingMsg)) tgSend(chatId, svcAction.pendingMsg);
 
           svcAction.run(String(userId), creds).then(result => {
             const chatId2 = readChatId(String(userId));
-            if (chatId2 && secrets.BOT_TOKEN) {
-              tgSend(chatId2, result.status === 'ok' ? svcAction.ok(result) : svcAction.err(result));
-            }
+            const text = result.status === 'ok' ? svcAction.ok(result) : svcAction.err(result);
+            if (chatId2 && secrets.BOT_TOKEN && !noticeAlreadySent(chatId2, text)) tgSend(chatId2, text);
           }).catch(e => console.error(`[tokens/${label}] action failed:`, e.message));
         }
       }
@@ -1498,7 +1504,7 @@ ${recent || '(пока нет)'}
         if (creds && creds.login && creds.password) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
           const nalogChatId = readChatId(String(userId));
-          if (nalogChatId && secrets.BOT_TOKEN) {
+          if (nalogChatId && secrets.BOT_TOKEN && !noticeAlreadySent(nalogChatId, '⏳ Данные получены — вхожу в Госуслуги...')) {
             fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
               method: 'POST', signal: AbortSignal.timeout(8000),
               headers: { 'Content-Type': 'application/json' },
@@ -1518,11 +1524,13 @@ ${recent || '(пока нет)'}
             } else {
               text = `❌ Не удалось войти в Госуслуги: ${result.error}\n\nПроверьте логин/пароль и повторите: «подключи налог»`;
             }
-            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-              method: 'POST', signal: AbortSignal.timeout(8000),
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: chatId2, text }),
-            }).catch(() => {});
+            if (!noticeAlreadySent(chatId2, text)) {
+              fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+                method: 'POST', signal: AbortSignal.timeout(8000),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: chatId2, text }),
+              }).catch(() => {});
+            }
           }).catch(e => console.error('[tokens/nalog-creds] login async failed:', e.message));
         }
       }
@@ -1543,17 +1551,15 @@ ${recent || '(пока нет)'}
       })();
       if (!svcAction && label !== 'nalog-creds' && hasRealValue) {
         const fbChatId = readChatId(String(userId));
-        if (fbChatId && secrets.BOT_TOKEN) {
+        const displayName = label.replace(/-creds?$/i, '').replace(/-/g, ' ');
+        const serviceTitle = displayName.charAt(0).toUpperCase() + displayName.slice(1);
+        const noticeText = `✅ Данные для ${serviceTitle} сохранены. Напиши «войди в ${serviceTitle}» — залогинюсь автоматически.`;
+        if (fbChatId && secrets.BOT_TOKEN && !noticeAlreadySent(fbChatId, noticeText)) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-          const displayName = label.replace(/-creds?$/i, '').replace(/-/g, ' ');
-          const serviceTitle = displayName.charAt(0).toUpperCase() + displayName.slice(1);
           fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
             method: 'POST', signal: AbortSignal.timeout(8000),
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: fbChatId,
-              text: `✅ Данные для ${serviceTitle} сохранены. Напиши «войди в ${serviceTitle}» — залогинюсь автоматически.`,
-            }),
+            body: JSON.stringify({ chat_id: fbChatId, text: noticeText }),
           }).catch(() => {});
         }
       }

@@ -25,6 +25,7 @@ const { initLog, readLog } = require('../requirements-log');
 const { readVacancyState, writeVacancyState } = require('../hh-vacancy');
 const persona = require('../persona');
 const profiles = require('../profiles');
+const { TOKENS_ROOT } = require('../data-paths');
 const answerRouter = require('../answer-router');
 // Telegram send/edit + markdown-degradation ladder chokepoint live in
 // tg-stream.js (issue #942 P1.4). The module owns the format/send/edit
@@ -740,7 +741,7 @@ function buildContextCard(username, workDir, chatId) {
   if (!services || !services.length) return null;
 
   // Build service labels, merging inline details where available
-  const gcConfig = path.join(os.homedir(), 'agent-tokens', String(username), 'getcourse', 'config.json');
+  const gcConfig = path.join(TOKENS_ROOT, String(username), 'getcourse', 'config.json');
   let gcDomain = null;
   if (fs.existsSync(gcConfig)) {
     try { gcDomain = JSON.parse(fs.readFileSync(gcConfig, 'utf8')).accountDomain || null; } catch (e) { console.warn('[runner] gcConfig parse:', e.message); }
@@ -968,7 +969,7 @@ function ensureProfileLayoutSkill(workDir, username) {
       `find ${workDir} -maxdepth 3 -not -path "*/sessions/*" -not -path "*/.git/*" | sort`,
       { timeout: 5000 }
     ).toString().trim();
-    const tokenDir = path.join(os.homedir(), 'agent-tokens', username);
+    const tokenDir = path.join(TOKENS_ROOT, username);
     const tokens = fs.existsSync(tokenDir)
       ? fs.readdirSync(tokenDir).filter(f => !f.startsWith('.')).join(', ')
       : '(нет)';
@@ -1464,10 +1465,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Persist chatId early — needed by OAuth callbacks (e.g. HH, GDrive) that fire
   // after a quick-answer early-return and never reach the Claude path below.
   try {
-    const tDir = path.join(os.homedir(), 'agent-tokens', String(user.username));
+    const tDir = path.join(TOKENS_ROOT, String(user.username));
     fs.mkdirSync(tDir, { recursive: true });
     fs.writeFileSync(path.join(tDir, '.chatid'), String(chatId), { mode: 0o600 });
-    const oldChatDir = path.join(os.homedir(), 'agent-tokens', String(user.id));
+    const oldChatDir = path.join(TOKENS_ROOT, String(user.id));
     if (fs.existsSync(oldChatDir)) {
       // Only write .username if the folder has no existing owner or already belongs to us.
       // Overwriting a different profile's marker would cause loadUserTokens to migrate

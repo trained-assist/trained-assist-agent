@@ -29,8 +29,12 @@ const USERS_ROOT = process.env.USERS_DIR || path.join(HOME, 'users');
 // Agent database root — structured storage for server-side state
 const SYSTEM_ROOT = process.env.AGENT_DATA_DIR || path.join(HOME, 'agent-data');
 
-// Token storage root — one dir per profile, one file per service
-const TOKENS_ROOT = process.env.AGENT_TOKENS_DIR || path.join(HOME, 'agent-tokens');
+// Token storage root — one dir per profile, one file per service.
+// Accept BOTH env names: systemd sets AGENT_TOKENS_DIR, while the test harness
+// (and user-tokens.js) use AGENT_TOKENS_ROOT. Honoring only one name meant tests
+// that set AGENT_TOKENS_ROOT still wrote .chatid/credentials into the real
+// ~/agent-tokens — the source of thousands of leaked test profiles (see issue).
+const TOKENS_ROOT = process.env.AGENT_TOKENS_DIR || process.env.AGENT_TOKENS_ROOT || path.join(HOME, 'agent-tokens');
 
 // ── Per-user Claude workspace (USERS_ROOT) ────────────────────────────────────
 
