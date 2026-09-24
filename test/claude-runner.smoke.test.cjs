@@ -245,4 +245,42 @@ exit 1
   try { require('node:child_process').spawnSync('pkill', ['-f', 'sleep 100']); } catch {}
   fs.rmSync(tmp5, { recursive: true, force: true });
   console.log('V2d PASS: zombie engine force-finishes; progress timers die with the engine (no 742с+3с overlap)');
+
+  // (10) Silent-progress-failure regression (2026-09-24 freeze): a progress edit
+  // that THROWS a non-429 error ("message to edit not found", timeout, 4xx/5xx)
+  // must NOT be swallowed — it must be logged, and after MAX_PROGRESS_HARD_FAILS
+  // consecutive hard failures the heartbeat must fall back to a fresh sendMessage
+  // so the user sees a live message instead of a frozen "(2с)" forever. A resolved
+  // drop ({ok:false,flooded}/{skipped}) is intentional backpressure and must NOT
+  // count toward the fallback.
+  const tmp6 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-hardfail-'));
+  const hardBin = path.join(tmp6, 'fake-slow');
+  // Emit nothing for ~8s so only heartbeat (not stream) edits fire, then finish.
+  writeFake(hardBin, `#!/usr/bin/env sh
+sleep 8
+echo '{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}'
+`);
+  const hardT0 = Date.now();
+  let hardEditCalls = 0;
+  let hardSendCalls = 0;
+  let hardFellBackAt = -1;
+  const hardEdit = async () => { hardEditCalls++; throw new Error('Bad Request: message to edit not found'); };
+  const hardSend = async () => { hardSendCalls++; if (hardFellBackAt < 0) hardFellBackAt = hardEditCalls; return { ok: true }; };
+  const origErr = console.error;
+  const errLines = [];
+  console.error = (...a) => { errLines.push(a.join(' ')); };
+  try {
+    await runEngineProcess({
+      ...baseOpts, engineBin: hardBin, cwd: tmp6, msgId: 'm-hf', taskId: 't-hardfail',
+      thinkingStart: hardT0, user: { username: 'smoke', workDir: tmp6, name: 'Smoke' },
+      tgEdit: hardEdit, tgSend: hardSend,
+    });
+  } finally { console.error = origErr; }
+  assert.ok(hardEditCalls >= 3, `hardfail: expected >=3 progress edits, got ${hardEditCalls}`);
+  assert.ok(errLines.some(l => /progress edit failed/.test(l) && /message to edit not found/.test(l)),
+    'hardfail: a thrown progress edit must be logged, not swallowed');
+  assert.ok(hardSendCalls >= 1, `hardfail: after ${hardEditCalls} hard fails must fall back to sendMessage, got ${hardSendCalls}`);
+  assert.ok(hardFellBackAt >= 3, `hardfail: fallback must not fire before MAX_PROGRESS_HARD_FAILS (fired after ${hardFellBackAt})`);
+  fs.rmSync(tmp6, { recursive: true, force: true });
+  console.log('V2e PASS: hard progress-edit failures are logged + fall back to sendMessage (no silent freeze)');
 })();

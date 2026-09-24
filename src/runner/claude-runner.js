@@ -293,12 +293,40 @@ async function runEngineProcess(opts) {
   // Drain in-flight progress edits before posting a terminal message.
   const progressEdits = new Set();
   let progressStopped = false;
+  // Consecutive HARD failures (a thrown non-429 tgEdit error: "message to edit
+  // not found", fetch timeout, any 4xx/5xx) on the SAME message. A resolved drop
+  // (`{ok:false,flooded}` / `{ok:true,skipped}`) is intentional flood/coalesce
+  // backpressure and does NOT count — only a throw means the edit genuinely
+  // could not be delivered. After MAX_PROGRESS_HARD_FAILS the heartbeat stops
+  // trying to edit the dead placeholder and falls back to a fresh sendMessage,
+  // so the user sees a live message instead of a frozen "(2с)" forever. This is
+  // the same fallback every terminal edit in runner/index.js already uses; the
+  // heartbeat was the one path that silently swallowed it (2026-09-24 freeze).
+  const MAX_PROGRESS_HARD_FAILS = 3;
+  let progressHardFails = 0;
+  let progressFellBack = false;
+  // progressStopped guard on the fallback: once the run is ending (stopProgress
+  // ran) we must not post a brand-new message — the terminal reply is coming.
   function progressEdit(...args) {
     if (progressStopped) return Promise.resolve();
     // Progress/status edits are cosmetic: best-effort (drop on 429 — a missed
     // "Думаю…" update is fine, a 5-44s block is not) and coalesced per chat so
     // concurrent sessions sharing a bot token can't flood editMessageText.
-    const pending = tgEdit(...args, { bestEffort: true, coalesce: true }).catch(() => {});
+    const pending = tgEdit(...args, { bestEffort: true, coalesce: true }).then(
+      (res) => { progressHardFails = 0; return res; },
+      (err) => {
+        progressHardFails++;
+        // The token value is never logged; chatId/msgId are enough to grep.
+        console.error(`[${taskId}] progress edit failed (${progressHardFails}/${MAX_PROGRESS_HARD_FAILS}) chat=${chatId} msg=${args[2]}: ${err.message}`);
+        if (progressHardFails >= MAX_PROGRESS_HARD_FAILS && !progressFellBack && !progressStopped) {
+          progressFellBack = true;
+          // args = (token, chatId, messageId, text, extra) — repost the same text
+          // as a fresh message so progress stays visible. Best-effort: the next
+          // heartbeat tick keeps editing the placeholder if this also fails.
+          tgSend(args[0], args[1], String(args[3] || '🧠 Думаю…'), args[4] || {}).catch(() => {});
+        }
+      },
+    );
     progressEdits.add(pending);
     pending.finally(() => progressEdits.delete(pending));
     return pending;
