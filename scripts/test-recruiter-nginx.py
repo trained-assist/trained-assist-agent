@@ -89,7 +89,10 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
         # Same route with depth=1 must reject this chain, not silently bypass TLS.
         s,h,b=request('/__negative_chain');assert s==502,(s,b)
         error_log=(d/'error.log').read_text()
-        assert 'certificate chain too long' in error_log.lower(),error_log
+        # OpenSSL versions report depth exhaustion as either error 22 (chain
+        # too long) or error 20 (unable to get local issuer). Assert the stable
+        # nginx verification failure for this request, not library wording.
+        assert any('upstream SSL certificate verify error:' in line and '/__negative_chain' in line for line in error_log.splitlines()),error_log
         print('PASS: TLS, root/login, OAuth query preservation, www, HTTP, ACME, candidate/vacancy routes, 2/20 MiB uploads, 413 boundary, streaming, cold-search TLS upstream with intermediate chain and negative depth control, signed query and POST body preservation')
     finally:
         p.terminate();p.wait(timeout=5);upstream.shutdown();cold.shutdown()
