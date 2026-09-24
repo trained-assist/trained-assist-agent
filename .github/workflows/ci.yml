@@ -25,6 +25,11 @@ jobs:
       - run: npm ci --include=dev
       - name: Replay mandatory user scenarios
         run: npm run test:staging
+      - name: Verify recruiter domain with real nginx
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nginx
+          python3 scripts/test-recruiter-nginx.py
       - name: Save scenario results and tested revision
         if: always()
         uses: actions/upload-artifact@v4
