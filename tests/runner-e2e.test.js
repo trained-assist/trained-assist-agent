@@ -156,6 +156,8 @@ let origTgUrl;
 let testTokensRoot;
 let testDataRoot;
 let origDataRoot;
+let origZerocredsUrl;
+let origZerocredsAdmin;
 
 beforeAll(async () => {
   await startTgServer();
@@ -172,6 +174,15 @@ beforeAll(async () => {
   process.env.AGENT_TOKENS_ROOT = testTokensRoot;     // isolate from real ~/agent-tokens/
   process.env.TEST_MODE = '1'; // retry-policy backoff → ms instead of 30s/3min/10min (see src/retry-policy.js)
 
+  // Never let a "подключи X" quick answer create a REAL ZeroCreds session against
+  // production. The ZeroCreds destination preflight would then POST the production
+  // /tokens for this testuser — the duplicate-flood incident of 2026-09-24. Force the
+  // legacy, fully-local connect-link path instead.
+  origZerocredsUrl = process.env.ZEROCREDS_URL;
+  origZerocredsAdmin = process.env.ZEROCREDS_ADMIN_TOKEN;
+  process.env.ZEROCREDS_URL = '';
+  process.env.ZEROCREDS_ADMIN_TOKEN = '';
+
   const mod = require('../src/runner');
   runTask = mod.runTask;
   sessionStore = require('../src/session-store.js');
@@ -182,6 +193,8 @@ afterAll(async () => {
   delete process.env.CLAUDE_BIN;
   delete process.env.AGENT_TOKENS_ROOT;
   delete process.env.TEST_MODE;
+  if (origZerocredsUrl === undefined) delete process.env.ZEROCREDS_URL; else process.env.ZEROCREDS_URL = origZerocredsUrl;
+  if (origZerocredsAdmin === undefined) delete process.env.ZEROCREDS_ADMIN_TOKEN; else process.env.ZEROCREDS_ADMIN_TOKEN = origZerocredsAdmin;
   if (origDataRoot === undefined) delete process.env.AGENT_DATA_DIR;
   else process.env.AGENT_DATA_DIR = origDataRoot;
   rmSync(testDataRoot, { recursive: true, force: true });
