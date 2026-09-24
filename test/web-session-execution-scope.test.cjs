@@ -13,9 +13,9 @@ test('stopSessionTask kills only the requested session within a shared profile',
   r._activeTimers.clear();
   const killed = [];
   const proc = name => ({ kill: sig => killed.push({ name, sig }) });
-  r._activeTimers.set('alice-tg-1', { proc: proc('telegram'), sessionId: 's-tg', chatId: 42, userStopped: false });
-  r._activeTimers.set('alice-web-1', { proc: proc('web'), sessionId: 's-web', chatId: 0, userStopped: false });
-  r._activeTimers.set('bob-web-1', { proc: proc('bob'), sessionId: 's-web', chatId: 0, userStopped: false });
+  r._activeTimers.set('alice-tg-1', { username: 'alice', proc: proc('telegram'), sessionId: 's-tg', chatId: 42, userStopped: false });
+  r._activeTimers.set('alice-web-1', { username: 'alice', proc: proc('web'), sessionId: 's-web', chatId: 0, userStopped: false });
+  r._activeTimers.set('bob-web-1', { username: 'bob', proc: proc('bob'), sessionId: 's-web', chatId: 0, userStopped: false });
 
   assert.equal(r.stopSessionTask('alice', 's-web'), true);
   assert.deepEqual(killed, [{ name: 'web', sig: 'SIGTERM' }]);
@@ -28,7 +28,7 @@ test('stopSessionTask returns false for a finished/unknown session and kills not
   const r = freshRunner();
   r._activeTimers.clear();
   const killed = [];
-  r._activeTimers.set('alice-tg-1', { proc: { kill: sig => killed.push(sig) }, sessionId: 's-tg', chatId: 42 });
+  r._activeTimers.set('alice-tg-1', { username: 'alice', proc: { kill: sig => killed.push(sig) }, sessionId: 's-tg', chatId: 42 });
   assert.equal(r.stopSessionTask('alice', 's-missing'), false);
   assert.deepEqual(killed, []);
 });

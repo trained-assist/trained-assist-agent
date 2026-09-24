@@ -116,5 +116,78 @@ function tmpDir() {
   ok(projects.listProjects(wd).some(p => p.id === legacy.id), 'listProjects() with no audience arg matches default-audience behavior');
 }
 
+// ── runner: stop/running isolation across bots sharing one profile (#1302 §3.2) ─
+// A private-chat chatId is the Telegram user's own id — identical no matter which
+// bot they're messaging — so audience, not just chatId, must scope stop/running.
+// Uses runner's real exported functions against the real (test-process) activeTimers
+// map, same technique as runner-index-contract.test.cjs's _activeTimers pokes.
+{
+  const runner = require('../src/runner');
+  const fakeProc = () => ({ killed: null, kill(sig) { this.killed = sig; } });
+  const CHAT = 555; // deliberately identical across both audiences below
+
+  const defaultProc = fakeProc();
+  const recruiterProc = fakeProc();
+  const freelanceProc = fakeProc();
+  runner._activeTimers.set('alice-default-1', { username: 'alice', audience: 'default', chatId: CHAT, sessionId: 's-default', proc: defaultProc });
+  runner._activeTimers.set('alice-recruiter-1', { username: 'alice', audience: 'recruiter', chatId: CHAT, sessionId: 's-recruiter', proc: recruiterProc });
+  runner._activeTimers.set('alice-freelance-1', { username: 'alice', audience: 'freelance', chatId: CHAT, sessionId: 's-freelance', proc: freelanceProc });
+
+  // isTaskRunning: omitted audience means 'default' only, never "any audience".
+  ok(runner.isTaskRunning('alice') === true, 'isTaskRunning(no audience) sees the default-audience task');
+  ok(runner.isTaskRunning('alice', 'recruiter') === true, 'isTaskRunning(recruiter) sees its own task');
+  ok(runner.isTaskRunning('alice', 'freelance') === true, 'isTaskRunning(freelance) sees its own task (3rd bot, issue #1302)');
+  ok(runner.isTaskRunning('bob', 'recruiter') === false, 'isTaskRunning does not match a different username');
+
+  // stopUserTask: same chatId, different audience — stopping the recruiter bot's
+  // task must NOT touch the default or freelance bot's task for the same profile.
+  const stoppedRecruiter = runner.stopUserTask('alice', CHAT, 'recruiter');
+  ok(stoppedRecruiter === true, 'stopUserTask(recruiter) reports it stopped something');
+  ok(recruiterProc.killed === 'SIGTERM', 'stopUserTask(recruiter) kills only the recruiter process');
+  ok(defaultProc.killed === null, 'stopUserTask(recruiter) does NOT touch the default-audience process (same chatId)');
+  ok(freelanceProc.killed === null, 'stopUserTask(recruiter) does NOT touch the freelance-audience process (same chatId)');
+
+  // stopUserTask with audience omitted scopes to 'default' only.
+  const stoppedDefault = runner.stopUserTask('alice', CHAT);
+  ok(stoppedDefault === true, 'stopUserTask(no audience) still finds and stops the default-audience task');
+  ok(defaultProc.killed === 'SIGTERM', 'stopUserTask(no audience) kills the default process');
+  ok(freelanceProc.killed === null, 'stopUserTask(no audience) still leaves freelance running — omitted audience is default-only, never "every audience"');
+
+  runner._activeTimers.clear();
+}
+
+// ── runner: killTaskByUsername and stopSessionTask isolation (#1302 §3.2) ──────
+{
+  const runner = require('../src/runner');
+  const fakeProc = () => ({ killed: null, kill(sig) { this.killed = sig; } });
+
+  const recruiterProc = fakeProc();
+  const freelanceProc = fakeProc();
+  runner._activeTimers.set('carol-recruiter-1', { username: 'carol', audience: 'recruiter', chatId: 1, sessionId: 's-1', proc: recruiterProc });
+  runner._activeTimers.set('carol-freelance-1', { username: 'carol', audience: 'freelance', chatId: 1, sessionId: 's-2', proc: freelanceProc });
+
+  // /tasks/stop for one bot (B) must not kill another bot's (A) task for the same profile.
+  const killedRecruiter = runner.killTaskByUsername('carol', 'recruiter');
+  ok(killedRecruiter === 1, 'killTaskByUsername(recruiter) reports exactly one kill');
+  ok(recruiterProc.killed === 'SIGTERM', 'killTaskByUsername(recruiter) kills the recruiter process');
+  ok(freelanceProc.killed === null, 'killTaskByUsername(recruiter) does NOT kill the freelance process for the same profile');
+
+  const killedDefault = runner.killTaskByUsername('carol'); // no audience -> default only
+  ok(killedDefault === 0, 'killTaskByUsername(no audience) finds nothing — freelance is not "default"');
+  ok(freelanceProc.killed === null, 'freelance process is still untouched');
+
+  runner._activeTimers.clear();
+
+  // stopSessionTask is exact-session already (sessionId disambiguates), but must also
+  // use an exact username match rather than a taskId string-prefix check.
+  const sessProc = fakeProc();
+  runner._activeTimers.set('dave-1', { username: 'dave', chatId: 1, sessionId: 's-dave', proc: sessProc });
+  ok(runner.stopSessionTask('dav', 's-dave') === false, 'stopSessionTask does not match on a username prefix');
+  ok(sessProc.killed === null, 'no process killed by the prefix mismatch');
+  ok(runner.stopSessionTask('dave', 's-dave') === true, 'stopSessionTask matches the exact username');
+  ok(sessProc.killed === 'SIGTERM', 'stopSessionTask kills the right process on an exact match');
+  runner._activeTimers.clear();
+}
+
 console.log(`\naudience-scope: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
