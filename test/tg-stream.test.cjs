@@ -32,6 +32,15 @@ function installFetch(statuses, retryAfter = 100) {
 
 (async () => {
   try {
+    // Two bots talking to the same human must not share flood/coalescing state.
+    installFetch([200, 200]);
+    await tgEdit('8815112204:recruiter', 91002003, 11, 'recruiter', {}, { coalesce: true });
+    await tgEdit('8843910332:classic', 91002003, 11, 'classic', {}, { coalesce: true });
+    assert.equal(calls.length, 2, 'different bot identities have independent edit slots');
+    installFetch([429, 200], 100);
+    await tgEdit('8815112204:recruiter', 91002004, 11, 'recruiter', {}, { bestEffort: true });
+    await tgEdit('8843910332:classic', 91002004, 11, 'classic', {}, { bestEffort: true });
+    assert.equal(calls.length, 2, 'one bot flood must not silence the other bot');
     // (1) coalesce — 3 rapid edits to one chat => exactly 1 fetch
     installFetch(200);
     await tgEdit('tok', 111, 1, 'a', {}, { coalesce: true });

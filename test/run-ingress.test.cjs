@@ -9,7 +9,7 @@ function fixture(t) {
  const start=source.indexOf("    if (req.method === 'POST' && url.pathname === '/run') {");
  const end=source.indexOf('    // POST /action',start);
  const runs=[];const pending=new Map();
- const sandbox={fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
+ const sandbox={deliverySecrets:require('../src/bot-delivery').deliverySecrets,fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
   isValidProjectId:()=>true,trackChat:()=>{},getPendingTasks:()=>[...pending.values()],atomicJson,profiles,
   readBody:async req=>JSON.stringify(req.body),json:(res,status,data)=>Object.assign(res,{status,data}),
   runTask:opts=>{pending.set(opts.taskId,opts);runs.push(opts);return Promise.resolve();},
@@ -103,4 +103,26 @@ test('a failed R2 integrity check prevents acknowledgement or text-only launch',
  const ref={storage:'r2',version:1,id:'d'.repeat(64),name:'doc.pdf',size:3,sha256:'0'.repeat(64)};
  const response=await f.send({fileRefs:[ref]});assert.equal(response.status,503);assert.equal(f.runs.length,0);
  assert.equal(fs.existsSync(path.join(f.root,'accepted-requests','request-1.json')),false);
+});
+
+test('recruiter delivery fails closed before acceptance when its credential is absent', async t => {
+ const f=fixture(t);f.sandbox.secrets.BOT_TOKEN='classic';
+ assert.equal((await f.send({audience:'recruiter'})).status,503);
+ assert.equal(f.runs.length,0);
+ assert.equal((await f.send({audience:'unregistered'})).status,400);
+});
+test('identical request IDs from different bots do not suppress each other',async t=>{
+ const f=fixture(t);f.sandbox.secrets.RECRUITER_BOT_TOKEN='recruiter';
+ const a=await f.send(),b=await f.send({audience:'recruiter'});
+ assert.equal(a.status,202);assert.equal(b.status,202);assert.notEqual(a.data.taskId,b.data.taskId);
+ assert.equal(f.runs.length,2);assert.equal(f.runs[1].user.audience,'recruiter');
+ assert.equal((await f.send({audience:'recruiter'})).data.duplicate,true);
+});
+
+test('rollout preserves lost-ACK deduplication for legacy receipts without audience', async t=>{
+ const f=fixture(t);f.sandbox.secrets.RECRUITER_BOT_TOKEN='recruiter';
+ const dir=path.join(f.root,'accepted-requests');fs.mkdirSync(dir);
+ fs.writeFileSync(path.join(dir,'alice-request-1.json'),JSON.stringify({taskId:'alice-request-1',acceptedAt:Date.now()}));
+ const result=await f.send({audience:'recruiter'});
+ assert.equal(result.status,202);assert.equal(result.data.duplicate,true);assert.equal(f.runs.length,0);
 });

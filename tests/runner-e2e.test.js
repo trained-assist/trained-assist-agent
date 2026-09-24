@@ -1084,3 +1084,27 @@ describe('Completed answers do not authorize speculative continuation', () => {
     } finally { spy.mockRestore(); }
   });
 });
+
+describe('Originating bot delivery isolation', () => {
+  it('routes status, quick and final replies through recruiter credentials, preserving classic replies', { timeout: 20000 }, async () => {
+    const secrets = { BOT_TOKEN: 'classic:token', RECRUITER_BOT_TOKEN: 'recruiter:token' };
+    for (const [audience, task, token] of [
+      ['recruiter', 'сделай задачу', 'recruiter:token'],
+      ['recruiter', '/ping', 'recruiter:token'],
+      ['default', '/ping', 'classic:token'],
+    ]) {
+      tgLog = [];
+      setupFakeClaude('Ответ 453918');
+      await runTask({ taskId: `route-${audience}-${Date.now()}`, user: { ...makeUser(928311457), audience },
+        task, forceNew: true, mode: 'deep', initialMsgId: 25, secrets });
+      const sent = tgSent();
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.every(call => call.url.startsWith(`/bot${token}/`))).toBe(true);
+      if (task !== '/ping') {
+        expect(sent.some(call => call.body.text.includes('Начинаю работу'))).toBe(true);
+        expect(sent.some(call => call.body.text.includes('453918'))).toBe(true);
+      }
+    }
+    expect(secrets.BOT_TOKEN).toBe('classic:token');
+  });
+});

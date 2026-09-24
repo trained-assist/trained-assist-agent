@@ -1,3 +1,4 @@
+const { taskDelivery } = require('../bot-delivery');
 const { atomicJson } = require('../atomic-json');
 let restartShutdown = false;
 const fs = require('fs');
@@ -399,6 +400,7 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
+  opts = taskDelivery(opts);
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -598,7 +600,7 @@ function runTask(opts) {
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode, userMessageRecorded: opts.userMessageRecorded,
     projectId: opts.projectId, newProjectName: opts.newProjectName, engine: opts.engine,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId, fileRefs: opts.fileRefs,
-    profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
+    profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId, audience: opts.user.audience,
     continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
     resumedAfterRestart: opts.resumedAfterRestart, resumeAttempts: opts.resumeAttempts,
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
@@ -1211,7 +1213,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const audience = user.audience || 'default';
 
   savePendingTask(taskId, {
-    phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
+    phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir, audience,
     profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
     task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
     initialMsgId, pinnedMsgId, initiatedAt, threadId, resumedAfterRestart, resumeAttempts,
