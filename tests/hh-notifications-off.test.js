@@ -43,7 +43,38 @@ it('suppresses a scheduled digest when disabled during actual search; manual sea
  api.saveStoredQueries(user,'A',['Engineer'],api.atsConfigHash(config));
  const dir=path.join(process.env.AGENT_TOKENS_DIR,user);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'hh'),'{"access_token":"fixture"}');
  api.saveSchedule(user,{enabled:true,vacancies:{A:{enabled:true}}});
- vi.stubGlobal('fetch',vi.fn(async()=>{schedule.disableSearches(user,work);return {ok:true,status:200,headers:new Headers(),json:async()=>({items:[]})};}));
+ vi.stubGlobal('fetch',vi.fn(async()=>{schedule.setNotifications(user,work,false);return {ok:true,status:200,headers:new Headers(),json:async()=>({items:[]})};}));
  const notify=vi.fn();await api.runProactiveSearch(user,work,{vacancyId:'A',alwaysNotify:true,notifyChat:notify});await new Promise(r=>setImmediate(r));expect(notify).not.toHaveBeenCalled();
  const result=await api.runProactiveSearch(user,work,{vacancyId:'A'});expect(result.count).toBe(0);
+});
+
+it('mute preserves cadence, enabled searches and other profiles; next vacancies still run',async()=>{
+ context('active_vacancies',[{id:'A'},{id:'B'}]);
+ api.saveSchedule(user,{enabled:true,vacancies:{A:{enabled:true,interval_hours:8},B:{enabled:true}}});
+ api.saveSchedule('other',{enabled:true});
+ const run=vi.fn(async()=>{schedule.setNotifications(user,work,false);return {new_count:1};});
+ await schedule.runDueSearches(user,work,run);
+ expect(run).toHaveBeenCalledTimes(2);
+ expect(api.loadSchedule(user)).toMatchObject({enabled:true,notifications_enabled:false,vacancies:{A:{enabled:true,interval_hours:8},B:{enabled:true}}});
+ expect(schedule.notificationsEnabled(user,work,'A')).toBe(false);
+ expect(schedule.deliveryEnabled('other',work,'A')).toBe(true);
+ schedule.setNotifications(user,work,true,'A');
+ expect(schedule.notificationsEnabled(user,work,'A')).toBe(true);
+ expect(schedule.notificationsEnabled(user,work,'B')).toBe(false);
+ schedule.setNotifications(user,work,false);expect(schedule.notificationsEnabled(user,work,'A')).toBe(false);
+});
+it('mute without selected vacancy persists for future searches; unmute never enables a stopped search',()=>{
+ api.saveSchedule(user,{enabled:false,interval_hours:12});
+ schedule.setNotifications(user,work,false);
+ schedule.updateSchedule(user,work,'NEW',{enabled:true});
+ expect(schedule.notificationsEnabled(user,work,'NEW')).toBe(false);
+ schedule.disableSearches(user,work);schedule.setNotifications(user,work,true);
+ expect(api.loadSchedule(user).enabled).toBe(false);
+ expect(schedule.notificationsEnabled(user,work,'NEW')).toBe(false);
+});
+
+it('muting legacy schedule without a selected vacancy preserves future scheduling',()=>{
+ api.saveSchedule(user,{enabled:true,interval_hours:12});schedule.setNotifications(user,work,false);
+ context('active_vacancy',{id:'L'});
+ expect(schedule.getSchedules(user,work).L).toMatchObject({enabled:true,interval_hours:12,notifications_enabled:false});
 });

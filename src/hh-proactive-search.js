@@ -945,6 +945,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
         : '';
       Promise.resolve()
         .then(() => {
+          if (!require('./hh-cold-search-schedule').deliveryEnabled(username, workDir, vacancyKey)) return;
           if (options.alwaysNotify && !require('./hh-cold-search-schedule').notificationsEnabled(username, workDir, vacancyKey)) return;
           return notifyChat({
             username,

@@ -1195,11 +1195,18 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // instead of an orphan the next buffered message can never find its way back to.
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
   const notificationIntents = require('../domains/hh/intents');
-  if (notificationIntents.HH_NOTIFY_OFF_INTENT.test(task) && userId && workDir) {
+  if (userId && workDir && (notificationIntents.HH_NOTIFY_OFF_INTENT.test(task) || notificationIntents.HH_NOTIFY_ON_INTENT.test(task))) {
+    try {
+      const enabled = notificationIntents.HH_NOTIFY_ON_INTENT.test(task);
+      require('../hh-cold-search-schedule').setNotifications(userId, workDir, enabled);
+      return `Уведомления холодного поиска в Telegram ${enabled ? 'включены' : 'выключены'} для всех вакансий профиля. Настройки автопоиска не изменены.`;
+    } catch { return 'Не удалось сохранить настройку уведомлений холодного поиска. Попробуй ещё раз.'; }
+  }
+  if (notificationIntents.HH_SEARCH_OFF_INTENT.test(task) && userId && workDir) {
     try {
       require('../hh-cold-search-schedule').disableSearches(userId, workDir);
-      return 'Автопоиск и уведомления холодного поиска выключены для всех вакансий профиля. Ручной поиск доступен.';
-    } catch { return 'Не удалось сохранить отключение уведомлений холодного поиска. Попробуй ещё раз.'; }
+      return 'Автопоиск выключен для всех вакансий профиля. Ручной поиск доступен.';
+    } catch { return 'Не удалось остановить автопоиск. Попробуй ещё раз.'; }
   }
   // Never mistake notification settings or a quoted complaint for new responses.
   if (notificationIntents.HH_NOTIFICATION_REQUEST.test(task)) return null;
