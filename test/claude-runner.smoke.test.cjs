@@ -206,4 +206,43 @@ echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens"
   assert.ok(!landedEdits.some(e => e.bare && landedEdits.indexOf(e) > landedEdits.indexOf(postThreshold[0])), 'no bare (button-stripping) edit after the first button-carrying one');
   fs.rmSync(tmp4, { recursive: true, force: true });
   console.log('V2c PASS: buttons persist across consecutive progress edits (no button-stripping edits)');
+
+  // (9) Zombie timer regression: codex spawns a codex-code-mode-host that inherits
+  // the stdout pipe, so proc.on('close') can stall forever after the engine dies.
+  // The exitWatcher must force-finish the run and the progress timers must stop
+  // re-arming — otherwise the "Думаю… (742с)" message keeps being edited by the
+  // dead run while a successor session edits its own ("742с + 3с in one chat").
+  const tmp5 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-zombie-'));
+  const zombieBin = path.join(tmp5, 'fake-zombie');
+  writeFake(zombieBin, `#!/usr/bin/env sh
+(sleep 100) &
+sleep 2
+echo "boom" >&2
+exit 1
+`);
+  const zombieT0 = Date.now();
+  const zombieEdits = [];
+  const zombieTgEdit = async (token, chatId, messageId, text, extra) => {
+    zombieEdits.push(Math.round(Date.now() - zombieT0));
+    return { ok: true };
+  };
+  // Must NOT hang forever: the watcher force-finishes ~3s after the engine dies.
+  const zombieResult = await Promise.race([
+    runEngineProcess({
+      ...baseOpts, engineBin: zombieBin, cwd: tmp5, msgId: 'm-1', taskId: 't-zombie',
+      thinkingStart: zombieT0, user: { username: 'smoke', workDir: tmp5, name: 'Smoke' },
+      tgEdit: zombieTgEdit,
+    }).catch(e => ({ forceFinished: /stalled/.test(e.message) })),
+    new Promise(r => setTimeout(() => r({ hung: true }), 10_000)),
+  ]);
+  assert.ok(!zombieResult?.hung, 'zombie: runEngineProcess must force-finish instead of hanging');
+  // All edits must have landed before the engine died (~2s), never after.
+  const lastEdit = zombieEdits.length ? zombieEdits[zombieEdits.length - 1] : 0;
+  assert.ok(zombieEdits.length > 0, 'zombie: expected at least one progress edit before engine death');
+  assert.ok(lastEdit <= 3000, `zombie: no progress edit after engine death (~2s), last was ${lastEdit}ms`);
+  // Kill the fake "host" (it inherited our stdout pipe — leaving it would block
+  // the test runner's own EOF). exec() here is a syscall, not a command runner.
+  try { require('node:child_process').spawnSync('pkill', ['-f', 'sleep 100']); } catch {}
+  fs.rmSync(tmp5, { recursive: true, force: true });
+  console.log('V2d PASS: zombie engine force-finishes; progress timers die with the engine (no 742с+3с overlap)');
 })();
