@@ -39,8 +39,15 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
     config=config.replace('listen 80;',f'listen 127.0.0.1:{hp};').replace('listen 443 ssl;',f'listen 127.0.0.1:{sp} ssl;')
     config=config.replace('/etc/letsencrypt/live/recruiter-assistant.ru/fullchain.pem',str(d/'cert.pem')).replace('/etc/letsencrypt/live/recruiter-assistant.ru/privkey.pem',str(d/'key.pem'))
     config=config.replace('127.0.0.1:8080',f'127.0.0.1:{upstream.server_port}')
-    config=config.replace('proxy_pass https://136-65-7-197.sslip.io',f'proxy_pass https://localhost:{cold.server_port}')
+    config=config.replace('proxy_pass https://136-65-7-197.sslip.io',f'proxy_pass https://127.0.0.1:{cold.server_port}')
+    config=config.replace('proxy_ssl_server_name on;', 'proxy_ssl_server_name on; proxy_ssl_name localhost;')
     config=config.replace('/etc/ssl/certs/ca-certificates.crt',str(d/'root.pem'))
+    # Clone the actual report proxy with the old depth in the SAME nginx
+    # instance: no process restart/listener race and no localhost IPv6 fallback.
+    start=config.index('    location ^~ /p/ {')
+    end=config.index('\n    }',start)+len('\n    }')
+    negative=config[start:end].replace('location ^~ /p/', 'location = /__negative_chain').replace('proxy_ssl_verify_depth 3;', 'proxy_ssl_verify_depth 1;')
+    config=config[:start]+negative+'\n'+config[start:]
     config=config.replace('/var/www/html',str(d/'webroot'))
     challenge=d/'webroot/.well-known/acme-challenge';challenge.mkdir(parents=True);(challenge/'probe').write_text('acme-ok')
     (d/'nginx.conf').write_text(f'pid {d}/nginx.pid; error_log {d}/error.log; events {{}} http {{ access_log off; client_body_temp_path {d}/body; proxy_temp_path {d}/proxy; {config} }}')
@@ -79,18 +86,10 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
         c=http.client.HTTPSConnection('127.0.0.1',sp,context=context,timeout=5);start=time.monotonic();c.request('GET','/stream',headers={'Host':'recruiter-assistant.ru'});r=c.getresponse()
         assert r.read(1)==b'/' and time.monotonic()-start<1,'SSE first bytes must arrive before upstream completes'
         assert r.read().endswith(b'END');c.close()
-        # Negative control: restore nginx's old verification depth. This must
-        # fail TLS, proving the fixture catches the production regression and
-        # certificate verification was not silently disabled to fix the 502.
-        p.terminate();p.wait(timeout=5)
-        conf=d/'nginx.conf';conf.write_text(conf.read_text().replace('proxy_ssl_verify_depth 3;', 'proxy_ssl_verify_depth 1;'))
-        p=subprocess.Popen(['nginx','-p',str(d),'-c',str(conf),'-g','daemon off;'])
-        for _ in range(100):
-            try:
-                with socket.create_connection(('127.0.0.1',sp),timeout=.1):break
-            except OSError:time.sleep(.02)
-        s,h,b=request('/p/chain-check');assert s==502,(s,b)
-        assert 'certificate chain too long' in (d/'error.log').read_text()
+        # Same route with depth=1 must reject this chain, not silently bypass TLS.
+        s,h,b=request('/__negative_chain');assert s==502,(s,b)
+        error_log=(d/'error.log').read_text()
+        assert 'certificate chain too long' in error_log.lower(),error_log
         print('PASS: TLS, root/login, OAuth query preservation, www, HTTP, ACME, candidate/vacancy routes, 2/20 MiB uploads, 413 boundary, streaming, cold-search TLS upstream with intermediate chain and negative depth control, signed query and POST body preservation')
     finally:
         p.terminate();p.wait(timeout=5);upstream.shutdown();cold.shutdown()
