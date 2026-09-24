@@ -234,8 +234,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f1f5f9;color:#1e
 <script>
 const NEG_ID = '${esc(String(neg_id))}';
 const HH_USER = '${esc(String(username))}';
-const CALLBACK_BASE = '${esc(callbackBase)}';
-const HH_SECRET = '${esc(process.env.AGENT_SECRET || '')}';
+const CALLBACK_BASE = ${JSON.stringify(callbackBase)} || (location.pathname.startsWith('/agent/') ? '/agent' : '');
 
 function showToast(msg, err) {
   const t = document.getElementById('toast');
@@ -252,7 +251,7 @@ async function doSend(force) {
   try {
     const r = await fetch(CALLBACK_BASE + '/hh/send', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: HH_USER, negotiation_id: NEG_ID, message: msg, force: !!force }),
     });
     const data = await r.json().catch(() => ({}));
@@ -305,6 +304,36 @@ if (req.method === 'OPTIONS' && (url.pathname === '/hh/send' || url.pathname ===
   return res.end();
 }
 
+if (req.method === 'GET' && url.pathname === '/hh/response-updates') {
+  const username = url.searchParams.get('username');
+  const vacancyId = url.searchParams.get('vacancy_id');
+  if (![username, vacancyId].every(x => /^[a-zA-Z0-9_-]+$/.test(String(x || '')))) return json(res, 400, { error: 'Invalid scope' });
+  if (process.env.AGENT_SECRET && url.searchParams.get('token') !== proactiveHmac(username)) return json(res, 403, { error: 'Invalid token' });
+  if (!readActiveVacancies(path.join(BASE_USERS_DIR, username)).some(v => String(v.id) === vacancyId)) return json(res, 403, { error: 'Unknown vacancy' });
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+    const saved = JSON.parse(fs.readFileSync(hhCacheFile(dataDir, username, vacancyId), 'utf8'));
+    return json(res, 200, { synced_at: saved.synced_at });
+  } catch { return json(res, 200, { synced_at: null }); }
+}
+
+if (req.method === 'POST' && url.pathname === '/hh/response-state') {
+  const body = JSON.parse(await readBody(req));
+  const { username, vacancy_id, negotiation_id, status, token } = body;
+  if (![username, vacancy_id, negotiation_id].every(x => /^[a-zA-Z0-9_-]+$/.test(String(x || '')))) return json(res, 400, { error: 'Invalid scope' });
+  if (process.env.AGENT_SECRET && token !== proactiveHmac(username)) return json(res, 403, { error: 'Invalid token' });
+  const vacancies = readActiveVacancies(path.join(BASE_USERS_DIR, username));
+  if (!vacancies.some(v => String(v.id) === String(vacancy_id))) return json(res, 403, { error: 'Unknown vacancy' });
+  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
+  try {
+    const cache = JSON.parse(fs.readFileSync(hhCacheFile(dataDir, username, vacancy_id), 'utf8'));
+    if (!cache.negotiations.some(n => String(n.id) === String(negotiation_id))) return json(res, 404, { error: 'Unknown response' });
+    require('../hh-response-state').setResponseState(dataDir, username, vacancy_id, negotiation_id, status);
+    return json(res, 200, { ok: true, status });
+  } catch (e) { return json(res, 400, { error: e.message }); }
+}
+
 if (req.method === 'GET' && url.pathname === '/hh/review') {
   const username = url.searchParams.get('username') || '';
   const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -331,15 +360,22 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
   const workDir = path.join(BASE_USERS_DIR, username);
   const activeVacancies = readActiveVacancies(workDir);
   const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
-  const vacancy = activeVacancies.find(v => String(v.id) === requestedVacancyId) || activeVacancies[0] || null;
+  const vacancy = requestedVacancyId ? activeVacancies.find(v => String(v.id) === requestedVacancyId) : activeVacancies[0];
   if (!vacancy?.id) return errPage('Вакансия не выбрана. Скажи боту «мои вакансии» и выбери вакансию.');
 
-  let negotiations = [], syncedAt = null;
+  let negotiations = [], syncedAt = null, syncError = null;
   try {
     const result = await getHhNegotiationsWithCache(dataDir, username, vacancy.id, tokenData.access_token);
     negotiations = result.negotiations;
     syncedAt = result.synced_at;
-  } catch (e) { console.error('[hh/review] fetch error:', e.message); }
+  } catch (e) {
+    console.error('[hh/review] fetch error:', e.message);
+    syncError = 'Не удалось обновить отклики из HH. Показаны последние сохранённые данные.';
+    try {
+      const cached = JSON.parse(fs.readFileSync(hhCacheFile(dataDir, username, vacancy.id), 'utf8'));
+      negotiations = cached.negotiations; syncedAt = cached.synced_at;
+    } catch { syncError = 'Не удалось загрузить отклики из HH. Нажмите «Обновить» для повтора.'; }
+  }
 
   // Sync HH thread messages into local history before rendering
   // (capped at 15 negs, ~2-3s max; errors are non-fatal)
@@ -353,9 +389,9 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
     if (fs.existsSync(logPath)) lastScoredAt = JSON.parse(fs.readFileSync(logPath, 'utf8')).at || null;
   } catch { /* non-critical */ }
 
-  const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+  const callbackBase = ''; // Same-origin public URL, including legacy /agent links.
   const html = generateReviewPageHtml(negotiations, vacancy.title || 'Вакансия', username, callbackBase, dataDir, {
-    syncedAt,
+    syncedAt, syncError, list: url.searchParams.get('list') || 'active',
     vacancyId: vacancy.id,
     lastScoredAt,
     vacancies: activeVacancies,
@@ -402,11 +438,8 @@ if (req.method === 'GET' && url.pathname === '/hh/candidate') {
     console.error(`[hh/candidate] fetch neg ${neg_id}:`, e.message);
   }
 
-  const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const reviewToken = agentSecret
-    ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16)
-    : '';
-  const reviewUrl = `${callbackBase}/hh/review?username=${encodeURIComponent(username)}&token=${reviewToken}`;
+  const callbackBase = '';
+  const reviewUrl = require('../hh-quick').hhReviewUrl(username, url.searchParams.get('vacancy_id') || neg?.vacancy?.id);
 
   const html = generateCandidateProfileHtml(neg, history, username, callbackBase, reviewUrl);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -956,19 +989,17 @@ if (req.method === 'POST' && url.pathname === '/hh/update-base-prompt') {
 if (req.method === 'POST' && url.pathname === '/hh/sync-negotiations') {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const body = JSON.parse(await readBody(req));
-  const { username: syncUser, vacancy_id: syncVacancyId } = body || {};
-  if (!syncUser || !syncVacancyId) return json(res, 400, { error: 'missing fields' });
+  const { username: syncUser, vacancy_id: syncVacancyId, token: syncAuth } = body || {};
+  if (process.env.AGENT_SECRET && syncAuth !== proactiveHmac(syncUser) && req.headers.authorization !== `Bearer ${process.env.AGENT_SECRET}`) return json(res, 403, { error: 'Invalid token' });
+  if (![syncUser, syncVacancyId].every(x => /^[a-zA-Z0-9_-]+$/.test(String(x || '')))) return json(res, 400, { error: 'Invalid scope' });
   const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const syncTokenFile = path.join(hhTokensBase, String(syncUser), 'hh');
   if (!fs.existsSync(syncTokenFile)) return json(res, 403, { error: 'HH not connected' });
+  if (!readActiveVacancies(path.join(BASE_USERS_DIR, syncUser)).some(v => String(v.id) === String(syncVacancyId))) return json(res, 403, { error: 'Unknown vacancy' });
   const syncTokenData = JSON.parse(fs.readFileSync(syncTokenFile, 'utf8'));
   const syncDataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
   try {
-    const negotiations = await fetchAllHhNegotiations(syncVacancyId, syncTokenData.access_token);
-    const cacheFile = hhCacheFile(syncDataDir, syncUser);
-    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-    const synced_at = Date.now();
-    fs.writeFileSync(cacheFile, JSON.stringify({ resume_version: 1, synced_at, vacancy_id: String(syncVacancyId), negotiations }), { mode: 0o600 });
+    const { negotiations, synced_at } = await getHhNegotiationsWithCache(syncDataDir, syncUser, syncVacancyId, syncTokenData.access_token, { force: true });
     console.log(`[hh/sync] user=${syncUser} vacancy=${syncVacancyId} count=${negotiations.length}`);
     return json(res, 200, { ok: true, count: negotiations.length, synced_at });
   } catch (e) {

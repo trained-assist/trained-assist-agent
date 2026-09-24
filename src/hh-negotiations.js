@@ -66,13 +66,13 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     return path.join(dataDir, 'hh', String(username), `negotiations-cache:${vacancyId}.json`);
   }
 
-  async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessToken) {
+  async function getHhNegotiationsWithCache(dataDir, username, vacancyId, accessToken, options = {}) {
     const cacheFile = hhCacheFile(dataDir, username, vacancyId);
-    const CACHE_TTL_MS = 15 * 60 * 1000;
+    const CACHE_TTL_MS = 5 * 60 * 1000;
     try {
       const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
       const ageMs = Date.now() - (cached.synced_at || 0);
-      if (cached.resume_version === 1 && ageMs < CACHE_TTL_MS && String(cached.vacancy_id) === String(vacancyId)) {
+      if (!options.force && cached.resume_version === 1 && ageMs < CACHE_TTL_MS && String(cached.vacancy_id) === String(vacancyId)) {
         return { negotiations: cached.negotiations, synced_at: cached.synced_at };
       }
     } catch {}
@@ -82,7 +82,7 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     } catch (e) {
       // If HH rejected the token (401/403 oauth_error=token-expired), refresh once and retry.
       // Without this, /hh/review silently goes empty 14 days after every re-auth.
-      if (username && /HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
+      if (username && /HH(?: API)? 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
         const fresh = await refreshHhToken(username, getSecretsCache());
         if (fresh) negotiations = await fetchAllHhNegotiations(vacancyId, fresh);
         else throw e;
@@ -91,7 +91,9 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     const synced_at = Date.now();
     try {
       fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-      fs.writeFileSync(cacheFile, JSON.stringify({ resume_version: 1, synced_at, vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
+      const tmp = `${cacheFile}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ resume_version: 1, synced_at, vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
+      fs.renameSync(tmp, cacheFile);
     } catch (e) { console.error('[hh-cache] write error:', e.message); }
     return { negotiations, synced_at };
   }
@@ -195,25 +197,10 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
   // Scores one tracked vacancy. Returns the (possibly refreshed) access token so the
   // caller can reuse it for the next vacancy in the loop without refreshing twice.
   async function runHhScoringForVacancy(username, workDir, dataDir, vacancy, accessToken) {
-    // Skip before any HH API call if this vacancy has no ATS config yet — same
-    // guard readAtsConfig uses when actually scoring, so a vacancy can never be
-    // fetched-but-silently-unscored for a different reason than what it logs.
-    if (!readAtsConfig(workDir, vacancy.id)) return accessToken;
-
-    let negotiations;
-    try {
-      negotiations = await fetchAllHhNegotiations(vacancy.id, accessToken);
-    } catch (e) {
-      // Auto-refresh HH access_token if it expired since the last re-auth.
-      // Without this, the background loop fails silently for 14 days after
-      // every /hh_connect, leaving new candidates unscored.
-      if (/HH 40[13].*token[-_]?expired/i.test(String(e.message || ''))) {
-        const fresh = await refreshHhToken(username, getSecretsCache());
-        if (!fresh) throw e;
-        accessToken = fresh;
-        negotiations = await fetchAllHhNegotiations(vacancy.id, accessToken);
-      } else { throw e; }
-    }
+    const { negotiations } = await getHhNegotiationsWithCache(dataDir, username, vacancy.id, accessToken, { force: true });
+    // Refresh may have replaced the persisted token; use it for message sync too.
+    const currentToken = require('./hh-utils').readHhToken(username);
+    accessToken = currentToken?.access_token || accessToken;
 
     // Sync HH thread messages incrementally — only candidates changed since last sync
     const msgSync = await syncHhMessagesToHistory(dataDir, username, negotiations, accessToken, {
@@ -221,6 +208,9 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
       maxConcurrent: 4,
     }).catch(e => { console.error(`[hh-bg] msg-sync error for ${username}/${vacancy.id}:`, e.message); return { synced: 0, newMessages: 0 }; });
     if (msgSync.newMessages > 0) console.log(`[hh-bg] msg-sync ${username}/${vacancy.id}: +${msgSync.newMessages} new messages across ${msgSync.synced} candidates`);
+
+    // Sync is independent of scoring setup. No LLM calls without an ATS config.
+    if (!readAtsConfig(workDir, vacancy.id)) return accessToken;
 
     const scored = await scoreUnscoredCandidates(negotiations, username, workDir, { maxConcurrent: 4, msgSyncStats: msgSync, vacancyId: vacancy.id });
     if (scored > 0) console.log(`[hh-bg] scored ${scored} new candidates for ${username}/${vacancy.id}`);
