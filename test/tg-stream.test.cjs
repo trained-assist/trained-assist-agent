@@ -15,7 +15,7 @@ const { tgEdit } = require('../src/runner/tg-stream');
 
 let calls = [];
 const realFetch = globalThis.fetch;
-function installFetch(statuses) {
+function installFetch(statuses, retryAfter = 100) {
   calls = [];
   globalThis.fetch = async (url, init) => {
     calls.push({ url, init, status: statuses.shift ? statuses.shift() : statuses });
@@ -24,7 +24,7 @@ function installFetch(statuses) {
       status,
       ok: status >= 200 && status < 300,
       json: async () => status === 429
-        ? { ok: false, error_code: 429, parameters: { retry_after: 100 } }
+        ? { ok: false, error_code: 429, parameters: { retry_after: retryAfter } }
         : { ok: true, result: { message_id: 1 } },
     };
   };
@@ -52,20 +52,38 @@ function installFetch(statuses) {
     assert.equal(r2.flooded, true, 'bestEffort 429 must report flooded');
     assert.equal(r2.ok, false, 'bestEffort 429 must not report ok');
 
-    // (3) terminal edit retries on 429 (3 attempts) with capped wait, then throws
-    installFetch([429, 429, 429]);
-    const t0 = Date.now();
-    let threw = false;
-    try {
-      await tgEdit('tok', 444, 1, 'final', {}, { retries: 3 });
-    } catch (e) {
-      threw = /retries exhausted/.test(e.message);
-    }
-    const elapsed = Date.now() - t0;
-    assert.equal(calls.length, 3, `terminal: expected 3 attempts, got ${calls.length}`);
-    assert.equal(threw, true, 'terminal: must throw after retries exhausted');
-    // 100s retry_after x3 would be 300s; capped at 8s each => well under
-    assert.ok(elapsed < 60_000, `terminal wait must be capped (elapsed=${elapsed}ms)`);
+// (3) terminal edit retries on 429 (3 attempts); the wait HONORS Telegram's
+// retry_after (regression: the old 8s cap sat BELOW the real 9-17s flood, so we
+// retried too early, re-429'd and deepened the storm). retry_after=12 → each
+// attempt waits the full 12s (not capped to 8), then throws after 3 tries.
+installFetch([429, 429, 429], 12);
+const t0 = Date.now();
+let threw = false;
+try {
+  await tgEdit('tok', 444, 1, 'final', {}, { retries: 3 });
+} catch (e) {
+  threw = /retries exhausted/.test(e.message);
+}
+const elapsed = Date.now() - t0;
+assert.equal(calls.length, 3, `terminal: expected 3 attempts, got ${calls.length}`);
+assert.equal(threw, true, 'terminal: must throw after retries exhausted');
+// 12s retry_after x3 waits = ~36s; the old 8s cap would give ~24s. The >= 30s
+// bound proves we honor retry_after (12s) instead of capping below it (8s).
+assert.ok(elapsed >= 30_000, `terminal wait must honor retry_after 12s, got ${elapsed}ms`);
+assert.ok(elapsed < 60_000, `terminal wait bounded (elapsed=${elapsed}ms)`);
+
+// (5) flood gate — a 429 on a progress edit suppresses subsequent best-effort
+// edits for THIS chat until retry_after passes (they skip, no fetch), then lets
+// one through. Other chats are unaffected.
+installFetch([429, 200, 200], 1);
+const r5a = await tgEdit('tok', 666, 1, 'a', {}, { bestEffort: true }); // 429 → flooded
+assert.equal(r5a.flooded, true, 'flood: first edit reports flooded');
+const r5b = await tgEdit('tok', 666, 1, 'b', {}, { bestEffort: true }); // skipped (flood window)
+assert.equal(r5b.skipped, true, 'flood: next edit within window must skip, no fetch');
+assert.equal(calls.length, 1, `flood: no fetch while window open, got ${calls.length}`);
+const r5c = await tgEdit('tok', 777, 1, 'c', {}, { bestEffort: true }); // other chat unaffected
+assert.ok(r5c.ok, 'flood: other chat is not suppressed');
+assert.equal(calls.length, 2, `flood: other chat should fetch, got ${calls.length}`);
 
     // (4) starve backstop — msgA wins the coalesce slot every tick, msgB keeps
     // losing; after MAX_STARVE_STREAK (2) consecutive drops, msgB's next edit
