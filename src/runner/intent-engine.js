@@ -1196,12 +1196,9 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
   const notificationIntents = require('../domains/hh/intents');
   if (userId && workDir && (notificationIntents.HH_NOTIFY_OFF_INTENT.test(task) || notificationIntents.HH_NOTIFY_ON_INTENT.test(task))) {
-    try {
-      const enabled = notificationIntents.HH_NOTIFY_ON_INTENT.test(task);
-      require('../hh-cold-search-schedule').setNotifications(userId, workDir, enabled);
-      return `Уведомления холодного поиска в Telegram ${enabled ? 'включены' : 'выключены'} для всех вакансий профиля. Настройки автопоиска не изменены.`;
-    } catch { return 'Не удалось сохранить настройку уведомлений холодного поиска. Попробуй ещё раз.'; }
+    return 'Уведомления холодного поиска выключены: функция удалена для всех пользователей. Настройки автопоиска не изменены.';
   }
+
   if (notificationIntents.HH_SEARCH_OFF_INTENT.test(task) && userId && workDir) {
     try {
       require('../hh-cold-search-schedule').disableSearches(userId, workDir);

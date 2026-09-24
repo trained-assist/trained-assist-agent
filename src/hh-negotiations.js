@@ -10,7 +10,7 @@ const { hydrateResumes } = require('./hh-resume');
 const { scoreUnscoredCandidates, generateDraftMessages, readAtsConfig } = require('./hh-scoring');
 const {
   runProactiveSearch, scoreUnscoredProactiveCandidates,
-  loadSchedule, saveSchedule, buildProactiveDigest,
+  loadSchedule, saveSchedule,
 } = require('./hh-proactive-search');
 
 const BASE_USERS_DIR = process.env.USERS_DIR ||
@@ -265,19 +265,14 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     }
   }
 
-  // Compute the HMAC-signed proactive page URL for a user — same logic as inside the
-  // request handler but needed at module level for the scheduler. `vacancyId` is a
-  // plain, non-HMAC'd query param (same pattern as hhReviewUrl) — omitted here because
-  // the scheduler builds this URL before runProactiveSearch resolves which vacancy it's
-  // running for; runProactiveSearch itself appends vacancy_id once vacancyKey is known
-  // (see the notifyChat block in hh-proactive-search.js).
+  // Compatibility URL helper for existing callers.
   function buildProactiveUrlForScheduler(username, vacancyId) {
     return require('./hh-autoscan').proactiveUrlFor(username, vacancyId);
   }
 
   // Periodic proactive HH search scheduler.
   // Checks every 30 min which users have enabled auto-search; for each user whose
-  // interval has elapsed, runs runProactiveSearch and sends a Telegram notification.
+  // interval has elapsed, runs runProactiveSearch and persists results for the results page.
   // Enable per user via the hh_proactive_schedule MCP tool (action=enable).
   function scheduleProactiveSearchRuns(secretsArg) {
     const CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -296,30 +291,7 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
           await require('./hh-cold-search-schedule').runDueSearches(username, workDir, vacancyId => runProactiveSearch(username, workDir, {
             vacancyId,
             refreshAccessToken: (u) => refreshHhToken(u, secrets),
-            proactiveUrl: buildProactiveUrlForScheduler(username),
-            alwaysNotify: true,
-            notifyChat: async (info) => {
-              const chatId = readChatId(username);
-              if (!chatId) return;
-              const botToken = secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN;
-              if (!botToken) return;
-              const text = buildProactiveDigest({
-                vacancyTitle: info.vacancyTitle,
-                newCount: info.newCount,
-                totalNewCount: info.totalNewCount,
-                totalSeen: info.totalSeen,
-                newCandidates: info.newCandidates,
-                threshold: info.threshold,
-                url: info.proactiveUrl,
-              });
-              const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-              await fetch(`${tgBase}/bot${botToken}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
-                signal: AbortSignal.timeout(10_000),
-              });
-            },
+
           }));
           console.log(`[proactive-scheduler] done for user=${username}`);
         } catch (e) {

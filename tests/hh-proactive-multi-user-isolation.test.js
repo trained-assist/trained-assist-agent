@@ -1,32 +1,6 @@
 /**
- * Multi-user isolation guard for the proactive HH cold-search digest.
- *
- * Owner requirement (2026-09-22): any background/automated sender (cron,
- * proactive search, digests) must be scoped to exactly one profile — never
- * a broadcast, never another user's data leaking into a different user's
- * Telegram chat. The explore audit of every proactive-send mechanism found
- * the design already isolates by username via per-user directories, but
- * flagged a coverage gap: no test proves it under REAL concurrency (the
- * 30-min proactive scheduler and the 5-min background-scoring loop in
- * hh-negotiations.js can overlap in wall-clock time for two different
- * users, which is exactly when accidental shared/module-level state would
- * show up as cross-talk — a sequential test would hide that class of bug).
- *
- * This test runs runProactiveSearch() for two users truly concurrently
- * (Promise.all, not awaited one after another) against the SAME external
- * HH candidate pool (cold search is a shared external database — the
- * safety property is that per-user *processing* of that shared pool never
- * crosses: each user's own vacancy criteria, seen-ids bucket, on-disk
- * output file, and Telegram digest text/chatId must stay theirs alone.
- *
- * The notifyChat fixture below mirrors the production wiring in
- * hh-negotiations.js's scheduleProactiveSearchRuns (readChatId(username) →
- * buildProactiveDigest → send) — if that wiring changes, update this
- * fixture to match, since it exercises the real buildProactiveDigest but a
- * local readChatId (the production readChatId hardcodes os.homedir(),
- * ignoring AGENT_TOKENS_DIR, so it can't be pointed at a tmp dir here;
- * that's a testability gap only — os.homedir() is the same for every user,
- * so it does not itself cause cross-profile leakage).
+ * Concurrent searches retain profile-isolated candidate results and never invoke
+ * retired notification callbacks, even with legacy alwaysNotify opt-in.
  */
 
 import { describe, it, expect, afterAll } from 'vitest';
@@ -91,7 +65,7 @@ afterAll(async () => {
 // HH_API_BASE_URL into a module-level const at require time.
 const require = createRequire(import.meta.url);
 const {
-  runProactiveSearch, buildProactiveDigest, atsConfigHash, getSearchExclusions,
+  runProactiveSearch, atsConfigHash, getSearchExclusions,
   saveStoredQueries, loadAllCandidates,
 } = require('../src/hh-proactive-search.js');
 
@@ -125,24 +99,17 @@ function setUpUserWorkDir(user, requiredCriterion) {
 function makeNotifyChat(user, sink) {
   return async (info) => {
     const chatId = readFileSync(join(tokensDir, user.username, '.chatid'), 'utf8').trim();
-    const text = buildProactiveDigest({
-      vacancyTitle: info.vacancyTitle,
-      newCount: info.newCount,
-      totalNewCount: info.totalNewCount,
-      totalSeen: info.totalSeen,
-      threshold: info.threshold,
-      url: info.proactiveUrl,
-    });
-    sink.push({ username: user.username, chatId, text, vacancyTitle: info.vacancyTitle, newCandidates: info.newCandidates });
+
+    sink.push({ username: user.username, chatId, vacancyTitle: info.vacancyTitle, newCandidates: info.newCandidates });
   };
 }
 
-describe('proactive HH digest — per-profile isolation under concurrency', () => {
+describe('silent proactive HH search — per-profile isolation under concurrency', () => {
   it('never mixes vacancy titles, chat IDs, or candidate data between two users searching the same shared HH pool at the same time', async () => {
     const aliceWorkDir = setUpUserWorkDir(ALICE, 'Менеджер по продажам');
     const bobWorkDir = setUpUserWorkDir(BOB, 'Саппорт');
 
-    // Scheduled digests require explicit opt-in; missing schedules are disabled.
+    // Legacy enabled schedules must still search without producing notifications.
     for (const user of [ALICE, BOB]) {
       require('../src/hh-proactive-search').saveSchedule(user.username, { enabled: true, vacancies: { [user.vacancyId]: { enabled: true } } });
     }
@@ -165,27 +132,9 @@ describe('proactive HH digest — per-profile isolation under concurrency', () =
     expect(aliceResult.vacancy_id).toBe(ALICE.vacancyId);
     expect(bobResult.vacancy_id).toBe(BOB.vacancyId);
 
-    // --- notifyChat fired exactly once per user, never cross-wired ---
-    expect(notifications).toHaveLength(2);
-    const aliceNotif = notifications.find(n => n.username === ALICE.username);
-    const bobNotif = notifications.find(n => n.username === BOB.username);
-    expect(aliceNotif).toBeDefined();
-    expect(bobNotif).toBeDefined();
-
-    expect(aliceNotif.chatId).toBe(ALICE.chatId);
-    expect(bobNotif.chatId).toBe(BOB.chatId);
-    expect(aliceNotif.chatId).not.toBe(bobNotif.chatId);
-
-    expect(aliceNotif.vacancyTitle).toBe(ALICE.vacancyTitle);
-    expect(bobNotif.vacancyTitle).toBe(BOB.vacancyTitle);
-
-    // The composed Telegram text for one user must never contain the other
-    // user's vacancy title — this is the concrete "broadcast leak" the
-    // owner is worried about.
-    expect(aliceNotif.text).toContain(ALICE.vacancyTitle);
-    expect(aliceNotif.text).not.toContain(BOB.vacancyTitle);
-    expect(bobNotif.text).toContain(BOB.vacancyTitle);
-    expect(bobNotif.text).not.toContain(ALICE.vacancyTitle);
+    // Retired notification hooks must never run, even with legacy opt-in flags.
+    await new Promise(resolve => setImmediate(resolve));
+    expect(notifications).toHaveLength(0);
 
     // --- real candidate data actually flowed (guards against a silently-empty test) ---
     expect(aliceResult.count).toBeGreaterThan(0);
