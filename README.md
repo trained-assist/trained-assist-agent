@@ -445,6 +445,14 @@ npm run check  # syntax check all src files
 | `AGENT_TOKENS_DIR` | `~/agent-tokens` | Per-profile credentials/tokens root. Set explicitly in systemd |
 | `NODE_ENV` | — | Set to `production` in systemd |
 | `AGENT_PUBLIC_URL` | `https://recruiter-assistant.ru` | Public base URL for connect-links. RU VM: `https://platform.recruiter-assistant.ru` |
+| `ENGINE_UNAVAILABLE_AFTER_FAILURES` | `3` | Consecutive relevant engine failures before `engine_health.status` flips degraded → unavailable |
+
+> **Engine Health vs Credentials vs Failure Events** (`src/engine-health.js`, spec §7–§10): three separate concerns.
+> - **Credentials** — `auth-flag.js` + CLI credential stores. The auth flag now tracks only a real credential loss (class `AUTH`).
+> - **Engine Health** — operational state per engine (`healthy`/`degraded`/`unavailable`, `consecutive_failures`, `last_failure_*`), SQLite at `$AGENT_DATA_DIR/engine-health/state.db`. Self-heals to `healthy` on the next successful call; failure history is not erased.
+> - **Failure Events** — append-only attempt chain in `execution-history.js`.
+>
+> `QUOTA` / `RATE_LIMIT` / `CONFIG` degrade health but are **not** credential-invalid. `/internal/auth-status` returns both the back-compat `engines` flags and the derived `engine_health` view.
 
 > **Identity ≠ location:** durable state stores stable IDs (profileId/projectId/sessionId/executionId) — filesystem paths are always derived in `src/data-paths.js`. Never persist an absolute path or construct a profile path inline. The legacy `$AGENT_DATA_DIR/sessions/<profile>` workspace tree is deprecated and migrated by `scripts/migrate-workspaces.mjs` (runs automatically in `deploy.sh`).
 
@@ -490,6 +498,8 @@ Enforced in CI (`ci.yml` → "Recruiter/HH tools must call OpenRouter, not spawn
 | `src/inn-pipeline/` | Multi-source pipeline for company lookup by INN. Sources: `sources/dadata.js`, `sources/checko.js`, `sources/egrul.js`, `sources/bfo.js`, `sources/site-scraper.js`. Helpers in `lib/`: cache, matcher, usage-log, variants. |
 | `src/site-connector.js` | Generic website connector: Playwright login → BFS crawl → Claude Haiku analysis → intent generation. Used by `POST /connect/site` and `src/user-sites.js`. |
 | `src/user-sites.js` | Stores and loads connected-site settings per profile. Reads intents from the crawl results; used by `runner.js` to inject site-specific quick answers. |
+| `src/engine-health.js` | Per-engine operational health (`healthy`/`degraded`/`unavailable`) in SQLite, separate from credentials (`auth-flag.js`) and failure history (`execution-history.js`). `markEngineSuccess` self-heals on success; `markEngineFailure` escalates at `ENGINE_UNAVAILABLE_AFTER_FAILURES`. Only class `AUTH` is credential-invalid. |
+| `src/failure-classifier.js` | Deterministic + cheap-LLM classifier mapping error text onto the fixed `FAILURE_CLASSES` enum (`failure-taxonomy.js`). Feeds `engine-health.js` and `execution-history.js`. |
 | `scripts/refresh-weeek-session.js` | Refreshes `WEEEK_APP_COOKIE` in the Cloudflare Worker secret. Flow: capture cookies from Chrome via CDP → headless Playwright fallback → CF REST API update → Telegram alert on failure. Run manually or via `weeek-session-refresh.service`. |
 
 ### Quick answers — prefer instant replies over calling Claude

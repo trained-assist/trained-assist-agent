@@ -7,13 +7,14 @@ const { writeMcpConfig } = require('../browser');
 const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
-const { isAuthError, detectReason, setAuthFailedFlag } = require('../auth-flag');
+const { isAuthError, setAuthFailedFlag, clearAuthFailedFlag } = require('../auth-flag');
 const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
 const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
 const { recordUsage } = require('../usage-store');
 const { classifyDeterministic: classifyFailureDeterministic } = require('../failure-classifier');
 const executionHistory = require('../execution-history');
+const { markEngineSuccess, markEngineFailure, isCredentialInvalidClass } = require('../engine-health');
 const { randomUUID } = require('crypto');
 const {
   loadUserTokens,
@@ -1250,13 +1251,17 @@ function forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, o
 function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engine, provider, model, exitCode, errorText, action }) {
   try {
     const cls = classifyFailureDeterministic(errorText);
+    const failureClass = cls?.class || 'UNKNOWN';
     executionHistory.recordAttempt(executionId, {
       taskId, projectId, sessionId, engine, provider, model, exitCode,
       errorText,
-      failureClass: cls?.class || 'UNKNOWN',
+      failureClass,
       classificationSource: cls ? 'rule' : 'none',
       action,
     });
+    // Move engine health in lockstep with the recorded event. markEngineFailure is a no-op for
+    // non-relevant classes (USER_STOP/UNKNOWN) and for a missing engine — see engine-health.js.
+    if (engine) markEngineFailure(engine, { failureClass, message: errorText });
   } catch (e) {
     console.warn('[runner] _recordFailureAttempt failed:', e.message);
   }
@@ -2125,7 +2130,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         return tooBigMsg;
       }
       if (verdict.class === 'config') {
-        setAuthFailedFlag({ reason: 'CONFIG_ONE_TIME', error_text: preLadderText, engine: 'opencode' });
+        // CONFIG is a one-time account/setup problem, NOT a credential loss — it degrades engine
+        // health (recorded below via _recordFailureAttempt → markEngineFailure) but must never be
+        // reported as auth-invalid (spec §7). The operator alert is the Telegram message below.
         const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg));
         else await tgSend(BOT_TOKEN, chatId, configMsg);
@@ -2170,7 +2177,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg));
       else await tgSend(BOT_TOKEN, chatId, exhaustedMsg);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, exhaustedMsg);
-      setAuthFailedFlag({ reason: 'QUOTA_EXCEEDED', error_text: preLadderText, engine: 'opencode' });
+      // QUOTA is a plan/usage limit, NOT a credential loss (spec §7): health degrades via
+      // _recordFailureAttempt below; do NOT set the auth flag.
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
         errorText: preLadderText, action: null,
@@ -2180,10 +2188,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
   }
 
-  // Detect an auth/quota failure for the current engine — set the per-engine flag so the
-  // operator repair loop sees it either way. Claude and Codex additionally get ONE automatic
-  // fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on repair;
-  // engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
+  // Detect an auth/quota failure for the current engine. Claude and Codex additionally get ONE
+  // automatic fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on
+  // repair; engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
   //
   // Only GENUINE provider error text may be treated as an auth/quota failure — never the final
   // answer prose. Previously this read `claudeResult || fullOutput.text || result`, so a
@@ -2191,10 +2198,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Telegram 429 fix) raised a false auth flag and bounced a healthy task to the OpenCode
   // fallback (#1227). codexErrorMsg is set only on a turn.failed/error event, claudeErrorText
   // only on an is_error result event; both are real errors, so nothing else is needed.
+  //
+  // isAuthError is deliberately broad (its patterns also cover quota/rate-limit) because the
+  // fallback-to-another-provider behaviour is right for both. But the AUTH FLAG (credentials)
+  // is set only when the unified classifier says the class is actually credential-invalid (AUTH):
+  // QUOTA/RATE_LIMIT degrade engine health via _recordFailureAttempt below, they do NOT mean the
+  // credentials broke (spec §7 — this conflation is what made the old flag lie).
   const authText = codexErrorMsg || claudeErrorText || '';
   if (isAuthError(authText)) {
-    const reason = detectReason(authText);
-    setAuthFailedFlag({ reason, error_text: authText, engine });
+    const authClass = classifyFailureDeterministic(authText)?.class || 'AUTH';
+    if (isCredentialInvalidClass(authClass)) {
+      setAuthFailedFlag({ reason: 'AUTH_INVALID', error_text: authText, engine });
+    }
     const engineLabel = engine === 'codex' ? 'Codex' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
 
     if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
@@ -2320,6 +2335,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     executionHistory.finalizeExecution(executionId, 'INTERRUPTED');
   } else {
     executionHistory.finalizeExecution(executionId, 'COMPLETED');
+    // Self-heal (spec §9): a successful authenticated engine call resets engine health to
+    // healthy and clears the current auth failure. Failure history is untouched — it lives in
+    // execution-history.js and last_failure_* on the health row. Never let a health-store error
+    // take down the success path.
+    if (engine) {
+      try {
+        markEngineSuccess(engine);
+        clearAuthFailedFlag(engine);
+      } catch (e) {
+        console.warn('[runner] engine-health self-heal failed:', e.message);
+      }
+    }
   }
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если

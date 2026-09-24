@@ -21,6 +21,7 @@ const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPend
 const { runMcpTool } = require('./mcp-action');
 const { computeSkillsList } = require('./capabilities-skills');
 const { getAuthFlag, getAllAuthFlags, clearAuthFailedFlag } = require('./auth-flag');
+const { getAllEngineHealth } = require('./engine-health');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
@@ -898,17 +899,18 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // GET /internal/auth-status — read/clear engine auth flags (for repair system).
-    // claude_auth_ok/reason/vm/... stay engine-agnostic-looking for back-compat with the existing
-    // repair system (always reflect the 'claude' engine, same as before per-engine tracking existed).
-    // `engines` is new: the full claude/codex/opencode breakdown, since Claude/Codex now auto-fall
-    // back to OpenCode on auth loss (issue #1061 Фаза 3) and the repair system needs to see all three.
+    // GET /internal/auth-status — engine auth + health. Derived view of current state (spec §12):
+    // `engine_health` is the operational truth (healthy|degraded|unavailable, self-healed on the
+    // next successful call); `claude_auth_ok`/`reason`/… and `engines` are kept for back-compat
+    // with the existing repair system (they reflect the auth flag, which now only ever tracks a
+    // real credential loss — QUOTA/RATE_LIMIT no longer write it, see engine-health.js).
     if (req.method === 'GET' && url.pathname === '/internal/auth-status') {
       const flag = getAuthFlag('claude');
       return json(res, 200, {
         claude_auth_ok: !flag.failed,
         ...(flag.failed ? { reason: flag.reason, vm: flag.vm, failed_at: flag.failed_at, error_text: flag.error_text } : {}),
         engines: getAllAuthFlags(),
+        engine_health: getAllEngineHealth(),
       });
     }
 
