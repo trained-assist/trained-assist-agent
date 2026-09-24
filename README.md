@@ -110,6 +110,7 @@ All endpoints (except `/health`, `/connect/*`) require `Authorization: Bearer <A
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Liveness check (no auth) |
+| `GET` | `/readiness` | Can accept work? 200 ready / 503 not (no auth) |
 | `GET` | `/health-full` | Health + Claude version |
 | `GET` | `/capabilities` | List RU-only services this user has tokens for (`?userId=…`) |
 | `GET` | `/skills` | List available MCP skills |
@@ -454,6 +455,10 @@ npm run check  # syntax check all src files
 >
 > `QUOTA` / `RATE_LIMIT` / `CONFIG` degrade health but are **not** credential-invalid. `/internal/auth-status` returns both the back-compat `engines` flags and the derived `engine_health` view.
 
+> **Health endpoints** (`src/readiness.js`, spec §13): `/health` is liveness only; `/readiness` answers "can this server accept work?" (data dir writable, execution-owner lock present, ≥1 engine not `unavailable`) and returns 503 when not. One unavailable engine does **not** make the server unready while a fallback engine is usable.
+
+> **Claude OAuth hardening** (`scripts/claude-token-refresh.js`, spec §8): a single-owner refresh broker — exclusive flock, re-read under lock, atomic write (temp + fsync file + fsync dir + rename), backup before write, and it refuses partial credential states (access token without refresh token). Locked in by `test/claude-token-refresh.test.cjs` (single-owner concurrency, atomic write, partial-response reject, no-write-on-failure).
+
 > **Identity ≠ location:** durable state stores stable IDs (profileId/projectId/sessionId/executionId) — filesystem paths are always derived in `src/data-paths.js`. Never persist an absolute path or construct a profile path inline. The legacy `$AGENT_DATA_DIR/sessions/<profile>` workspace tree is deprecated and migrated by `scripts/migrate-workspaces.mjs` (runs automatically in `deploy.sh`).
 
 Note: on first deploy after this change, `deploy.sh` automatically migrates `~/alesa-data` → `~/agent-data` if the old directory exists.
@@ -499,6 +504,7 @@ Enforced in CI (`ci.yml` → "Recruiter/HH tools must call OpenRouter, not spawn
 | `src/site-connector.js` | Generic website connector: Playwright login → BFS crawl → Claude Haiku analysis → intent generation. Used by `POST /connect/site` and `src/user-sites.js`. |
 | `src/user-sites.js` | Stores and loads connected-site settings per profile. Reads intents from the crawl results; used by `runner.js` to inject site-specific quick answers. |
 | `src/engine-health.js` | Per-engine operational health (`healthy`/`degraded`/`unavailable`) in SQLite, separate from credentials (`auth-flag.js`) and failure history (`execution-history.js`). `markEngineSuccess` self-heals on success; `markEngineFailure` escalates at `ENGINE_UNAVAILABLE_AFTER_FAILURES`. Only class `AUTH` is credential-invalid. |
+| `src/readiness.js` | `computeReadiness()` for `GET /readiness` — data dir writable, execution-owner lock present, ≥1 engine usable. A single unavailable engine does not make the server unready. |
 | `src/failure-classifier.js` | Deterministic + cheap-LLM classifier mapping error text onto the fixed `FAILURE_CLASSES` enum (`failure-taxonomy.js`). Feeds `engine-health.js` and `execution-history.js`. |
 | `scripts/refresh-weeek-session.js` | Refreshes `WEEEK_APP_COOKIE` in the Cloudflare Worker secret. Flow: capture cookies from Chrome via CDP → headless Playwright fallback → CF REST API update → Telegram alert on failure. Run manually or via `weeek-session-refresh.service`. |
 
