@@ -15,6 +15,14 @@
 // test — can be tested in isolation.
 async function checkCompleteness(text, openrouterKey, { fetchImpl = fetch } = {}) {
   const trimmed = (text || '').trim();
+  // A named link lookup is already actionable; retrieving account context is
+  // the assistant's job, not a reason to demand a deep session. Keep incomplete
+  // and multi-line requests with the model gate.
+  const linkLookup = /(?:напомни|пришли|покажи|скинь|дай)\s+(?:пожалуйста\s+)?(?:мне\s+)?(?:пожалуйста\s+)?ссылк[уа]\s+(?:на|для|к)\s+\S+/i;
+  const unfinished = /(?:\s(?:и|но|чтобы|для|на|к)|[,:;]|\.\.\.|…)\s*$/i;
+  if (trimmed.length < 250 && !trimmed.includes('\n') && linkLookup.test(trimmed) && !unfinished.test(trimmed)) {
+    return { level: 'clear', complete: true };
+  }
   if (!trimmed || !openrouterKey) return { level: 'clear', complete: true };
 
   const prompt = `Пользователь пишет ассистенту в Telegram. Оцени, насколько уверенно можно начинать выполнять это как законченный запрос.
@@ -28,6 +36,8 @@ ${trimmed.slice(0, 1200)}
 - "clear" — однозначно законченная мысль/просьба/вопрос, можно начинать сразу (даже короткая, даже без деталей).
 - "likely" — скорее всего законченная мысль, но есть небольшая неопределённость (могло бы быть продолжение, но по умолчанию можно начинать).
 - "insufficient" — реально не хватает контекста чтобы понять, что делать, ИЛИ мысль явно оборвана на полуслове: обрывается на предлоге/союзе, "сделай так чтобы", "а можешь", "нужно чтобы…" без продолжения, висящее "и".
+
+Просьба напомнить ссылку или открыть существующие результаты — законченная задача: данные и активную вакансию агент проверит сам. Отсутствие этих данных в сообщении не означает "insufficient".
 
 Сильно склоняйся к "clear". Используй "insufficient" только когда по сообщению реально невозможно понять задачу. Ничего лишнего, одно слово.`;
 

@@ -15,6 +15,8 @@
 
 const { formatForTelegram, makeLlmFixer } = require('../tg-format');
 
+const { canonicalizePublicLinks } = require('../public-links');
+
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
 const EDIT_MIN_INTERVAL_MS = 1200;    // Telegram edit flood is ~1/s per chat; stay under it
@@ -38,6 +40,7 @@ function tgFixer() {
 }
 
 async function tgFormat(text, extra) {
+  text = canonicalizePublicLinks(text);
   if (extra && extra.parse_mode) return { text, extra };
   const { text: out, parse_mode } = await formatForTelegram(text, { llmFix: tgFixer() });
   return { text: out, extra: parse_mode ? { ...extra, parse_mode } : extra };
