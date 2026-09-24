@@ -675,28 +675,16 @@ ${exclusionsBlock}
 
 // Scoring explanation shown to the recruiter on request — built from the latest actual
 // run's ats_config + generated queries, not a static domain-specific description.
-function buildScoringPromptText(username) {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  const dir = path.join(dataDir, 'hh', String(username), 'proactive');
-  let latest = null;
-  try {
-    const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json')).sort();
-    if (files.length) latest = JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8'));
-  } catch {}
-
-  if (!latest) {
-    return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
-  }
-
-  // Prefer the live context-store config if available — it's always current.
-  // Fall back to the results-file snapshot so the function still works without a running session.
-  let rawConfig = latest.ats_config || {};
-  try {
-    const ctxFile = path.join(userWorkDir(username), 'contexts', 'hh', 'ats_config.json');
-    const ctxRaw = JSON.parse(fs.readFileSync(ctxFile, 'utf8'));
-    if (ctxRaw?.value && typeof ctxRaw.value === 'object') rawConfig = ctxRaw.value;
-  } catch { /* no context store — use results file */ }
-
+function buildScoringPromptText(username, vacancyId) {
+  const workDir = userWorkDir(username);
+  const { readSearchContext } = require('./hh-cold-search-context');
+  const id = vacancyId || readSearchContext(workDir, 'active_vacancy')?.id;
+  if (!id) return 'Сначала выбери вакансию.';
+  const file = require('./hh-cold-search-snapshots').latestProactiveFile(username, id);
+  if (!file) return 'Проактивный поиск ещё не запускался для текущей вакансии — критерии и запросы появятся после первого запуска (команда «проактивный поиск»).';
+  const latest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // Explain the criteria actually used in this run, not a newer config or another vacancy.
+  const rawConfig = latest.ats_config || {};
   const cfg = normalizeAtsConfig(rawConfig);
   const queriesStr = (latest.search_queries || []).map(q => `• "${q}"`).join('\n') || '—';
   const knockoutStr = (cfg.knockout || []).map(k => `• ${k}`).join('\n') || '(не задано)';
@@ -720,7 +708,7 @@ ${prefStr}
 PASS/REVIEW считаются относительно суммы весов этой вакансии — точную оценку даёт следующий шаг.
 
 🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
-Топ-30 по предварительному скорингу + ВСЕ новые кандидаты этого прогона (даже если не попали в топ-30) прогоняются через AI по тем же критериям — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест кандидаты по именам не попадают — только счётчик и ссылка на страницу со списком.`;
+До 30 лучших кандидатов по предварительному скорингу и до 50 новых вне этого списка (кроме первого запуска) оцениваются AI по тем же критериям; неизменившиеся оценки берутся из кэша — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест кандидаты по именам не попадают — только счётчик и ссылка на страницу со списком.`;
 }
 
 // HH resume search with optional one-shot refresh on token-expired (401/403).

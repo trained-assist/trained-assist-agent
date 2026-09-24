@@ -444,6 +444,25 @@ const SLIDER_MAX = ${JSON.stringify(sliderMax)};
 const VACANCY_ID = ${JSON.stringify(vacancyId || '')};
 
 let activePreset = 'all';
+const FILTER_KEY = 'hh-proactive-filters:' + USERNAME + ':' + VACANCY_ID;
+function saveFilters() {
+  try { sessionStorage.setItem(FILTER_KEY, JSON.stringify({
+    name: document.getElementById('nameSearch').value,
+    score: document.getElementById('scoreSlider').value,
+    source: document.getElementById('sourceFilter').value, preset: activePreset,
+  })); } catch {}
+}
+try {
+  const filters = JSON.parse(sessionStorage.getItem(FILTER_KEY) || '{}');
+  document.getElementById('nameSearch').value = filters.name || '';
+  document.getElementById('scoreSlider').value = filters.score || 0;
+  document.getElementById('scoreSliderVal').textContent = Number(document.getElementById('scoreSlider').value).toFixed(1);
+  document.getElementById('sourceFilter').value = filters.source || '';
+  activePreset = ['all', 'pass', 'review', 'top9'].includes(filters.preset) ? filters.preset : 'all';
+  document.querySelectorAll('#presetBtns .btn-preset').forEach(b => b.classList.toggle('active', b.dataset.preset === activePreset));
+} catch {}
+window.addEventListener('pagehide', saveFilters);
+let modalRequest = 0;
 
 // Debounce helper (#3: ~150-200ms) shared by the name search input.
 function debounce(fn, ms) {
@@ -471,6 +490,7 @@ function matchesFilters(el, nameQuery, minScore, preset, source) {
 }
 
 function applyFilters() {
+  saveFilters();
   const nameQuery = document.getElementById('nameSearch').value.trim().toLowerCase();
   const minScore = parseFloat(document.getElementById('scoreSlider').value) || 0;
   const source = document.getElementById('sourceFilter').value;
@@ -512,6 +532,7 @@ document.getElementById('presetBtns').addEventListener('click', e => {
 });
 
 function openAiModal(candidateId, title) {
+  const request = ++modalRequest;
   const modal = document.getElementById('modal');
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalBody').innerHTML = '<div style="text-align:center;padding:24px"><div class="spinner"></div><div style="margin-top:10px;color:#94a3b8;font-size:.85rem">Запрашиваю AI оценку…</div></div>';
@@ -521,10 +542,11 @@ function openAiModal(candidateId, title) {
   fetch(CALLBACK_BASE + '/api/hh/proactive/ai-score', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: USERNAME, candidate_id: candidateId, token: TOKEN }),
+    body: JSON.stringify({ username: USERNAME, candidate_id: candidateId, token: TOKEN, vacancy_id: VACANCY_ID }),
   })
   .then(r => r.json())
   .then(data => {
+    if (request !== modalRequest) return;
     if (data.error) {
       document.getElementById('modalBody').innerHTML = '<span style="color:#dc2626">Ошибка: ' + esc(data.error) + '</span>';
       return;
@@ -551,11 +573,13 @@ function openAiModal(candidateId, title) {
     }
   })
   .catch(e => {
+    if (request !== modalRequest) return;
     document.getElementById('modalBody').innerHTML = '<span style="color:#dc2626">Ошибка: ' + esc(e.message) + '</span>';
   });
 }
 
 function closeModal() {
+  modalRequest++;
   document.getElementById('modal').classList.remove('open');
 }
 document.getElementById('modal').addEventListener('click', e => {

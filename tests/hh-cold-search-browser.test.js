@@ -22,17 +22,49 @@ it('browser switches vacancies and persists monitor/archive actions with the dis
       }) });
     });
     await page.goto('https://hh-fixture.test/hh/proactive?vacancy_id=A');
+    await page.locator('#nameSearch').fill('Designer');
     await page.getByTestId('monitor-toggle').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="monitor-toggle"]').textContent.includes('Отключить'));
+    expect(await page.locator('#nameSearch').inputValue()).toBe('Designer');
     await page.locator('.vacancy-tab', { hasText: 'Vacancy B' }).click();
+    expect(await page.locator('#nameSearch').inputValue()).toBe('');
+    await page.locator('#nameSearch').fill('Sales');
     await page.getByTestId('monitor-toggle').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="monitor-toggle"]').textContent.includes('Отключить'));
     await page.getByTestId('vacancy-archive').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="vacancy-archive"]').textContent.includes('Вернуть'));
     await page.reload(); expect(await page.getByTestId('vacancy-monitoring').innerText()).toContain('вакансия в архиве');
     await page.locator('.vacancy-tab', { hasText: 'Vacancy A' }).click();
+    expect(await page.locator('#nameSearch').inputValue()).toBe('Designer');
     expect(await page.getByTestId('monitor-toggle').innerText()).toContain('Отключить');
     expect(actions.map(a => [a.vacancy_id, a.action])).toEqual([['A', 'enable'], ['B', 'enable'], ['B', 'archive']]);
     expect(errors).toEqual([]);
   } finally { await browser.close(); }
 }, 20000);
+
+it('late AI response cannot overwrite a newer modal; requests carry the displayed vacancy', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    let oldRoute, signalOld;
+    const oldReady = new Promise(resolve => { signalOld = resolve; });
+    const requests = [];
+    await page.route('https://hh-fixture.test/**', async route => {
+      if (route.request().method() === 'POST') {
+        const body = route.request().postDataJSON(); requests.push(body);
+        if (body.candidate_id === 'old') { oldRoute = route; signalOld(); return; }
+        return route.fulfill({ json: { evaluation: 'New evaluation' } });
+      }
+      await route.fulfill({ contentType: 'text/html', body: generateProactivePageHtml({ candidates: [] }, 'user', 'https://hh-fixture.test', 'token', {}, { vacancyId: 'A' }) });
+    });
+    await page.goto('https://hh-fixture.test/hh/proactive?vacancy_id=A');
+    await page.evaluate(() => openAiModal('old', 'Old'));
+    await oldReady;
+    await page.evaluate(() => openAiModal('new', 'New'));
+    await page.waitForFunction(() => document.getElementById('modalBody').textContent.includes('New evaluation'));
+    await oldRoute.fulfill({ json: { evaluation: 'Stale evaluation' } });
+    await page.waitForLoadState('networkidle');
+    expect(await page.locator('#modalBody').innerText()).toContain('New evaluation');
+    expect(requests.map(r => r.vacancy_id)).toEqual(['A', 'A']);
+  } finally { await browser.close(); }
+}, 15000);

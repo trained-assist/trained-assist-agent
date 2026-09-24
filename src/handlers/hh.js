@@ -1029,7 +1029,7 @@ if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
   const given = url.searchParams.get('token') || '';
   if (process.env.AGENT_SECRET && given !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   const { loadAllCandidates } = require('../hh-proactive-search');
-  const all = Object.values(loadAllCandidates(username))
+  const all = Object.values(loadAllCandidates(username, url.searchParams.get('vacancy_id')))
     .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
   return json(res, 200, { total: all.length, candidates: all });
 }
@@ -1039,11 +1039,14 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/ai-score') {
   try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
   const { username = '', candidate_id = '', token: givenToken = '' } = body || {};
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
-  const file = latestProactiveFile(username);
+  const vacancyId = body.vacancy_id || require('../hh-cold-search-context').readSearchContext(path.join(BASE_USERS_DIR, username), 'active_vacancy')?.id;
+  if (!vacancyId) return json(res, 400, { error: 'vacancy_id required' });
+  const file = latestProactiveFile(username, vacancyId);
   if (!file) return json(res, 404, { error: 'no results yet' });
   let results;
   try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return json(res, 500, { error: 'read error' }); }
-  const candidate = (results.candidates || []).find(c => c.id === candidate_id);
+  const candidate = require('../hh-proactive-search').loadAllCandidates(username, vacancyId)[candidate_id]
+    || (results.candidates || []).find(c => c.id === candidate_id);
   if (!candidate) return json(res, 404, { error: 'candidate not found' });
   const cfg = results.ats_config || {};
   const knockoutList = (cfg.knockout || []).map(k => `- ${k}`).join('\n');

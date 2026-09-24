@@ -182,3 +182,28 @@ describe('monitoring lifecycle and run exclusion', () => {
     }
   });
 });
+
+
+describe('scoring explanation belongs to the requested run', () => {
+  it('does not mix latest B queries with A criteria or use config edited after the run', () => {
+    const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+    const { buildScoringPromptText } = require('../src/hh-proactive-search');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-explain-'));
+    const old = process.env.AGENT_DATA_DIR;
+    process.env.AGENT_DATA_DIR = root;
+    const dir = path.join(root, 'hh', 'fixture', 'proactive'); fs.mkdirSync(dir, { recursive: true });
+    try {
+      for (const [id, date, title] of [['A', '2026-09-23', 'Designer'], ['B', '2026-09-24', 'Sales']]) {
+        fs.writeFileSync(path.join(dir, 'search-results-' + id + '.json'), JSON.stringify({ vacancy_id: id, searched_at: date,
+          ats_config: { vacancy_title: title, required: [], preferred: [] }, search_queries: [title] }));
+      }
+      const a = buildScoringPromptText('fixture', 'A');
+      expect(a).toContain('Designer'); expect(a).not.toContain('Sales');
+      expect(buildScoringPromptText('fixture', 'B')).toContain('Sales');
+      expect(buildScoringPromptText('fixture', 'C')).toContain('ещё не запускался');
+    } finally {
+      if (old === undefined) delete process.env.AGENT_DATA_DIR; else process.env.AGENT_DATA_DIR = old;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
