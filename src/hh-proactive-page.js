@@ -138,6 +138,7 @@ function candidateCard(c, idx, existingComment) {
 
 function generateProactivePageHtml(results, username, callbackBase, token, existingComments, opts = {}) {
   const { activeVacancies = [], vacancyId = '', listView = 'active', stateCounts = { active: 0, starred: 0, archived: 0 } } = opts;
+  const monitoring = opts.monitoring || {};
   const candidates = results.candidates || [];
   const comments = existingComments || {};
   const searchedAt = results.searched_at
@@ -347,6 +348,15 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
     const isActive = key === listView;
     return `<a class="state-tab${isActive ? ' active' : ''}" href="${href}">${label} (${stateCounts[key] || 0})</a>`;
   }).join('')}</div>
+  ${vacancyId ? `<div data-testid="vacancy-monitoring">
+    <span role="status">Мониторинг: ${monitoring.archived ? 'вакансия в архиве' : monitoring.enabled ? 'включён' : 'выключен'}.
+    Попытка: ${escHtml(monitoring.last_attempt || '—')}. Успешно: ${escHtml(monitoring.last_success || '—')}.
+    Результат: ${escHtml(({ partial: 'поиск выполнен, AI-оценка не завершена', success: 'есть новые', zero_new: 'новых нет', failed: 'ошибка', running: 'выполняется' })[monitoring.status] || 'ещё не запускался')}.</span>
+    ${monitoring.error ? `<span role="alert">${escHtml(monitoring.error)}</span>` : ''}
+    <button data-testid="monitor-toggle" onclick="vacancyAction('${monitoring.enabled ? 'disable' : 'enable'}',this)">${monitoring.enabled ? 'Отключить мониторинг' : 'Включить мониторинг'}</button>
+    <button data-testid="vacancy-star" onclick="vacancyAction('${monitoring.starred ? 'unstar' : 'star'}',this)">${monitoring.starred ? '★ Убрать звезду вакансии' : '☆ Отметить вакансию'}</button>
+    <button data-testid="vacancy-archive" onclick="vacancyAction('${monitoring.archived ? 'restore' : 'archive'}',this)">${monitoring.archived ? 'Вернуть вакансию из архива' : 'Архивировать вакансию'}</button>
+  </div>` : ''}
   <div class="header-top">
     <div>
       <div class="vacancy-title">
@@ -434,6 +444,25 @@ const SLIDER_MAX = ${JSON.stringify(sliderMax)};
 const VACANCY_ID = ${JSON.stringify(vacancyId || '')};
 
 let activePreset = 'all';
+const FILTER_KEY = 'hh-proactive-filters:' + USERNAME + ':' + VACANCY_ID;
+function saveFilters() {
+  try { sessionStorage.setItem(FILTER_KEY, JSON.stringify({
+    name: document.getElementById('nameSearch').value,
+    score: document.getElementById('scoreSlider').value,
+    source: document.getElementById('sourceFilter').value, preset: activePreset,
+  })); } catch {}
+}
+try {
+  const filters = JSON.parse(sessionStorage.getItem(FILTER_KEY) || '{}');
+  document.getElementById('nameSearch').value = filters.name || '';
+  document.getElementById('scoreSlider').value = filters.score || 0;
+  document.getElementById('scoreSliderVal').textContent = Number(document.getElementById('scoreSlider').value).toFixed(1);
+  document.getElementById('sourceFilter').value = filters.source || '';
+  activePreset = ['all', 'pass', 'review', 'top9'].includes(filters.preset) ? filters.preset : 'all';
+  document.querySelectorAll('#presetBtns .btn-preset').forEach(b => b.classList.toggle('active', b.dataset.preset === activePreset));
+} catch {}
+window.addEventListener('pagehide', saveFilters);
+let modalRequest = 0;
 
 // Debounce helper (#3: ~150-200ms) shared by the name search input.
 function debounce(fn, ms) {
@@ -461,6 +490,7 @@ function matchesFilters(el, nameQuery, minScore, preset, source) {
 }
 
 function applyFilters() {
+  saveFilters();
   const nameQuery = document.getElementById('nameSearch').value.trim().toLowerCase();
   const minScore = parseFloat(document.getElementById('scoreSlider').value) || 0;
   const source = document.getElementById('sourceFilter').value;
@@ -502,6 +532,7 @@ document.getElementById('presetBtns').addEventListener('click', e => {
 });
 
 function openAiModal(candidateId, title) {
+  const request = ++modalRequest;
   const modal = document.getElementById('modal');
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalBody').innerHTML = '<div style="text-align:center;padding:24px"><div class="spinner"></div><div style="margin-top:10px;color:#94a3b8;font-size:.85rem">Запрашиваю AI оценку…</div></div>';
@@ -511,10 +542,11 @@ function openAiModal(candidateId, title) {
   fetch(CALLBACK_BASE + '/api/hh/proactive/ai-score', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: USERNAME, candidate_id: candidateId, token: TOKEN }),
+    body: JSON.stringify({ username: USERNAME, candidate_id: candidateId, token: TOKEN, vacancy_id: VACANCY_ID }),
   })
   .then(r => r.json())
   .then(data => {
+    if (request !== modalRequest) return;
     if (data.error) {
       document.getElementById('modalBody').innerHTML = '<span style="color:#dc2626">Ошибка: ' + esc(data.error) + '</span>';
       return;
@@ -541,11 +573,13 @@ function openAiModal(candidateId, title) {
     }
   })
   .catch(e => {
+    if (request !== modalRequest) return;
     document.getElementById('modalBody').innerHTML = '<span style="color:#dc2626">Ошибка: ' + esc(e.message) + '</span>';
   });
 }
 
 function closeModal() {
+  modalRequest++;
   document.getElementById('modal').classList.remove('open');
 }
 document.getElementById('modal').addEventListener('click', e => {
@@ -563,6 +597,19 @@ function esc(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+async function vacancyAction(action, button) {
+  button.disabled = true;
+  try {
+    const response = await fetch(CALLBACK_BASE + '/api/hh/proactive/vacancy-state', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, vacancy_id: VACANCY_ID, action }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || 'Ошибка сохранения');
+    location.reload();
+  } catch (error) { alert(error.message); button.disabled = false; }
+}
+
 async function runSearch() {
   const btn = document.getElementById('searchBtn');
   btn.disabled = true;
@@ -571,7 +618,7 @@ async function runSearch() {
     const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, vacancy_id: VACANCY_ID }),
     });
     const data = await res.json();
     if (data.error) {
@@ -598,7 +645,7 @@ async function saveComment(candidateId, btn) {
     const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/comment', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, text }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, text, vacancy_id: VACANCY_ID }),
     });
     const data = await res.json();
     if (data.error) { btn.textContent = 'Ошибка'; return; }
@@ -632,7 +679,7 @@ async function setStatus(candidateId, status, btn) {
     const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/set-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, status }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, status, vacancy_id: VACANCY_ID }),
     });
     const data = await res.json();
     if (data.error) {

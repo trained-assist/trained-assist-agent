@@ -63,14 +63,7 @@ function proactiveUrl(username, vacancyId) {
   return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
 }
 
-function latestProactiveFile(username) {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  const dir = path.join(dataDir, 'hh', username, 'proactive');
-  if (!fs.existsSync(dir)) return null;
-  const files = fs.readdirSync(dir).filter(f => f.startsWith('search-results-') && f.endsWith('.json')).sort();
-  if (!files.length) return null;
-  return path.join(dir, files[files.length - 1]);
-}
+const { latestProactiveFile } = require('../hh-cold-search-snapshots');
 
 function appendGuardBlock(username, negId, reason, checks, blocked = true) {
   try {
@@ -795,7 +788,11 @@ if (req.method === 'POST' && url.pathname === '/hh/send-and-reject') {
   const history2 = fs.existsSync(histFile2) ? JSON.parse(fs.readFileSync(histFile2, 'utf8')) : { messages: [] };
   history2.messages = history2.messages || [];
 
-  const guard2 = await bullshitGuard(message, history2.messages, { username });
+  // A persisted operation resumes only the HH stage (or asks for reconciliation).
+  // Rechecking its already-delivered message trips the duplicate-message guard
+  // before sendRejection can perform the safe stage-only retry.
+  const resumeOnly = ['message_sent', 'done', 'sending', 'unknown', 'discarding'].includes(history2.rejection_operation?.status);
+  const guard2 = resumeOnly ? { ok: true, checks: {} } : await bullshitGuard(message, history2.messages, { username });
   if (!guard2.ok) {
     if (!force) {
       console.warn(`[hh/send-and-reject] guard blocked user=${username} neg=${negotiation_id} reason="${guard2.reason}"`);
@@ -986,26 +983,24 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   if (process.env.AGENT_SECRET && given !== proactiveHmac(username)) {
     return proactiveErrPage('Ссылка недействительна. Запроси новую у бота.');
   }
-  const file = latestProactiveFile(username);
-  if (!file) return proactiveErrPage('Нет данных. Попроси бота запустить поиск командой «проактивный поиск».');
-  let results;
-  try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
-  const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-  const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy, candidateStatusOf } = require('../hh-proactive-search');
-  const pageComments = loadCandidateComments(username);
-  // Multi-vacancy step 7/7: tab switcher, mirroring /hh/review's vacancy_id pattern.
   const workDir = path.join(BASE_USERS_DIR, username);
   const activeVacancies = readActiveVacancies(workDir);
   const requestedVacancyId = url.searchParams.get('vacancy_id') || '';
-  const vacancyId = activeVacancies.find(v => String(v.id) === requestedVacancyId)
-    ? requestedVacancyId
-    : (requestedVacancyId || '');
+  const vacancyId = requestedVacancyId || activeVacancies[0]?.id || '';
+  const file = latestProactiveFile(username, vacancyId);
+  let results = { vacancy_id: vacancyId, vacancy_title: activeVacancies.find(v => String(v.id) === String(vacancyId))?.title || 'Вакансия', candidates: [], search_queries: [], total_collected: 0, total_after_knockout: 0 };
+  if (file) {
+    try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
+  }
+  const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+  const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy, candidateStatusOf } = require('../hh-proactive-search');
+  const pageComments = loadCandidateComments(username, vacancyId);
   // Render from the unified all-candidates store (search + manual, accumulated
   // across runs) rather than only the latest search-results snapshot — keeps the
   // rest of `results` (vacancy_title, stats, searched_at) from the snapshot.
   // Records with no vacancy_ids (pre-step-7 data, or manually added with no active
   // vacancy resolvable) are a wildcard and show up under every tab.
-  const byVacancy = Object.values(loadAllCandidates(username)).filter(c => candidateMatchesVacancy(c, vacancyId));
+  const byVacancy = Object.values(loadAllCandidates(username, vacancyId)).filter(c => candidateMatchesVacancy(c, vacancyId));
   // Triage state tabs: a candidate lives in exactly one of active/starred/archived
   // (see hh-proactive-search.js candidateStatusOf) — starring or archiving moves it
   // out of the other tabs entirely instead of just dimming it in place.
@@ -1026,7 +1021,7 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   }
   results.candidates = unified;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments, { activeVacancies, vacancyId, listView, stateCounts }));
+  return res.end(generateProactivePageHtml(results, username, callbackBase, given, pageComments, { activeVacancies, vacancyId, listView, stateCounts, monitoring: require('../hh-cold-search-schedule').getSchedules(username, workDir)[vacancyId] || {} }));
 }
 
 if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
@@ -1034,7 +1029,7 @@ if (req.method === 'GET' && url.pathname === '/api/hh/proactive/candidates') {
   const given = url.searchParams.get('token') || '';
   if (process.env.AGENT_SECRET && given !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
   const { loadAllCandidates } = require('../hh-proactive-search');
-  const all = Object.values(loadAllCandidates(username))
+  const all = Object.values(loadAllCandidates(username, url.searchParams.get('vacancy_id')))
     .sort((a, b) => new Date(b.found_at || b.added_at || 0) - new Date(a.found_at || a.added_at || 0));
   return json(res, 200, { total: all.length, candidates: all });
 }
@@ -1044,11 +1039,14 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/ai-score') {
   try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
   const { username = '', candidate_id = '', token: givenToken = '' } = body || {};
   if (process.env.AGENT_SECRET && givenToken !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
-  const file = latestProactiveFile(username);
+  const vacancyId = body.vacancy_id || require('../hh-cold-search-context').readSearchContext(path.join(BASE_USERS_DIR, username), 'active_vacancy')?.id;
+  if (!vacancyId) return json(res, 400, { error: 'vacancy_id required' });
+  const file = latestProactiveFile(username, vacancyId);
   if (!file) return json(res, 404, { error: 'no results yet' });
   let results;
   try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return json(res, 500, { error: 'read error' }); }
-  const candidate = (results.candidates || []).find(c => c.id === candidate_id);
+  const candidate = require('../hh-proactive-search').loadAllCandidates(username, vacancyId)[candidate_id]
+    || (results.candidates || []).find(c => c.id === candidate_id);
   if (!candidate) return json(res, 404, { error: 'candidate not found' });
   const cfg = results.ats_config || {};
   const knockoutList = (cfg.knockout || []).map(k => `- ${k}`).join('\n');
@@ -1118,6 +1116,8 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/search') {
   const workDir = path.join(BASE_USERS_DIR, username);
   try {
     const result = await runProactiveSearch(username, workDir, {
+      vacancyId: body.vacancy_id,
+      ...(Object.prototype.hasOwnProperty.call(body, 'area') ? { area: body.area } : {}),
       refreshAccessToken: (u) => refreshHhToken(u, _secretsCache),
       proactiveUrl: proactiveUrl(username),
       notifyChat: async (info) => {
@@ -1158,11 +1158,28 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/comment') {
   if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
   try {
     const { saveCandidateComment } = require('../hh-proactive-search');
-    saveCandidateComment(username, candidate_id, { text: String(text).slice(0, 1000) });
+    saveCandidateComment(username, candidate_id, { text: String(text).slice(0, 1000) }, body.vacancy_id);
     return json(res, 200, { ok: true });
   } catch (e) {
     return json(res, 500, { error: e.message });
   }
+}
+
+if (req.method === 'POST' && url.pathname === '/api/hh/proactive/vacancy-state') {
+  let body;
+  try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+  const { username = '', token = '', vacancy_id, action } = body || {};
+  if (process.env.AGENT_SECRET && token !== proactiveHmac(username)) return json(res, 403, { error: 'invalid token' });
+  const workDir = path.join(BASE_USERS_DIR, username);
+  if (!readActiveVacancies(workDir).some(v => String(v.id) === String(vacancy_id))) return json(res, 404, { error: 'vacancy not tracked' });
+  const patches = { enable: { enabled: true, archived: false }, disable: { enabled: false },
+    star: { starred: true }, unstar: { starred: false }, archive: { archived: true, enabled: false }, restore: { archived: false } };
+  if (!patches[action]) return json(res, 400, { error: 'invalid action' });
+  try {
+    if (action === 'enable') require('../hh-cold-search-context').resolveSearchContext(workDir, vacancy_id);
+    const state = require('../hh-cold-search-schedule').updateSchedule(username, workDir, vacancy_id, patches[action]);
+    return json(res, 200, { ok: true, state });
+  } catch (e) { return json(res, 400, { error: e.message }); }
 }
 
 if (req.method === 'POST' && url.pathname === '/api/hh/proactive/set-status') {
@@ -1173,7 +1190,7 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/set-status') {
   if (!candidate_id) return json(res, 400, { error: 'candidate_id required' });
   try {
     const { setCandidateStatus } = require('../hh-proactive-search');
-    const rec = setCandidateStatus(username, candidate_id, status);
+    const rec = setCandidateStatus(username, candidate_id, status, body.vacancy_id);
     return json(res, 200, { ok: true, status: rec.status, status_changed_at: rec.status_changed_at });
   } catch (e) {
     return json(res, 400, { error: e.message });

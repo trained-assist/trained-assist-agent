@@ -140,6 +140,12 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
   if (engine === 'opencode') {
     return [process.env.OPENCODE_BIN || 'opencode', [
       'run',
+      // Native resume (#1234 Sub-4): `opencode run --session <id>` continues the real session.
+      // SAFE BY CONSTRUCTION: we only have an id if opencode previously ran successfully and
+      // emitted a sessionID — so if opencode is broken, resumeSessionId is always null and this
+      // branch is a no-op. On a stale/unknown id the run fails and the runner falls back to a
+      // fresh context-rebuild (see resumeFallbackDone in runner/index.js).
+      ...(resumeSessionId ? ['--session', resumeSessionId] : []),
       '--format', 'json',
       '--auto',
       ...(opencodeModelResolved ? ['-m', opencodeModelResolved] : []),

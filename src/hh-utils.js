@@ -53,7 +53,7 @@ async function writeHhContext(workDir, skill, key, value) {
 // the MCP tools and the background scoring loop so they can't drift apart.
 function readActiveVacancies(workDir) {
   const list = readHhContext(workDir, 'hh', 'active_vacancies')?.value;
-  if (Array.isArray(list) && list.length) return list;
+  if (Array.isArray(list)) return list;
   const legacy = readHhContext(workDir, 'hh', 'active_vacancy')?.value;
   return legacy?.id ? [legacy] : [];
 }
