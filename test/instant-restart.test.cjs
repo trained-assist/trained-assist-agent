@@ -41,7 +41,7 @@ const { isTaskResumable } = require('../src/pending-task-resume');
 function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engineSessionIds = {} }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
-  const calls = [], runs = [], cleared = [], delays = [];
+  const calls = [], runs = [], cleared = [], delays = [], resumeKinds = [];
   const sandbox = {
     path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise,
@@ -52,6 +52,8 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engi
     clearPendingTask: id => cleared.push(id),
     // Journal hygiene (#1239): drop pings, don't resume them.
     isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
+    // Resume metric (#1240): capture kind/engine so tests can assert it.
+    recordResume: (kind, engine) => resumeKinds.push({ kind, engine }),
     // Native-resume id lookup (#1234). Default: none on disk → fallback path (the pre-#1234
     // behavior these tests were written for). Tests that exercise native resume pass ids here.
     getEngineSessionId: (workDir, sessionId, engine) => engineSessionIds[engine] || null,
@@ -60,7 +62,7 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engi
   };
   vm.createContext(sandbox);
   vm.runInContext(`${serverSrc.slice(start, end)}; this.resume = resumePendingTasks;`, sandbox);
-  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, delays, now };
+  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, delays, resumeKinds, now };
 }
 
 const task = (over = {}) => ({ taskId: 'alice-1', username: 'alice', userId: 42, task: 'work', initialMsgId: 7,
@@ -128,6 +130,7 @@ test('a resumed task that fails to start tells the user', async () => {
     getPendingTasks: () => pending, clearPendingTask() {},
     getEngineSessionId: () => null,
     isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
+    recordResume: () => {},
     fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return {}; },
     runTask: () => Promise.reject(new Error('boom')),
   };
@@ -165,6 +168,7 @@ test('native resume: known engine session id → resumeSessionId passed + a shor
   assert.match(h.runs[0].task, /ПРОДОЛЖЕНИЕ/, 'native resume sends a continuation prompt, not the replayed task');
   assert.notEqual(h.runs[0].task, 'work', 'original task must not be replayed on a native resume');
   assert.deepEqual(h.calls, [], 'still silent on success');
+  assert.deepEqual(h.resumeKinds, [{ kind: 'native', engine: 'claude' }], 'metric records a native resume (#1240)');
 });
 
 test('native resume: journal id wins over the durable session record', async () => {
@@ -182,6 +186,7 @@ test('fallback: no engine session id anywhere → null resumeSessionId + origina
   assert.equal(h.runs.length, 1);
   assert.equal(h.runs[0].resumeSessionId, null, 'no id → no --resume (fresh run, pre-#1234 behavior)');
   assert.equal(h.runs[0].task, 'work', 'fallback replays the original task');
+  assert.deepEqual(h.resumeKinds, [{ kind: 'fallback', engine: 'claude' }], 'metric records a fallback (#1240)');
 });
 
 test('native resume: codex wired (Sub-3); opencode still falls back (Sub-4 pending)', async () => {
