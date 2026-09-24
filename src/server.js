@@ -279,6 +279,9 @@ function scheduleGtdController(secrets) {
 // exceeds RESUME_WINDOW_MS, so "age < ABANDONED_NOTICE_MS" can never hold if they're equal).
 const RESUME_WINDOW_MS = 2 * 60 * 60 * 1000;    // re-run tasks interrupted within this window
 const ABANDONED_NOTICE_MS = 6 * 60 * 60 * 1000; // older but not ancient: tell the user it is gone
+// Sent instead of the original task when the engine already holds the conversation (native resume)
+// or when there is no task text to replay (forceClaude callbacks). An empty prompt stalls engines.
+const CONTINUATION_PROMPT = '[ПРОДОЛЖЕНИЕ] Сервер перезапустился и прервал тебя. Продолжи с того места, где остановился.';
 
 async function resumePendingTasks(secrets) {
   if (!secrets?.BOT_TOKEN) return;
@@ -326,7 +329,12 @@ async function resumePendingTasks(secrets) {
     }
 
     const engine = p.engine || 'claude';
-    const attempt = (p.resumeAttempts || 0) + 1;
+    // The attempt counter is OWNED BY THE RUNNER: it advances only when a resume actually FAILS
+    // (runner/index.js retry block). This boot path must NOT advance it — a restart that kills an
+    // in-flight resume is not a failure, and counting it as one burned the whole budget on a
+    // deploy flurry (34 restarts/day), so a perfectly resumable task "gave up after 3 attempts"
+    // without a single genuine failure. Reuse the journaled number; a fresh task starts at 1.
+    const attempt = p.resumeAttempts || 1;
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
 
     // Native resume (#1234): claude (Sub-2), codex (Sub-3) and opencode (Sub-4) are wired.
@@ -338,10 +346,10 @@ async function resumePendingTasks(secrets) {
       ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, engine) : null))
       : null;
     // With a native resume the engine already holds the task, so replaying it is redundant (and
-    // risks redoing finished steps); send a short "keep going" instead.
-    const resumeTask = nativeResumeId
-      ? '[ПРОДОЛЖЕНИЕ] Сервер перезапустился и прервал тебя. Продолжи с того места, где остановился.'
-      : p.task;
+    // risks redoing finished steps); send a short "keep going" instead. Same when there is no task
+    // text at all (forceClaude callbacks) — there is nothing to replay, and an empty prompt would
+    // stall the engine.
+    const resumeTask = (nativeResumeId || !p.task) ? CONTINUATION_PROMPT : p.task;
     console.log(`[resume] ${nativeResumeId ? 'native' : 'fallback'} engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(resumeTask).slice(0, 60)}"`);
 
     if (attempt > MAX_RESUME_ATTEMPTS) {
