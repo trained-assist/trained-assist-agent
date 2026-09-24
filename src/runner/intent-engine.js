@@ -495,7 +495,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     if (!fs.existsSync(profileFile)) return `⚠️ Профиль '${raw}' не найден (.opencode/profiles/${raw}.json)`;
     profiles.setOcProfile(workDir, raw);
     const PROFILE_LABELS = {
-      max:      'MAX — лестница GPT-5.6/6 Astra → DeepSeek (дефолт)',
+      max:      'MAX — лестница GPT-6/5.6 Luna → DeepSeek (дефолт)',
       value:    'VALUE — DeepSeek V4 Flash → GLM → Qwen',
       free:     'FREE — только бесплатный inference (MiMo/Nemotron)',
       russian:  'RUSSIAN — GigaChat Pro/Ultra/Max',

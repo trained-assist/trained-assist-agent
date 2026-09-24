@@ -46,6 +46,15 @@ test('classifyError catches retired/unavailable model slugs and provider overloa
   assert.equal(mod.classifyError('HTTP 503 Service Unavailable').class, 'quota');
 });
 
+test('classifyError recognizes opencode\'s generic "Unexpected server error" (dead model slug) as a per-rung quota failure', () => {
+  const { mod } = freshModule();
+  // Confirmed live 2026-09-24: an invalid opencode-go slug (gpt-6-astra) returned exactly this,
+  // while the valid sibling (gpt-6-luna) worked. Must degrade the ladder, not dead-end on the rung.
+  const v = mod.classifyError('{"type":"error","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details."}}}');
+  assert.equal(v.class, 'quota');
+  assert.ok(v.ttlMs > 0, 'short TTL, not permanent');
+});
+
 test('classifyError recognizes context-overflow text as its own class, distinct from quota/config', () => {
   const { mod } = freshModule();
   assert.equal(mod.classifyError('This model\'s maximum context length is 128000 tokens').class, 'context');

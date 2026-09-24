@@ -58,6 +58,12 @@ const CLASSIFIERS = [
   // upstream provider being busy right now, not a limit that resets hourly/daily.
   { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /temporarily overloaded/i },
   { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /\b503\b/ },
+  // opencode's generic server-side error. Confirmed live 2026-09-24: an invalid/retired model
+  // slug on the opencode-go gateway (gpt-6-astra / gpt-5.6-sol / gpt-5.6-terra) returns exactly
+  // "Unexpected server error" while the valid sibling (gpt-6-luna) works. Without this pattern
+  // the ladder only advanced via forceAdvance on retries; a short TTL degrades a dead rung
+  // immediately without permanently poisoning a rung that might just be having a transient 5xx.
+  { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /unexpected server error/i },
   // The request itself didn't fit this rung's context window — not a quota/config problem
   // with the rung, so unlike the classes above this must NOT persist a shared exhaustion:
   // the next task on this rung (from any user) is very likely a normal-sized prompt that
