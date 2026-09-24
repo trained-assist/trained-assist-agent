@@ -118,3 +118,14 @@
 | 🔵 планируется | **Группа скилов «Документы»** | Чтение и генерация PDF/HTML/Word/Excel в одной группе `51–54` рядом с gdrive, ядро в `src/documents/`. |
 | 🔵 планируется | **Проверить Cloudflare toMarkdown** | Замер на тех же 12 PDF (кириллица, макеты), цена, приватность → решить, брать ли ступенью лестницы. |
 | ❓ уточнить | **Ночной скил HTML→PDF отчётов** | В этом репо следов нет — выяснить, где он и в какой стадии, до начала `52-doc-generate.js`. |
+
+## 2026-09-24 — треть-бот (freelance) + gate
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | gate авто-запуска (#1334) | `checkCompleteness` звал reasoning-модель `z-ai/glm-5.3-flash` с `max_tokens:8` → `content:null` → всегда `insufficient` → «текст не запускается». Модель → `INTAKE_GATE_MODEL` (default `deepseek/deepseek-chat`), `max_tokens` 16, устойчивый парсинг метки. |
+| ✅ реализовано | freelance-скилл как MCP агента (#1330) | MCP `freelance-skills` из sibling-репо `trained-assist-freelance-skill`; проекты `~/users/<profile>/Фриланс проекты/`; `freelance` в `/capabilities`. |
+| ✅ реализовано | A1 transport (#1310) | `audience=freelance`, изоляция stop/running/GTD по username+audience, admission lock; A2 gateway — trained-assist-tg-bot #235. |
+| 🔵 планируется | #1329 freelance handoff | drain standalone `freelance-bot.service`, mapping `chat-<id> → profile`, движок opencode. |
+| 🔵 планируется | #1303 | ownership-проверка `POST /tasks/:taskId/stop`. |
+| 🔵 планируется | #1302 | третий бот на общем контуре (A1+A2 merged; canary). |
