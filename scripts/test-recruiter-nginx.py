@@ -19,8 +19,20 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
     upstream=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
     threading.Thread(target=upstream.serve_forever,daemon=True).start()
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(d/'key.pem'),'-out',str(d/'cert.pem'),'-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1,DNS:localhost'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    # Real public chains include intermediates. A trusted self-signed leaf hid
+    # nginx's default depth=1 failure (production returned certificate chain too long).
+    def openssl(*args):
+        subprocess.run(['openssl', *map(str,args)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    openssl('req','-x509','-newkey','rsa:2048','-nodes','-keyout',d/'root.key','-out',d/'root.pem','-days','1','-subj','/CN=Test Root','-addext','basicConstraints=critical,CA:TRUE')
+    issuer='root'
+    for name,ca in [('intermediate1',True),('intermediate2',True),('upstream',False)]:
+        openssl('req','-new','-newkey','rsa:2048','-nodes','-keyout',d/(name+'.key'),'-out',d/(name+'.csr'),'-subj','/CN='+('localhost' if not ca else name))
+        (d/(name+'.ext')).write_text('basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n' if ca else 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n')
+        openssl('x509','-req','-in',d/(name+'.csr'),'-CA',d/(issuer+'.pem'),'-CAkey',d/(issuer+'.key'),'-CAcreateserial','-out',d/(name+'.pem'),'-days','1','-extfile',d/(name+'.ext'))
+        issuer=name
+    (d/'chain.pem').write_text(''.join((d/(name+'.pem')).read_text() for name in ['upstream','intermediate2','intermediate1']))
     cold=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
-    cold_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);cold_tls.load_cert_chain(str(d/'cert.pem'),str(d/'key.pem'))
+    cold_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);cold_tls.load_cert_chain(str(d/'chain.pem'),str(d/'upstream.key'))
     cold.socket=cold_tls.wrap_socket(cold.socket,server_side=True)
     threading.Thread(target=cold.serve_forever,daemon=True).start()
     config=(REPO/'infra/nginx/recruiter-assistant.conf').read_text()
@@ -28,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
     config=config.replace('/etc/letsencrypt/live/recruiter-assistant.ru/fullchain.pem',str(d/'cert.pem')).replace('/etc/letsencrypt/live/recruiter-assistant.ru/privkey.pem',str(d/'key.pem'))
     config=config.replace('127.0.0.1:8080',f'127.0.0.1:{upstream.server_port}')
     config=config.replace('proxy_pass https://136-65-7-197.sslip.io',f'proxy_pass https://localhost:{cold.server_port}')
-    config=config.replace('/etc/ssl/certs/ca-certificates.crt',str(d/'cert.pem'))
+    config=config.replace('/etc/ssl/certs/ca-certificates.crt',str(d/'root.pem'))
     config=config.replace('/var/www/html',str(d/'webroot'))
     challenge=d/'webroot/.well-known/acme-challenge';challenge.mkdir(parents=True);(challenge/'probe').write_text('acme-ok')
     (d/'nginx.conf').write_text(f'pid {d}/nginx.pid; error_log {d}/error.log; events {{}} http {{ access_log off; client_body_temp_path {d}/body; proxy_temp_path {d}/proxy; {config} }}')
@@ -67,6 +79,18 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
         c=http.client.HTTPSConnection('127.0.0.1',sp,context=context,timeout=5);start=time.monotonic();c.request('GET','/stream',headers={'Host':'recruiter-assistant.ru'});r=c.getresponse()
         assert r.read(1)==b'/' and time.monotonic()-start<1,'SSE first bytes must arrive before upstream completes'
         assert r.read().endswith(b'END');c.close()
-        print('PASS: TLS, root/login, OAuth query preservation, www, HTTP, ACME, candidate/vacancy routes, 2/20 MiB uploads, 413 boundary, streaming, cold-search TLS upstream, signed query and POST body preservation')
+        # Negative control: restore nginx's old verification depth. This must
+        # fail TLS, proving the fixture catches the production regression and
+        # certificate verification was not silently disabled to fix the 502.
+        p.terminate();p.wait(timeout=5)
+        conf=d/'nginx.conf';conf.write_text(conf.read_text().replace('proxy_ssl_verify_depth 3;', 'proxy_ssl_verify_depth 1;'))
+        p=subprocess.Popen(['nginx','-p',str(d),'-c',str(conf),'-g','daemon off;'])
+        for _ in range(100):
+            try:
+                with socket.create_connection(('127.0.0.1',sp),timeout=.1):break
+            except OSError:time.sleep(.02)
+        s,h,b=request('/p/chain-check');assert s==502,(s,b)
+        assert 'certificate chain too long' in (d/'error.log').read_text()
+        print('PASS: TLS, root/login, OAuth query preservation, www, HTTP, ACME, candidate/vacancy routes, 2/20 MiB uploads, 413 boundary, streaming, cold-search TLS upstream with intermediate chain and negative depth control, signed query and POST body preservation')
     finally:
         p.terminate();p.wait(timeout=5);upstream.shutdown();cold.shutdown()
