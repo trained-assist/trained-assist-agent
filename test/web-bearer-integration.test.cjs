@@ -38,7 +38,7 @@ test('session bearer readers expose projectId and summary metadata', () => {
 test('bearer run contract validates projectId and carries project/file metadata into streamWebTask', () => {
   const src = fs.readFileSync(path.join(__dirname,'../src/handlers/web.js'),'utf8');
   assert.match(src,/isValidProjectId\(projectId\)/);
-  assert.match(src,/prepareWebTaskFiles\(username, task\.trim\(\), fileRefs \|\| \[\]\)/);
+  assert.match(src,/prepareWebTaskFiles\(username, taskText, refs\)/);
   assert.match(src,/projectId: projectId \|\| null, fileRefs: prepared\.fileRefs/);
   assert.match(src,/\/web\/intake-file-bearer/);
 });
