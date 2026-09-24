@@ -297,10 +297,11 @@ async function resumePendingTasks(secrets) {
     const attempt = (p.resumeAttempts || 0) + 1;
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
 
-    // Native resume (#1234): claude (Sub-2) and codex (Sub-3) are wired. Source: the pending
-    // journal (written mid-run, survives SIGKILL) with the durable session record as fallback.
-    // opencode (Sub-4) still takes the context-rebuild path until its resume path is validated.
-    const NATIVE_RESUME_ENGINES = ['claude', 'codex'];
+    // Native resume (#1234): claude (Sub-2), codex (Sub-3) and opencode (Sub-4) are wired.
+    // Source: the pending journal (written mid-run, survives SIGKILL) with the durable session
+    // record as fallback. opencode is safe by construction — an id only exists if it previously
+    // ran successfully; otherwise nativeResumeId is null and the old path is unchanged.
+    const NATIVE_RESUME_ENGINES = ['claude', 'codex', 'opencode'];
     const nativeResumeId = NATIVE_RESUME_ENGINES.includes(engine)
       ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, engine) : null))
       : null;
