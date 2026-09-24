@@ -20,10 +20,16 @@ restore() {
 }
 trap 'restore; exit 1' ERR
 sudo nginx -t
+sites=()
 if [[ "$DEPLOY_ENV" == gcp ]]; then
+  sites=(relay agent-trainedassist-store)
+elif [[ "${DEPLOY_RECRUITER_APEX:-}" == 1 || -e "$NGINX_ROOT/sites-enabled/recruiter-assistant" ]]; then
+  sites=(recruiter-assistant)
+fi
+if (( ${#sites[@]} )); then
   # Both public hostnames must accept the same media sizes. The stable tunnel
   # hostname used by the gateway was previously outside deployment management.
-  for name in relay agent-trainedassist-store; do
+  for name in "${sites[@]}"; do
     src="$REPO_DIR/infra/nginx/$name.conf"
     dst="$NGINX_ROOT/sites-enabled/$name"
     if ! sudo cmp -s "$src" "$dst"; then
