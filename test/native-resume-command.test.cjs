@@ -47,8 +47,15 @@ test('codex: `exec resume <id>` on the resume path; -C only on the fresh path', 
   assert.notEqual(freshArgs.indexOf('-C'), -1, 'fresh path keeps -C');
 });
 
-test('opencode is untouched by the claude/codex resume flags (Sub-4 owns it)', () => {
-  const [, ocArgs] = buildEngineCommand({ ...base, engine: 'opencode', resumeSessionId: 'x' });
-  assert.equal(ocArgs.includes('--resume'), false, 'opencode must not receive claude --resume');
-  assert.equal(ocArgs.includes('resume'), false, 'opencode resume is Sub-4');
+test('opencode: `run --session <id>` on the resume path, none on a fresh run', () => {
+  const [, ocArgs] = buildEngineCommand({ ...base, engine: 'opencode', resumeSessionId: 'ses-1' });
+  assert.equal(ocArgs[0], 'run');
+  const i = ocArgs.indexOf('--session');
+  assert.notEqual(i, -1, 'opencode resumes via --session');
+  assert.equal(ocArgs[i + 1], 'ses-1');
+  assert.ok(ocArgs.includes('--format') && ocArgs.includes('json'), 'json stream preserved');
+  assert.equal(ocArgs[ocArgs.length - 1], 'continue please', 'prompt stays last');
+
+  const [, freshArgs] = buildEngineCommand({ ...base, engine: 'opencode', resumeSessionId: null });
+  assert.equal(freshArgs.includes('--session'), false, 'no --session on a fresh run');
 });
