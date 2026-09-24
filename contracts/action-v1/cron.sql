@@ -29,6 +29,10 @@ CREATE TABLE action_executions (
   action TEXT NOT NULL,
   arguments_json TEXT NOT NULL CHECK(json_valid(arguments_json) AND json_type(arguments_json) = 'object'),
   trigger TEXT NOT NULL CHECK(trigger IN ('user','cron','durable_task','webhook','system')),
+  -- Entry channel, distinct from trigger (spec §7). Set by core from trusted
+  -- call context (route/tool-call), never from provider arguments.
+  origin TEXT CHECK(origin IS NULL OR origin IN ('web','mcp','telegram','api','cron-service','durable')),
+  channel TEXT,
   idempotency_key TEXT NOT NULL,
   cron_id TEXT REFERENCES cron_jobs(id) ON DELETE SET NULL,
   scheduled_at INTEGER,
