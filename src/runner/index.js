@@ -1801,7 +1801,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
   });
   const {
-    fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
+    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
     lastActivity, exitCode, processSignal, processError, timedOut,
     inactivityKill, outputPersistenceError, codexErrorMsg, sessionState,
@@ -2184,9 +2184,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // operator repair loop sees it either way. Claude and Codex additionally get ONE automatic
   // fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on repair;
   // engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
-  // codexErrorMsg first for the same reason as preLadderText above: it's the real provider
-  // error text, not our own generic incomplete-task message, which never matches auth patterns.
-  const authText = codexErrorMsg || claudeResult || fullOutput.text || result;
+  //
+  // Only GENUINE provider error text may be treated as an auth/quota failure — never the final
+  // answer prose. Previously this read `claudeResult || fullOutput.text || result`, so a
+  // successful run whose answer merely mentioned "rate limit"/"quota" (e.g. an explanation of a
+  // Telegram 429 fix) raised a false auth flag and bounced a healthy task to the OpenCode
+  // fallback (#1227). codexErrorMsg is set only on a turn.failed/error event, claudeErrorText
+  // only on an is_error result event; both are real errors, so nothing else is needed.
+  const authText = codexErrorMsg || claudeErrorText || '';
   if (isAuthError(authText)) {
     const reason = detectReason(authText);
     setAuthFailedFlag({ reason, error_text: authText, engine });

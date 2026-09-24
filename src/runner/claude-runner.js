@@ -256,6 +256,7 @@ async function runEngineProcess(opts) {
   let lineBuffer = '';
   let fullOutput = { text: '' };
   let claudeResult = null;  // text from result event
+  let claudeErrorText = null; // result-event text ONLY when event.is_error — genuine provider error, never answer prose (#1227)
   let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
   let terminalSuccess = false; // explicit engine completion, never inferred from narration
   let processSignal = null;
@@ -480,6 +481,13 @@ async function runEngineProcess(opts) {
           terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
           claudeUsage = event.usage || null;
+          if (event.is_error) {
+            // Real provider error text — the only thing auth detection may trust. Also log it:
+            // the exit-1 + zero-usage bursts (auth loss) were previously undiagnosable because
+            // only `usage: in=0 out=0` was printed, never the error string (#1227 / #1228).
+            claudeErrorText = claudeResult || event.subtype || null;
+            console.warn(`[${taskId}] result error: ${(claudeErrorText || '').slice(0, 500)}`);
+          }
           if (claudeUsage) {
             console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
           }
@@ -611,7 +619,7 @@ async function runEngineProcess(opts) {
   }
 
   return {
-    fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
+    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
     lastActivity, exitCode, processSignal, processError, timedOut,
     inactivityKill, outputPersistenceError, codexErrorMsg, sessionState,
