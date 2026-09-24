@@ -1677,7 +1677,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
   const basePromptFile = path.join(__dirname, '..', 'agent-system-prompt.txt');
   // Merge the user's per-profile persona into the system prompt (returns base file if none set).
-  let systemPromptFile = persona.buildSystemPromptFile(user.workDir, basePromptFile);
+  let systemPromptFile = persona.buildSystemPromptFile(user.workDir, basePromptFile, user.audience);
   // Fold the bound project's PROFILE.md (domain rules) on top of the persona-merged prompt.
   try {
     const profileTxt = boundProjectId ? projects.profileText(user.workDir, boundProjectId) : null;

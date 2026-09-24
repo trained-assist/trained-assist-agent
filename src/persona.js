@@ -9,6 +9,18 @@ const path = require('path');
 const FILE = 'persona.md';
 const MAX_LEN = 8000; // guard against pasting a whole book into the system prompt
 
+// Built-in persona per bot/audience, used ONLY when the profile has no persona.md
+// of its own — an explicit /persona set by the user always wins. Lets a domain bot
+// (e.g. the freelance spec bot) have its own voice without configuring every profile
+// by hand. Keep the freelance line in sync with the gateway's /start intro
+// (trained-assist-tg-bot src/handlers/commands.js cmdStart).
+const AUDIENCE_DEFAULT = {
+  freelance:
+    'Я — ассистент по фриланс-проектам: разбираю входящие заказы и файлы, ' +
+    'раскладываю факты, требования и решение по проектам, считаю риск GO/NO-GO и собираю ТЗ. ' +
+    'Пиши задачу обычным текстом или присылай файлы — сам разберусь и подскажу, что делать дальше.',
+};
+
 function personaPath(workDir) {
   return path.join(workDir, FILE);
 }
@@ -40,18 +52,24 @@ function clear(workDir) {
   }
 }
 
-// Build the system-prompt file to hand to the CLI. If a persona is set, merge the
-// global base prompt + persona into a per-user file and return its path; otherwise
-// return the base file path unchanged. Never throws — falls back to the base file.
-function buildSystemPromptFile(workDir, basePromptFile) {
+// Build the system-prompt file to hand to the CLI. Prefers the profile's own persona;
+// if none is set, falls back to the audience's built-in default (AUDIENCE_DEFAULT).
+// Merges the global base prompt + persona into a per-user file and returns its path;
+// otherwise returns the base file unchanged. Never throws — falls back to the base file.
+function buildSystemPromptFile(workDir, basePromptFile, audience = 'default') {
   const base = basePromptFile && fs.existsSync(basePromptFile) ? basePromptFile : '';
-  const text = load(workDir);
-  if (!text || !workDir) return base;
+  if (!workDir) return base;
+  const userText = load(workDir);
+  const text = userText || AUDIENCE_DEFAULT[audience] || null;
+  if (!text) return base;
+  const source = userText
+    ? 'задано пользователем — соблюдай в каждом ответе'
+    : `роль бота (аудитория: ${audience}) — соблюдай в каждом ответе`;
   try {
     const baseContent = base ? fs.readFileSync(base, 'utf8') : '';
     const merged =
       baseContent +
-      '\n\n# РОЛЬ И ЛИЧНОСТЬ АССИСТЕНТА (задано пользователем — соблюдай в каждом ответе)\n' +
+      `\n\n# РОЛЬ И ЛИЧНОСТЬ АССИСТЕНТА (${source})\n` +
       text + '\n';
     const out = path.join(workDir, '.system-prompt.txt');
     fs.writeFileSync(out, merged, { mode: 0o600 });
@@ -62,4 +80,4 @@ function buildSystemPromptFile(workDir, basePromptFile) {
   }
 }
 
-module.exports = { load, save, clear, personaPath, buildSystemPromptFile };
+module.exports = { load, save, clear, personaPath, buildSystemPromptFile, AUDIENCE_DEFAULT };
