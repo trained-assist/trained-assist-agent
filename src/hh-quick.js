@@ -316,7 +316,7 @@ function hhStatus(userId) {
 
   const reviewToken = hhReviewToken(userId);
   const tokenParam  = reviewToken ? `&token=${reviewToken}` : '';
-  const reviewUrl   = `${hhBase()}/hh/review?username=${encodeURIComponent(userId)}${tokenParam}`;
+  const reviewUrl   = hhReviewUrl(userId);
 
   return [
     '📊 HH статус:',

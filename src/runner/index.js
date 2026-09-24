@@ -775,7 +775,7 @@ function buildContextCard(username, workDir, chatId) {
           const vacQs = multi ? `&vacancy_id=${encodeURIComponent(vac.id)}` : '';
           const hasProactive = _hasProactiveResults(dataDir, username, multi ? vac.id : null);
           const proactiveLink = hasProactive ? ` · [Поиск →](${require('../hh-autoscan').proactiveUrlFor(username, multi ? vac.id : null)})` : '';
-          lines.push(`🔗 [Кандидаты →](${base}/hh/review?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok}${vacQs})${proactiveLink}`);
+          lines.push(`🔗 [Кандидаты →](${require('../hh-quick').hhReviewUrl(username, vac.id)}) · [История →](${base}/hh/sync-log?username=${encodeURIComponent(username)}&token=${tok}${vacQs}) · [ATS →](${base}/hh/ats-editor?username=${encodeURIComponent(username)}&token=${tok}${vacQs})${proactiveLink}`);
         }
       });
     }

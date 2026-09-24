@@ -22,6 +22,7 @@ beforeAll(async () => {
   process.env.AGENT_SECRET=secret; process.env.AGENT_DATA_DIR=data; process.env.AGENT_TOKENS_DIR=tokens; process.env.USERS_DIR=users;
   write(path.join(users,username,'contexts/hh/active_vacancy.json'), {value:{id:vacancy,title:'Финансовый советник'}});
   write(path.join(tokens,username,'hh'), {access_token:'fixture'});
+  write(path.join(data,'hh',username,'candidates/n1.json'), {messages:[],ats_result:{score:8,verdict:'ПРОПУСТИТЬ'}});
   mock = http.createServer((req,res) => {
     hhCalls++;
     if(req.headers.authorization === 'Bearer expired'){res.writeHead(401);return res.end(JSON.stringify({errors:[{value:'token-expired'}]}));}
@@ -77,6 +78,7 @@ describe('HH response refresh and durable triage', () => {
     expect(hhCalls).toBe(before);
     await page.getByRole('link',{name:'Архив (1)',exact:true}).click();
     expect(await page.locator('#tab-all').getByRole('button',{name:'✗ Отправить отказ',exact:true}).count()).toBe(1);
+    expect(await page.locator('#tab-all .card-cb:checked').count()).toBe(0);
     await post('/hh/sync-negotiations',{});await page.evaluate(()=>checkResponseUpdates());await expect.poll(()=>page.locator('#responseUpdates').textContent()).toContain('Данные HH обновились');await page.reload();expect(await page.locator('#tab-all .card').count()).toBe(1);
     await Promise.all([page.waitForNavigation(),page.locator('#tab-all [data-testid=response-restore]').click()]);
     await page.getByRole('link',{name:'Активные (1)',exact:true}).click();expect(await page.locator('#tab-all .card').count()).toBe(1);
