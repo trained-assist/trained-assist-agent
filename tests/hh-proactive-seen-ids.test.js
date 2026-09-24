@@ -193,6 +193,6 @@ describe('buildProactiveDigest — Telegram message format', () => {
       threshold: 82,
       url: 'https://example/hh/proactive',
     });
-    expect(text).toContain('0 сильных кандидатов (≥82%) из 3 новых');
+    expect(text).toContain('3 новых кандидатов найдено, рекомендовано 0 (приоритет ≥82%)');
   });
 });

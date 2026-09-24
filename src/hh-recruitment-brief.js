@@ -23,8 +23,9 @@ async function prepareBrief(username, config, vacancy, vacancyId, key) {
     try { brief = await evidence.compileBrief(brief, key); } catch { return brief; }
     const file = location(username, vacancyId);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file + '.tmp-' + process.pid, JSON.stringify({ brief, vacancy }), { mode: 0o600 });
-    fs.renameSync(file + '.tmp-' + process.pid, file);
+    const temp = file + '.tmp-' + require('crypto').randomUUID();
+    fs.writeFileSync(temp, JSON.stringify({ brief, vacancy }), { mode: 0o600 });
+    fs.renameSync(temp, file);
   }
   return brief;
 }

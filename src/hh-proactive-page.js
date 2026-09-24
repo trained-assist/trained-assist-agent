@@ -464,6 +464,7 @@ try {
 } catch {}
 window.addEventListener('pagehide', saveFilters);
 let modalRequest = 0;
+let modalNeedsRefresh = false;
 
 // Debounce helper (#3: ~150-200ms) shared by the name search input.
 function debounce(fn, ms) {
@@ -554,6 +555,7 @@ function openAiModal(candidateId, title) {
       document.getElementById('modalBody').innerHTML = '<span style="color:#dc2626">Ошибка: ' + esc(data.error) + '</span>';
       return;
     }
+    if (data.evaluation_status === 'complete') modalNeedsRefresh = true;
     // Render tags from AI response
     const plusHtml = (data.plus_tags||[]).map(t => '<span class="tag" style="background:#f0fdf4;color:#15803d;border:1px solid #86efac40">'+esc(t)+'</span>').join('');
     const yellowHtml = (data.yellow_tags||[]).map(t => '<span class="tag" style="background:#fffbeb;color:#92400e;border:1px solid #fcd34d40">'+esc(t)+'</span>').join('');
@@ -584,6 +586,7 @@ function openAiModal(candidateId, title) {
 function closeModal() {
   modalRequest++;
   document.getElementById('modal').classList.remove('open');
+  if (modalNeedsRefresh) window.location.reload();
 }
 document.getElementById('modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeModal();

@@ -2,7 +2,7 @@
   "canonical": "trained-assist/trained-assist-hh-skill",
   "files": {
     "hh-evidence-evaluator.js": "a88fe6036cd7c2361315ca87b0905a2f785d1ae3f3af956f8f75c4bd3a57426c",
-    "hh-recruitment-brief.js": "20aad272b91e5b7e3b6f2dafa2331e515abc75e042b062a32cd301c5872f7aae",
-    "hh-evaluation-trace.js": "783cbe6fec87652f7292d784d7718b8f93c43fbb0ee06e967515e5dbd3bf1585"
+    "hh-recruitment-brief.js": "faa608f89e951615938c3a4e4331066d265a244791c934e3b02dd88b820347b7",
+    "hh-evaluation-trace.js": "d916aa8552a3dc93ff4b44b3a193702c3d2a313d0c716ea8d73a44fe1012ed63"
   }
 }

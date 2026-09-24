@@ -260,13 +260,17 @@ function loadAllCandidates(username, vacancyId) {
     const parsed = JSON.parse(raw);
     const store = parsed && typeof parsed === 'object' ? parsed : {};
     if (!vacancyId) return store;
+    let brief;
+    try {
+      const current = require('./hh-cold-search-context').resolveSearchContext(userWorkDir(username), vacancyId);
+      brief = require('./hh-recruitment-brief').loadBrief(username, normalizeAtsConfig(current.config), current.vacancy || {}, vacancyId);
+    } catch { /* No trusted current requirements: render stale. */ }
     return Object.fromEntries(Object.entries(store)
       .filter(([, c]) => candidateMatchesVacancy(c, vacancyId))
       .map(([id, c]) => {
         let view = candidateForVacancy(c, vacancyId);
         try {
-          const current = require('./hh-cold-search-context').resolveSearchContext(userWorkDir(username), vacancyId);
-          const brief = require('./hh-recruitment-brief').loadBrief(username, normalizeAtsConfig(current.config), current.vacancy || {}, vacancyId);
+          if (!brief) throw new Error('Missing current brief');
           if (evidence.isComplete(view) && !evidence.isFresh(view, brief)) view = evidence.pendingAssessment(view, 'stale');
           else view = evidence.displayCandidate(view);
         } catch { view = evidence.pendingAssessment(view, 'stale'); }
@@ -478,11 +482,8 @@ function saveStoredQueries(username, vacancyId, queries, configHash) {
 // rendered here; callers may keep passing it (e.g. for other consumers), it's ignored.
 function buildProactiveDigest({ vacancyTitle, newCount, totalNewCount, totalSeen, url, threshold }) {
   const total = Number.isFinite(totalNewCount) ? totalNewCount : newCount;
-  // threshold>0 and some candidates got filtered out → say so, otherwise keep the
-  // original unqualified "N новых кандидатов" wording unchanged.
-  const countLine = (threshold > 0 && total !== newCount)
-    ? `${newCount} сильных кандидатов (≥${threshold}%) из ${total} новых`
-    : `${newCount} новых кандидатов`;
+  const countLine = `${total} новых кандидатов найдено, рекомендовано ${newCount}`
+    + (threshold > 0 ? ` (приоритет ≥${threshold}%)` : '');
   const head = `🧊 Холодный поиск: ${countLine} для «${vacancyTitle || 'вакансии'}» (всего в базе: ${totalSeen}).`;
   const link = url ? ` Смотри здесь: ${url}` : '';
   return `${head}${link}`;
@@ -810,18 +811,13 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   const toEnrich = [...top30, ...newButNotTop30];
 
   const previous = loadAllCandidates(username, vacancyKey);
-  const pending = [];
-  const cached = [];
-  for (const c of toEnrich) {
-    // Search excerpts cannot prove that a full resume stayed unchanged.
-    // Re-fetch only inside the same bounded evaluation budget.
-    pending.push(c);
-  }
-  let enriched = [...cached, ...pending];
+  // Full snapshots are refreshed within the bounded queue before cache reuse.
+  const pending = toEnrich;
+  let enriched = pending;
   if (orKey && pending.length > 0) {
     console.log(`[proactive-search] enriching ${toEnrich.length} candidates with AI (top-30 + ${newButNotTop30.length} new)…`);
     try {
-      enriched = [...cached, ...await enrichCandidates(pending, atsConfig, orKey, { brief, token, previous })];
+      enriched = await enrichCandidates(pending, atsConfig, orKey, { brief, token, previous });
     } catch (e) {
       console.error('[proactive-search] enrichment failed:', e.message);
     }
@@ -859,7 +855,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
     searched_at: now.toISOString(),
     total_collected: allCandidates.size,
     total_after_knockout: scored.length,
-    ai_enriched: enriched.length > 0 && enriched.every(evidence.isComplete),
+    ai_enriched: markedCandidates.length > 0 && markedCandidates.every(evidence.isComplete),
     ai_pending_count: markedCandidates.filter(c => !evidence.isComplete(c)).length,
     ats_config: atsConfig,
     recruitment_brief: brief, search_plan: { ...searchPlan, queries },
@@ -923,7 +919,8 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
 
   return {
     file: outFile,
-    count: enriched.length,
+    count: markedCandidates.length,
+    evaluated_count: markedCandidates.filter(evidence.isComplete).length,
     pass_count,
     review_count,
     searched_at: now.toISOString(),

@@ -1060,6 +1060,8 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/ai-score') {
     search.mergeSearchCandidatesIntoAll(username, [{ ...candidate, ...assessment }], {}, vacancyId);
     return json(res, 200, { ...assessment, evaluation: assessment.summary_why });
   } catch (e) {
+    const failed = require('../hh-evidence-evaluator').pendingAssessment(candidate, 'error');
+    require('../hh-proactive-search').mergeSearchCandidatesIntoAll(username, [failed], {}, vacancyId);
     return json(res, 500, { error: e.message });
   }
 }

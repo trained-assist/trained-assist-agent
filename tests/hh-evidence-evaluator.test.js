@@ -21,6 +21,9 @@ describe('evidence reducer', () => {
     const legacy = { ...brief(), compiled: false };
     expect(e.validateAssessment(check('met'), legacy, e.snapshotOf(candidate()), { full_resume: true }).verdict).toBe('REVIEW');
   });
+  it('accepts the explicit candidate_snapshot prefix without relaxing quotation verification', () => {
+    expect(e.validateAssessment(check('met', 'candidate_snapshot.area.name', 'Москва'), brief(), e.snapshotOf(candidate()), { full_resume: true }).verdict).toBe('PASS');
+  });
   it('rejects invented evidence, omitted/duplicated checks and invalid schema', () => {
     for (const payload of [check('met', 'area.name', 'Сыктывкар'), check('met', '__proto__.x', 'x'), { checks: [], summary: '' }, { ...check('met'), checks: [...check('met').checks, ...check('met').checks] }, {}]) {
       expect(() => e.validateAssessment(payload, brief(), e.snapshotOf(candidate()), { full_resume: true })).toThrow();
