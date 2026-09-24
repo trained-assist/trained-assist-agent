@@ -10,12 +10,17 @@ const error = (code, message) => Object.assign(new Error(message), { code });
 class ActionProviderRegistry {
   #providers = new Set();
   #actions = new Map();
-  #validateManifest;
+  #validateV1;
+  #validateV2;
 
   constructor() {
     const ajv = new Ajv({ strict: false, allErrors: true });
     ajv.addSchema(contract);
-    this.#validateManifest = ajv.compile({ $ref: `${contract.$id}#/$defs/provider` });
+    // Version selects the manifest validator. v1 is unchanged; v2 adds the
+    // first-class domain sections (contextFields/collections/connections/
+    // webSurfaces) and is a superset that still requires the v1 actions[].
+    this.#validateV1 = ajv.compile({ $ref: `${contract.$id}#/$defs/provider` });
+    this.#validateV2 = ajv.compile({ $ref: `${contract.$id}#/$defs/providerV2` });
   }
 
   register(manifest) {
@@ -23,9 +28,12 @@ class ActionProviderRegistry {
     let snapshot;
     try { snapshot = clone(manifest); }
     catch { throw error('INVALID_ARGUMENTS', 'Provider manifest must be JSON'); }
-    if (!this.#validateManifest(snapshot)) {
-      throw error('INVALID_ARGUMENTS', 'Invalid provider v1 manifest');
+    const isV2 = snapshot && snapshot.version === 2;
+    const validateManifest = isV2 ? this.#validateV2 : this.#validateV1;
+    if (!validateManifest(snapshot)) {
+      throw error('INVALID_ARGUMENTS', `Invalid provider ${isV2 ? 'v2' : 'v1'} manifest`);
     }
+    if (isV2) this.#validateV2Policy(snapshot);
     if (this.#providers.has(snapshot.providerId)) {
       throw error('CONFLICT', `Provider already registered: ${snapshot.providerId}`);
     }
@@ -55,6 +63,41 @@ class ActionProviderRegistry {
     for (const [name, entry] of pending) this.#actions.set(name, entry);
     this.#providers.add(snapshot.providerId);
     return this.list(snapshot.providerId);
+  }
+
+  // Cross-field rules JSON Schema cannot express (spec §6). Registration checks,
+  // not authorization: invokeAction still enforces consent/resource access.
+  #validateV2Policy(manifest) {
+    const byName = new Map(manifest.actions.map(a => [a.name, a]));
+
+    const collections = new Set();
+    for (const c of manifest.collections ?? []) {
+      if (collections.has(c.name)) throw error('INVALID_ARGUMENTS', `Duplicate collection: ${c.name}`);
+      collections.add(c.name);
+    }
+
+    const fieldKeys = new Set();
+    for (const f of manifest.contextFields) {
+      if (fieldKeys.has(f.key)) throw error('INVALID_ARGUMENTS', `Duplicate context field: ${f.key}`);
+      fieldKeys.add(f.key);
+    }
+
+    const surfaceIds = new Set();
+    for (const s of manifest.webSurfaces ?? []) {
+      if (surfaceIds.has(s.id)) throw error('INVALID_ARGUMENTS', `Duplicate web surface: ${s.id}`);
+      surfaceIds.add(s.id);
+      const target = byName.get(s.queryAction);
+      if (!target) throw error('INVALID_ARGUMENTS', `Unknown query action: ${s.queryAction}`);
+      if (target.effect !== 'read' || target.retrySafety !== 'read_only') {
+        throw error('INVALID_ARGUMENTS', `Web surface query action must be read/read_only: ${s.queryAction}`);
+      }
+    }
+
+    for (const conn of manifest.connections ?? []) {
+      for (const name of conn.requiredFor) {
+        if (!byName.has(name)) throw error('INVALID_ARGUMENTS', `Connection references unknown action: ${name}`);
+      }
+    }
   }
 
   list(providerId) {

@@ -242,6 +242,167 @@
         "actions"
       ]
     },
+    "contextField": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "boolean",
+            "json"
+          ]
+        },
+        "source": {
+          "enum": [
+            "context_store",
+            "capability",
+            "cron"
+          ]
+        },
+        "default": {}
+      },
+      "required": [
+        "key",
+        "label",
+        "type",
+        "source"
+      ]
+    },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/id"
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "name",
+        "schemaVersion"
+      ]
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "requiredFor": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "requiredFor"
+      ]
+    },
+    "webSurface": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "access": {
+          "enum": [
+            "private_profile"
+          ]
+        },
+        "queryAction": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "access",
+        "queryAction"
+      ]
+    },
+    "providerV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "providerId": {
+          "$ref": "#/$defs/id"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/descriptor"
+          },
+          "minItems": 1
+        },
+        "contextFields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contextField"
+          },
+          "minItems": 1
+        },
+        "collections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/collection"
+          }
+        },
+        "connections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/connection"
+          }
+        },
+        "webSurfaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/webSurface"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "providerId",
+        "actions",
+        "contextFields"
+      ]
+    },
     "cron_create": {
       "type": "object",
       "additionalProperties": false,

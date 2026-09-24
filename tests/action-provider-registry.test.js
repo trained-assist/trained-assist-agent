@@ -81,3 +81,58 @@ describe('provider registration v1', () => {
     checkError(() => mergeToolCatalogs([a, a], []), 'CONFLICT');
   });
 });
+
+describe('provider registration v2', () => {
+  const readAction = (name = 'recruiting_query_candidates_page') =>
+    action({ name, allowedTriggers: ['user'], effect: 'read', retrySafety: 'read_only' });
+  const writeAction = (name = 'recruiting_update_scoring') =>
+    action({ name, allowedTriggers: ['user'], effect: 'write', requiresApproval: true, retrySafety: 'idempotent' });
+  const manifestV2 = (changes = {}) => ({
+    version: 2,
+    providerId: 'recruiting',
+    actions: [readAction()],
+    contextFields: [{ key: 'active_vacancy', label: 'Активная вакансия', type: 'string', source: 'context_store' }],
+    ...changes,
+  });
+
+  it('registers a full v2 manifest with contextFields/collections/connections/webSurfaces', () => {
+    const r = new ActionProviderRegistry();
+    const list = r.register(manifestV2({
+      actions: [readAction(), writeAction()],
+      collections: [{ name: 'candidates', schemaVersion: 1 }],
+      connections: [{ id: 'headhunter', label: 'HeadHunter', requiredFor: ['recruiting_update_scoring'] }],
+      webSurfaces: [{ id: 'candidates', title: 'Кандидаты', access: 'private_profile', queryAction: 'recruiting_query_candidates_page' }],
+    }));
+    expect(list).toHaveLength(2);
+    expect(r.get('recruiting_query_candidates_page').providerId).toBe('recruiting');
+    expect(r.validateCall('recruiting_query_candidates_page', {}, 'user').effect).toBe('read');
+  });
+
+  it('requires first-class contextFields on a v2 manifest (context is not optional)', () => {
+    const r = new ActionProviderRegistry();
+    checkError(() => r.register({ version: 2, providerId: 'p', actions: [readAction()] }), 'INVALID_ARGUMENTS');
+    checkError(() => r.register(manifestV2({ contextFields: [] })), 'INVALID_ARGUMENTS');
+    expect(r.list()).toEqual([]);
+  });
+
+  it.each([
+    ['duplicate context field', { contextFields: [{ key: 'k', label: 'a', type: 'string', source: 'cron' }, { key: 'k', label: 'b', type: 'string', source: 'cron' }] }],
+    ['duplicate collection', { collections: [{ name: 'c', schemaVersion: 1 }, { name: 'c', schemaVersion: 2 }] }],
+    ['unknown query action', { webSurfaces: [{ id: 's', title: 't', access: 'private_profile', queryAction: 'missing' }] }],
+    ['unknown connection action', { connections: [{ id: 'x', label: 'X', requiredFor: ['missing'] }] }],
+    ['non-read query action', { actions: [writeAction()], webSurfaces: [{ id: 's', title: 't', access: 'private_profile', queryAction: 'recruiting_update_scoring' }] }],
+    ['unknown top-level field', { extra: true }],
+    ['bad source', { contextFields: [{ key: 'k', label: 'a', type: 'string', source: 'nope' }] }],
+    ['schemaVersion < 1', { collections: [{ name: 'c', schemaVersion: 0 }] }],
+  ])('rejects an invalid v2 manifest: %s', (_label, changes) => {
+    const r = new ActionProviderRegistry();
+    checkError(() => r.register(manifestV2(changes)), 'INVALID_ARGUMENTS');
+    expect(r.list()).toEqual([]);
+  });
+
+  it('keeps v1 manifests valid unchanged (no contextFields required)', () => {
+    const r = new ActionProviderRegistry();
+    expect(r.register({ version: 1, providerId: 'legacy', actions: [action()] })).toHaveLength(1);
+    checkError(() => r.register({ version: 1, providerId: 'legacy2', actions: [action({ name: 'other' })], contextFields: [] }), 'INVALID_ARGUMENTS');
+  });
+});
