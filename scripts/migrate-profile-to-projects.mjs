@@ -98,6 +98,24 @@ function ledgerAppend(workDir, rec) {
   fs.appendFileSync(lp, JSON.stringify(rec) + '\n');
 }
 
+// Move `from` → `to` without ever overwriting or deleting anything at `to`.
+// Dest missing → single rename. Both dirs → recurse per entry. Same-name file (or
+// file/dir mismatch) → conflict, left in place at the source.
+export function mergeMove(from, to, acc = { moved: [], conflicts: [] }) {
+  if (!fs.existsSync(to)) {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.renameSync(from, to);
+    acc.moved.push({ from, to });
+    return acc;
+  }
+  const fromIsDir = fs.statSync(from).isDirectory();
+  const toIsDir = fs.statSync(to).isDirectory();
+  if (!(fromIsDir && toIsDir)) { acc.conflicts.push(from); return acc; }
+  for (const name of fs.readdirSync(from)) mergeMove(path.join(from, name), path.join(to, name), acc);
+  try { if (fs.readdirSync(from).length === 0) fs.rmdirSync(from); } catch { /* keep */ }
+  return acc;
+}
+
 function migrateProfile(profile) {
   const workDir = path.join(USERS_ROOT, profile);
   const plan = planProfile(workDir);
@@ -123,10 +141,16 @@ function migrateProfile(profile) {
     const toDir = path.join(projects.projectDir(workDir, pid), m.toSub);
     fs.mkdirSync(toDir, { recursive: true });
     const to = path.join(toDir, path.basename(m.fromRel));
-    ledgerAppend(workDir, { event: 'move', at: new Date().toISOString(), from: m.fromRel, to: path.relative(workDir, to), projectId: pid, note: m.note });
-    if (fs.existsSync(to)) fs.rmSync(to, { recursive: true, force: true });
-    fs.renameSync(from, to);
-    console.log(`  moved: ${m.fromRel} -> ${path.relative(workDir, to)}`);
+    // NEVER delete the destination. It used to `rmSync(to)` first — but project scaffolds
+    // pre-create interviews/, applylink/ … so migrating root interviews/ into a recruiting
+    // project WIPED that project's own transcripts (issue #1311). Now: merge file-by-file,
+    // same-name conflicts stay at the source and are reported for a manual decision.
+    const { moved, conflicts } = mergeMove(from, to);
+    for (const mv of moved) {
+      ledgerAppend(workDir, { event: 'move', at: new Date().toISOString(), from: path.relative(workDir, mv.from), to: path.relative(workDir, mv.to), projectId: pid, note: m.note });
+    }
+    console.log(`  moved: ${m.fromRel} -> ${path.relative(workDir, to)} (${moved.length} item(s))`);
+    for (const c of conflicts) console.log(`  CONFLICT (left at source, decide manually): ${path.relative(workDir, c)}`);
   }
   ledgerAppend(workDir, { event: 'migration-done', at: new Date().toISOString(), profile });
 }
