@@ -362,6 +362,28 @@ function isSessionRunning(sessionId) {
   return false;
 }
 
+// Exact-session stop for web/API callers. Deliberately has NO profile-wide
+// fallback: failure to find the requested session must never kill a sibling
+// Telegram/web task that happens to share the same profile.
+function stopSessionTask(username, sessionId) {
+  if (!username || !sessionId) return false;
+  let stopped = false;
+  const prefix = `${username}-`;
+  for (const [taskId, state] of activeTimers.entries()) {
+    if (!taskId.startsWith(prefix) || !state?.proc) continue;
+    if (state.sessionId !== sessionId) continue;
+    state.userStopped = true;
+    try {
+      state.proc.kill('SIGTERM');
+      stopped = true;
+      console.log(`[${taskId}] stopped by exact session ${sessionId}`);
+    } catch (e) {
+      console.warn('[runner] stopSessionTask SIGTERM:', e.message);
+    }
+  }
+  return stopped;
+}
+
 /**
  * Kill any running Claude process for a given username.
  * Finds all entries in activeTimers whose taskId starts with `${username}-`
@@ -2456,7 +2478,7 @@ function interruptForRestart() {
 module.exports = {
   interruptForRestart, MAX_RESUME_ATTEMPTS,
   runTask, getQuickAnswer, runQuickAnswer, shouldAttemptQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
-  isTaskRunning, isSessionRunning, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  isTaskRunning, isSessionRunning, stopSessionTask, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   reconcileSoftContinuations,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
