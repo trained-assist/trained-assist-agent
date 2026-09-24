@@ -12,7 +12,6 @@ const {
   loadSeenIds,
   saveSeenIds,
   mergeSeenIds,
-  buildProactiveDigest,
   seenIdsPath,
 } = require('../src/hh-proactive-search.js');
 
@@ -121,28 +120,6 @@ test('lossless: union of new across N runs === total distinct IDs', () => {
   assert.ok(unionNews.has('hh-0000'));
   assert.ok(unionNews.has('hh-0053'));
   assert.ok(!unionNews.has('hh-0054')); // never collected
-});
-
-// Multi-vacancy step 4/6: cold search results are a one-line count + link, never a
-// per-candidate name list, in Telegram.
-test('buildProactiveDigest: one-line count summary + link, no candidate names', () => {
-  const text = buildProactiveDigest({
-    vacancyTitle: 'Финансовый советник', newCount: 3, totalSeen: 47,
-    url: 'https://example/hh/proactive',
-  });
-  assert.ok(text.includes('🧊 Холодный поиск: 3 новых'));
-  assert.ok(text.includes('«Финансовый советник»'));
-  assert.ok(text.includes('всего в базе: 47'));
-  assert.ok(text.includes('https://example/hh/proactive'));
-  assert.ok(text.split('\n').length === 1);
-});
-
-test('buildProactiveDigest: omits link line when no url given', () => {
-  const text = buildProactiveDigest({
-    vacancyTitle: 'X', newCount: 15, totalSeen: 100, url: '',
-  });
-  assert.ok(!text.includes('http'));
-  assert.ok(text.includes('15 новых'));
 });
 
 (async () => {

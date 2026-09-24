@@ -8,13 +8,13 @@ it('routes standalone stop without credentials or vacancy, and delegates complai
  const {runQuickAnswer}=require('./src/runner/intent-engine');const api=require('./src/hh-proactive-search');
  (async()=>{try{
  for(const text of ['/hh_notify_off','[Сообщение 1]\n/hh_notify_off@TestBot','выключи уведомления о новых кандидатах','отключи уведомления холодного поиска']){
- api.saveSchedule('alice',{enabled:true});assert.match(await runQuickAnswer(text,'alice',root),/выключены/);assert.equal(api.loadSchedule('alice').enabled,true);assert.equal(api.loadSchedule('alice').notifications_enabled,false);
+ api.saveSchedule('alice',{enabled:true});assert.match(await runQuickAnswer(text,'alice',root),/выключены/);assert.equal(api.loadSchedule('alice').enabled,true);assert.equal(api.loadSchedule('alice').notifications_enabled,undefined);
  }
  for(const text of ['не выключай уведомления о новых кандидатах','как выключить уведомления холодного поиска?','"/hh_notify_off"','/hh_notify_off\nно сначала объясни','Слушай, мне нужно, чтобы уведомления о холодном поиске новых кандидатов можно было выключать. Сейчас это не выключается. Настрой, пожалуйста, чтобы выключалось.']){
  api.saveSchedule('alice',{enabled:true});assert.equal(await runQuickAnswer(text,'alice',root),null,text);assert.equal(api.loadSchedule('alice').enabled,true);
  }
  for(const text of ['/hh_notify_on','включи уведомления о новых кандидатах']){
- api.saveSchedule('alice',{enabled:false,notifications_enabled:false});assert.match(await runQuickAnswer(text,'alice',root),/включены/);assert.equal(api.loadSchedule('alice').enabled,false);assert.equal(api.loadSchedule('alice').notifications_enabled,true);
+ api.saveSchedule('alice',{enabled:false,notifications_enabled:false});assert.match(await runQuickAnswer(text,'alice',root),/функция удалена/);assert.equal(api.loadSchedule('alice').enabled,false);assert.equal(api.loadSchedule('alice').notifications_enabled,false);
  }
  api.saveSchedule('alice',{enabled:true});await runQuickAnswer('выключи автопоиск','alice',root);assert.equal(api.loadSchedule('alice').enabled,false);
  console.log('PASS');}finally{fs.rmSync(root,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});

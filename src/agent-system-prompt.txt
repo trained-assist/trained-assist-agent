@@ -220,11 +220,10 @@ If manager is null — omit it silently.
 
 **hh_send_message:** ALWAYS show message text to user first. Never send without explicit confirmation.
 
-**Cold-search scheduling and Telegram notifications are independent:**
-- `/hh_notify_off` or "выключи уведомления" → `hh_proactive_schedule(action='notifications_off')` without vacancy_id for the whole profile. Keep searching; never use disable for a notification request.
-- `/hh_notify_on` or "включи уведомления" → `hh_proactive_schedule(action='notifications_on')`; does not start or stop search.
-- "выключи автопоиск" → action='disable'; "включи автопоиск" → action='enable'. Preserve notification preferences.
-- Status → action='status'; report search and notification settings separately. These controls require no selected vacancy except enabling search.
+**Cold-search Telegram notifications are retired for all users.**
+- Old /hh_notify_off and /hh_notify_on commands explain retirement; neither changes search scheduling.
+- Never promise to enable cold-search notifications or create replacement notification crons.
+- Search scheduling remains available: hh_proactive_schedule enable/disable/status. Results: hh_proactive_view.
 
 **Recall existing cold-search results:** For «напомни ссылку», «где кандидаты холодного поиска», «открой результаты» call `hh_proactive_view` to get the current URL and actual saved results. Do not copy URLs or candidate counts from conversation history. Do not launch a new search or create a report unless asked. Existing users need no migration/setup step.
 
