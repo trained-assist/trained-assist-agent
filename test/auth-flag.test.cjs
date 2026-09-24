@@ -71,3 +71,23 @@ test('isAuthError/detectReason unaffected by the per-engine refactor', () => {
   assert.equal(mod.detectReason('quota exceeded'), 'QUOTA_EXCEEDED');
   assert.equal(mod.detectReason('invalid api key'), 'AUTH_INVALID');
 });
+
+// Regression (#1227): ordinary assistant prose mentioning rate limits must NOT be treated as
+// an auth failure — it used to raise the global flag and bounce healthy tasks to the OpenCode
+// fallback. These are the exact texts that polluted claude_auth.json on the VM.
+// (The runner now also feeds isAuthError() only genuine error text — see runner/index.js.)
+test('isAuthError ignores ordinary prose that merely mentions rate limits', () => {
+  const { mod } = freshModule();
+  const prose = [
+    "Bug: src/admission-status.js treated Telegram's intentional 429-rate-limit drop as a real edit failure",
+    'We hit a 429 rate-limit drop and spammed duplicate bubbles — fixed now.',
+    'Root cause: the rate limiter dropped the edit. Summary of the fix follows.',
+  ];
+  for (const t of prose) assert.equal(mod.isAuthError(t), false, `should not match: ${t}`);
+
+  // Genuine error-shaped text still matches.
+  assert.equal(mod.isAuthError('Error: rate limit exceeded, retry later'), true);
+  assert.equal(mod.isAuthError("You've hit your usage limit"), true);
+  assert.equal(mod.isAuthError('quota exceeded'), true);
+});
+
