@@ -1113,6 +1113,7 @@ async function detectMenuInAnswer(text, apiKey, { timeoutMs = 10000 } = {}) {
     'законченный отдельный путь действия, а не шаг одного общего плана.',
     'НЕ меню: единая последовательность шагов одного плана, вопрос да/нет,',
     'список фактов без выбора, один рекомендованный вариант без альтернатив.',
+    'Служебные команды /command и управление чеклистом НЕ являются меню вариантов.',
     'Если это меню — верни короткие ярлыки (2-4 слова, БЕЗ номеров и слова "вариант"),',
     'по одному на альтернативу, в порядке появления в тексте.',
     'Ответь СТРОГО JSON: {"menu": true, "labels": ["...", "..."]} или {"menu": false}.',
@@ -2354,16 +2355,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // plan|{sid}). Тап безопасен из one-shot — callback сам форсирует deep+forceClaude
   // (см. tg-bot callbacks.js), так что кнопка не обязана ждать явного deep-режима.
   // Плана нет → кнопки нет (actionButtons/oneshotActionMarkup и так null, §9.2).
+  // Classify only the model answer. Runtime cost/GTD footers are controls,
+  // not proposals, and are absent from the model conversation on a later tap.
   let finalMarkup = null;
   let buttonReason = internalGtd ? 'internalGtd-suppressed' : 'no-session';
   if (!internalGtd && !incomplete) {
     if (activeSessionId) {
-      const hasPlan = await detectPlanInAnswer(final, secrets.OPENROUTER_API_KEY);
+      const hasPlan = await detectPlanInAnswer(result, secrets.OPENROUTER_API_KEY);
       if (hasPlan) {
         finalMarkup = { inline_keyboard: [[{ text: '▶️ Действуй дальше по плану', callback_data: `plan|${activeSessionId}` }]] };
         buttonReason = 'plan';
       } else {
-        const menuLabels = await detectMenuInAnswer(final, secrets.OPENROUTER_API_KEY);
+        const menuLabels = await detectMenuInAnswer(result, secrets.OPENROUTER_API_KEY);
         finalMarkup = menuLabels
           ? { inline_keyboard: menuLabels.map((label, idx) => [{ text: `${idx + 1}. ${label}`.slice(0, 60), callback_data: `menu|${activeSessionId}|${idx}` }]) }
           : actionButtons(activeSessionId, { deep: finalDeep });

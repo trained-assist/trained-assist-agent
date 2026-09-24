@@ -1121,3 +1121,33 @@ describe('Originating bot delivery isolation', () => {
     expect(secrets.BOT_TOKEN).toBe('classic:token');
   });
 });
+
+
+describe('GTD footer is not an assistant menu', () => {
+  it('keeps service controls out of both classifiers and produces no recursive menu', { timeout: 15000 }, async () => {
+    const user = makeUser();
+    const gtd = require('../src/gtd-controller');
+    gtd.writeGtd(user.workDir, { sessionId: 'other-open-checklist', status: 'open' });
+    const answer = 'Исправил и проверил: уведомления выключены, автопоиск продолжает работать. Все обязательные проверки успешно завершились.';
+    setupFakeClaude(answer);
+    const inputs = [];
+    const originalFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+      if (!String(url).startsWith('https://openrouter.ai/')) return originalFetch(url, options);
+      const input = JSON.parse(options.body).messages.find(m => m.role === 'user').content;
+      inputs.push(input);
+      const footer = input.includes('/checklist_turn_off');
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+        plan: false, menu: footer, labels: ['Чеклист активен', 'Отключить чеклист'],
+      }) } }] }) };
+    });
+    try {
+      await runTask({ taskId: `footer-${Date.now()}`, user, task: 'Исправь уведомления',
+        forceClaude: true, mode: 'deep', secrets: { BOT_TOKEN: 'fake:token', OPENROUTER_API_KEY: 'fake' } });
+      expect(inputs.filter(t => t === answer).length).toBe(2);
+      expect(inputs.every(t => !t.includes('/checklist_turn_off'))).toBe(true);
+      expect(tgTexts().at(-1)).toContain('/checklist_turn_off');
+      expect(tgSent().at(-1).body.reply_markup).toEqual({ inline_keyboard: [] });
+    } finally { spy.mockRestore(); gtd.clearGtd(user.workDir, 'other-open-checklist'); }
+  });
+});
