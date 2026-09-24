@@ -915,7 +915,9 @@ ${recent || '(пока нет)'}
       // hh skill was extracted (#942) — its MCP tools no longer live under toolsDir,
       // so detect it the same way src/mcp-action.js does: sibling checkout present.
       const HH_SKILL_SIBLING = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
-      const skills = computeSkillsList(toolFilenames, fs.existsSync(HH_SKILL_SIBLING));
+      // freelance skill is also a sibling checkout (trained-assist-freelance-skill).
+      const FREELANCE_SKILL_SIBLING = path.join(__dirname, '..', '..', 'trained-assist-freelance-skill', 'src', 'mcp-skills', 'index.js');
+      const skills = computeSkillsList(toolFilenames, fs.existsSync(HH_SKILL_SIBLING), fs.existsSync(FREELANCE_SKILL_SIBLING));
       const upsell_text = process.env.AGENT_UPSELL_TEXT ||
         'За HH-рекрутингом, налогами, задачами Weeek и другим — обратитесь к @super_personal_assistant_bot';
       return json(res, 200, { capabilities, skills, upsell_text });
