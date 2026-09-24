@@ -30,3 +30,7 @@ contract with retirement behavior (future/overdue, repeat boot, failures, corrup
 records). tests/runner-e2e.test.js executes final delivery with an optimistic LLM
 stub and asserts there is no classification request, timer journal, or promise.
 Both suites are mandatory in scripts/staging/suites.json.
+
+The API contract test test/runner-index-contract.test.cjs now requires the startup
+retirement entry point instead of the removed, unused clearPendingContinuation.
+No callers remain for that cancelled-timer API.
