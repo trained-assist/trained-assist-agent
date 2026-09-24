@@ -31,6 +31,8 @@ function listSessionsFor(username, limit = 20) {
     createdAt: s.createdAt,
     messageCount: s.messageCount,
     lastUserMessage: s.lastUserMessage,
+    summary: s.summary || null,
+    projectId: s.projectId || null,
     status: (running && i === 0) ? 'running' : (s.status || 'completed'),
   }));
 }
@@ -50,6 +52,8 @@ function getSessionFor(username, sessionId) {
     createdAt: session.createdAt,
     lastAt: session.lastAt,
     messageCount: session.messageCount,
+    summary: session.summary || meta.summary || null,
+    projectId: session.projectId || meta.projectId || null,
     status: running && index[0]?.id === sessionId ? 'running' : (session.status || 'completed'),
     messages: session.messages || [],
   };
@@ -225,7 +229,42 @@ function checkOrigin(req, secrets) {
   return false;
 }
 
-async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
+function prepareWebTaskFiles(username, task, fileRefs) {
+  if (!Array.isArray(fileRefs) || !fileRefs.length) return { task, fileRefs: [] };
+  const fs = require('fs');
+  const workDir = userWorkDir(username);
+  const uploadsDir = path.join(workDir, 'media', 'intake');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  let effectiveTask = task || '';
+  const normalized = [];
+
+  for (const ref of fileRefs) {
+    if (!ref || typeof ref.id !== 'string' || !/^[a-f0-9]{16,64}$/.test(ref.id)) {
+      const err = new Error('invalid fileRef'); err.statusCode = 400; throw err;
+    }
+    const storeDir = path.join(workDir, 'media', 'intake-store', ref.id);
+    const src = path.join(storeDir, 'data');
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(path.join(storeDir, 'meta.json'), 'utf8')); } catch {}
+    const rawName = ref.name || meta.name || 'file';
+    const safeName = path.basename(rawName).replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
+    const mime = ref.mime || ref.type || meta.mime || 'application/octet-stream';
+    const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
+    try {
+      fs.copyFileSync(src, filePath);
+      const fd = fs.openSync(filePath, 'r');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    } catch (e) {
+      const err = new Error('attachment not persisted'); err.statusCode = 503; throw err;
+    }
+    const note = `[Файл сохранён: ${filePath} (${mime}). Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
+    effectiveTask = effectiveTask ? `${note}\n\n${effectiveTask}` : note;
+    normalized.push({ id: ref.id, name: safeName, mime });
+  }
+  return { task: effectiveTask, fileRefs: normalized };
+}
+
+async function streamWebTask({ req, res, secrets, username, task, sessionId, projectId = null, fileRefs = [] }) {
   const workDir = userWorkDir(username);
   const taskId = `${username}-web-${Date.now()}`;
 
@@ -274,6 +313,8 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
     secrets: { TELEGRAM_BOT_TOKEN: secrets.BOT_TOKEN, ...secrets },
     initialMsgId: null,
     pinnedMsgId: null,
+    projectId: projectId || null,
+    fileRefs,
     outputCallback: (text) => emitter.emit('chunk', text),
   }).then(() => {
     // sessionId may have been created inside _runTask. The runner persists the
@@ -289,4 +330,4 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId }) {
   });
 }
 
-module.exports = { handleWebRoute, listSessionsFor, getSessionFor, streamWebTask, stopSessionFor };
+module.exports = { handleWebRoute, listSessionsFor, getSessionFor, prepareWebTaskFiles, streamWebTask, stopSessionFor };

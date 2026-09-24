@@ -61,6 +61,7 @@
   "gcp_secret_manager_only": {
     "_doc": "Available on GCP VM only (via Secret Manager). NOT in GitHub Secrets, NOT on RU VM.",
     "secrets": [
+      { "name": "RECRUITER_BOT_TOKEN", "description": "Optional recruiter reply credential; Secret Manager or host env fallback. Never use classic bot as fallback." },
       { "name": "CF_API_TOKEN",             "description": "Cloudflare API token" },
       { "name": "OPERATOR_CHAT_ID",         "description": "Telegram chat ID for operator notifications" },
       { "name": "GOOGLE_OAUTH_CLIENT_ID",   "description": "Google OAuth2 client ID (GDrive/GetCourse)" },
