@@ -1080,11 +1080,29 @@ ${recent || '(пока нет)'}
       return json(res, result.ok ? 200 : 404, result);
     }
 
-    // POST /tasks/:taskId/stop — kill a specific running Claude process by taskId
+    // POST /tasks/:taskId/stop — kill a specific running Claude process by taskId.
+    // Ownership-checked (#1303): AGENT_SECRET alone is NOT ownership — it is shared
+    // by every first-party gateway, so on its own it lets any of them stop any
+    // profile's/bot's task just by knowing its taskId. The caller must name the
+    // owner (username required; audience defaults to 'default'; chatId optional),
+    // matched by the same exact-username/audience rule #1302 §3.2 uses for
+    // /tasks/stop. Missing owner or mismatch -> 403 and the task keeps running.
+    // No Telegram callback calls this route (the bot's Stop button uses the
+    // username-scoped /tasks/stop), so no existing caller is broken.
     if (req.method === 'POST' && /^\/tasks\/[^/]+\/stop$/.test(url.pathname)) {
-      const taskId = url.pathname.split('/')[2];
+      const taskId = decodeURIComponent(url.pathname.split('/')[2]);
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch { payload = null; }
+      const username = payload?.username;
+      const audience = payload?.audience;
+      const chatId = payload?.chatId ?? payload?.userId ?? null;
+      if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(username))
+        return json(res, 403, { error: 'forbidden: owner username required' });
+      if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience)))
+        return json(res, 400, { error: 'invalid audience' });
       const { stopTask } = require('./runner');
-      const result = stopTask(taskId);
+      const result = stopTask(taskId, { username, audience: audience || 'default', chatId });
+      if (result.forbidden) return json(res, 403, { error: result.error });
       return json(res, result.ok ? 200 : 404, result);
     }
 

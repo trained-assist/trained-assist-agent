@@ -256,14 +256,38 @@ const {
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
 const activeTimers = new Map();
 
+// Ownership matcher for a specific taskId (#1303). Aligned with the #1302 §3.2
+// rule used by stopUserTask/killTaskByUsername: EXACT username (never a taskId
+// string-prefix), audience normalized to 'default', and chatId compared only
+// when both the task state and the caller carry one — a private-chat chatId is
+// the Telegram user's own id, identical no matter which bot is messaged, so it
+// cannot disambiguate audiences by itself. Kept in one place so the taskId stop
+// path can never drift from the username-scoped path.
+function taskOwnedBy(state, owner) {
+  if (!state || !owner || typeof owner.username !== 'string' || !owner.username) return false;
+  if (state.username !== owner.username) return false;
+  if ((state.audience || 'default') !== (owner.audience || 'default')) return false;
+  if (owner.chatId != null && state.chatId != null && String(state.chatId) !== String(owner.chatId)) return false;
+  return true;
+}
+
 /**
- * Extend the timeout for a running task by another CLAUDE_TIMEOUT_MS.
- * Called from server.js POST /tasks/:taskId/extend-timeout which the
- * session_extend_timeout MCP tool invokes.
+ * Stop one running task by its exact taskId.
+ *
+ * `owner` is REQUIRED (#1303): AGENT_SECRET is shared by every first-party
+ * gateway and therefore proves nothing about who owns a taskId. Without an
+ * owner match, any caller that knows a taskId could SIGTERM another profile's
+ * or another bot's task. owner = { username (required), audience?, chatId? },
+ * matched by taskOwnedBy. A missing or mismatching owner returns
+ * { ok:false, forbidden:true } and the task keeps running.
  */
-function stopTask(taskId) {
+function stopTask(taskId, owner = null) {
   const s = activeTimers.get(taskId);
   if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
+  if (!taskOwnedBy(s, owner)) {
+    console.warn(`[runner] stopTask refused: owner missing/mismatch for ${taskId}`);
+    return { ok: false, forbidden: true, error: 'forbidden: task belongs to another owner' };
+  }
   s.userStopped = true;
   try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopTask SIGTERM:', e.message); }
   console.log(`[${taskId}] stopped by user`);
@@ -284,9 +308,11 @@ function stopUserTask(username, chatId = null, audience = null) {
   const scopedAudience = audience || 'default';
   let stopped = false;
   for (const [taskId, s] of activeTimers.entries()) {
-    if (s.username !== username || !s.proc) continue;
-    if ((s.audience || 'default') !== scopedAudience) continue;
-    if (chatId != null && s.chatId != null && String(s.chatId) !== String(chatId)) continue;
+    if (!s.proc) continue;
+    // Single shared ownership rule (#1303) — exact username + audience (+ chatId
+    // when both sides carry one), never a taskId prefix. Keeps this path and
+    // stopTask(taskId, owner) from drifting apart.
+    if (!taskOwnedBy(s, { username, audience: scopedAudience, chatId })) continue;
     s.userStopped = true;
     try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
     console.log(`[${taskId}] stopped by user command`);
@@ -322,6 +348,11 @@ function stopUserTask(username, chatId = null, audience = null) {
   return stopped;
 }
 
+/**
+ * Extend the timeout for a running task by another CLAUDE_TIMEOUT_MS.
+ * Called from server.js POST /tasks/:taskId/extend-timeout which the
+ * session_extend_timeout MCP tool invokes.
+ */
 function extendTaskTimeout(taskId) {
   const s = activeTimers.get(taskId);
   if (!s?.proc) return { ok: false, error: 'task not found or already finished' };
@@ -402,8 +433,9 @@ function killTaskByUsername(username, audience = null) {
   const scopedAudience = audience || 'default';
   let killed = 0;
   for (const [taskId, state] of activeTimers.entries()) {
-    if (state.username !== username) continue;
-    if ((state.audience || 'default') !== scopedAudience) continue;
+    // Same shared ownership rule (#1303); this caller is deliberately profile-wide
+    // within one audience, so it passes no chatId.
+    if (!taskOwnedBy(state, { username, audience: scopedAudience })) continue;
     try {
       if (state.proc) {
         state.userStopped = true;
