@@ -2,7 +2,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { webAuth } = require('./web-auth');
 const { listSessions, getSession, getCurrentSessionId } = require('./session-store');
-const { isTaskRunning, runTask, stopUserTask } = require('./runner');
+const { isSessionRunning, runTask, stopSessionTask } = require('./runner');
 const { userWorkDir } = require('./data-paths');
 
 // Per-task SSE emitters: taskId → EventEmitter
@@ -23,8 +23,7 @@ function json(res, status, body) {
 function listSessionsFor(username, limit = 20) {
   const workDir = userWorkDir(username);
   const cap = Math.min(parseInt(limit, 10) || 20, 50);
-  const running = isTaskRunning(username);
-  return listSessions(workDir, cap).map((s, i) => ({
+  return listSessions(workDir, cap).map((s) => ({
     id: s.id,
     topic: s.topic,
     lastAt: s.lastAt,
@@ -33,7 +32,7 @@ function listSessionsFor(username, limit = 20) {
     lastUserMessage: s.lastUserMessage,
     summary: s.summary || null,
     projectId: s.projectId || null,
-    status: (running && i === 0) ? 'running' : (s.status || 'completed'),
+    status: isSessionRunning(s.id) ? 'running' : (s.status || 'completed'),
   }));
 }
 
@@ -45,7 +44,6 @@ function getSessionFor(username, sessionId) {
   if (!meta) return null;
   const session = getSession(workDir, sessionId);
   if (!session) return null;
-  const running = isTaskRunning(username);
   return {
     id: session.id,
     topic: session.topic,
@@ -54,7 +52,7 @@ function getSessionFor(username, sessionId) {
     messageCount: session.messageCount,
     summary: session.summary || meta.summary || null,
     projectId: session.projectId || meta.projectId || null,
-    status: running && index[0]?.id === sessionId ? 'running' : (session.status || 'completed'),
+    status: isSessionRunning(sessionId) ? 'running' : (session.status || 'completed'),
     messages: session.messages || [],
   };
 }
@@ -65,9 +63,8 @@ function getSessionFor(username, sessionId) {
 // Shared by both the cookie-authed /web/stop/:id route and the bearer-gated
 // /web/stop-bearer route (external frontends can't hold a WEB_JWT cookie).
 function stopSessionFor(username, sessionId) {
-  const session = getSession(userWorkDir(username), sessionId);
-  const chatId = session ? (session.liveChatId ?? session.ownerChatId) : null;
-  return stopUserTask(username, chatId);
+  if (!sessionId || !getSession(userWorkDir(username), sessionId)) return false;
+  return stopSessionTask(username, sessionId);
 }
 
 // Resolve session status: running (process alive) or from stored field, fallback completed
@@ -170,8 +167,10 @@ async function handleWebRoute(req, url, res, secrets) {
     const sessionId = p.slice('/web/stop/'.length);
     if (!sessionId || !SESSION_ID_RE.test(sessionId)) return json(res, 400, { error: 'invalid session id' }), true;
 
-    stopSessionFor(username, sessionId);
-    return json(res, 200, { ok: true }), true;
+    const stopped = stopSessionFor(username, sessionId);
+    return stopped
+      ? (json(res, 200, { ok: true, sessionId }), true)
+      : (json(res, 409, { ok: false, error: 'session is not running', sessionId }), true);
   }
 
   return false;
