@@ -358,7 +358,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const createMatch = rest.match(/^(?:new|new project|новый|создать|создай|create|add)\s+(.+)$/i);
     if (createMatch) {
       const meta = projects.createProject(workDir, createMatch[1].trim(), { audience });
-      projects.setActiveProjectId(workDir, meta.id, chatId, { audience });
+      projects.setActiveProjectId(workDir, meta.id, chatId, { audience, pinned: true });
       return `✅ Проект создан и выбран: «${meta.name}» (${meta.label}).\nНовые сессии пойдут в него. Список: \`/project\``;
     }
 
@@ -392,7 +392,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
         return [head, ...parts].join('\n');
       });
       return [
-        '📁 Проекты (▶️ — активный, новые сессии идут в него):',
+        '📁 Проекты (▶️ — проект этого чата, новые сессии идут в него):',
         '',
         lines.join('\n\n'),
         '',
@@ -413,8 +413,8 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
         || list.find(p => (p.name || '').toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
     }
     if (!target) return `Проект «${rest}» не найден. Список проектов: \`/project\``;
-    projects.setActiveProjectId(workDir, target.id, chatId, { audience });
-    return `▶️ Активный проект: «${target.name}» (${target.label}).\nСледующие новые сессии пойдут в него. Список: \`/project\``;
+    projects.setActiveProjectId(workDir, target.id, chatId, { audience, pinned: true });
+    return `📌 Проект чата: «${target.name}» (${target.label}).\nВсе новые сессии этого чата пойдут в него без вопроса. Сменить: \`/project\``;
   }
 
   // /switch2klod, /switch2codex — see ENGINE_SWITCH_INTENT above.

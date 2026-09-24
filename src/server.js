@@ -1189,7 +1189,7 @@ ${recent || '(пока нет)'}
         for (const s of allSess) if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
 
         const d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience);
-        const out = { action: d.action, active: d.active || null };
+        const out = { action: d.action, active: d.active || null, pinned: d.pinned ? d.project.id : null };
 
         // Data gap fix: a project's 3-sense summary used to be generated ONLY in the
         // sessions-list intent for the ACTIVE project, so at picker time most projects
