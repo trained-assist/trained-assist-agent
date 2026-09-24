@@ -59,6 +59,34 @@ const FIRE_LEASE_MS = 45 * 60 * 1000; // > CLAUDE_TIMEOUT_MS (40м); переж�
 // следующий тик — no-op (лог), запись подождёт своей очереди на следующем тике.
 let _tickInFlight = false;
 
+// Heartbeat (issue #512 pt.3): the tick lives inside an in-process setInterval
+// (server.js scheduleGtdController) — if it ever silently stopped firing
+// (unhandled state outside the try/catch, event loop wedged), open records
+// would sit forever with no external signal. This makes "when did the tick
+// last actually run" observable via GET /internal/gtd-status instead of
+// requiring someone to notice a stuck checklist by hand.
+let _tickHeartbeat = { lastStartAt: null, lastFinishAt: null, lastDurationMs: null, lastError: null, tickCount: 0 };
+function tickHeartbeat() { return { ..._tickHeartbeat }; }
+
+// Cheap backlog counters for the heartbeat endpoint — no LLM/network, just what's on disk/in the DB.
+function countOpenLegacy(baseUsersDir) {
+  let users = [];
+  try { users = fs.readdirSync(baseUsersDir).filter(u => /^[a-zA-Z0-9_-]+$/.test(u)); } catch { return { open: 0, profiles: 0 }; }
+  let open = 0;
+  for (const username of users) {
+    open += listGtd(path.join(baseUsersDir, username)).filter(r => r && r.status === 'open').length;
+  }
+  return { open, profiles: users.length };
+}
+
+function durableItemCounts(store = durableStore()) {
+  const out = { pending: 0, waiting: 0, running: 0, done: 0, failed: 0, skipped: 0 };
+  for (const row of store.db.prepare('SELECT status, COUNT(*) as n FROM task_items GROUP BY status').all()) {
+    out[row.status] = row.n;
+  }
+  return out;
+}
+
 const GTD_DIR = 'gtd';
 const CHECKLIST_FILE = 'checklist.md';
 const TOKENS_ROOT = process.env.AGENT_TOKENS_ROOT || path.join(os.homedir(), 'agent-tokens');
@@ -678,10 +706,20 @@ function clearGtdForChat(workDir, chatId) {
 async function runDue(deps) {
   if (_tickInFlight) { console.warn('[gtd] tick skipped: previous tick still in flight'); return; }
   _tickInFlight = true;
+  const startedAt = Date.now();
+  _tickHeartbeat.lastStartAt = startedAt;
   try {
-    return await _runDueInner(deps);
+    const result = await _runDueInner(deps);
+    _tickHeartbeat.lastError = null;
+    return result;
+  } catch (e) {
+    _tickHeartbeat.lastError = e.message;
+    throw e;
   } finally {
     _tickInFlight = false;
+    _tickHeartbeat.lastFinishAt = Date.now();
+    _tickHeartbeat.lastDurationMs = _tickHeartbeat.lastFinishAt - startedAt;
+    _tickHeartbeat.tickCount += 1;
   }
 }
 
@@ -868,6 +906,7 @@ module.exports = {
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE, checklistAutologinUrl,
   durableStore, runDueDurable, reconcileOrphanedRunning, claimNextDurableItem,
+  tickHeartbeat, countOpenLegacy, durableItemCounts,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
   CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS, MAX_FIRES_PER_TICK, FIRE_LEASE_MS,
   _atomicWrite,

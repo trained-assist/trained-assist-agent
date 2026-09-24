@@ -24,7 +24,7 @@ const { getAuthFlag, getAllAuthFlags, clearAuthFailedFlag } = require('./auth-fl
 const { getAllEngineHealth } = require('./engine-health');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary, getEngineSessionId } = require('./session-store');
 const { generateSummary } = require('./session-summary');
 const { startNalogLogin } = require('./nalog-login');
 const { startGetcourseLogin } = require('./getcourse-login');
@@ -285,7 +285,21 @@ async function resumePendingTasks(secrets) {
 
     const engine = p.engine || 'claude';
     const attempt = (p.resumeAttempts || 0) + 1;
-    console.log(`[resume] engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(p.task).slice(0, 60)}"`);
+    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
+
+    // Native resume (#1234): claude (Sub-2) and codex (Sub-3) are wired. Source: the pending
+    // journal (written mid-run, survives SIGKILL) with the durable session record as fallback.
+    // opencode (Sub-4) still takes the context-rebuild path until its resume path is validated.
+    const NATIVE_RESUME_ENGINES = ['claude', 'codex'];
+    const nativeResumeId = NATIVE_RESUME_ENGINES.includes(engine)
+      ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, engine) : null))
+      : null;
+    // With a native resume the engine already holds the task, so replaying it is redundant (and
+    // risks redoing finished steps); send a short "keep going" instead.
+    const resumeTask = nativeResumeId
+      ? '[ПРОДОЛЖЕНИЕ] Сервер перезапустился и прервал тебя. Продолжи с того места, где остановился.'
+      : p.task;
+    console.log(`[resume] ${nativeResumeId ? 'native' : 'fallback'} engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(resumeTask).slice(0, 60)}"`);
 
     if (attempt > MAX_RESUME_ATTEMPTS) {
       // The resume itself keeps failing across restarts (not just once) — this is a real,
@@ -296,14 +310,9 @@ async function resumePendingTasks(secrets) {
       continue;
     }
 
-    // Silently re-run with the original session context, on the same engine the task was
-    // running on (claude/opencode/codex all take the same path — none of the three CLIs use a
-    // native --resume flag here, buildEngineCommand always sends a single --print/exec prompt,
-    // so "resume" just means re-invoking runTask with the same task/session, which every engine
-    // handles identically). Delayed via retry-policy's shared backoff schedule so a deploy
-    // flurry (several restarts in quick succession) gets a chance to settle before we retry,
-    // instead of hammering the same failure immediately on every restart.
-    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
+    // Delayed via retry-policy's shared backoff schedule so a deploy flurry (several restarts in
+    // quick succession) gets a chance to settle before we retry, instead of hammering the same
+    // failure immediately on every restart.
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
       profileId: p.profileId, telegramUserId: p.telegramUserId,
@@ -314,12 +323,13 @@ async function resumePendingTasks(secrets) {
         // Keep the old durable entry throughout backoff and until that handoff succeeds.
         const running = runTask({
           taskId: `${p.username}-resume-${Date.now()}`,
-          user, task: p.task, context: p.context || null,
+          user, task: resumeTask, context: p.context || null,
           engine, sessionId: p.sessionId || null,
           contextFromSession: p.contextFromSession || null,
           forceClaude: true, projectId: p.projectId || null,
           initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
           resumedAfterRestart: true, resumeAttempts: attempt,
+          resumeSessionId: nativeResumeId || null,
           secrets, internalGtd: !!p.internalGtd,
           mode: p.mode, continuationCount: p.continuationCount,
           initiatedAt: p.initiatedAt, threadId: p.threadId,
@@ -904,6 +914,24 @@ ${recent || '(пока нет)'}
       } catch (err) {
         return json(res, 500, { ok: false, error: err.message, latencyMs: Date.now() - start });
       }
+    }
+
+    // GET /internal/gtd-status — GTD tick heartbeat + backlog (issue #512 pt.3). The tick lives
+    // inside an in-process setInterval (scheduleGtdController below); if it ever silently stopped
+    // firing, open records would sit forever with no external signal. `stale` flips once we've
+    // missed 3 ticks' worth of time AND there's backlog waiting on it — cheap enough to poll from
+    // a cron-skill job without spawning Claude.
+    if (req.method === 'GET' && url.pathname === '/internal/gtd-status') {
+      const gtd = require('./gtd-controller');
+      const heartbeat = gtd.tickHeartbeat();
+      const legacy = gtd.countOpenLegacy(BASE_USERS_DIR);
+      const durable = gtd.durableItemCounts();
+      const msSinceLastTick = heartbeat.lastFinishAt != null ? Date.now() - heartbeat.lastFinishAt : null;
+      const backlog = legacy.open + durable.pending + durable.waiting;
+      const stale = msSinceLastTick != null && msSinceLastTick > 3 * 5 * 60 * 1000;
+      return json(res, stale && backlog > 0 ? 503 : 200, {
+        heartbeat, msSinceLastTick, stale, backlog, legacy, durable,
+      });
     }
 
     // GET /internal/auth-status — engine auth + health. Derived view of current state (spec §12):
