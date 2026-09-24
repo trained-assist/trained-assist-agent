@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:trained-assist:domain-view-model:v1",
+  "title": "Domain Web Surface view model v1 — declarative, rendered by core",
+  "description": "A provider's queryAction returns this JSON; core renders it. Providers never return HTML or JS (spec §5.3). Unknown block types are skipped by the renderer, so this schema keeps block shapes open and the renderer stays defensive.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "lastSyncAt": {
+          "type": ["integer", "null"]
+        },
+        "lastError": {
+          "type": ["string", "null"],
+          "maxLength": 2000
+        }
+      }
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["version", "blocks"]
+}
