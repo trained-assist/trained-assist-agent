@@ -106,3 +106,9 @@ Goal: Не замораживать счётчик «Думаю… (Nс)» на 
 - [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1282
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live
+
+Goal: Remove assist-agent from the RU VM — keep only a thin RU-IP edge (browser + RU-IP egress), run ALL Claude on GCP (issue #1288). src/ru-edge.js + systemd/ru-edge.service replace assist-agent-ru.service; GCP delegates nalog.ru login + lknpd.nalog.ru API calls to the edge over HTTP.
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1292
+- [ ] Merged to main
+- [ ] Deployed to prod — verify both `assist-agent` (GCP) and `ru-edge` (RU) are healthy after deploy, and run `scripts/smoke-test-ru-edge.sh` against the RU VM
