@@ -31,9 +31,24 @@ test('degradation guard: no resumeSessionId → no --resume (fresh session as be
   }
 });
 
-test('codex/opencode are untouched by the claude resume flag (Sub-3/Sub-4 own them)', () => {
-  const [, codexArgs] = buildEngineCommand({ ...base, engine: 'codex', resumeSessionId: 'x' });
-  assert.equal(codexArgs.includes('--resume'), false, 'codex must not receive claude --resume');
+test('codex: `exec resume <id>` on the resume path; -C only on the fresh path', () => {
+  const [, resumeArgs] = buildEngineCommand({ ...base, engine: 'codex', resumeSessionId: 'thr-1' });
+  assert.equal(resumeArgs[0], 'exec');
+  assert.equal(resumeArgs[1], 'resume', 'codex resumes via the `resume` subcommand');
+  assert.equal(resumeArgs[2], 'thr-1');
+  assert.equal(resumeArgs.includes('--resume'), false, 'claude --resume must not leak into codex');
+  assert.equal(resumeArgs.includes('-C'), false, '`codex exec resume` rejects -C (uses the process cwd)');
+  assert.ok(resumeArgs.includes('--json'), 'json stream preserved on resume');
+  assert.ok(resumeArgs.some(a => a.startsWith('tool_output_token_limit=')), 'tool-output cap preserved');
+  assert.equal(resumeArgs[resumeArgs.length - 1], 'continue please', 'prompt stays last');
+
+  const [, freshArgs] = buildEngineCommand({ ...base, engine: 'codex', resumeSessionId: null });
+  assert.equal(freshArgs[1], '--json', 'fresh path is a plain `exec`');
+  assert.notEqual(freshArgs.indexOf('-C'), -1, 'fresh path keeps -C');
+});
+
+test('opencode is untouched by the claude/codex resume flags (Sub-4 owns it)', () => {
   const [, ocArgs] = buildEngineCommand({ ...base, engine: 'opencode', resumeSessionId: 'x' });
   assert.equal(ocArgs.includes('--resume'), false, 'opencode must not receive claude --resume');
+  assert.equal(ocArgs.includes('resume'), false, 'opencode resume is Sub-4');
 });

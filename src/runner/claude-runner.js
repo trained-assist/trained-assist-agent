@@ -123,10 +123,15 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
     const toolOutputTokenLimit = process.env.CODEX_TOOL_OUTPUT_TOKEN_LIMIT || '4000';
     return [process.env.CODEX_BIN || 'codex', [
       'exec',
+      // Native resume (#1234 Sub-3): `codex exec resume <thread_id>` continues the real thread.
+      // Validated live. NOTE: `resume` rejects `-C` (it uses the process cwd, which we already
+      // set in spawn opts) — so `-C` is emitted only on the fresh-exec path. `--json` and the
+      // `-c` overrides (tool-output limit + MCP) are accepted on both paths.
+      ...(resumeSessionId ? ['resume', resumeSessionId] : []),
       '--json',
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
-      '-C', user.cwd || user.workDir,
+      ...(resumeSessionId ? [] : ['-C', user.cwd || user.workDir]),
       '-c', `tool_output_token_limit=${toolOutputTokenLimit}`,
       ...codexMcpArgs(mcpConfig),
       systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
