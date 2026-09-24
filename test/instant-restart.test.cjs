@@ -184,7 +184,7 @@ test('fallback: no engine session id anywhere → null resumeSessionId + origina
   assert.equal(h.runs[0].task, 'work', 'fallback replays the original task');
 });
 
-test('native resume: codex wired (Sub-3); opencode still falls back (Sub-4 pending)', async () => {
+test('native resume: claude, codex and opencode are all wired', async () => {
   const hc = resumeHarness({ pending: [task({ engine: 'codex' })], engineSessionIds: { codex: 'thr-x' } });
   await hc.resume();
   assert.equal(hc.runs[0].resumeSessionId, 'thr-x', 'codex native resume must be wired');
@@ -192,7 +192,8 @@ test('native resume: codex wired (Sub-3); opencode still falls back (Sub-4 pendi
 
   const ho = resumeHarness({ pending: [task({ engine: 'opencode' })], engineSessionIds: { opencode: 'ses-x' } });
   await ho.resume();
-  assert.equal(ho.runs[0].resumeSessionId, null, 'opencode takes the context-rebuild path until Sub-4');
+  assert.equal(ho.runs[0].resumeSessionId, 'ses-x', 'opencode native resume must be wired (Sub-4)');
+  assert.equal(ho.runs[0].engine, 'opencode');
 });
 
 // ── Journal hygiene (#1239) — degradation guards ───────────────────────────────────────────
