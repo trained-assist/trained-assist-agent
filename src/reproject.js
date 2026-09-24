@@ -597,11 +597,17 @@ function applyPlan(profileRoot, plan, { dryRun = true, now = Date.now() } = {}) 
   // destination — see planFolderMoves() for why partial/fan-out cases are skipped.
   const { folderMoves: plannedFolderMoves, warnings: folderWarnings } = planFolderMoves(profileRoot, index, ledger.moves);
   ledger.folderMoves = [];
+  ledger.pinMoves = [];
   for (const fm of plannedFolderMoves) {
     if (dryRun) {
       actions.push({ kind: 'merge-folder', from: fm.from, to: fm.to, dryRun: true });
       continue;
     }
+    // A chat pinned to the merged-away project follows it to the destination (#1318) —
+    // otherwise the pin silently keeps feeding new sessions into the emptied project.
+    const pinMoves = projects.repointPins(profileRoot, fm.from, fm.to, { now });
+    ledger.pinMoves.push(...pinMoves);
+    for (const pm of pinMoves) actions.push({ kind: 'repoint-pin', ...pm });
     const { moved, conflicts } = mergeProjectFolder(profileRoot, fm.from, fm.to);
     ledger.folderMoves.push(...moved);
     actions.push({ kind: 'merge-folder', from: fm.from, to: fm.to, filesMoved: moved.length, conflicts });
@@ -673,6 +679,18 @@ function revertPlan(profileRoot, { now = Date.now() } = {}) {
     } catch (e) { notReverted.push({ file: fm.to, reason: e.message }); }
   }
 
+  // Restore chat pins that apply moved along with a merged project.
+  let pinsReverted = 0;
+  for (const pm of (ledger.pinMoves || [])) {
+    const fp = path.join(projects.projectsRoot(profileRoot), pm.file);
+    try {
+      const rec = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      if (rec.id !== pm.to) continue; // user re-pinned since — don't clobber
+      atomicWrite(fp, JSON.stringify({ id: pm.from, at: now }));
+      pinsReverted++;
+    } catch { /* best-effort */ }
+  }
+
   // Restore gtd/*.json projectDir that apply repointed.
   let gtdReverted = 0;
   for (const g of (ledger.gtdSyncs || [])) {
@@ -693,7 +711,7 @@ function revertPlan(profileRoot, { now = Date.now() } = {}) {
   try { atomicWrite(`${ledgerPath(profileRoot)}.reverted-${now}`, JSON.stringify(ledger, null, 2)); } catch { /* ignore */ }
   if (stack.length) writeLedgerStack(profileRoot, stack);
   else { try { fs.unlinkSync(ledgerPath(profileRoot)); } catch { /* ignore */ } }
-  return { reverted: n, foldersReverted, gtdReverted, notReverted, remainingApplies: stack.length };
+  return { reverted: n, foldersReverted, gtdReverted, pinsReverted, notReverted, remainingApplies: stack.length };
 }
 
 // ── State persistence (iterative refinement across cycles/crashes) ────────────

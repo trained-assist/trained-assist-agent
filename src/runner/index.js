@@ -631,7 +631,7 @@ function runTask(opts) {
     workDir: opts.user.workDir, task: opts.task, context: opts.context,
     sessionId: opts.sessionId, contextFromSession: opts.contextFromSession,
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode, userMessageRecorded: opts.userMessageRecorded,
-    projectId: opts.projectId, newProjectName: opts.newProjectName, engine: opts.engine,
+    projectId: opts.projectId, projectPicked: opts.projectPicked, newProjectName: opts.newProjectName, engine: opts.engine,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId, fileRefs: opts.fileRefs,
     profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId, audience: opts.user.audience,
     continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
@@ -750,8 +750,11 @@ function buildContextCard(username, workDir, chatId) {
   // Chat's project (issue #1312, «чат = проект»): every new session of this chat goes
   // into it. Pinned = explicit user choice; otherwise the last-used one.
   try {
-    const pid = chatId ? (projects.getPinnedProjectId(workDir, chatId) || projects.getActiveProjectId(workDir, chatId)) : null;
-    const pmeta = pid ? projects.getProject(workDir, pid) : null;
+    // Show the line ONLY when a new session really goes there without asking (#1318):
+    // pinned, or the profile's single project. ≥2 projects and no pin → the bot will ask,
+    // so a «📁 Проект» line would be a lie.
+    const d = chatId ? projects.decideNewSessionProject(workDir, chatId) : null;
+    const pmeta = d && d.action === 'auto' ? d.project : null;
     if (pmeta) lines.push(`📁 Проект: ${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''} · сменить: /project`);
   } catch (e) { console.warn('[runner] project pin line:', e.message); }
 
@@ -1234,7 +1237,7 @@ function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engi
   }
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1256,7 +1259,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   savePendingTask(taskId, {
     phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir, audience,
     profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
-    task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
+    task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, projectPicked, newProjectName,
     initialMsgId, pinnedMsgId, initiatedAt, threadId, resumedAfterRestart, resumeAttempts,
     startedAt: Date.now(),
   });
@@ -1358,26 +1361,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let boundProjectId = null;
   let pinProject = false; // explicit user choice → becomes the chat's pinned project (#1312)
   try {
-    if (sessionExists && activeSessionId) {
-      const s = sessions.getSession(user.workDir, activeSessionId);
-      boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId, audience);
-    } else if (projectId && projects.getProject(user.workDir, projectId)) {
-      boundProjectId = projectId; // explicit choice from the gateway picker
-      pinProject = true;
-    } else if (newProjectName) {
-      // gateway "➕ Новый проект" — provisional name derived from the first message
-      boundProjectId = projects.createProject(user.workDir, newProjectName, { audience }).id;
-      pinProject = true;
-    } else {
-      const decision = projects.decideNewSessionProject(user.workDir, chatId, undefined, audience);
-      if (decision.action === 'auto') {
-        boundProjectId = decision.project.id;
-      } else if (decision.action === 'create') {
-        boundProjectId = projects.createProject(user.workDir, { type: 'generic', name: 'Основной' }, { audience }).id;
-      } else { // 'ask' — gateway didn't pass a choice; fall back so we never block silently
-        boundProjectId = decision.active || (decision.choices[0] && decision.choices[0].id) || null;
-      }
-    }
+    const continuing = !!(sessionExists && activeSessionId);
+    const s = continuing ? sessions.getSession(user.workDir, activeSessionId) : null;
+    const r = projects.resolveRunProject(user.workDir, {
+      chatId, audience, continuing, continuingProjectId: s && s.projectId,
+      projectId, projectPicked, newProjectName,
+    });
+    boundProjectId = r.projectId;
+    pinProject = r.pin;
     if (boundProjectId) {
       const dir = projects.resolveProjectDir(user.workDir, boundProjectId);
       if (dir) {
