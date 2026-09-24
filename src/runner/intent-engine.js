@@ -161,10 +161,17 @@ const MODEL_INFO_INTENT = /(?:на\s+какой\s+(?:модел|нейросет
 // PROJECT_INTENT (they can mutate persona/project files) and SESSIONS_INTENT/
 // SESSION_DETAIL_INTENT (they may call out to an LLM to generate a summary) — those stay
 // on the queued path for now.
+// ENGINE_SWITCH_INTENT (/switch2klod, /switch2codex, /switch2opencode) IS included: it's a
+// sync profiles.json write with no Claude/network call, and its own handler already documents
+// that a running task keeps its already-captured engine — the switch only affects the NEXT
+// task in this chat, so applying it immediately is safe. Was missing from this whitelist
+// (2026-09-24 bug report: /switch2codex sat behind "Ожидаю завершения предыдущей работы"
+// instead of answering instantly like /ping does).
 function isPreQueueQuickIntent(task) {
   return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
     MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
-    USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task);
+    USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
+    ENGINE_SWITCH_INTENT.test(task);
 }
 // A slash command is an unambiguous, registry-backed user command — never fuzzy prose.
 function isSlashCommand(task) {
