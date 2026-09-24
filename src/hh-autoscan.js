@@ -85,7 +85,7 @@ function shouldRun(state, nowMs) {
 // straight into the right tab. Omitted (falsy) → no param, unchanged for
 // single-vacancy callers.
 function proactiveUrlFor(username, vacancyId) {
-  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+  const base = (process.env.HH_COLD_SEARCH_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
   const token = createHmac('sha256', process.env.AGENT_SECRET || '').update(String(username)).digest('hex').slice(0, 16);
   const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
   return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
