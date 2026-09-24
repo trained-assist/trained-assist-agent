@@ -39,3 +39,21 @@ test('an unrecognised answer defaults to "clear" (fail open)', async () => {
   const result = await checkCompleteness('что-то', 'key', { fetchImpl: fakeFetch('maybe???') });
   assert.deepEqual(result, { level: 'clear', complete: true });
 });
+
+// The exact voice transcript must be actionable even if the model would refuse it.
+test('named link recall bypasses model ambiguity without a paid request', async () => {
+  for (const text of [
+    'Слушай, напомни пожалуйста мне ссылку для холодного поиска, где там кандидат?',
+    'Пришли ссылку на отчёт',
+    'дай мне ссылку на результаты',
+  ]) {
+    const result = await checkCompleteness(text, 'key', { fetchImpl: () => { throw new Error('must not call model'); } });
+    assert.deepEqual(result, { level: 'clear', complete: true });
+  }
+});
+test('unfinished link requests remain subject to the gate', async () => {
+  for (const text of ['напомни ссылку', 'дай ссылку на', 'пришли ссылку на отчёт и', 'пришли ссылку на отчёт\nи сделай так чтобы']) {
+    const result = await checkCompleteness(text, 'key', { fetchImpl: fakeFetch('insufficient') });
+    assert.deepEqual(result, { level: 'insufficient', complete: false });
+  }
+});

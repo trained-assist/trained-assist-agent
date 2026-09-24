@@ -137,6 +137,8 @@ beforeAll(async () => {
     OPENROUTER_API_KEY: '',
     TELEGRAM_BOT_TOKEN: 'test-tg-token-hh-proactive',
     AGENT_SECRET: SECRET,
+    AGENT_PUBLIC_URL: 'https://old-server.sslip.io/agent',
+    HH_COLD_SEARCH_PUBLIC_URL: '',
     AGENT_TOKENS_DIR: tokensDir,
     AGENT_DATA_DIR: dataDir,
     USERS_DIR: usersDir,
@@ -284,6 +286,14 @@ describe('multi-vacancy tagging + tab switcher (step 7/7)', () => {
     });
     expect(r.status).toBe(200);
     expect(r.body.candidate.vacancy_ids).toEqual(['vac-B']);
+  });
+
+  it('keeps cold-search navigation and API callbacks on the public recruiting domain', async () => {
+    const r = await get(`http://127.0.0.1:${serverPort}/hh/proactive?username=${MULTI_VAC_UID}&token=${multiVacToken()}&vacancy_id=vac-B`);
+    expect(r.status).toBe(200);
+    expect(r.body).toContain('const CALLBACK_BASE = "https://recruiter-assistant.ru"');
+    expect(r.body).toContain('https://recruiter-assistant.ru/hh/proactive?');
+    expect(r.body).not.toContain('sslip.io');
   });
 
   it('GET /hh/proactive renders a tab per active vacancy, marking the requested one active', async () => {
