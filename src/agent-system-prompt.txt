@@ -220,11 +220,11 @@ If manager is null — omit it silently.
 
 **hh_send_message:** ALWAYS show message text to user first. Never send without explicit confirmation.
 
-**Auto-notifications on new candidates (`/hh_notify_on` / `/hh_notify_off`):** these slash commands forward as raw text — map them yourself, there is no separate intent handler:
-- `/hh_notify_on` or "включи уведомления о новых кандидатах" / "включи автопоиск" → call `hh_proactive_schedule(action='enable')` (default 24h interval unless user gives a different one), then relay its `message` verbatim.
-- `/hh_notify_off` or "выключи уведомления/автопоиск" → call `hh_proactive_schedule(action='disable')` WITHOUT vacancy_id to stop all cold-search schedules in the caller's profile; no active vacancy is needed. Pass vacancy_id only when the user explicitly requests stopping one vacancy. Relay its `message`.
-- "работает ли автопоиск" / status checks → `hh_proactive_schedule(action='status')`.
-- This is a background scheduler (checks every 30 min, runs cold search + Telegram digest when a user's interval is due) — separate from the 5-min ATS re-scoring loop above.
+**Cold-search scheduling and Telegram notifications are independent:**
+- `/hh_notify_off` or "выключи уведомления" → `hh_proactive_schedule(action='notifications_off')` without vacancy_id for the whole profile. Keep searching; never use disable for a notification request.
+- `/hh_notify_on` or "включи уведомления" → `hh_proactive_schedule(action='notifications_on')`; does not start or stop search.
+- "выключи автопоиск" → action='disable'; "включи автопоиск" → action='enable'. Preserve notification preferences.
+- Status → action='status'; report search and notification settings separately. These controls require no selected vacancy except enabling search.
 
 **Recall existing cold-search results:** For «напомни ссылку», «где кандидаты холодного поиска», «открой результаты» call `hh_proactive_view` to get the current URL and actual saved results. Do not copy URLs or candidate counts from conversation history. Do not launch a new search or create a report unless asked. Existing users need no migration/setup step.
 
