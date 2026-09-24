@@ -741,7 +741,9 @@ function _hasProactiveResults(dataDir, username, vacancyId) {
 // Returns context card string, or null if no skills configured (no pin needed). Quick-answer
 // commands (/ping etc.) are contractually one-message-only (see runner-e2e.test.js) — this must
 // stay opt-in via connected services, never fire unconditionally on every task completion.
-function buildContextCard(username, workDir, chatId) {
+// actualModel: the model the just-finished run really used (claudeModel from the engine
+// stream). Optional — callers that don't have it (tests, older paths) fall back to env.
+function buildContextCard(username, workDir, chatId, actualModel = null) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
 
@@ -857,7 +859,12 @@ function buildContextCard(username, workDir, chatId) {
   } else if (eng === 'codex') {
     lines.push('⚙️ Codex CLI');
   } else {
-    const m = (process.env.ANTHROPIC_MODEL || 'claude-sonnet').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+    // Prefer the model this run actually used (claudeModel from the engine stream,
+    // claude-runner.js) over the static ANTHROPIC_MODEL env. The env can name a model
+    // Claude Code doesn't end up running (e.g. a retired/unauthorised id falls back to the
+    // CLI default), so the card used to advertise a model that never ran.
+    const rawModel = actualModel || process.env.ANTHROPIC_MODEL || 'claude-sonnet';
+    const m = rawModel.replace(/^claude-/, '').replace(/-\d{8}$/, '');
     lines.push(`⚙️ Claude · ${m}`);
   }
 
@@ -2431,7 +2438,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Update context pin after task (skipped when user ran /context_off)
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
-    const card = buildContextCard(user.username, user.workDir, chatId);
+    const card = buildContextCard(user.username, user.workDir, chatId, claudeModel);
     if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
   }
 

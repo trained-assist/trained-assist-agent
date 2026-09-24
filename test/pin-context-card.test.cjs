@@ -114,5 +114,23 @@ function withFakeConnectedService(username) {
   ok(/⏸ Скоринг выключен/.test(v2Block), 'vacancy 2 (no ats config) shows scoring-off');
 }
 
+// 6. Claude model line reflects the model the run actually used, not the static
+//    ANTHROPIC_MODEL env. Regression: the card advertised claude-opus-5-5 (systemd env)
+//    while the session really ran a different model.
+{
+  const username = 'u-claude-model-' + Date.now();
+  withFakeConnectedService(username);
+  const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'pin-card-'));
+  const prev = process.env.ANTHROPIC_MODEL;
+  process.env.ANTHROPIC_MODEL = 'claude-opus-5-5';
+  const card = buildContextCard(username, wd, 1, 'claude-sonnet-4-5-20250929');
+  ok(/⚙️ Claude · sonnet-4-5/.test(card), `card shows the real run model, got: ${card}`);
+  ok(!/opus-5-5/.test(card), 'card must not advertise the static env model when the run model is known');
+  // No run model available (e.g. quick answer) → env is the only signal, keep old behaviour.
+  const cardEnvOnly = buildContextCard(username, wd, 1);
+  ok(/⚙️ Claude · opus-5-5/.test(cardEnvOnly), `falls back to env without a live model, got: ${cardEnvOnly}`);
+  if (prev === undefined) delete process.env.ANTHROPIC_MODEL; else process.env.ANTHROPIC_MODEL = prev;
+}
+
 console.log(`\npin-context-card: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
