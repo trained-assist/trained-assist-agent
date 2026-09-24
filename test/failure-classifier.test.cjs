@@ -10,6 +10,9 @@ test('deterministic: AUTH/CONFIG/QUOTA/RATE_LIMIT/CONTEXT/TRANSIENT/MODEL_ERROR/
   assert.equal(classifyDeterministic('429 rate limit hit').class, 'RATE_LIMIT');
   assert.equal(classifyDeterministic('maximum context length exceeded').class, 'CONTEXT');
   assert.equal(classifyDeterministic('service temporarily overloaded').class, 'TRANSIENT');
+  // #1311 C5: opencode shared SQLite contention between concurrent runs (real stderr).
+  assert.equal(classifyDeterministic('Error: Unexpected error\n\ndatabase is locked').class, 'TRANSIENT');
+  assert.equal(classifyDeterministic('SQLITE_BUSY: database is locked').retryable, true);
   assert.equal(classifyDeterministic('500 internal server error').class, 'MODEL_ERROR');
   assert.equal(classifyDeterministic('tool call failed: ENOENT').class, 'TOOL_ERROR');
 });
