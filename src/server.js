@@ -4,6 +4,7 @@ process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { isTaskResumable } = require('./pending-task-resume');
 const { isNonTaskMessage } = require('./resume-hygiene');
+const { recordResume, getResumeStats } = require('./resume-stats');
 const { getRetryDelayMs } = require('./retry-policy');
 const { refreshHhToken } = require('./hh-utils');
 const http = require('http');
@@ -323,6 +324,7 @@ async function resumePendingTasks(secrets) {
     // Delayed via retry-policy's shared backoff schedule so a deploy flurry (several restarts in
     // quick succession) gets a chance to settle before we retry, instead of hammering the same
     // failure immediately on every restart.
+    recordResume(nativeResumeId ? 'native' : 'fallback', engine); // #1240: measure native-vs-fallback
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
       profileId: p.profileId, telegramUserId: p.telegramUserId,
@@ -1021,6 +1023,7 @@ ${recent || '(пока нет)'}
         memory: { totalMb: Math.round(totalMem / 1048576), usedMb: Math.round(usedMem / 1048576), freeMb: Math.round(freeMem / 1048576) },
         disk,
         uptime: process.uptime(),
+        resume: getResumeStats(), // #1240: native vs fallback post-restart resumes
       });
     }
 
