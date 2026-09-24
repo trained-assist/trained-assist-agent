@@ -614,7 +614,10 @@ async function runEngineProcess(opts) {
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
   let timedOut = false;
-  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId, sessionId };
+  // username + audience: exact-match keys for stop/running isolation across bots
+  // (issue #1302 §3.2) — chatId alone can collide across audiences (private-chat
+  // chatId == Telegram user id, identical regardless of which bot is messaged).
+  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId, sessionId, username: user.username, audience: user.audience || 'default' };
   activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {

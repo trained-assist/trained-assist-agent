@@ -272,14 +272,20 @@ function stopTask(taskId) {
 
 // Stop running task(s) for a given username (used by the /stop quick command).
 // One profile's workDir is deliberately shared across multiple Telegram chats
-// (see runTask's queueKey comment), so a plain-text "стоп" typed in one chat
-// must NOT reach into another chat's running task or orphaned process — pass
-// chatId to scope the kill to the task that chat actually started. Omit chatId
-// only for genuinely profile-wide callers (e.g. /gtd_stop's explicit hard-stop).
-function stopUserTask(username, chatId = null) {
+// (see runTask's queueKey comment) AND — since #1302 — across multiple bots
+// (audience: 'default', 'recruiter', 'freelance', ...) sharing that same profile.
+// chatId alone cannot disambiguate bots: in a private chat, chatId is the
+// Telegram user's own id, identical no matter which bot they're messaging — so
+// audience must scope the kill too, not just chatId. Pass chatId to scope to the
+// chat that actually started the task; omit chatId only for genuinely
+// profile-wide callers (e.g. /gtd_stop's explicit hard-stop) within that audience.
+// Omitting audience scopes to 'default' — never "every audience" (#1302 §3.2/§2).
+function stopUserTask(username, chatId = null, audience = null) {
+  const scopedAudience = audience || 'default';
   let stopped = false;
   for (const [taskId, s] of activeTimers.entries()) {
-    if (!taskId.startsWith(username + '-') || !s.proc) continue;
+    if (s.username !== username || !s.proc) continue;
+    if ((s.audience || 'default') !== scopedAudience) continue;
     if (chatId != null && s.chatId != null && String(s.chatId) !== String(chatId)) continue;
     s.userStopped = true;
     try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
@@ -289,10 +295,11 @@ function stopUserTask(username, chatId = null) {
 
   // Fallback: kill orphaned Claude processes (e.g. from before a service restart)
   // The mcp-config path contains the username, so we can grep the process list.
-  // Orphans carry no chat attribution, so this fallback only runs for a genuinely
-  // profile-wide stop (chatId omitted) — otherwise it would kill another chat's
-  // orphan under a chat-scoped "стоп", recreating the cross-chat leak this guards.
-  if (!stopped && !chatId) {
+  // Orphans carry no chat/audience attribution, so this fallback only runs for a
+  // genuinely profile-wide default-audience stop (chatId omitted, audience
+  // omitted/default) — otherwise it would kill another chat's or another bot's
+  // orphan under a scoped "стоп", recreating the cross-chat/cross-bot leak this guards.
+  if (!stopped && !chatId && scopedAudience === 'default') {
     try {
       const { execSync } = require('child_process');
       // Find PIDs of claude processes for this user by mcp-config path
@@ -326,10 +333,11 @@ function extendTaskTimeout(taskId) {
   return { ok: true, extendCount: s.extendCount, extensionsLeft: 8 - s.extendCount, newDeadlineMins: 15 };
 }
 
-function isTaskRunning(username) {
-  const prefix = `${username}-`;
-  for (const [taskId] of activeTimers.entries()) {
-    if (taskId.startsWith(prefix)) return true;
+// audience omitted -> 'default' only, never "any audience" (#1302 §3.2/§2).
+function isTaskRunning(username, audience = null) {
+  const scopedAudience = audience || 'default';
+  for (const s of activeTimers.values()) {
+    if (s.username === username && (s.audience || 'default') === scopedAudience) return true;
   }
   return false;
 }
@@ -368,9 +376,8 @@ function isSessionRunning(sessionId) {
 function stopSessionTask(username, sessionId) {
   if (!username || !sessionId) return false;
   let stopped = false;
-  const prefix = `${username}-`;
   for (const [taskId, state] of activeTimers.entries()) {
-    if (!taskId.startsWith(prefix) || !state?.proc) continue;
+    if (state.username !== username || !state?.proc) continue;
     if (state.sessionId !== sessionId) continue;
     state.userStopped = true;
     try {
@@ -385,15 +392,18 @@ function stopSessionTask(username, sessionId) {
 }
 
 /**
- * Kill any running Claude process for a given username.
- * Finds all entries in activeTimers whose taskId starts with `${username}-`
- * and sends SIGTERM. Returns how many tasks were killed.
+ * Kill any running Claude process for a given username, scoped to one audience.
+ * audience omitted -> 'default' only, never "every audience" (#1302 §3.2/§2) —
+ * killing every bot's task for a profile in one call is a deliberately separate,
+ * explicit action this function does not perform.
+ * Returns how many tasks were killed.
  */
-function killTaskByUsername(username) {
+function killTaskByUsername(username, audience = null) {
+  const scopedAudience = audience || 'default';
   let killed = 0;
-  const prefix = `${username}-`;
   for (const [taskId, state] of activeTimers.entries()) {
-    if (!taskId.startsWith(prefix)) continue;
+    if (state.username !== username) continue;
+    if ((state.audience || 'default') !== scopedAudience) continue;
     try {
       if (state.proc) {
         state.userStopped = true;
@@ -428,9 +438,10 @@ function runTask(opts) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
     const chatId = opts.user.id;
-    // Chat-scoped: a plain "стоп" typed in one chat must only touch this chat's
-    // task/GTD tracking, not a profile-mate's — workDir is shared across chats.
-    const stopped = stopUserTask(username, chatId);
+    // Chat- and audience-scoped: a plain "стоп" typed in one chat must only touch
+    // this chat's task/GTD tracking, not a profile-mate's or another bot's —
+    // workDir is shared across chats AND audiences (#1302 §3.2).
+    const stopped = stopUserTask(username, chatId, opts.user.audience);
     let gtdCancelled = 0;
     if (workDir) {
       try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
@@ -457,7 +468,7 @@ function runTask(opts) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
     const chatId = opts.user.id;
-    stopUserTask(username, chatId);
+    stopUserTask(username, chatId, opts.user.audience);
     let gtdCancelled = 0;
     if (workDir) {
       try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
@@ -548,7 +559,7 @@ function runTask(opts) {
     const username = opts.user.username;
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
-    const stopped = stopUserTask(username, chatId);
+    const stopped = stopUserTask(username, chatId, opts.user.audience);
     // Clear this chat's queue so the next task doesn't wait behind a stuck one.
     chatQueue.clearChat(chatId);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
@@ -570,7 +581,7 @@ function runTask(opts) {
   if (SKIP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const chatId = opts.user.id;
-    const stopped = stopUserTask(username, chatId);
+    const stopped = stopUserTask(username, chatId, opts.user.audience);
     const msg = stopped
       ? '⏭ Текущая задача пропущена. Следующая начнётся автоматически.'
       : '✅ Нет активной задачи для пропуска.';
@@ -2411,7 +2422,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         const gtd = require('../gtd-controller');
         const checklistArgs = {
           workDir: user.workDir, sessionId: activeSessionId, chatId,
-          username: user.username, projectDir: user.cwd || null,
+          username: user.username, projectDir: user.cwd || null, audience: user.audience || 'default',
         };
         if (explicitMode === 'deep') {
           // Осознанный launch — «⏻ Запустить проработку» (workrun). Свободный текст

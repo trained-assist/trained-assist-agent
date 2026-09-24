@@ -444,6 +444,52 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   ok(G.listGtd(wd15).length === 1 && G.listGtd(wd15)[0].sessionId === 's-atomic',
     'atomic write: listGtd ignores .tmp artifacts, surfaces only the committed record');
 
+  // 24. audience persistence (issue #1302 §3.3): a new GTD record created via
+  // scheduleFromChecklist (deterministic — no LLM call, unlike maybeSchedule's
+  // detectIntent) stores the passed audience on the record itself.
+  const wd16 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd16-'));
+  const projectDir16 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd16-proj-'));
+  fs.writeFileSync(path.join(projectDir16, 'checklist.md'), 'Goal: x\n\n- [ ] one\n');
+  const scheduledWithAudience = await G.scheduleFromChecklist({
+    workDir: wd16, sessionId: 's-aud', chatId: '42', username: 'u', projectDir: projectDir16, audience: 'recruiter',
+  });
+  ok(scheduledWithAudience && scheduledWithAudience.audience === 'recruiter',
+    `scheduleFromChecklist persists the passed audience on the record (got ${scheduledWithAudience && scheduledWithAudience.audience})`);
+  const persisted = G.readGtd(wd16, 's-aud');
+  ok(persisted && persisted.audience === 'recruiter', 'audience survives a write/read roundtrip on disk');
+
+  // 25. rec.audience wins over a drifted session.audience — a session's audience
+  // must never silently override an already-recorded GTD record (#1302 §3.3).
+  const wd17 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd17-'));
+  const userDir17 = path.join(wd17, 'u');
+  fs.mkdirSync(userDir17, { recursive: true });
+  G.writeGtd(userDir17, { ...rec, sessionId: 's-drift', audience: 'recruiter', dueAt: 100 });
+  let routedAudience = null;
+  await G.runDue({
+    secrets: { RECRUITER_BOT_TOKEN: 'r-tok' }, baseUsersDir: wd17, now: 200,
+    isTaskRunning: () => false,
+    // Session itself now reports 'default' (drift) — the durable record's audience must win.
+    getSession: () => ({ ownerChatId: '42', audience: 'default', summary: {} }),
+    runTask: async (opts) => { routedAudience = opts.user.audience; return 'GTD: done'; },
+  });
+  ok(routedAudience === 'recruiter', `rec.audience ('recruiter') wins over drifted session.audience ('default'), got ${routedAudience}`);
+
+  // 26. legacy GTD record (no audience field) falls back to session.audience.
+  const wd18 = fs.mkdtempSync(path.join(os.tmpdir(), 'gtd18-'));
+  const userDir18 = path.join(wd18, 'u');
+  fs.mkdirSync(userDir18, { recursive: true });
+  const legacyRec = { ...rec, sessionId: 's-legacy', dueAt: 100 };
+  delete legacyRec.audience;
+  G.writeGtd(userDir18, legacyRec);
+  let legacyRoutedAudience = null;
+  await G.runDue({
+    secrets: { RECRUITER_BOT_TOKEN: 'r-tok' }, baseUsersDir: wd18, now: 200,
+    isTaskRunning: () => false,
+    getSession: () => ({ ownerChatId: '42', audience: 'recruiter', summary: {} }),
+    runTask: async (opts) => { legacyRoutedAudience = opts.user.audience; return 'GTD: done'; },
+  });
+  ok(legacyRoutedAudience === 'recruiter', `legacy record (no audience field) falls back to session.audience, got ${legacyRoutedAudience}`);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

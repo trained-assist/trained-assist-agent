@@ -260,3 +260,16 @@ test('restart retains recruiter audience and failure notices never use the class
  const missing=resumeHarness({pending:[task({audience:'recruiter',resumeAttempts:4})]});await missing.resume();
  assert.equal(missing.calls.length,0);
 });
+
+test('restart retains freelance audience (3rd bot, issue #1302) and failure notices never use the classic bot',async()=>{
+ const secrets={BOT_TOKEN:'classic',FREELANCE_BOT_TOKEN:'freelance'};
+ const h=resumeHarness({pending:[task({audience:'freelance'})],secrets});await h.resume();
+ assert.equal(h.runs[0].user.audience,'freelance');
+ const failure=resumeHarness({pending:[task({audience:'freelance',resumeAttempts:4})],secrets});await failure.resume();
+ assert.equal(failure.calls.length,1);assert.match(failure.calls[0].url,/botfreelance\//);
+ // Missing FREELANCE_BOT_TOKEN: the pending record is retained (still cleared like any
+ // terminal resume outcome above), but never silently falls back to the classic bot —
+ // no Telegram call is made at all, matching the recruiter case above.
+ const missing=resumeHarness({pending:[task({audience:'freelance',resumeAttempts:4})]});await missing.resume();
+ assert.equal(missing.calls.length,0);
+});
