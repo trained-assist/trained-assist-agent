@@ -24,6 +24,7 @@
     "test/execution-owner-lock.test.cjs",
     "test/instant-restart.test.cjs",
     "test/intake-gate.test.cjs",
-    "test/bot-delivery.test.cjs"
+    "test/bot-delivery.test.cjs",
+    "test/reproject-sandbox.test.cjs"
   ]
 }
