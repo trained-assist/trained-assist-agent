@@ -322,15 +322,35 @@ async function runEngineProcess(opts) {
   // only on the first landing (and bare text afterwards) makes the buttons
   // visible for one tick and then vanish on the next — the reported bug.
   let stopButtonShown = false;
+  // Cadence of progress edits: burst at 1s/2s/5s/10s/15s so the counter feels
+  // live, then settle to one edit every 15s. A fixed 3s tick hammered Telegram's
+  // per-chat edit flood limit (~1/s) when concurrent sessions (user task + GTD +
+  // quick-answers) shared one bot token — retry_after escalated to 9-17s, every
+  // edit dropped, and the "Думаю… (Nс)" counter froze at its first landed value
+  // for minutes. Backing off after the burst window keeps it live without
+  // re-429'ing. progressStart (not thinkingStart) drives the schedule so a long
+  // pre-spawn queue doesn't shift the cadence; the DISPLAYED secs still uses
+  // thinkingStart.
+  const progressStart = Date.now();
+  function nextProgressDelayMs(secs) {
+    if (secs < 1) return 1000;
+    if (secs < 2) return 1000;
+    if (secs < 5) return 3000;
+    if (secs < 10) return 5000;
+    if (secs < 15) return 5000;
+    return 15000;
+  }
   if (msgId) {
-    heartbeatTimer = setInterval(async () => {
-      if (outputStarted) return;
+    const heartbeatTick = async () => {
+      if (outputStarted || progressStopped) return;
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
       if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
       const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {});
       if (stopButtonShown && editLanded(result)) stopButtonShown = true;
-    }, HEARTBEAT_INTERVAL_MS);
+      heartbeatTimer = setTimeout(heartbeatTick, nextProgressDelayMs(Math.round((Date.now() - progressStart) / 1000)));
+    };
+    heartbeatTimer = setTimeout(heartbeatTick, nextProgressDelayMs(0));
   }
 
   function scheduleStream() {
@@ -349,7 +369,8 @@ async function runEngineProcess(opts) {
       typingTimer = setInterval(sendTyping, 4_000);
     }
     let streamEditInProgress = false;
-    streamTimer = setInterval(async () => {
+    const streamTick = async () => {
+      if (progressStopped) return;
       if (streamEditInProgress) return;
       streamEditInProgress = true;
       try {
@@ -376,8 +397,10 @@ async function runEngineProcess(opts) {
         }
       } finally {
         streamEditInProgress = false;
+        streamTimer = setTimeout(streamTick, nextProgressDelayMs(Math.round((Date.now() - progressStart) / 1000)));
       }
-    }, STREAM_INTERVAL_MS);
+    };
+    streamTimer = setTimeout(streamTick, nextProgressDelayMs(0));
   }
 
   let firstJsonEventSeen = false;
