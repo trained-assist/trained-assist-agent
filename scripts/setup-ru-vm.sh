@@ -1,11 +1,14 @@
 #!/bin/bash
 # Setup script for RU VM (Hostland or any non-GCP Linux)
-# Run as root. Sets up assist-agent with Playwright browsers.
+# Run as root. Sets up ru-edge (src/ru-edge.js) — the thin RU-IP edge service:
+# nalog.ru/ESIA login, RU-geo-blocked page fetch, vacancy pages. No Claude Code,
+# no runner, no task-queue, no MCP on this box any more (issue #1288) — all
+# Claude sessions run on GCP.
 set -e
 
 REPO_URL="https://github.com/trained-assist/trained-assist-agent.git"
 REPO_DIR="/home/vova/trained-assist-agent"
-SERVICE="assist-agent"
+SERVICE="ru-edge"
 USER="vova"
 
 echo "==> Creating user if needed..."
@@ -51,7 +54,7 @@ sudo -u "$USER" mkdir -p "/home/$USER/users"
 
 echo "==> Installing systemd service..."
 # Copy template and let operator fill in secrets
-cp "$REPO_DIR/systemd/assist-agent-ru.service" "/etc/systemd/system/$SERVICE.service"
+cp "$REPO_DIR/systemd/ru-edge.service" "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
 systemctl enable "$SERVICE"
 

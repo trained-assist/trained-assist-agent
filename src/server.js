@@ -28,9 +28,7 @@ const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
 const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary, getEngineSessionId } = require('./session-store');
 const { generateSummary } = require('./session-summary');
-const { startNalogLogin } = require('./nalog-login');
 const { startGetcourseLogin } = require('./getcourse-login');
-const { storeApplication } = require('./hh-vacancy');
 const { processMishaUpdate } = require('./misha-bot');
 const { createHhNegotiations } = require('./hh-negotiations');
 
@@ -42,6 +40,32 @@ const PORT = process.env.PORT || 3001;
 // Single source of truth (src/data-paths.js) — do not re-derive from HOME.
 const BASE_USERS_DIR = dataPaths.USERS_ROOT;
 const userWorkDir = dataPaths.userWorkDir;
+
+// RU-IP edge (src/ru-edge.js, issue #1288) — thin RU-only service holding the
+// nalog.ru/ESIA Playwright login (geo-blocked outside Russia). This agent never
+// runs Playwright against lknpd.nalog.ru/gosuslugi.ru directly any more; it
+// delegates over HTTP and the edge pushes the resulting token back via
+// POST /nalog/token-store.
+const RU_EDGE_URL = (process.env.RU_EDGE_URL || 'https://platform.recruiter-assistant.ru').replace(/\/$/, '');
+
+// Delegates a nalog.ru login attempt to the RU edge (Playwright + Госуслуги/ESIA
+// need a Russian IP). Mirrors the old local startNalogLogin() return shape:
+// {status:'ok', expires} | {status:'need_code', sessionId} | {error}.
+async function ruEdgeNalogStartLogin(userId, login, password) {
+  try {
+    const res = await fetch(`${RU_EDGE_URL}/nalog/start-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.AGENT_SECRET || ''}` },
+      body: JSON.stringify({ userId, login, password }),
+      signal: AbortSignal.timeout(90_000), // browser login can take 30-60s
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && !data.error) return { error: `RU edge returned HTTP ${res.status}` };
+    return data;
+  } catch (e) {
+    return { error: `Не удалось связаться с RU edge: ${e.message}` };
+  }
+}
 
 // /run idempotency window (see the requestId handling below): in-memory only,
 // resets on restart — acceptable because it's guarding against a retry racing
@@ -128,13 +152,12 @@ function scheduleNalogExpiryChecks(secrets) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: chatId, text: '🔄 Токен Налог.ру истёк — обновляю автоматически...' }),
           }).catch(() => {});
-          startNalogLogin(username, creds.login, creds.password).then(result => {
-            const AGENT_PUB = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+          ruEdgeNalogStartLogin(username, creds.login, creds.password).then(result => {
             let text;
             if (result.status === 'ok') {
               text = `✅ Налог.ру — токен обновлён автоматически. Действует до ${result.expires ? new Date(result.expires).toLocaleString('ru-RU') : '?'}.`;
             } else if (result.status === 'need_code') {
-              const codeUrl = `${AGENT_PUB}/connect/nalog/code?sessionId=${result.sessionId}`;
+              const codeUrl = `${RU_EDGE_URL}/connect/nalog/code?sessionId=${result.sessionId}`;
               text = `📱 Нужен код из SMS для Госуслуг:\n\n👉 ${codeUrl}\n\nСсылка действительна 25 минут.`;
             } else {
               text = `❌ Не удалось обновить токен Налог.ру: ${result.error}\n\nСкажите «подключи налог» чтобы обновить данные.`;
@@ -449,19 +472,11 @@ async function main() {
       return;
     }
 
-    // GET /vacancy/:username/:vacancyId — public vacancy landing page (no auth)
-    const vacancyPageMatch = url.pathname.match(/^\/vacancy\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)$/);
-    if (req.method === 'GET' && vacancyPageMatch) {
-      const [, username, vacancyId] = vacancyPageMatch;
-      const htmlPath = path.join(os.homedir(), 'users', username, 'vacancy-drafts', `${vacancyId}.html`);
-      try {
-        const html = fs.readFileSync(htmlPath, 'utf8');
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
-      } catch {
-        res.writeHead(404).end('Vacancy not found');
-      }
-      return;
-    }
+    // Vacancy landing pages (GET /vacancy/:username/:vacancyId, POST /vacancy/store,
+    // POST /apply/:username/:vacancyId) moved to the RU edge service — see
+    // src/ru-edge.js. Vacancy hosting stays on platform.recruiter-assistant.ru by
+    // owner decision (issue #1288); this agent still publishes to it via
+    // publishVacancyPage() in src/hh-vacancy.js (VACANCY_REMOTE_STORE_URL), unchanged.
 
     // GET /health — no auth, liveness check for smoke tests and monitoring
     if (req.method === 'GET' && url.pathname === '/health') {
@@ -690,6 +705,23 @@ ${recent || '(пока нет)'}
       return;
     }
 
+    // POST /nalog/token-store — receive a nalog.ru token pushed by the RU edge
+    // after a Playwright login (initial or post-2FA). The RU edge holds no
+    // per-user state of its own; this agent (GCP) is the token's home, since
+    // that's where 10-nalog.js and the expiry scheduler read it from.
+    if (req.method === 'POST' && url.pathname === '/nalog/token-store') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
+      const { username, tokens } = body || {};
+      if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
+      if (!tokens || typeof tokens !== 'object' || !tokens.auth_token) return json(res, 400, { error: 'missing tokens.auth_token' });
+      const dir = path.join(dataPaths.TOKENS_ROOT, username);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'nalog'), JSON.stringify(tokens, null, 2), { mode: 0o600 });
+      console.log('[nalog/token-store] saved token for username=%s expires=%s', username, tokens.expires);
+      return json(res, 200, { ok: true });
+    }
+
     // Compat for the bot's /restart command: "request" restarts right away (reply first,
     // then SIGTERM ourselves); every other action is a harmless status read. Nothing is
     // ever paused, and "pause" from stale deploy scripts must NOT restart the service.
@@ -847,21 +879,6 @@ ${recent || '(пока нет)'}
       return json(res, 200, { ok: true, url: issueData.html_url, number: issueData.number });
     }
 
-    // POST /vacancy/store — receive and persist a vacancy landing page HTML from another VM
-    if (req.method === 'POST' && url.pathname === '/vacancy/store') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
-      const { username, vacancyId, html } = body || {};
-      if (!username || !vacancyId || !html) return json(res, 400, { error: 'missing fields' });
-      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username) || !/^[a-zA-Z0-9_-]{1,64}$/.test(vacancyId)) {
-        return json(res, 400, { error: 'invalid username or vacancyId' });
-      }
-      const draftsDir = path.join(os.homedir(), 'users', username, 'vacancy-drafts');
-      fs.mkdirSync(draftsDir, { recursive: true });
-      fs.writeFileSync(path.join(draftsDir, `${vacancyId}.html`), html, 'utf8');
-      const pageUrl = `https://platform.recruiter-assistant.ru/vacancy/${username}/${vacancyId}`;
-      return json(res, 200, { ok: true, url: pageUrl });
-    }
 
     // GET /capabilities?userId=XXX — list services with tokens on this machine
     if (req.method === 'GET' && url.pathname === '/capabilities') {
@@ -1362,115 +1379,6 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // CORS preflight for /apply (form is hosted on chillai.space, different origin)
-    if (req.method === 'OPTIONS' && /^\/apply\//.test(url.pathname)) {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Max-Age': '86400',
-      });
-      res.end();
-      return;
-    }
-
-    // POST /apply/:username/:vacancyId — no auth, public endpoint for candidate applications
-    if (req.method === 'POST' && /^\/apply\/[a-zA-Z0-9_-]+\/vac-\d+$/.test(url.pathname)) {
-      const parts = url.pathname.split('/');
-      const applyUsername = parts[2];
-      const vacancyId = parts[3];
-      const workDir = path.join(BASE_USERS_DIR, applyUsername);
-
-      let fields = {};
-      try {
-        const ct = req.headers['content-type'] || '';
-        if (ct.includes('multipart/form-data')) {
-          // Parse multipart from raw bytes to preserve UTF-8 text correctly
-          const rawBuf = await readBodyBuffer(req);
-          const boundary = ct.match(/boundary=([^\s;]+)/)?.[1];
-          if (boundary) {
-            const sep = Buffer.from(`--${boundary}`);
-            const parts2 = splitBuffer(rawBuf, sep);
-            for (const part of parts2) {
-              const headerEnd = indexOfSeq(part, Buffer.from('\r\n\r\n'));
-              if (headerEnd === -1) continue;
-              const header = part.slice(0, headerEnd).toString();
-              const value = part.slice(headerEnd + 4);
-              const m = header.match(/Content-Disposition:[^\n]*name="([^"]+)"/);
-              if (m && m[1] !== 'resume') {
-                // Strip trailing \r\n that multipart adds before next boundary
-                const text = value.slice(-2).equals(Buffer.from('\r\n')) ? value.slice(0, -2) : value;
-                fields[m[1]] = text.toString('utf8').trim();
-              }
-            }
-          }
-        } else {
-          const body = await readBody(req);
-          if (ct.includes('application/json')) {
-            fields = JSON.parse(body);
-          } else if (ct.includes('application/x-www-form-urlencoded')) {
-            for (const pair of body.split('&')) {
-              const [k, v] = pair.split('=');
-              if (k) fields[decodeURIComponent(k)] = decodeURIComponent(v || '');
-            }
-          }
-        }
-      } catch (e) {
-        console.error('[apply] parse error:', e.message);
-        res.writeHead(400, { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'invalid request body' }));
-        return;
-      }
-
-      const corsHeaders = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
-      function applyJson(status, data) {
-        res.writeHead(status, corsHeaders);
-        res.end(JSON.stringify(data));
-      }
-
-      const email = String(fields.email || '').trim();
-      const phone = String(fields.phone || '').trim();
-      if (!email || !phone) return applyJson(400, { error: 'email and phone are required' });
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return applyJson(400, { error: 'invalid email' });
-
-      try {
-        const app = storeApplication(workDir, vacancyId, {
-          name: String(fields.name || '').trim().slice(0, 200),
-          email,
-          phone: phone.slice(0, 30),
-          telegram: String(fields.telegram || '').trim().slice(0, 100),
-          message: String(fields.message || '').trim().slice(0, 3000),
-        }, null, null);
-
-        // Notify recruiter via Telegram if chatId is known
-        const chatIdFile = path.join(process.env.HOME || '/home/vova', 'agent-tokens', applyUsername, '.chatid');
-        const chatId = fs.existsSync(chatIdFile) ? fs.readFileSync(chatIdFile, 'utf8').trim() : null;
-        if (chatId && secrets.BOT_TOKEN) {
-          const notifLines = [
-            `📬 Новый отклик на вакансию!`,
-            '',
-            app.name ? `👤 ${app.name}` : '👤 (имя не указано)',
-            `📧 ${app.email}`,
-            `📞 ${app.phone}`,
-            app.telegram ? `✈️ ${app.telegram}` : null,
-            app.message ? `\n💬 ${app.message.slice(0, 300)}` : null,
-          ].filter(Boolean).join('\n');
-          const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-          fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            signal: AbortSignal.timeout(8000),
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, text: notifLines }),
-          }).catch(e => console.error('[apply] tg notify error:', e.message));
-        }
-
-        return applyJson(200, { ok: true });
-      } catch (e) {
-        console.error('[apply] store error:', e.message);
-        return applyJson(500, { error: 'failed to store application' });
-      }
-    }
-
     if (req.method === 'POST' && url.pathname === '/tokens') {
       const body = await readBody(req);
       let payload;
@@ -1560,15 +1468,14 @@ ${recent || '(пока нет)'}
               body: JSON.stringify({ chat_id: nalogChatId, text: '⏳ Данные получены — вхожу в Госуслуги...' }),
             }).catch(() => {});
           }
-          startNalogLogin(String(userId), creds.login, creds.password).then(result => {
+          ruEdgeNalogStartLogin(String(userId), creds.login, creds.password).then(result => {
             const chatId2 = readChatId(String(userId));
             if (!chatId2 || !secrets.BOT_TOKEN) return;
-            const AGENT_PUB = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
             let text;
             if (result.status === 'ok') {
               text = `✅ Налог.ру подключён! Токен действует до ${result.expires ? new Date(result.expires).toLocaleString('ru-RU') : '?'}.`;
             } else if (result.status === 'need_code') {
-              const codeUrl = `${AGENT_PUB}/connect/nalog/code?sessionId=${result.sessionId}`;
+              const codeUrl = `${RU_EDGE_URL}/connect/nalog/code?sessionId=${result.sessionId}`;
               text = `📱 Введите код из SMS / приложения Госуслуги:\n\n👉 ${codeUrl}\n\nСсылка действительна 25 минут.`;
             } else {
               text = `❌ Не удалось войти в Госуслуги: ${result.error}\n\nПроверьте логин/пароль и повторите: «подключи налог»`;
@@ -1851,52 +1758,10 @@ ${recent || '(пока нет)'}
     if (await handleHhAuthed(req, url, res, { ...hhCtx, secrets }) !== false) return;
 
 
-    // POST /playwright-fetch — run headless Playwright on this VM and return page content.
-    // Used by the ru_browser_fetch MCP skill so GCP sessions can fetch RU-geo-blocked pages.
-    if (req.method === 'POST' && url.pathname === '/playwright-fetch') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); }
-      catch { return json(res, 400, { error: 'bad json' }); }
-
-      const { url: targetUrl, selector, waitFor, script, screenshot } = body || {};
-      if (!targetUrl || typeof targetUrl !== 'string') return json(res, 400, { error: 'url required' });
-
-      const { chromium } = require('playwright');
-      let browser;
-      try {
-        browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-        const context = await browser.newContext({
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        });
-        const page = await context.newPage();
-        await page.goto(targetUrl, { waitUntil: waitFor || 'domcontentloaded', timeout: 30000 });
-
-        const title = await page.title();
-        let text = null, scriptResult = null, screenshotB64 = null;
-
-        if (script) {
-          scriptResult = await page.evaluate(script);
-        }
-        if (screenshot) {
-          const buf = await page.screenshot({ type: 'png', fullPage: false });
-          screenshotB64 = buf.toString('base64');
-        }
-        if (selector) {
-          const el = await page.$(selector);
-          text = el ? await el.innerText() : null;
-        } else if (!screenshot) {
-          text = await page.innerText('body');
-        }
-
-        console.log(`[playwright-fetch] ok url=${targetUrl} title="${title}"`);
-        return json(res, 200, { ok: true, url: targetUrl, title, text, scriptResult, screenshot: screenshotB64 });
-      } catch (e) {
-        console.error('[playwright-fetch] error:', e.message);
-        return json(res, 500, { error: 'playwright_failed', message: e.message });
-      } finally {
-        if (browser) await browser.close().catch(() => {});
-      }
-    }
+    // POST /playwright-fetch moved to the RU edge service (src/ru-edge.js) — the
+    // ru_browser_fetch/ru_browser_screenshot MCP skills already call
+    // platform.recruiter-assistant.ru directly (src/mcp-skills/tools/22-ru-browser.js),
+    // unchanged by this migration.
 
     // POST /report — create GitHub issue from user bug report / feature request
     if (req.method === 'POST' && url.pathname === '/report') {
@@ -2036,8 +1901,6 @@ scheduleProactiveSearchRuns(secrets);
     shuttingDown = true;
     interruptForRestart();
     server.close();
-    // Close any open Playwright browsers so Node exits cleanly
-    try { require('./nalog-login').closeAll(); } catch {}
     process.exit(0);
   };
   process.once('SIGTERM', shutdown);
@@ -2075,25 +1938,6 @@ function readBodyBuffer(req, maxBytes = 1_048_576) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
-}
-
-function indexOfSeq(buf, seq) {
-  for (let i = 0; i <= buf.length - seq.length; i++) {
-    if (buf.slice(i, i + seq.length).equals(seq)) return i;
-  }
-  return -1;
-}
-
-function splitBuffer(buf, sep) {
-  const parts = [];
-  let start = 0;
-  let pos;
-  while ((pos = indexOfSeq(buf.slice(start), sep)) !== -1) {
-    parts.push(buf.slice(start, start + pos));
-    start += pos + sep.length;
-  }
-  parts.push(buf.slice(start));
-  return parts.filter(p => p.length > 0);
 }
 
 // True only when the vacancy's ats_config.interview_config has real, recruiter-provided
