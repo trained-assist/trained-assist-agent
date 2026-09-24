@@ -10,6 +10,11 @@ const os = require('os');
 
 const USER_ID = process.env.USER_ID || '';
 
+// lknpd.nalog.ru is geo-blocked outside Russia (issue #1288) — this skill runs
+// on GCP now (Claude no longer runs on the RU VM), so every call is relayed
+// through the RU-IP edge service instead of hitting nalog.ru directly.
+const RU_EDGE_URL = (process.env.RU_EDGE_URL || 'https://platform.recruiter-assistant.ru').replace(/\/$/, '');
+
 function tokenPath(userId) {
   return path.join(os.homedir(), 'agent-tokens', String(userId || USER_ID), 'nalog');
 }
@@ -27,6 +32,20 @@ function writeToken(userId, data) {
 }
 
 async function nalogFetch(endpoint, { method = 'GET', body, token } = {}) {
+  const agentSecret = process.env.AGENT_SECRET;
+  if (agentSecret) {
+    const res = await fetch(`${RU_EDGE_URL}/nalog-api-relay`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${agentSecret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ path: endpoint, method, body, token }),
+      signal: AbortSignal.timeout(20000),
+    });
+    return res.json();
+  }
+  // Fallback for local/dev runs with real RU egress (no AGENT_SECRET configured).
   const res = await fetch(`https://lknpd.nalog.ru/api/v1${endpoint}`, {
     method,
     headers: {
@@ -56,15 +75,13 @@ async function doRefresh(t, userId) {
     return { success: false, error: 'No refresh_token or device_id stored' };
   }
   try {
-    const res = await fetch('https://lknpd.nalog.ru/api/v1/auth/token', {
+    const data = await nalogFetch('/auth/token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: {
         refreshToken: t.refresh_token,
         deviceInfo: { sourceType: 'WEB', sourceDeviceId: t.device_id, appVersion: '1.0.0', metaDetails: {} },
-      }),
+      },
     });
-    const data = await res.json();
     if (data.token) {
       writeToken(userId, {
         ...t,

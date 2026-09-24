@@ -4,6 +4,13 @@ HTTP API server running on GCP VM — receives tasks from the Telegram bot and r
 
 ## Architecture
 
+**All Claude Code sessions run on GCP** (issue #1288). The RU VM is a thin
+**RU-IP edge** only — it holds no Claude, no runner, no task-queue, no MCP —
+used for the handful of things that need a Russian IP: nalog.ru/Госуслуги
+(ESIA) login, RU-geo-blocked page fetches, and the vacancy landing pages
+hosted on `platform.recruiter-assistant.ru`. GCP calls the RU edge over HTTP
+(Bearer `AGENT_SECRET`) whenever it needs one of those.
+
 ```
 User (Telegram)
       │
@@ -13,19 +20,13 @@ trained-assist-tg-bot  (Cloudflare Worker — stateless)
       ├── simple commands handled locally
       ├── voice → Deepgram STR → text
       │
-      └── task ──── smart routing ────────────────────────────────────┐
-                         │                                             │
-              probe /capabilities?userId=…  (2.5s, fail-open)        │
-                         │                                             │
-              user has nalog/gosuslugi token?                         │
-                    YES → RU VM (178.212.14.192)                      │
-                    NO  → GCP VM (136.65.7.197)  ◄────────────────────┘
+      └── task ──────────────────────────────────────────► GCP VM (136.65.7.197)
                          │
                          ▼
                POST /run  (Bearer AGENT_SECRET)
                          │
                          ▼
-              trained-assist-agent  (this repo, Node.js)
+              trained-assist-agent  (this repo, src/server.js)
                          │
                 ┌────────┴────────┐
                 │                 │
@@ -37,16 +38,38 @@ trained-assist-tg-bot  (Cloudflare Worker — stateless)
                          │
                          ▼
               stream output → Telegram API directly
+
+  GCP → RU-IP edge (RU VM, 178.212.14.192, src/ru-edge.js), on demand:
+    POST /nalog/start-login   — nalog.ru/ESIA login via Playwright
+    POST /nalog-api-relay     — lknpd.nalog.ru API calls (geo-blocked from GCP)
+    POST /playwright-fetch    — any other RU-geo-blocked page
+    POST /vacancy/store       — publish a vacancy landing page
+
+  RU-IP edge → GCP, after a nalog.ru login completes:
+    POST /nalog/token-store   — hand the token back (GCP is where it's read from)
 ```
 
-**trained-assist-agent** manages:
+> **Bot routing note (follow-up, separate repo):** `trained-assist-tg-bot`'s
+> smart routing still probes `/capabilities` to decide GCP vs RU VM per task.
+> Since ALL Claude tasks now run on GCP regardless, that RU branch is dead —
+> removing it from the bot's routing is tracked as a follow-up there, not in
+> this repo.
+
+**trained-assist-agent** (GCP) manages:
 - Per-user working directories (`~/users/<username>/`)
 - Session state and topics (in-memory + disk persistence)
 - Claude Code process lifecycle
 - MCP skills server (`trained-skills`) per session
 - Quick answers — deterministic responses that bypass Claude entirely
-- `/capabilities` endpoint — tells the bot which RU-only services (nalog, gosuslugi) a user has tokens for
+- `/capabilities` endpoint — lists which services a user has tokens for (bot upsell/status use; no longer drives RU routing, see note above)
 - `/classify` endpoint — Claude Haiku call to match an incoming message to an existing session
+
+**RU-IP edge** (`src/ru-edge.js`, RU VM) manages:
+- `GET/POST /connect/nalog`, `GET/POST /connect/nalog/code` — nalog.ru/ESIA Playwright login, including the interactive 2FA step (the Playwright browser session lives in this process's memory between the two steps, so both must run on the same host)
+- `POST /nalog/start-login`, `POST /nalog-api-relay` — the GCP-facing delegation endpoints above
+- `POST /playwright-fetch` — generic RU-geo-blocked page fetch (used by `ru_browser_fetch`/`ru_browser_screenshot` MCP skills)
+- `GET /vacancy/:username/:id`, `POST /vacancy/store`, `POST /apply/:username/:id` — vacancy landing pages (kept on RU by design, not geo-blocked, just historically hosted there)
+- `GET /health`, `GET /capabilities` (always empty — no per-user state lives on this box any more)
 
 ### Request flow (POST /run)
 
@@ -112,7 +135,7 @@ All endpoints (except `/health`, `/connect/*`) require `Authorization: Bearer <A
 | `GET` | `/health` | Liveness check (no auth) |
 | `GET` | `/readiness` | Can accept work? 200 ready / 503 not (no auth) |
 | `GET` | `/health-full` | Health + Claude version |
-| `GET` | `/capabilities` | List RU-only services this user has tokens for (`?userId=…`) |
+| `GET` | `/capabilities` | List services this user has tokens for (`?userId=…`). No longer drives bot RU-routing — see Architecture note. |
 | `GET` | `/skills` | List available MCP skills |
 | `GET` | `/stats` | Session and task stats |
 | `POST` | `/run` | Run a Claude Code task |
@@ -122,9 +145,12 @@ All endpoints (except `/health`, `/connect/*`) require `Authorization: Bearer <A
 | `POST` | `/tokens` | Store an auth token for a user (`userId`, `label`, `value`) |
 | `GET` | `/files` | List files in a user's session dir |
 | `GET` | `/files/read` | Read a file from a user's session dir |
-| `GET` | `/connect/:service` | OAuth / login form for a service (nalog, getcourse, gdrive, …) |
-| `POST` | `/connect/nalog` | Submit nalog.ru credentials (headless Playwright) |
-| `POST` | `/connect/nalog/code` | Submit SMS code for nalog.ru 2FA |
+| `GET` | `/connect/:service` | OAuth / login form for a service (getcourse, gdrive, hh, …) |
+| `POST` | `/nalog/token-store` | Receive a nalog.ru token pushed from the RU edge after login (`AGENT_SECRET`) |
+
+> nalog.ru's own login routes (`/connect/nalog`, `/connect/nalog/code`) run on
+> the RU-IP edge now, not here — see `src/ru-edge.js` and "RU VM — nalog login
+> setup" below.
 
 ### POST /run
 
@@ -147,7 +173,9 @@ Returns `202 { "taskId": "alice-1234567890" }` immediately. Output streamed to T
 
 ### GET /capabilities
 
-Returns which RU-only services a user has tokens for. Used by the bot to decide GCP vs RU VM routing.
+Returns which services this user has tokens for on GCP. Historically used by the bot to
+decide GCP vs RU VM routing — since all Claude tasks run on GCP now (issue #1288), that
+routing branch is dead; removing it from the bot is a follow-up in `trained-assist-tg-bot`.
 
 ```json
 { "capabilities": ["nalog"] }
@@ -170,12 +198,12 @@ Asks Claude Haiku which existing session a new message belongs to.
 
 ### VM Inventory
 
-| VM | IP | Domain | Purpose |
-|----|-----|--------|---------|
-| `gcp-main` | `136.65.7.197` | `recruiter-assistant.ru` | Main VM — HH recruiting, GDrive, GetCourse, company lookup |
-| `ru-vm` | `178.212.14.192` | `platform.recruiter-assistant.ru` | RU-IP VM — nalog.ru access, Playwright headless login |
+| VM | IP | Domain | Purpose | systemd service |
+|----|-----|--------|---------|------------------|
+| `gcp-main` | `136.65.7.197` | `recruiter-assistant.ru` | Main VM — all Claude Code sessions, HH recruiting, GDrive, GetCourse, company lookup | `assist-agent` (`src/server.js`) |
+| `ru-vm` | `178.212.14.192` | `platform.recruiter-assistant.ru` | RU-IP edge only — nalog.ru/ESIA login, RU-geo-blocked fetch, vacancy pages. No Claude, no runner, no MCP (issue #1288) | `ru-edge` (`src/ru-edge.js`) |
 
-Both VMs run `assist-agent.service` on port 8080, reverse-proxied via nginx on 443.
+Both VMs run their service on port 8080, reverse-proxied via nginx on 443.
 Identity visible in `/health` response: `vm` field (e.g. `"vm":"gcp-main"`) + `commit` (git SHA).
 
 ### Browser Session Infrastructure
@@ -217,16 +245,21 @@ Xvfb :99 (virtual display)
 
 ### Secrets Architecture
 
+RU `secrets.env` only lists the two secrets ru-edge (`src/ru-edge.js`) actually
+needs — no Claude, no runner, no MCP there any more (issue #1288). Everything
+else GCP needs (INN_*, image-gen keys, OPENROUTER_API_KEY, OPENCODE_*, ZeroCreds,
+GitHub issues token, CHECKLIST_API_KEY) is GCP-only now too.
+
 | Secret | Required | GCP Secret Manager | GCP `secrets.env` | RU `secrets.env` | Notes |
 |--------|----------|:------------------:|:-----------------:|:----------------:|-------|
-| `TELEGRAM_BOT_TOKEN` | ✅ | ✅ | — | ✅ | GCP reads from SM; RU reads from file |
-| `ANTHROPIC_API_KEY` | — | ✅ | — | ✅ | |
-| `AGENT_SECRET` | ✅ | ✅ | ✅ | ✅ | Also needed for deploy smoke tests |
-| `DEEPGRAM_API_KEY` | — | ✅ | — | ✅ | Voice transcription |
-| `BOT_SECRET` | — | ✅ | — | ✅ | Chrome extension token relay |
-| `INN_DADATA_TOKEN` | — | — | ✅ | ✅ | Injected directly into Claude env (bypasses secrets.js) |
-| `INN_DADATA_SECRET` | — | — | ✅ | ✅ | Same |
-| `INN_CHECKO_KEY` | — | — | ✅ | ✅ | Same |
+| `TELEGRAM_BOT_TOKEN` | ✅ | ✅ | — | ✅ | GCP reads from SM; ru-edge reads from file (Telegram notifications) |
+| `ANTHROPIC_API_KEY` | — | ✅ | — | — | Unused anywhere now — GCP's Claude Code uses OAuth, RU no longer runs Claude |
+| `AGENT_SECRET` | ✅ | ✅ | ✅ | ✅ | GCP↔ru-edge mutual auth (`/nalog/start-login`, `/nalog-api-relay`, `/nalog/token-store`, `/playwright-fetch`, `/vacancy/store`) |
+| `DEEPGRAM_API_KEY` | — | ✅ | — | — | Voice transcription — GCP only (no Claude sessions on RU any more) |
+| `BOT_SECRET` | — | ✅ | — | — | Chrome extension token relay — GCP only |
+| `INN_DADATA_TOKEN` | — | — | ✅ | — | Injected directly into Claude env (bypasses secrets.js) — GCP only (MCP tool) |
+| `INN_DADATA_SECRET` | — | — | ✅ | — | Same |
+| `INN_CHECKO_KEY` | — | — | ✅ | — | Same |
 | `CF_API_TOKEN` | — | ✅ only | — | — | GCP-only via Secret Manager |
 | `HH_CLIENT_ID` | — | ✅ only | — | — | HH OAuth — GCP only |
 | `HH_CLIENT_SECRET` | — | ✅ only | — | — | HH OAuth — GCP only |
@@ -331,7 +364,7 @@ Legacy minimal set — sufficient only if you haven't added new secrets:
 | `VM_USER` | SSH user (`vova`) |
 | `VM_SSH_KEY` | Private SSH key for deployment |
 
-## RU VM — nalog login setup
+## RU VM — nalog login setup (RU-IP edge, `src/ru-edge.js`)
 
 `POST /connect/nalog` runs headless Playwright for 30–60 s. nginx must not cut the connection before it completes.
 
@@ -376,6 +409,12 @@ location /connect/nalog/code {
 Reload: `nginx -t && systemctl reload nginx`
 
 ### Smoke-test the nalog routes
+
+```bash
+AGENT_URL=https://178-212-14-192.sslip.io AGENT_SECRET=xxx bash scripts/smoke-test-ru-edge.sh
+```
+
+Or manually:
 
 ```bash
 BASE=https://178-212-14-192.sslip.io
@@ -498,6 +537,8 @@ Enforced in CI (`ci.yml` → "Recruiter/HH tools must call OpenRouter, not spawn
 
 | Module / path | Description |
 |---------------|-------------|
+| `src/ru-edge.js` | The RU-IP edge service (issue #1288) — a separate entry point (`node src/ru-edge.js`, `systemd/ru-edge.service`), not part of `server.js`'s request handler. No Claude/runner/task-queue/MCP. Runs on the RU VM only. |
+| `src/nalog-login.js` | Headless Playwright login to lknpd.nalog.ru via Госуслуги (ESIA). Now only required by `src/ru-edge.js` — pushes the resulting token to GCP via `NALOG_TOKEN_SINK_URL` (`POST /nalog/token-store`) since that's where it's actually read from. |
 | `src/connect-forms/` | HTML templates for `/connect/*` endpoints (nalog, gdrive, hh, getcourse, weeek, generic site). Each file exports a function that returns an HTML string. |
 | `src/hooks/post-tool-use-artifacts.js` | Global `PostToolUse` Claude Code hook. Registered in `~/.claude/settings.json` via `runner.js`. Intercepts every tool-use response and stores extractable artifacts via `artifacts-store.js`. Skips sessions where `AGENT_USER_ID` is not set. |
 | `src/inn-pipeline/` | Multi-source pipeline for company lookup by INN. Sources: `sources/dadata.js`, `sources/checko.js`, `sources/egrul.js`, `sources/bfo.js`, `sources/site-scraper.js`. Helpers in `lib/`: cache, matcher, usage-log, variants. |
