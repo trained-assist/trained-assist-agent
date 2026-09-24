@@ -111,7 +111,7 @@ function readOcAgentModels() {
 
 // Build the argv for the selected engine (claude/codex/opencode).
 // Returns [bin, args].
-function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user }) {
+function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user, resumeSessionId = null }) {
   const opencodeModelResolved = opencodeModel || process.env.OPENCODE_MODEL || null;
   if (engine === 'codex') {
     // Validated 2026-09-23: capping raw tool-output tokens cuts the *uncached* input
@@ -123,10 +123,15 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
     const toolOutputTokenLimit = process.env.CODEX_TOOL_OUTPUT_TOKEN_LIMIT || '4000';
     return [process.env.CODEX_BIN || 'codex', [
       'exec',
+      // Native resume (#1234 Sub-3): `codex exec resume <thread_id>` continues the real thread.
+      // Validated live. NOTE: `resume` rejects `-C` (it uses the process cwd, which we already
+      // set in spawn opts) — so `-C` is emitted only on the fresh-exec path. `--json` and the
+      // `-c` overrides (tool-output limit + MCP) are accepted on both paths.
+      ...(resumeSessionId ? ['resume', resumeSessionId] : []),
       '--json',
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
-      '-C', user.cwd || user.workDir,
+      ...(resumeSessionId ? [] : ['-C', user.cwd || user.workDir]),
       '-c', `tool_output_token_limit=${toolOutputTokenLimit}`,
       ...codexMcpArgs(mcpConfig),
       systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
@@ -143,6 +148,10 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
   }
   return [process.env.CLAUDE_BIN || 'claude', [
     '--dangerously-skip-permissions',
+    // Native resume (#1234 Sub-2): continue the REAL Claude session — full history, tool
+    // state, plan — instead of rebuilding a lossy context after a restart. Validated live:
+    // `claude --resume <session_id> --print "…"` recalls earlier turns. Absent → new session.
+    ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
     '--output-format', 'stream-json',
     '--verbose',
     '--mcp-config', mcpConfig,
@@ -216,7 +225,7 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
-    ocProfileOverrides, onHeartbeat,
+    ocProfileOverrides, onHeartbeat, onEngineSessionId,
   } = opts;
 
   const proc = spawn(engineBin, engineArgs, {
@@ -256,6 +265,8 @@ async function runEngineProcess(opts) {
   let lineBuffer = '';
   let fullOutput = { text: '' };
   let claudeResult = null;  // text from result event
+  let claudeErrorText = null; // result-event text ONLY when event.is_error — genuine provider error, never answer prose (#1227)
+  let engineSessionId = null; // native CLI session id (claude session_id / codex thread_id / opencode sessionID) — for real --resume (#1234)
   let lastAssistantMsg = ''; // last complete assistant turn — clean fallback, not the whole scratchpad
   let terminalSuccess = false; // explicit engine completion, never inferred from narration
   let processSignal = null;
@@ -377,6 +388,18 @@ async function runEngineProcess(opts) {
       try {
         const event = JSON.parse(line);
         firstJsonEventSeen = true;
+        // Capture the engine's native session id the first time it appears, so a later
+        // restart can resume the REAL session instead of rebuilding a lossy context (#1234).
+        // One field per engine, checked generically: claude puts `session_id` on every event
+        // (init included), codex emits `thread_id` in `thread.started`, opencode emits
+        // `sessionID`. Fired once; the callback persists it durably (survives SIGKILL).
+        if (!engineSessionId) {
+          const sid = event.session_id || event.thread_id || event.sessionID;
+          if (sid) {
+            engineSessionId = sid;
+            try { onEngineSessionId?.(sid); } catch (e) { console.warn(`[${taskId}] onEngineSessionId:`, e.message); }
+          }
+        }
         if (engine === 'opencode') {
           if (event.type === 'text' && typeof event.part?.text === 'string') {
             fullOutput.text += event.part.text;
@@ -393,7 +416,8 @@ async function runEngineProcess(opts) {
             lastOutputAt = Date.now();
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`).catch(() => {});
+              if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
             }
             scheduleStream();
           } else if (event.type === 'step_start') {
@@ -448,7 +472,8 @@ async function runEngineProcess(opts) {
             lastActivity = formatToolActivity('Bash', { command: event.item.command });
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
+              if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
             }
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
@@ -478,6 +503,13 @@ async function runEngineProcess(opts) {
           terminalSuccess = !event.is_error && (!event.subtype || event.subtype === 'success');
           claudeResult = typeof event.result === 'string' ? event.result : null;
           claudeUsage = event.usage || null;
+          if (event.is_error) {
+            // Real provider error text — the only thing auth detection may trust. Also log it:
+            // the exit-1 + zero-usage bursts (auth loss) were previously undiagnosable because
+            // only `usage: in=0 out=0` was printed, never the error string (#1227 / #1228).
+            claudeErrorText = claudeResult || event.subtype || null;
+            console.warn(`[${taskId}] result error: ${(claudeErrorText || '').slice(0, 500)}`);
+          }
           if (claudeUsage) {
             console.log(`[${taskId}] usage: in=${claudeUsage.input_tokens} out=${claudeUsage.output_tokens} cache_read=${claudeUsage.cache_read_input_tokens || 0} cache_write=${claudeUsage.cache_creation_input_tokens || 0}`);
           }
@@ -493,7 +525,8 @@ async function runEngineProcess(opts) {
               lastActivity = formatToolActivity(block.name, block.input);
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
-                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`).catch(() => {});
+                if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
+                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
               }
             }
           }
@@ -608,7 +641,7 @@ async function runEngineProcess(opts) {
   }
 
   return {
-    fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
+    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, engineSessionId, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
     lastActivity, exitCode, processSignal, processError, timedOut,
     inactivityKill, outputPersistenceError, codexErrorMsg, sessionState,

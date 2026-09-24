@@ -94,3 +94,9 @@ Correct procedure:
    *tap* (verifies the `sup|{taskId}` callback_data round-trips and
    `session.pendingSupplement` gets armed) — just not for step 2/3's button
    *rendering*, which is agent-side only.
+
+Goal: stop duplicate token-save Telegram notices — a real group got flooded with byte-identical «✅ Данные для Github сохранены…» from automated/retried `POST /tokens` saves (testuser-* profiles whose `.chatid` pointed at the group); also fix broken token-path test isolation (`runner/index.js` hardcoded `~/agent-tokens`, `data-paths.js` ignored `AGENT_TOKENS_ROOT` → 12,549 test profiles leaked into prod). Adds `src/tg-notice-dedupe.js` (suppress identical notice to same chat within 10 min) + resolves token/`.chatid` paths via data-paths `TOKENS_ROOT`.
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1248
+- [ ] Merged to main
+- [ ] Deployed to prod — verified live (no more than one identical notice per chat per 10 min)

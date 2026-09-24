@@ -7,13 +7,14 @@ const { writeMcpConfig } = require('../browser');
 const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
-const { isAuthError, detectReason, setAuthFailedFlag } = require('../auth-flag');
+const { isAuthError, setAuthFailedFlag, clearAuthFailedFlag } = require('../auth-flag');
 const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
 const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
 const { recordUsage } = require('../usage-store');
 const { classifyDeterministic: classifyFailureDeterministic } = require('../failure-classifier');
 const executionHistory = require('../execution-history');
+const { markEngineSuccess, markEngineFailure, isCredentialInvalidClass } = require('../engine-health');
 const { randomUUID } = require('crypto');
 const {
   loadUserTokens,
@@ -24,6 +25,7 @@ const { initLog, readLog } = require('../requirements-log');
 const { readVacancyState, writeVacancyState } = require('../hh-vacancy');
 const persona = require('../persona');
 const profiles = require('../profiles');
+const { TOKENS_ROOT } = require('../data-paths');
 const answerRouter = require('../answer-router');
 // Telegram send/edit + markdown-degradation ladder chokepoint live in
 // tg-stream.js (issue #942 P1.4). The module owns the format/send/edit
@@ -248,49 +250,29 @@ function listSoftContinuations() {
 
 // ── Concurrency model ────────────────────────────────────────────────────────
 //
-// Three layers, each with a different scope:
+// Two layers, each with a different scope:
 //
 //  1. perChatQueue (Map<chatId, Promise>) — ONE TASK AT A TIME PER CHAT.
 //     The top-level invariant: tasks from the same Telegram chat/group always
 //     queue behind each other, regardless of which session they belong to.
 //     Different chats (even sharing the same workDir/profile) run in parallel.
-//     chatId=0 (internal/web calls) is excluded.
+//     chatId=0 (internal/web calls) is excluded. This lock is deliberate and
+//     must stay: in one Telegram chat there can't be more than one task at a
+//     time — the chat is the single stream the user reads from.
 //
-//  2. chatLanes (Map<laneKey, Promise>) — TRANSCRIPT PROTECTION PER SESSION.
-//     Prevents two `claude` processes from appending to the same session
-//     transcript simultaneously. Lane key = session id; a brand-new session
-//     (no id yet) falls back to chat key so first-messages collapse into one
-//     session instead of spawning two claudes.
+//  2. Global semaphore + RAM watchdog — OOM GUARD.
+//     Bounds how many live `claude` processes run in total (MAX_CONCURRENT_TASKS)
+//     and holds off spawning while free RAM is low (task-queue.js).
 //
-//  3. Per-profile cap + global semaphore — FAIRNESS / OOM GUARD.
-//     Bounds how many live `claude` processes one profile can hold at once
-//     (runner-lanes.js) and globally (MAX_CONCURRENT_TASKS + RAM watchdog).
+// There are deliberately NO per-session, per-profile or per-workDir locks.
+// A profile may run as many tasks as it likes across its chats; different
+// sessions and sessions sharing a workDir all run in parallel. Safe because
+// context is rebuilt from the session store (no `claude --resume`), so
+// parallel claudes never share a transcript file.
 //
-// Confusingly-named historical note: "one active session per chat" was always
-// the invariant, NOT "one session per workDir". Multiple chats can share a
-// workDir and their tasks run in parallel — that is correct and expected.
-//
-// Map<laneKey(string), Promise> — the tail of each transcript lane. laneKey is
-// `session:<id>` (or `chat:<id>` for a brand-new session); see runTask.
-const chatLanes = new Map();
-
-// Session serialization lane + per-profile cap primitives live in a pure module
-// (runner-lanes.js) so the REAL admission logic is vendorable/testable in staging
-// without pulling in the whole runner (same discipline as intake-routing.js).
-// See that file for why the lane keys on the SESSION, not the workDir/profile.
-const {
-  _laneKey,
-  DEFAULT_MAX_CONCURRENT_PER_KEY,
-  _capForKey,
-  setKeyCap,
-  _acquireKeySlot,
-  _releaseKeySlot,
-} = require('../runner-lanes');
-
 // Per-chat serialization (layer 1) + the global RAM-aware concurrency
-// semaphore (layer 3) live in src/runner/task-queue.js so admission logic is
-// unit-testable without pulling in the whole runner (same pattern as
-// runner-lanes.js for layer 2). Per-profile cap stays in runner-lanes.js.
+// semaphore (layer 2) live in src/runner/task-queue.js so admission logic is
+// unit-testable without pulling in the whole runner.
 const {
   chatQueue,
   _acquireSlot,
@@ -398,25 +380,30 @@ function isTaskRunning(username) {
 }
 
 // True while this exact session is either spawned-and-streaming OR still queued
-// waiting for a turn — checks activeTimers (live process) AND chatLanes (accepted,
-// waiting on the per-chat lane / per-profile cap / RAM / global slot). Used by
-// gtd-controller's re-entrancy guard: the journal-based check it used before had a
-// 30-min TTL heuristic while real runs can legitimately take up to CLAUDE_TIMEOUT_MS
-// (40min) plus up to 8 extend-timeout calls (2h+), so a long-running GTD turn could
-// age out of the guard and get double-fired by the next tick — fixed by switching to
-// this live in-process check (#1062). But activeTimers only gets an entry once the
-// process actually spawns (claude-runner.js, after every admission wait), while
-// chatLanes.set() happens synchronously the instant runTask() is called and stays
-// until the queued work finishes. Under load (profile cap / RAM / global slot all
-// busy), a GTD turn can sit queued for minutes with activeTimers still empty — the
-// next 5-min tick would see "not running" and fire a duplicate queued turn for the
-// same session onto the same lane. Checking chatLanes too closes that window.
+// waiting for a turn — checks activeTimers (live process) AND queuedSessions
+// (accepted, waiting behind this chat's current task / RAM / global slot). Used
+// by gtd-controller's re-entrancy guard: the journal-based check it used before
+// had a 30-min TTL heuristic while real runs can legitimately take up to
+// CLAUDE_TIMEOUT_MS (40min) plus up to 8 extend-timeout calls (2h+), so a
+// long-running GTD turn could age out of the guard and get double-fired by the
+// next tick — fixed by switching to this live in-process check (#1062).
+// activeTimers only gets an entry once the process actually spawns
+// (claude-runner.js, after every admission wait), while the session is added to
+// queuedSessions synchronously the instant runTask() is called and stays until
+// the queued work finishes. Under load (global slot / RAM busy), a GTD turn can
+// sit queued for minutes with activeTimers still empty — the next 5-min tick
+// would see "not running" and fire a duplicate queued turn for the same
+// session. Checking queuedSessions too closes that window. This is a read-only
+// membership set, NOT a lock: it serializes nothing, so unlimited tasks per
+// session/profile may still run concurrently.
+const queuedSessions = new Set(); // Set<sessionId(string)>
+
 function isSessionRunning(sessionId) {
   if (!sessionId) return false;
   for (const s of activeTimers.values()) {
     if (s.sessionId === sessionId) return true;
   }
-  if (chatLanes.has(_laneKey(sessionId, null))) return true;
+  if (queuedSessions.has(sessionId)) return true;
   return false;
 }
 
@@ -458,14 +445,6 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
-  // Transcript lane key — session-scoped to prevent two `claude` processes from
-  // writing to the same transcript at once. Sharing a workDir across chats is
-  // fine and expected; those tasks are serialized by perChatQueue, not here.
-  //   • sessionId present → serialize messages within the same session.
-  //   • no sessionId (brand-new) → fall back to chat key so concurrent
-  //     first-messages from the same chat collapse into one session.
-  let queueKey = _laneKey(opts.sessionId, opts.user.id);
-
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -518,7 +497,7 @@ function runTask(opts) {
     return Promise.resolve(msg);
   }
 
-  // /active_checklist — list all open GTD records for this user, plus a one-click
+  // /show_active_cheklist — list all open GTD records for this user, plus a one-click
   // link into checklist.trainedassist.store (no password needed, see checklistAutologinUrl).
   if (ACTIVE_CHECKLIST_INTENT.test((opts.task || '').trim())) {
     return (async () => {
@@ -592,8 +571,8 @@ function runTask(opts) {
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username, chatId);
-    // Clear this workDir's lane so the next task doesn't wait behind a stuck one.
-    chatLanes.delete(queueKey);
+    // Clear this chat's queue so the next task doesn't wait behind a stuck one.
+    chatQueue.clearChat(chatId);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const msg = stopped
       ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
@@ -671,83 +650,59 @@ function runTask(opts) {
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('../admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  if (chatLanes.has(queueKey) || chatQueue.hasPending(opts.user.id)) status.waiting(
+  // One task at a time per chat — the per-chat lock, kept deliberately. There are
+  // no per-session / per-profile / per-workDir locks: those were removed because a
+  // stale promise in them left chats saying "waiting for previous work" with nothing
+  // running. Any number of tasks may run concurrently across chats and sessions of
+  // one profile — context is rebuilt from the session store (no `claude --resume`),
+  // so parallel claudes never share a transcript file.
+  if (chatQueue.hasPending(opts.user.id)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
-  // Per-profile cap key ("repository" = one profile's workspace). The owner is a
-  // PROFILE (L1 shim sets user.profileId = payload.profileId ?? username), so key on
-  // profileId; fall back to username, then chatId for internal/system callers that
-  // build a bare user object. In-memory Map key only — never a path/env key.
-  const capKey = String(opts.user.profileId || opts.user.username || opts.user.id);
-
-  // chatQueue.enqueue serializes at the per-chat level (layer 1). Inside the fn,
-  // we handle the session-lane (layer 2) and then run the actual work.
-  //
-  // IMPORTANT: capture sessionPrev HERE, before enqueue(), not inside the fn callback.
-  // The fn runs as a deferred microtask (.then(fn)), so chatLanes.set(queueKey, current)
-  // below executes first — reading chatLanes inside fn would return `current` itself,
-  // creating a circular dependency (work waits for current, current waits for work → deadlock).
-  const sessionPrev = chatLanes.get(queueKey) ?? Promise.resolve();
   // Postmortem diagnostics for issue #1015 ("session hung, no evidence of where
   // the time went"): stamp how long each admission stage actually took. Cheap
   // (a handful of Date.now() calls + one console.log per stage) but turns a
   // future "it was stuck" report into a log grep instead of guesswork.
   const stageT0 = Date.now();
   const logStage = (stage, since) => console.log(`[${opts.taskId}] stage=${stage} tookMs=${Date.now() - since}`);
-  const current = chatQueue.enqueue(opts.user.id, () => {
-    const work = sessionPrev.catch(() => {}).then(async () => {
-      logStage('session_lane_wait', stageT0);
-      // Per-profile cap FIRST: cheap, spawns nothing. A task blocked on its
-      // profile's 4-slot cap waits here without holding a scarce global slot.
-      // Only show "waiting for slot" when the slot isn't immediately available —
-      // resolving at once means there's no real queue, so stay silent.
-      const capT0 = Date.now();
-      let capAcquired = false;
-      const capP = _acquireKeySlot(capKey);
-      capP.then(() => { capAcquired = true; });
-      await Promise.resolve(); // one microtask: synchronously-resolved slots are marked
-      if (!capAcquired) status.waiting('↪️ Ожидаю свободного места на сервере. Задача сохранена, начну автоматически.');
-      await capP;
-      logStage('profile_cap_wait', capT0);
+  // Track the session as "queued" the instant we accept the task — the GTD
+  // re-entrancy guard (isSessionRunning) relies on this window before the
+  // process spawns. Read-only membership, not a lock.
+  if (opts.sessionId) queuedSessions.add(opts.sessionId);
+  const current = chatQueue.enqueue(opts.user.id, async () => {
+    try {
+      // Global admission control: wait for a free slot + enough RAM before we
+      // actually spawn `claude`. This is the OOM guard — the only remaining gate.
+      const ramT0 = Date.now();
+      await _waitForRam();
+      logStage('ram_wait', ramT0);
+      const slotT0 = Date.now();
+      await _acquireSlot();
+      logStage('global_slot_wait', slotT0);
       try {
-        // Global admission control: wait for a free slot + enough RAM before we
-        // actually spawn `claude`. This — not the per-chat lane — is the OOM guard.
-        const ramT0 = Date.now();
-        await _waitForRam();
-        logStage('ram_wait', ramT0);
-        const slotT0 = Date.now();
-        await _acquireSlot();
-        logStage('global_slot_wait', slotT0);
+        await status.finish('🧠 Начинаю работу…');
+        const runT0 = Date.now();
         try {
-          await status.finish('🧠 Начинаю работу…');
-          const runT0 = Date.now();
-          try {
-            return await _runTask(opts);
-          } finally {
-            logStage('run_task', runT0);
-          }
+          return await _runTask(opts);
         } finally {
-          _releaseSlot();
+          logStage('run_task', runT0);
         }
       } finally {
-        _releaseKeySlot(capKey);
+        _releaseSlot();
       }
-    });
-    return work;
+    } finally {
+      logStage('total', stageT0);
+    }
   }).catch(async err => {
-    const msg = err.message === 'capacity_wait_timeout'
-      ? '⏰ Сервер перегружен — задача слишком долго ждала свободного места. Попробуй ещё раз через минуту.'
-      : '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
+    const msg = '❌ Не удалось запустить или завершить работу. Попробуй запустить задачу ещё раз.';
     await status.finish(msg);
     console.error(`[${opts.taskId}] unhandled queue error:`, err.message);
   });
-  chatLanes.set(queueKey, current);
   current.finally(() => {
     // A task cut off by a restart keeps its journal entry: the next process resumes it.
     if (!restartShutdown) clearPendingTask(opts.taskId);
-    // Only clear if no newer task was enqueued after us
-    if (chatLanes.get(queueKey) === current) chatLanes.delete(queueKey);
+    if (opts.sessionId) queuedSessions.delete(opts.sessionId);
   });
   // Await retries for callers, but never hold their predecessor lane/lease.
   return current.then(result => result?.queuedRetry || result);
@@ -786,7 +741,7 @@ function buildContextCard(username, workDir, chatId) {
   if (!services || !services.length) return null;
 
   // Build service labels, merging inline details where available
-  const gcConfig = path.join(os.homedir(), 'agent-tokens', String(username), 'getcourse', 'config.json');
+  const gcConfig = path.join(TOKENS_ROOT, String(username), 'getcourse', 'config.json');
   let gcDomain = null;
   if (fs.existsSync(gcConfig)) {
     try { gcDomain = JSON.parse(fs.readFileSync(gcConfig, 'utf8')).accountDomain || null; } catch (e) { console.warn('[runner] gcConfig parse:', e.message); }
@@ -897,10 +852,10 @@ function buildContextCard(username, workDir, chatId) {
       if (openRecs.length === 1) {
         const r = openRecs[0];
         const preview = (r.originalTask || '').slice(0, 40);
-        lines.push(`📋 Чеклист: «${preview}» · ${_relativeTime(r.dueAt)} · /active_checklist · /checklist_turn_off`);
+        lines.push(`📋 Чеклист: «${preview}» · ${_relativeTime(r.dueAt)} · /show_active_cheklist · /checklist_turn_off`);
       } else if (openRecs.length > 1) {
         const next = openRecs.reduce((a, b) => a.dueAt < b.dueAt ? a : b);
-        lines.push(`📋 ${openRecs.length} чек-листа · след. ${_relativeTime(next.dueAt)} · /active_checklist · /checklist_turn_off`);
+        lines.push(`📋 ${openRecs.length} чек-листа · след. ${_relativeTime(next.dueAt)} · /show_active_cheklist · /checklist_turn_off`);
       }
     } catch (e) { console.warn('[runner] gtd pin:', e.message); }
   }
@@ -1014,7 +969,7 @@ function ensureProfileLayoutSkill(workDir, username) {
       `find ${workDir} -maxdepth 3 -not -path "*/sessions/*" -not -path "*/.git/*" | sort`,
       { timeout: 5000 }
     ).toString().trim();
-    const tokenDir = path.join(os.homedir(), 'agent-tokens', username);
+    const tokenDir = path.join(TOKENS_ROOT, username);
     const tokens = fs.existsSync(tokenDir)
       ? fs.readdirSync(tokenDir).filter(f => !f.startsWith('.')).join(', ')
       : '(нет)';
@@ -1297,19 +1252,23 @@ function forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, o
 function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engine, provider, model, exitCode, errorText, action }) {
   try {
     const cls = classifyFailureDeterministic(errorText);
+    const failureClass = cls?.class || 'UNKNOWN';
     executionHistory.recordAttempt(executionId, {
       taskId, projectId, sessionId, engine, provider, model, exitCode,
       errorText,
-      failureClass: cls?.class || 'UNKNOWN',
+      failureClass,
       classificationSource: cls ? 'rule' : 'none',
       action,
     });
+    // Move engine health in lockstep with the recorded event. markEngineFailure is a no-op for
+    // non-relevant classes (USER_STOP/UNKNOWN) and for a missing engine — see engine-health.js.
+    if (engine) markEngineFailure(engine, { failureClass, message: errorText });
   } catch (e) {
     console.warn('[runner] _recordFailureAttempt failed:', e.message);
   }
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1368,7 +1327,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const ctxMsgCount = forceClaude ? 8 : 6;
 
   if (sessionId) {
-    // Explicit session ID from bot — honor it, but enforce per-chat ownership.
+    // Explicit session ID from bot — honor it, but a session belonging to another chat
+    // of this profile is dropped rather than used (see the non-blocking fallback below).
     // Sign-robust: the gateway's remembered id can diverge from disk (chatId
     // sign-split — KV holds `s-1003…`, real content lives under `s--1003…`).
     // resolveChatSession falls back to this chat's durable current-session
@@ -1381,29 +1341,32 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId, audience) || sessionId);
     const existing = sessions.getSession(user.workDir, activeSessionId);
     if (existing) {
-      // Strict chat isolation: a live session is attached to exactly one chat.
-      // If it's attached to a different chat, reject and notify — don't mix contexts.
-      // liveChatId (was ownerChatId): read-compat with pre-rename session files.
+      // Chat isolation is NON-BLOCKING. A live session is attached to exactly one chat;
+      // if the gateway handed us one that belongs to a DIFFERENT chat of this profile
+      // (its remembered id can leak across a profile's chats), we must not reject the
+      // message — that stranded the user with an error and no answer. Instead treat the
+      // foreign session as unavailable here and fall through to THIS chat's own current
+      // session, or start fresh. The foreign session is left untouched so the other chat
+      // keeps its context. liveChatId (was ownerChatId): read-compat with pre-rename files.
       const attachedChatId = existing.liveChatId ?? existing.ownerChatId;
       if (attachedChatId && String(attachedChatId) !== String(chatId)) {
-        const msg = `⚠️ Эта сессия сейчас закреплена за другим чатом этого профиля.\n\nЧтобы перенести её сюда — напишите /sessions и выберите нужную, или просто напишите новый запрос.`;
-        if (initialMsgId) await tgEdit(BOT_TOKEN, chatId, initialMsgId, msg).catch(() => tgSend(BOT_TOKEN, chatId, msg));
-        else await tgSend(BOT_TOKEN, chatId, msg);
-        clearPendingTask(taskId);
-        return;
+        activeSessionId = null;
+      } else {
+        // Legacy / unattached session (#489): a null liveChatId would otherwise let ANY
+        // chat adopt it and mix contexts. Claim it for the current chat on first touch.
+        if (!attachedChatId && chatId) {
+          sessions.claimLiveChatId(user.workDir, sessionId, chatId);
+        }
+        sessionExists = true;
+        const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
+        if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
       }
-      // Legacy / unattached session (#489): a null liveChatId short-circuited
-      // the guard above, letting ANY chat adopt it and mix contexts. Claim it for
-      // the current chat on first touch so a foreign chat is rejected next time.
-      if (!attachedChatId && chatId) {
-        sessions.claimLiveChatId(user.workDir, sessionId, chatId);
-      }
-      sessionExists = true;
-      const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
-      if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
     }
-  } else {
-    // No explicit session — try to continue the most recent one (within 4h)
+  }
+
+  if (!activeSessionId && !(forceNew && sessionId)) {
+    // No usable explicit session (none given, or a foreign one was dropped above) —
+    // continue the most recent one for THIS chat (within 4h), or start a fresh session.
     const currentId = getCurrentSessionId(user.workDir, chatId, audience);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
@@ -1502,10 +1465,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Persist chatId early — needed by OAuth callbacks (e.g. HH, GDrive) that fire
   // after a quick-answer early-return and never reach the Claude path below.
   try {
-    const tDir = path.join(os.homedir(), 'agent-tokens', String(user.username));
+    const tDir = path.join(TOKENS_ROOT, String(user.username));
     fs.mkdirSync(tDir, { recursive: true });
     fs.writeFileSync(path.join(tDir, '.chatid'), String(chatId), { mode: 0o600 });
-    const oldChatDir = path.join(os.homedir(), 'agent-tokens', String(user.id));
+    const oldChatDir = path.join(TOKENS_ROOT, String(user.id));
     if (fs.existsSync(oldChatDir)) {
       // Only write .username if the folder has no existing owner or already belongs to us.
       // Overwriting a different profile's marker would cause loadUserTokens to migrate
@@ -1786,7 +1749,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const opencodeModel = process.env.OPENCODE_MODEL || null;
   const [engineBin, engineArgs] = buildEngineCommand({
     engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel,
-    mcpConfig, systemPromptFile, user,
+    mcpConfig, systemPromptFile, user, resumeSessionId,
   });
 
   // Per-profile OpenCode model ladder (max|value|free|russian), resolved to the flat
@@ -1842,9 +1805,17 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // OS process died and nobody ever wrote a terminal state". savePendingTask does
     // a partial merge ({...previous, ...params}) so this only touches the one field.
     onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
+    // Persist the engine's native session id the moment it appears (#1234): to the durable
+    // session record (source of truth for resume) AND the pending journal (read by
+    // resumePendingTasks before the session is loaded). Written mid-run so a deploy SIGKILL
+    // can't lose it — that is exactly the restart case resume exists for.
+    onEngineSessionId: (sid) => {
+      if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
+      savePendingTask(taskId, { engineSessionId: sid, engine });
+    },
   });
   const {
-    fullOutput, lastAssistantMsg, claudeResult, terminalSuccess,
+    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, engineSessionId, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
     lastActivity, exitCode, processSignal, processError, timedOut,
     inactivityKill, outputPersistenceError, codexErrorMsg, sessionState,
@@ -2020,6 +1991,36 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : 'нет подтверждённого финального ответа';
     incompleteReason = reason;
 
+    // Native-resume fallback (#1234 Sub-2): a `--resume <id>` attempt can fail fast when the
+    // engine session is gone (expired transcript, cwd changed, engine GC'd it). Fall back ONCE
+    // to the pre-#1234 path — a fresh run with rebuilt context — instead of burning the whole
+    // restart-retry budget on a resume that cannot succeed. resumeSessionId is NOT carried into
+    // the retry, so the next attempt takes the normal context-rebuild path; resumeFallbackDone
+    // is belt-and-braces against re-entering this branch.
+    if (resumeSessionId && !resumeFallbackDone && !restartShutdown) {
+      console.warn(`[${taskId}] resume: fallback reason=native_resume_failed engine=${engine} (${reason})`);
+      const fallbackMsg = '↩️ Не удалось продолжить сессию движка — перезапускаю с восстановленным контекстом.';
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg));
+      else await tgSend(BOT_TOKEN, chatId, fallbackMsg);
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+        errorText: reason, action: 'native_resume_fallback',
+      });
+      const queuedRetry = runTask({
+        initiatedAt, threadId,
+        taskId: `${user.username}-resume-fb-${Date.now()}`,
+        user, task, context,
+        sessionId: activeSessionId,
+        forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
+        resumedAfterRestart, resumeAttempts,
+        continuationCount, mode, projectId, internalGtd, engine,
+        executionId,
+        resumeFallbackDone: true,
+        lastAttemptError: { reason: `нативный resume не удался (${reason})`, errorText: codexErrorMsg || fullOutput.text.trim().slice(-1000) },
+      });
+      return { queuedRetry };
+    }
+
     // A task resumed after a server restart that fails again is our fault, not the
     // user's task — auto-retry a bounded number of times instead of dead-ending on
     // "напиши продолжай". resumePendingTasks() (server.js) already drops the pre-restart
@@ -2168,7 +2169,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         return tooBigMsg;
       }
       if (verdict.class === 'config') {
-        setAuthFailedFlag({ reason: 'CONFIG_ONE_TIME', error_text: preLadderText, engine: 'opencode' });
+        // CONFIG is a one-time account/setup problem, NOT a credential loss — it degrades engine
+        // health (recorded below via _recordFailureAttempt → markEngineFailure) but must never be
+        // reported as auth-invalid (spec §7). The operator alert is the Telegram message below.
         const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
         if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg));
         else await tgSend(BOT_TOKEN, chatId, configMsg);
@@ -2213,7 +2216,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg));
       else await tgSend(BOT_TOKEN, chatId, exhaustedMsg);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, exhaustedMsg);
-      setAuthFailedFlag({ reason: 'QUOTA_EXCEEDED', error_text: preLadderText, engine: 'opencode' });
+      // QUOTA is a plan/usage limit, NOT a credential loss (spec §7): health degrades via
+      // _recordFailureAttempt below; do NOT set the auth flag.
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
         errorText: preLadderText, action: null,
@@ -2223,16 +2227,28 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
   }
 
-  // Detect an auth/quota failure for the current engine — set the per-engine flag so the
-  // operator repair loop sees it either way. Claude and Codex additionally get ONE automatic
-  // fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on repair;
-  // engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
-  // codexErrorMsg first for the same reason as preLadderText above: it's the real provider
-  // error text, not our own generic incomplete-task message, which never matches auth patterns.
-  const authText = codexErrorMsg || claudeResult || fullOutput.text || result;
+  // Detect an auth/quota failure for the current engine. Claude and Codex additionally get ONE
+  // automatic fallback to OpenCode for this task (issue #1061 Фаза 3) instead of just waiting on
+  // repair; engineFallbackDone guards against looping if OpenCode itself later trips isAuthError.
+  //
+  // Only GENUINE provider error text may be treated as an auth/quota failure — never the final
+  // answer prose. Previously this read `claudeResult || fullOutput.text || result`, so a
+  // successful run whose answer merely mentioned "rate limit"/"quota" (e.g. an explanation of a
+  // Telegram 429 fix) raised a false auth flag and bounced a healthy task to the OpenCode
+  // fallback (#1227). codexErrorMsg is set only on a turn.failed/error event, claudeErrorText
+  // only on an is_error result event; both are real errors, so nothing else is needed.
+  //
+  // isAuthError is deliberately broad (its patterns also cover quota/rate-limit) because the
+  // fallback-to-another-provider behaviour is right for both. But the AUTH FLAG (credentials)
+  // is set only when the unified classifier says the class is actually credential-invalid (AUTH):
+  // QUOTA/RATE_LIMIT degrade engine health via _recordFailureAttempt below, they do NOT mean the
+  // credentials broke (spec §7 — this conflation is what made the old flag lie).
+  const authText = codexErrorMsg || claudeErrorText || '';
   if (isAuthError(authText)) {
-    const reason = detectReason(authText);
-    setAuthFailedFlag({ reason, error_text: authText, engine });
+    const authClass = classifyFailureDeterministic(authText)?.class || 'AUTH';
+    if (isCredentialInvalidClass(authClass)) {
+      setAuthFailedFlag({ reason: 'AUTH_INVALID', error_text: authText, engine });
+    }
     const engineLabel = engine === 'codex' ? 'Codex' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
 
     if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
@@ -2342,7 +2358,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     ? formatOcFooter(opencodeUsage, opencodeBreakdown)
     : formatCostFooter(claudeUsage, claudeModel);
   const gtdFooter = (!internalGtd && !incomplete && user.workDir)
-    ? (() => { try { return require('../gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /active_checklist · /checklist_turn_off' : ''; } catch { return ''; } })()
+    ? (() => { try { return require('../gtd-controller').listGtd(user.workDir).filter(r => r.status === 'open').length > 0 ? '\n\n📋 Чеклист активен — /show_active_cheklist · /checklist_turn_off' : ''; } catch { return ''; } })()
     : '';
   const final = (result + costFooter).slice(-MAX_MSG_LEN) + gtdFooter;
 
@@ -2358,6 +2374,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     executionHistory.finalizeExecution(executionId, 'INTERRUPTED');
   } else {
     executionHistory.finalizeExecution(executionId, 'COMPLETED');
+    // Self-heal (spec §9): a successful authenticated engine call resets engine health to
+    // healthy and clears the current auth failure. Failure history is untouched — it lives in
+    // execution-history.js and last_failure_* on the health row. Never let a health-store error
+    // take down the success path.
+    if (engine) {
+      try {
+        markEngineSuccess(engine);
+        clearAuthFailedFlag(engine);
+      } catch (e) {
+        console.warn('[runner] engine-health self-heal failed:', e.message);
+      }
+    }
   }
 
   // Кнопки действий под финальным ответом. Не показываем «Запустить проработку», если
@@ -2594,14 +2622,10 @@ module.exports = {
   _final: { pickFinalText, isScratchpadFallback },
   // Exported for oc-footer tests only
   _footer: { formatOcFooter, formatCostFooter },
-  // Exported for lane-granularity tests only
-  _laneKey,
-  // Exported for per-profile cap-isolation tests only (R7/S8a)
-  _cap: { _acquireKeySlot, _releaseKeySlot, _capForKey, setKeyCap, DEFAULT_MAX_CONCURRENT_PER_KEY },
   // Exported for isSessionRunning tests only — the real Map backing activeTimers
   _activeTimers: activeTimers,
-  // Exported for isSessionRunning tests only — the real Map backing chatLanes
-  _chatLanes: chatLanes,
+  // Exported for isSessionRunning tests only — the real Set of queued sessions
+  _queuedSessions: queuedSessions,
   // Exported for provider-alternation wiring tests only (unified crash-retry, issue #1132 follow-up)
   _forceOpencodeAlternation: forceOpencodeAlternation,
   // Exported for failure-brain wiring tests only (issue #1175, PR #1179 follow-up)

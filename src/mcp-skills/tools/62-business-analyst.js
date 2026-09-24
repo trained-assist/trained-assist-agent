@@ -27,6 +27,12 @@ module.exports = {
   setupTools: [],
 
   tools: {
+    ba_development_playbook: {
+      description: 'Engineering playbook for durable planning. Expand into concrete items, then persist atomically with task_create. No model call or execution.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () => require('../../development-playbook'),
+    },
+
 
     ba_clarify_requirements: {
       description: 'Classify a task by size and generate structured clarification questions BEFORE any execution skill (dev/ci-cd/qa/deploy) starts work. Call for every non-trivial task, even ones that look clear — the tier decision itself (trivial/small/feature) is the point: it tells you whether to skip ceremony or write a durable spec via ba_write_spec. Ask only the questions that are actually unclear for that tier.',

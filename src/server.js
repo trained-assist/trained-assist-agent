@@ -3,6 +3,8 @@ const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(r
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
 const { isTaskResumable } = require('./pending-task-resume');
+const { isNonTaskMessage } = require('./resume-hygiene');
+const { recordResume, getResumeStats } = require('./resume-stats');
 const { getRetryDelayMs } = require('./retry-policy');
 const { refreshHhToken } = require('./hh-utils');
 const http = require('http');
@@ -21,9 +23,10 @@ const { runTask, generateConnectLink, getQuickAnswer, getPendingTasks, clearPend
 const { runMcpTool } = require('./mcp-action');
 const { computeSkillsList } = require('./capabilities-skills');
 const { getAuthFlag, getAllAuthFlags, clearAuthFailedFlag } = require('./auth-flag');
+const { getAllEngineHealth } = require('./engine-health');
 const { isValidProjectId } = require('./valid-project-id');
 const { trackChat, pollDriveChanges } = require('./drive-watcher');
-const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary } = require('./session-store');
+const { listSessions, getSession: getSessionData, archiveSessions, getCurrentSessionId, needsSummary, setSummary, getEngineSessionId } = require('./session-store');
 const { generateSummary } = require('./session-summary');
 const { startNalogLogin } = require('./nalog-login');
 const { startGetcourseLogin } = require('./getcourse-login');
@@ -33,10 +36,12 @@ const { createHhNegotiations } = require('./hh-negotiations');
 
 const profiles = require('./profiles');
 const mediaVision = require('./media-vision');
+const dataPaths = require('./data-paths');
 
 const PORT = process.env.PORT || 3001;
-const BASE_USERS_DIR = process.env.USERS_DIR ||
-  path.join(process.env.HOME || '/home/vova', 'users');
+// Single source of truth (src/data-paths.js) — do not re-derive from HOME.
+const BASE_USERS_DIR = dataPaths.USERS_ROOT;
+const userWorkDir = dataPaths.userWorkDir;
 
 // /run idempotency window (see the requestId handling below): in-memory only,
 // resets on restart — acceptable because it's guarding against a retry racing
@@ -51,6 +56,13 @@ function seenRequestId(id) {
 function rememberRequestId(id, taskId) {
   recentRequestIds.set(id, { taskId, at: Date.now() });
 }
+
+// Token-save Telegram notices: suppress byte-identical repeats to the same chat
+// (see src/tg-notice-dedupe.js) — stops automated/retried credential saves from
+// spamming a chat with the same confirmation (duplicate flood of 2026-09-24).
+const { createNoticeDeduper } = require('./tg-notice-dedupe');
+const tokenNoticeDeduper = createNoticeDeduper();
+const noticeAlreadySent = (chatId, text) => tokenNoticeDeduper.alreadySent(chatId, text);
 
 // Narrow ("specialized") bots delegate into a real profile instead of owning their
 // own. @cmr_management_bot ("misha") IS Flexi Consulting — its data (6 expo projects,
@@ -70,13 +82,13 @@ const { classifyMessage, CLASSIFY_MAX_AGE_MS } = require('./classify-message');
 const { checkCompleteness } = require('./intake-gate');
 
 function readChatId(username) {
-  try { return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', String(username), '.chatid'), 'utf8').trim() || null; }
+  try { return fs.readFileSync(path.join(dataPaths.TOKENS_ROOT, String(username), '.chatid'), 'utf8').trim() || null; }
   catch { return null; }
 }
 
 function scheduleNalogExpiryChecks(secrets) {
   const notified = new Set();
-  const AGENT_TOKENS_DIR = path.join(os.homedir(), 'agent-tokens');
+  const AGENT_TOKENS_DIR = dataPaths.TOKENS_ROOT;
   const CHECK_INTERVAL_MS = 5 * 60 * 1000;
   const NOTIFY_WINDOW_MS  = 10 * 60 * 1000; // notify if expired within last 10 min
 
@@ -262,6 +274,14 @@ async function resumePendingTasks(secrets) {
   for (const p of pending) {
     const now = Date.now();
     const age = now - (p.startedAt || 0);
+    // Journal hygiene (#1239): never resume a ping / status question — replaying "движется?"
+    // as a task is nonsense and was exactly the "user pings, session resumes with a question"
+    // symptom. Drop it silently (a ping needs no apology, and re-pinging is trivial).
+    if (isNonTaskMessage(p.task)) {
+      clearPendingTask(p.taskId);
+      console.log(`[resume] dropped non-task ${p.taskId} (user=${p.username}): "${String(p.task).slice(0, 40)}"`);
+      continue;
+    }
     const resumable = isTaskResumable(p, now, RESUME_WINDOW_MS);
     if (!resumable) {
       // Stale entries would otherwise block GTD indefinitely: isTaskRunning() reads this journal.
@@ -275,7 +295,21 @@ async function resumePendingTasks(secrets) {
 
     const engine = p.engine || 'claude';
     const attempt = (p.resumeAttempts || 0) + 1;
-    console.log(`[resume] engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(p.task).slice(0, 60)}"`);
+    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
+
+    // Native resume (#1234): claude (Sub-2) and codex (Sub-3) are wired. Source: the pending
+    // journal (written mid-run, survives SIGKILL) with the durable session record as fallback.
+    // opencode (Sub-4) still takes the context-rebuild path until its resume path is validated.
+    const NATIVE_RESUME_ENGINES = ['claude', 'codex'];
+    const nativeResumeId = NATIVE_RESUME_ENGINES.includes(engine)
+      ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, engine) : null))
+      : null;
+    // With a native resume the engine already holds the task, so replaying it is redundant (and
+    // risks redoing finished steps); send a short "keep going" instead.
+    const resumeTask = nativeResumeId
+      ? '[ПРОДОЛЖЕНИЕ] Сервер перезапустился и прервал тебя. Продолжи с того места, где остановился.'
+      : p.task;
+    console.log(`[resume] ${nativeResumeId ? 'native' : 'fallback'} engine=${engine} user=${p.username} session=${p.sessionId} attempt=${attempt}/${MAX_RESUME_ATTEMPTS} task="${String(resumeTask).slice(0, 60)}"`);
 
     if (attempt > MAX_RESUME_ATTEMPTS) {
       // The resume itself keeps failing across restarts (not just once) — this is a real,
@@ -286,41 +320,45 @@ async function resumePendingTasks(secrets) {
       continue;
     }
 
-    // Silently re-run with the original session context, on the same engine the task was
-    // running on (claude/opencode/codex all take the same path — none of the three CLIs use a
-    // native --resume flag here, buildEngineCommand always sends a single --print/exec prompt,
-    // so "resume" just means re-invoking runTask with the same task/session, which every engine
-    // handles identically). Delayed via retry-policy's shared backoff schedule so a deploy
-    // flurry (several restarts in quick succession) gets a chance to settle before we retry,
-    // instead of hammering the same failure immediately on every restart.
-    const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
+    // Delayed via retry-policy's shared backoff schedule so a deploy flurry (several restarts in
+    // quick succession) gets a chance to settle before we retry, instead of hammering the same
+    // failure immediately on every restart.
+    recordResume(nativeResumeId ? 'native' : 'fallback', engine); // #1240: measure native-vs-fallback
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
       profileId: p.profileId, telegramUserId: p.telegramUserId,
     };
-    const fireResume = () => runTask({
-      taskId: `${p.username}-resume-${Date.now()}`,
-      user, task: p.task, context: p.context || null,
-      engine, sessionId: p.sessionId || null,
-      contextFromSession: p.contextFromSession || null,
-      forceClaude: true, projectId: p.projectId || null,
-      initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
-      resumedAfterRestart: true, resumeAttempts: attempt,
-      secrets, internalGtd: !!p.internalGtd,
-    }).then(reply => {
-      // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
-      if (p.internalGtd && p.sessionId) require('./gtd-controller').settleResumedGtd(workDir, p.sessionId, reply);
-    }).catch(err => {
-      console.error(`[resume] user=${p.username} error:`, err.message);
-      if (!p.internalGtd) notifyFailure(p, '⚠️ Не удалось продолжить задачу после перезапуска. Повтори запрос.');
-    });
+    const fireResume = async () => {
+      try {
+        // runTask journals its replacement synchronously before returning its promise.
+        // Keep the old durable entry throughout backoff and until that handoff succeeds.
+        const running = runTask({
+          taskId: `${p.username}-resume-${Date.now()}`,
+          user, task: resumeTask, context: p.context || null,
+          engine, sessionId: p.sessionId || null,
+          contextFromSession: p.contextFromSession || null,
+          forceClaude: true, projectId: p.projectId || null,
+          initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
+          resumedAfterRestart: true, resumeAttempts: attempt,
+          resumeSessionId: nativeResumeId || null,
+          secrets, internalGtd: !!p.internalGtd,
+          mode: p.mode, continuationCount: p.continuationCount,
+          initiatedAt: p.initiatedAt, threadId: p.threadId,
+        });
+        clearPendingTask(p.taskId);
+        const reply = await running;
+        // Resumed GTD turn: runDue's .then() died with the old process, so settle here.
+        if (p.internalGtd && p.sessionId) require('./gtd-controller').settleResumedGtd(workDir, p.sessionId, reply);
+      } catch (err) {
+        console.error(`[resume] user=${p.username} error:`, err.message);
+        if (!p.internalGtd) await notifyFailure(p, '⚠️ Не удалось продолжить задачу после перезапуска. Повтори запрос.');
+      }
+    };
     const delayMs = getRetryDelayMs(attempt) || 0;
     if (delayMs > 0) setTimeout(fireResume, delayMs);
     else fireResume();
-    // runTask journals the new task id once fireResume() actually runs; drop the old entry
-    // now regardless, otherwise the next restart within the window would re-run this task
-    // a second time while the delayed attempt is still pending.
-    clearPendingTask(p.taskId);
+    // A process restart destroys its timers. Leave the journal intact while waiting
+    // so the next process can schedule the same attempt again without losing work.
     await new Promise(r => setTimeout(r, 200)); // stagger multiple resumes
   }
 }
@@ -554,8 +592,9 @@ async function main() {
       const calltipsToken = url.searchParams.get('token');
       if (!calltipsToken || calltipsToken !== calltipsHmac(profile))
         return json(res, 403, { error: 'invalid or missing token for this profile' });
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const filePath = path.join(dataDir, 'sessions', profile, 'calltips-latest.json');
+      // Call Tips session is written into the profile workspace (USERS_ROOT), not
+      // the legacy SYSTEM_ROOT/sessions tree — resolve via the canonical helper.
+      const filePath = path.join(userWorkDir(profile), 'calltips-latest.json');
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
         return json(res, 200, data);
@@ -732,8 +771,7 @@ ${recent || '(пока нет)'}
 
       if (!secrets.GITHUB_ISSUES_TOKEN) return json(res, 503, { error: 'reporting not configured' });
 
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const workDir = path.join(dataDir, 'sessions', username);
+      const workDir = userWorkDir(username);
 
       // Load current session
       let session = null;
@@ -889,17 +927,36 @@ ${recent || '(пока нет)'}
       }
     }
 
-    // GET /internal/auth-status — read/clear engine auth flags (for repair system).
-    // claude_auth_ok/reason/vm/... stay engine-agnostic-looking for back-compat with the existing
-    // repair system (always reflect the 'claude' engine, same as before per-engine tracking existed).
-    // `engines` is new: the full claude/codex/opencode breakdown, since Claude/Codex now auto-fall
-    // back to OpenCode on auth loss (issue #1061 Фаза 3) and the repair system needs to see all three.
+    // GET /internal/gtd-status — GTD tick heartbeat + backlog (issue #512 pt.3). The tick lives
+    // inside an in-process setInterval (scheduleGtdController below); if it ever silently stopped
+    // firing, open records would sit forever with no external signal. `stale` flips once we've
+    // missed 3 ticks' worth of time AND there's backlog waiting on it — cheap enough to poll from
+    // a cron-skill job without spawning Claude.
+    if (req.method === 'GET' && url.pathname === '/internal/gtd-status') {
+      const gtd = require('./gtd-controller');
+      const heartbeat = gtd.tickHeartbeat();
+      const legacy = gtd.countOpenLegacy(BASE_USERS_DIR);
+      const durable = gtd.durableItemCounts();
+      const msSinceLastTick = heartbeat.lastFinishAt != null ? Date.now() - heartbeat.lastFinishAt : null;
+      const backlog = legacy.open + durable.pending + durable.waiting;
+      const stale = msSinceLastTick != null && msSinceLastTick > 3 * 5 * 60 * 1000;
+      return json(res, stale && backlog > 0 ? 503 : 200, {
+        heartbeat, msSinceLastTick, stale, backlog, legacy, durable,
+      });
+    }
+
+    // GET /internal/auth-status — engine auth + health. Derived view of current state (spec §12):
+    // `engine_health` is the operational truth (healthy|degraded|unavailable, self-healed on the
+    // next successful call); `claude_auth_ok`/`reason`/… and `engines` are kept for back-compat
+    // with the existing repair system (they reflect the auth flag, which now only ever tracks a
+    // real credential loss — QUOTA/RATE_LIMIT no longer write it, see engine-health.js).
     if (req.method === 'GET' && url.pathname === '/internal/auth-status') {
       const flag = getAuthFlag('claude');
       return json(res, 200, {
         claude_auth_ok: !flag.failed,
         ...(flag.failed ? { reason: flag.reason, vm: flag.vm, failed_at: flag.failed_at, error_text: flag.error_text } : {}),
         engines: getAllAuthFlags(),
+        engine_health: getAllEngineHealth(),
       });
     }
 
@@ -913,8 +970,9 @@ ${recent || '(пока нет)'}
     // GET /analytics — aggregated token/cost usage across all users
     if (req.method === 'GET' && url.pathname === '/analytics') {
       const { getUsageLog } = require('./usage-store');
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const sessionsDir = path.join(dataDir, 'sessions');
+      // Usage logs live in each profile's workspace (USERS_ROOT/<u>/usage.json),
+      // not the legacy SYSTEM_ROOT/sessions tree.
+      const sessionsDir = dataPaths.USERS_ROOT;
       const totals = { tasks: 0, input: 0, output: 0, cost_usd: 0 };
       const byDate = {};   // date → { model → { input, output, cost, tasks } }
       const byUser = {};   // username → { tasks, input, output, cost_usd }
@@ -964,6 +1022,7 @@ ${recent || '(пока нет)'}
         memory: { totalMb: Math.round(totalMem / 1048576), usedMb: Math.round(usedMem / 1048576), freeMb: Math.round(freeMem / 1048576) },
         disk,
         uptime: process.uptime(),
+        resume: getResumeStats(), // #1240: native vs fallback post-restart resumes
       });
     }
 
@@ -1420,7 +1479,7 @@ ${recent || '(пока нет)'}
       if (!/^[a-zA-Z0-9_.-]+$/.test(label) || label.length > 64)
         return json(res, 400, { error: 'invalid label' });
 
-      const tokensDir = path.join(process.env.HOME || '/home/vova', 'agent-tokens', String(userId));
+      const tokensDir = path.join(dataPaths.TOKENS_ROOT, String(userId));
       fs.mkdirSync(tokensDir, { recursive: true });
       const storedValue = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
       // If the target path is a directory (e.g. getcourse/ stores a Playwright session),
@@ -1468,13 +1527,12 @@ ${recent || '(пока нет)'}
           }).catch(() => {});
 
           const chatId = readChatId(String(userId));
-          if (chatId && secrets.BOT_TOKEN) tgSend(chatId, svcAction.pendingMsg);
+          if (chatId && secrets.BOT_TOKEN && !noticeAlreadySent(chatId, svcAction.pendingMsg)) tgSend(chatId, svcAction.pendingMsg);
 
           svcAction.run(String(userId), creds).then(result => {
             const chatId2 = readChatId(String(userId));
-            if (chatId2 && secrets.BOT_TOKEN) {
-              tgSend(chatId2, result.status === 'ok' ? svcAction.ok(result) : svcAction.err(result));
-            }
+            const text = result.status === 'ok' ? svcAction.ok(result) : svcAction.err(result);
+            if (chatId2 && secrets.BOT_TOKEN && !noticeAlreadySent(chatId2, text)) tgSend(chatId2, text);
           }).catch(e => console.error(`[tokens/${label}] action failed:`, e.message));
         }
       }
@@ -1486,7 +1544,7 @@ ${recent || '(пока нет)'}
         if (creds && creds.login && creds.password) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
           const nalogChatId = readChatId(String(userId));
-          if (nalogChatId && secrets.BOT_TOKEN) {
+          if (nalogChatId && secrets.BOT_TOKEN && !noticeAlreadySent(nalogChatId, '⏳ Данные получены — вхожу в Госуслуги...')) {
             fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
               method: 'POST', signal: AbortSignal.timeout(8000),
               headers: { 'Content-Type': 'application/json' },
@@ -1506,11 +1564,13 @@ ${recent || '(пока нет)'}
             } else {
               text = `❌ Не удалось войти в Госуслуги: ${result.error}\n\nПроверьте логин/пароль и повторите: «подключи налог»`;
             }
-            fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
-              method: 'POST', signal: AbortSignal.timeout(8000),
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chat_id: chatId2, text }),
-            }).catch(() => {});
+            if (!noticeAlreadySent(chatId2, text)) {
+              fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
+                method: 'POST', signal: AbortSignal.timeout(8000),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: chatId2, text }),
+              }).catch(() => {});
+            }
           }).catch(e => console.error('[tokens/nalog-creds] login async failed:', e.message));
         }
       }
@@ -1531,17 +1591,15 @@ ${recent || '(пока нет)'}
       })();
       if (!svcAction && label !== 'nalog-creds' && hasRealValue) {
         const fbChatId = readChatId(String(userId));
-        if (fbChatId && secrets.BOT_TOKEN) {
+        const displayName = label.replace(/-creds?$/i, '').replace(/-/g, ' ');
+        const serviceTitle = displayName.charAt(0).toUpperCase() + displayName.slice(1);
+        const noticeText = `✅ Данные для ${serviceTitle} сохранены. Напиши «войди в ${serviceTitle}» — залогинюсь автоматически.`;
+        if (fbChatId && secrets.BOT_TOKEN && !noticeAlreadySent(fbChatId, noticeText)) {
           const tgBase = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-          const displayName = label.replace(/-creds?$/i, '').replace(/-/g, ' ');
-          const serviceTitle = displayName.charAt(0).toUpperCase() + displayName.slice(1);
           fetch(`${tgBase}/bot${secrets.BOT_TOKEN}/sendMessage`, {
             method: 'POST', signal: AbortSignal.timeout(8000),
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: fbChatId,
-              text: `✅ Данные для ${serviceTitle} сохранены. Напиши «войди в ${serviceTitle}» — залогинюсь автоматически.`,
-            }),
+            body: JSON.stringify({ chat_id: fbChatId, text: noticeText }),
           }).catch(() => {});
         }
       }
@@ -1846,8 +1904,7 @@ ${recent || '(пока нет)'}
       // Collect session context (last 8 messages)
       let contextLines = [];
       try {
-        const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-        const workDir = path.join(dataDir, 'sessions', username);
+        const workDir = userWorkDir(username);
         if (sessionId) {
           const sessionFile = path.join(workDir, 'sessions', `${sessionId}.json`);
           if (fs.existsSync(sessionFile)) {

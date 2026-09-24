@@ -46,8 +46,10 @@ async function spawnTestAgent(fakeTgPort) {
     TELEGRAM_API_URL: `http://127.0.0.1:${fakeTgPort}`,
     TELEGRAM_BOT_TOKEN: 'fake-mainstream-token',
     AGENT_DATA_DIR: TEST_DATA_DIR,
-    // Isolate agent tokens to the test dir so test users don't pollute ~/agent-tokens
+    // Isolate agent tokens to the test dir so test users don't pollute ~/agent-tokens.
+    // Set BOTH names: data-paths/hh-* read AGENT_TOKENS_DIR, user-tokens.js reads AGENT_TOKENS_ROOT.
     AGENT_TOKENS_DIR: path.join(TEST_DATA_DIR, 'tokens'),
+    AGENT_TOKENS_ROOT: path.join(TEST_DATA_DIR, 'tokens'),
     NODE_ENV: 'test',
     TEST_MODE: '1',
     // Force env-var secrets loading (skip GCP Secret Manager)

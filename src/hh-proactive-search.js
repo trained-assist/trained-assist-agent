@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { readHhToken } = require('./hh-utils');
+const { userWorkDir } = require('./data-paths');
 
 const HH_API_BASE = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
 const HH_CONTACT = process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru';
@@ -673,7 +674,7 @@ function buildScoringPromptText(username) {
   // Fall back to the results-file snapshot so the function still works without a running session.
   let rawConfig = latest.ats_config || {};
   try {
-    const ctxFile = path.join(dataDir, 'sessions', String(username), 'contexts', 'hh', 'ats_config.json');
+    const ctxFile = path.join(userWorkDir(username), 'contexts', 'hh', 'ats_config.json');
     const ctxRaw = JSON.parse(fs.readFileSync(ctxFile, 'utf8'));
     if (ctxRaw?.value && typeof ctxRaw.value === 'object') rawConfig = ctxRaw.value;
   } catch { /* no context store — use results file */ }

@@ -40,7 +40,7 @@ trained-assist-tg-bot  (Cloudflare Worker — stateless)
 ```
 
 **trained-assist-agent** manages:
-- Per-user working directories (`~/agent-data/sessions/<username>/`)
+- Per-user working directories (`~/users/<username>/`)
 - Session state and topics (in-memory + disk persistence)
 - Claude Code process lifecycle
 - MCP skills server (`trained-skills`) per session
@@ -67,7 +67,7 @@ Three distinct concepts — understanding them prevents confusion:
 | **Chat** | `userId` in `/run` | `number` (Telegram chat ID) | Where Claude's output streams to — a private chat or group. Many chats → one profile. The bot controls the mapping. |
 | **Telegram User** | `telegramUserId` | `number` | The individual human who sent the message. Informational only — does not control routing or state. |
 
-**Profile is the unit of isolation.** Tokens: `~/agent-tokens/{username}/`. Sessions: `~/agent-data/sessions/{username}/`. Claude sees `USER_ID={username}`.
+**Profile is the unit of isolation.** Tokens: `~/agent-tokens/{username}/`. Workspace (sessions, projects, per-profile data): `~/users/{username}/`. Claude sees `USER_ID={username}`.
 
 **Many chats → one profile** is supported by design. A recruiter profile shared across 5 people and 2 groups all use the same HH token, same session history, same ATS configs. The bot implements this via `CHAT_MAPPINGS` env var (see [tg-bot#17](https://github.com/trained-assist/trained-assist-tg-bot/pull/17)).
 
@@ -440,17 +440,29 @@ npm run check  # syntax check all src files
 | Var | Default | Description |
 |-----|---------|-------------|
 | `PORT` | `3000` | HTTP listen port |
-| `AGENT_DATA_DIR` | `~/agent-data` | Data directory for sessions + user registry |
+| `AGENT_DATA_DIR` | `~/agent-data` | Server-side operational state (candidate history, pending tasks, flags, execution history) |
+| `USERS_DIR` | `~/users` | Canonical per-profile workspace root — sessions, projects, contexts, artifacts. Set explicitly in systemd |
+| `AGENT_TOKENS_DIR` | `~/agent-tokens` | Per-profile credentials/tokens root. Set explicitly in systemd |
 | `NODE_ENV` | — | Set to `production` in systemd |
 | `AGENT_PUBLIC_URL` | `https://recruiter-assistant.ru` | Public base URL for connect-links. RU VM: `https://platform.recruiter-assistant.ru` |
+| `ENGINE_UNAVAILABLE_AFTER_FAILURES` | `3` | Consecutive relevant engine failures before `engine_health.status` flips degraded → unavailable |
+
+> **Engine Health vs Credentials vs Failure Events** (`src/engine-health.js`, spec §7–§10): three separate concerns.
+> - **Credentials** — `auth-flag.js` + CLI credential stores. The auth flag now tracks only a real credential loss (class `AUTH`).
+> - **Engine Health** — operational state per engine (`healthy`/`degraded`/`unavailable`, `consecutive_failures`, `last_failure_*`), SQLite at `$AGENT_DATA_DIR/engine-health/state.db`. Self-heals to `healthy` on the next successful call; failure history is not erased.
+> - **Failure Events** — append-only attempt chain in `execution-history.js`.
+>
+> `QUOTA` / `RATE_LIMIT` / `CONFIG` degrade health but are **not** credential-invalid. `/internal/auth-status` returns both the back-compat `engines` flags and the derived `engine_health` view.
+
+> **Identity ≠ location:** durable state stores stable IDs (profileId/projectId/sessionId/executionId) — filesystem paths are always derived in `src/data-paths.js`. Never persist an absolute path or construct a profile path inline. The legacy `$AGENT_DATA_DIR/sessions/<profile>` workspace tree is deprecated and migrated by `scripts/migrate-workspaces.mjs` (runs automatically in `deploy.sh`).
 
 Note: on first deploy after this change, `deploy.sh` automatically migrates `~/alesa-data` → `~/agent-data` if the old directory exists.
 
 ## Claude Code Instructions
 
 ### Architecture rules
-- All state on disk in `AGENT_DATA_DIR` — persists across process restarts. **Always read from `process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data')`, never hardcode the path.**
-- Per-user workDir: `$AGENT_DATA_DIR/sessions/<username>/` — files for Claude Code
+- All state on disk — persists across process restarts. **Resolve every path through `src/data-paths.js` (`USERS_ROOT`/`SYSTEM_ROOT`/`TOKENS_ROOT` + helpers); never hardcode or re-derive from `os.homedir()` inline.**
+- Per-user workDir: `$USERS_DIR/<username>/` — files for Claude Code (canonical per-profile workspace; resolved via `src/data-paths.js`, never hardcode)
 - User tokens: `~/agent-tokens/<username>/` — one file per service (github, nalog, gdrive…), `mode 0o600`
 - Connect-pending tokens: `~/connect-pending/<token>.json` — short-lived (30 min), `mode 0o600`
 - HTTP server: no framework, built-in `http` module only
@@ -486,6 +498,8 @@ Enforced in CI (`ci.yml` → "Recruiter/HH tools must call OpenRouter, not spawn
 | `src/inn-pipeline/` | Multi-source pipeline for company lookup by INN. Sources: `sources/dadata.js`, `sources/checko.js`, `sources/egrul.js`, `sources/bfo.js`, `sources/site-scraper.js`. Helpers in `lib/`: cache, matcher, usage-log, variants. |
 | `src/site-connector.js` | Generic website connector: Playwright login → BFS crawl → Claude Haiku analysis → intent generation. Used by `POST /connect/site` and `src/user-sites.js`. |
 | `src/user-sites.js` | Stores and loads connected-site settings per profile. Reads intents from the crawl results; used by `runner.js` to inject site-specific quick answers. |
+| `src/engine-health.js` | Per-engine operational health (`healthy`/`degraded`/`unavailable`) in SQLite, separate from credentials (`auth-flag.js`) and failure history (`execution-history.js`). `markEngineSuccess` self-heals on success; `markEngineFailure` escalates at `ENGINE_UNAVAILABLE_AFTER_FAILURES`. Only class `AUTH` is credential-invalid. |
+| `src/failure-classifier.js` | Deterministic + cheap-LLM classifier mapping error text onto the fixed `FAILURE_CLASSES` enum (`failure-taxonomy.js`). Feeds `engine-health.js` and `execution-history.js`. |
 | `scripts/refresh-weeek-session.js` | Refreshes `WEEEK_APP_COOKIE` in the Cloudflare Worker secret. Flow: capture cookies from Chrome via CDP → headless Playwright fallback → CF REST API update → Telegram alert on failure. Run manually or via `weeek-session-refresh.service`. |
 
 ### Quick answers — prefer instant replies over calling Claude
@@ -540,7 +554,7 @@ Sessions in Telegram are the core UX feature. Understanding the two-layer archit
 #### Two-layer storage
 
 ```
-$AGENT_DATA_DIR/sessions/<username>/
+$USERS_DIR/<username>/
   sessions.json              ← INDEX: array of {id, topic, lastAt, messageCount, lastUserMessage}
   sessions/
     s-1234567890.json        ← FULL SESSION: {id, topic, messages: [{role, content, at}]}
@@ -579,16 +593,16 @@ Then the current task is appended as `Пользователь: <task>`. Without
 
 #### Common traps
 
-**1. Never hardcode data directory path.**
+**1. Never construct a profile path inline — resolve it via `src/data-paths.js`.**
 ```js
-// ❌ Wrong — breaks on path change
+// ❌ Wrong — hardcodes the legacy AGENT_DATA_DIR/sessions tree and breaks on a path change
 const workDir = path.join(os.homedir(), 'agent-data', 'sessions', username);
 
-// ✅ Right
-const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-const workDir = path.join(dataDir, 'sessions', username);
+// ✅ Right — canonical per-profile workspace root (USERS_DIR/<username>)
+const { userWorkDir } = require('./data-paths');
+const workDir = userWorkDir(username);
 ```
-The systemd service sets `AGENT_DATA_DIR=/home/vova/agent-data`. On local dev this defaults to the same value. Always use the env var.
+Roots are set explicitly in systemd (`USERS_DIR=/home/vova/users`, `AGENT_DATA_DIR=/home/vova/agent-data`, `AGENT_TOKENS_DIR=/home/vova/agent-tokens`). Always go through the resolver — inline `os.homedir()` derivation drifts and breaks tests.
 
 **2. Quick answers that touch state still need null-guard on `workDir`.**
 ```js
@@ -751,21 +765,30 @@ grep -r "^123456789$" ~/agent-tokens/*/.chatid 2>/dev/null
   github                  ← GitHub personal access token (plain text)
   getcourse/config.json   ← GetCourse API key + session cookies
 
-~/agent-data/sessions/<username>/
-  sessions.json           ← session index (50 most recent)
+~/users/<username>/              ← USERS_DIR: canonical per-profile workspace
+  sessions.json                 ← session index (50 most recent)
   sessions/
-    s-<id>.json           ← full session with messages
-  current-session.json    ← pointer to active session
-  .pin_state.json         ← pinned context card state (msgId + chatId)
-  profile.json            ← user profile (about, preferences)
-  requirements-log.md     ← per-user requirements log
-  contexts/               ← key-value state for MCP skills (03-context-store.js)
+    s-<id>.json                 ← full session with messages
+  current-session.json          ← pointer to active session
+  .pin_state.json               ← pinned context card state (msgId + chatId)
+  profile.json                  ← user profile (about, preferences)
+  requirements-log.md           ← per-user requirements log
+  contexts/                     ← key-value state for MCP skills (03-context-store.js)
     <skill>/
       <key>.json
+  projects/<projectId>/         ← cwd for sessions of that project (projects.js)
+  artifacts/artifacts.jsonl     ← operational: extracted artifacts (post-tool-use hook)
+  sites/<slug>/                 ← operational: connected-site config (user-sites.js)
+  calltips-latest.json          ← operational: last Call Tips plan
+  video-analysis/ interview-analysis/   ← operational: analyses
+  .inn-config.json              ← operational: INN-pipeline keys
 
-~/agent-data/system-flags/
-  claude_auth.json        ← auth error flag set by auth-flag.js
+~/agent-data/                    ← SYSTEM_ROOT: server-wide operational state (NOT per-profile)
+  system-flags/claude_auth.json  ← engine auth flag (auth-flag.js)
+  pending-tasks/ execution-history/ hh/<username>/ …
 ```
+
+> Legacy `~/agent-data/sessions/<username>/` is deprecated — `scripts/migrate-workspaces.mjs` merges it into `~/users/<username>/` (dry-run/apply/rollback, ledgered, idempotent).
 
 ---
 

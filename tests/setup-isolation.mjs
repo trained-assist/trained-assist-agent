@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const root = mkdtempSync(join(tmpdir(), 'agent-vitest-'));
-for (const [key, child] of Object.entries({ AGENT_DATA_DIR: 'data', USERS_DIR: 'users' })) {
+for (const [key, child] of Object.entries({ AGENT_DATA_DIR: 'data', USERS_DIR: 'users', AGENT_TOKENS_DIR: 'tokens' })) {
   const directory = join(root, child);
   mkdirSync(directory, { recursive: true });
   process.env[key] = directory;

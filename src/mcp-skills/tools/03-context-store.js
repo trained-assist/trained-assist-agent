@@ -22,9 +22,9 @@ function writeContext(skill, key, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // Atomic write: the context store is keyed by PROFILE (username), so two
   // concurrent sessions of one profile can write it at the same time. The
-  // serialization lane is per-SESSION (see runner._laneKey) and deliberately
-  // does NOT serialize sibling sessions, so this store is the one genuinely
-  // shared per-profile resource. temp + rename means a reader never observes a
+  // runner only serializes per-CHAT (parallel tasks across sessions/chats of
+  // one profile are allowed), so this store is the one genuinely shared
+  // per-profile resource. temp + rename means a reader never observes a
   // torn file, and a crash mid-write leaves the previous value intact rather
   // than corrupt — this is what makes parallel same-profile sessions safe.
   const tmp = `${file}.${process.pid}.tmp`;

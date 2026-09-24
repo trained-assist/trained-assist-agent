@@ -31,7 +31,9 @@ const HH_SCAN_INTENT         = /\/hh_scan|запусти скан|проскан
 // no token is saved (returns "HH не подключён"), and the intent must NOT be in
 // hhIntents (which gates on hhConnected) — otherwise disconnected users could
 // not type /hh_disconnect to clean up a stale token file.
-const HH_DISCONNECT_INTENT   = /\/hh_disconnect|отключи(?:ть)?\s*(?:hh|хх|headhunter)|удали(?:ть)?\s*(?:hh|хх|headhunter)|hh.{0,15}(?:отключи|удали|разъедин|сброс)|сброс.{0,15}(?:hh|хх|headhunter|авторизац)|выключи.{0,15}(?:hh|хх|headhunter)|reset.{0,15}hh/i;
+// Credential mutations require a complete standalone request, never a substring
+// in a specification, quotation, negation, or multi-message batch.
+const HH_DISCONNECT_INTENT = /^\s*(?:\[Сообщение \d+\]\s*)?(?:\/hh_disconnect(?:@[a-z0-9_]+)?|(?:отключи(?:ть)?|удали(?:ть)?|выключи|сброс|reset) +(?:hh|хх|headhunter)(?: +авторизации)?|(?:hh|хх|headhunter) +(?:отключи|удали|сброс))\s*[.!]?\s*$/i;
 // /hh publish draft — publish an existing vacancy draft to HeadHunter as a draft
 const VACANCY_HH_PUBLISH_INTENT = /опубликуй.{0,20}(?:черновик.{0,15}(?:на\s+)?(?:hh|хх)|(?:на\s+)?(?:hh|хх).{0,15}черновик)|загрузи.{0,20}(?:на\s+)?(?:hh|хх)|публикуй.{0,20}(?:на\s+)?(?:hh|хх)|сохрани.{0,20}черновик.{0,20}(?:hh|хх)/i;
 // /hh prep draft — "подготовь черновик вакансии на HH": fast-path push when draft_ready, else single-shot collect

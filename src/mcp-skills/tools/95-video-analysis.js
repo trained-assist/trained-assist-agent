@@ -82,8 +82,7 @@ function workDir(outDir) {
     const base = activeProjectDir() || userWorkspace();
     dir = base
       ? path.join(base, 'interviews')
-      : path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'),
-          'sessions', USER_ID, 'video-analysis');
+      : path.join(require('../../data-paths').userWorkDir(USER_ID), 'video-analysis');
   }
   fs.mkdirSync(path.join(dir, 'transcripts'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'audio'), { recursive: true });

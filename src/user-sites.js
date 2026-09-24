@@ -2,14 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-
-function dataDir() {
-  return process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-}
+const { userWorkDir } = require('./data-paths');
 
 function sitesRoot(username) {
-  return path.join(dataDir(), 'sessions', username, 'sites');
+  // Connected-site config lives in the profile workspace (USERS_ROOT/<u>/sites).
+  return path.join(userWorkDir(username), 'sites');
 }
 
 function slugFor(url) {

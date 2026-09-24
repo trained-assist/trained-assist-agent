@@ -445,6 +445,56 @@ echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output
     }
   });
 
+  // Regression for 2026-09-24 bug report: /switch2codex sat behind "Ожидаю завершения
+  // предыдущей работы" instead of answering instantly, because ENGINE_SWITCH_INTENT was
+  // missing from isPreQueueQuickIntent's whitelist even though its handler is a sync,
+  // local profiles.json write with no Claude/network call — same shape as /agent_info above.
+  it('/switch2codex answers immediately while a real task is still running in the same chat', { timeout: 20000 }, async () => {
+    const SLOW_MS = 4000;
+    writeSlowClaudeScript(SLOW_MS);
+    const userId = 555444334;
+    try {
+      const slowTask = runTask({
+        taskId: `slow-${Date.now()}`,
+        user: makeUser(userId),
+        task: 'сделай что-нибудь долгое',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+
+      await new Promise(r => setTimeout(r, 300));
+
+      const t0 = Date.now();
+      await runTask({
+        taskId: `switch-${Date.now()}`,
+        user: makeUser(userId),
+        task: '/switch2codex',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+      const elapsedMs = Date.now() - t0;
+
+      expect(elapsedMs, `/switch2codex took ${elapsedMs}ms — looks like it waited behind the slow task instead of bypassing the queue`).toBeLessThan(SLOW_MS / 2);
+
+      let texts = [];
+      for (let i = 0; i < 20; i++) {
+        texts = tgTexts();
+        if (texts.some(t => /движок/i.test(t))) break;
+        await new Promise(r => setTimeout(r, 25));
+      }
+      expect(texts.some(t => /движок/i.test(t)), 'expected an engine-switch-shaped reply').toBe(true);
+      expect(texts.some(t => /Ожидаю завершения предыдущей работы/i.test(t)), 'must NOT get the queued-behind-previous-task message').toBe(false);
+
+      await slowTask;
+    } finally {
+      restoreNormalClaude();
+    }
+  });
+
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -495,6 +545,53 @@ describe('Session continuity TTL', () => {
     expect(current.id).not.toBe(autoId);
   });
 
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENARIO 3b: cross-chat isolation is non-blocking
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Cross-chat session isolation is non-blocking', () => {
+  const CHAT_A = -5042012537;
+  const CHAT_B = -5042012538;
+
+  it('a foreign session id never blocks — the chat still gets an answer', { timeout: 30000 }, async () => {
+    // CHAT_A owns a session.
+    await chat('подключи github', { userId: CHAT_A });
+    const sessA = readCurrentSession(CHAT_A);
+    expect(sessA, 'CHAT_A session not created').not.toBeNull();
+
+    // CHAT_B's gateway mistakenly hands back CHAT_A's session id.
+    await chat('сделай отчёт', { userId: CHAT_B, sessionId: sessA.id, claudeReply: 'Отчёт готов' });
+
+    // No rejection message.
+    expect(tgTexts().some(t => /закреплена за другим чатом/.test(t))).toBe(false);
+
+    // CHAT_B got its own current session + the answer.
+    const sessB = readCurrentSession(CHAT_B);
+    expect(sessB, 'CHAT_B session not created').not.toBeNull();
+    expect(sessB.id).not.toBe(sessA.id);
+    expect(readSession(sessB.id).messages.some(m => m.content.includes('Отчёт готов'))).toBe(true);
+
+    // CHAT_A's session is untouched and still attached to CHAT_A.
+    const a = readSession(sessA.id);
+    expect(String(a.liveChatId)).toBe(String(CHAT_A));
+    expect(a.messages.some(m => m.content.includes('сделай отчёт'))).toBe(false);
+  });
+
+  it("falls back to this chat's own session when it already has one", { timeout: 30000 }, async () => {
+    await chat('подключи github', { userId: CHAT_B });        // CHAT_B owns S_B
+    const sessB = readCurrentSession(CHAT_B);
+
+    await chat('подключи github', { userId: CHAT_A });        // CHAT_A owns S_A
+    const sessA = readCurrentSession(CHAT_A);
+    expect(sessA.id).not.toBe(sessB.id);
+
+    // CHAT_B receives CHAT_A's id — must continue S_B, not spawn a new session.
+    await chat('прочитай файл sales.xlsx', { userId: CHAT_B, sessionId: sessA.id, claudeReply: 'Прочитал' });
+
+    expect(readCurrentSession(CHAT_B).id, 'expected CHAT_B to continue its own session').toBe(sessB.id);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -935,7 +1032,12 @@ describe('terminal answer delivery', () => {
     };
     try {
       streamScript([tool, { type: 'result', subtype: 'success', result: 'Финальный отчёт' }]);
-      await chat('Проверь проект и исправь найденные дефекты');
+      // Fresh chat id: progress edits coalesce per chat — an edit is skipped if one
+      // already landed for that chat <1.2s ago (tg-stream `lastEditAt`). The default
+      // test chat id is reused across tests, so its coalesce window can already be
+      // open and the event-driven progress edit below would be skipped, leaving
+      // nothing in flight to wait for. A unique id guarantees the edit is sent.
+      await chat('Проверь проект и исправь найденные дефекты', { userId: 555000123 });
       expect(progressFinished).toBe(true);
       expect(tgTexts().at(-1)).toContain('Финальный отчёт');
     } finally { writeNormalClaudeScript(); }

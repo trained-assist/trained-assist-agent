@@ -22,7 +22,12 @@ const AUTH_ERROR_PATTERNS = [
   /invalid[_\s-]{0,5}api[_\s-]{0,5}key/i,
   /authentication[^.]{0,30}failed/i,
   /quota[^.]{0,20}exceeded/i,
-  /rate[_\s-]{0,5}limit/i,
+  // Usage/rate-limit phrasing that is actually an error. Deliberately NOT the bare
+  // /rate[_\s-]{0,5}limit/i: ordinary assistant prose ("Telegram's 429 rate-limit drop")
+  // matched it, raising a false auth flag and bouncing a healthy task to the OpenCode
+  // fallback (#1227). Callers must also feed only genuine error text (see runner/index.js).
+  /usage[_\s-]{0,5}limit/i,
+  /rate[_\s-]{0,5}limit[^.]{0,20}(exceed|reached|hit)/i,
 ];
 
 function isAuthError(text) {

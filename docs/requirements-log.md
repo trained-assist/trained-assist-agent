@@ -74,12 +74,14 @@
 | ✅ реализовано | MCP skills server | stdio JSON-RPC, auto-discover из tools/*.js |
 | ✅ реализовано | Token storage | ~/agent-tokens/{USER_ID}/{label}, инжектируется в env через runner.js |
 | ✅ реализовано | Session управление | sessions.json, buildContext, appendUserMessage |
+| ✅ реализовано | **Кросс-чат: изоляция без блокировки** | Если шлюз прислал sessionId, привязанный к другому чату того же профиля, сообщение больше НЕ отклоняется («⚠️ Эта сессия закреплена за другим чатом…» удалено). Чужая сессия просто не используется: продолжаем собственную текущую сессию чата (в пределах 4ч) или создаём новую. Чужая сессия не трогается — её контекст остаётся у своего чата. `src/runner/index.js` |
 | ✅ реализовано | Браузерная сессия | noVNC → Chrome CDP, захват кукисов |
 | ✅ реализовано | **Infra manifest + CI sync check** | `infra/env-manifest.json` — единый источник правды для всех секретов. `scripts/check-env-sync.js` валидирует ci.yml в CI. |
 | ✅ реализовано | **Деплой на push в main** | ci.yml: deploy-jobs принимают merge.result == success ИЛИ push to main — больше не нужно PR чтобы задеплоить hotfix. |
 | ✅ реализовано | **Manual Deploy workflow** | `workflow_dispatch` без PR: GitHub → Actions → Manual Deploy → выбор таргета gcp/ru/both. |
 | ✅ реализовано | **Health endpoint: vm + commit** | `/health` возвращает `{ vm: "gcp-main", commit: "abc1234" }` — сразу видно что на каком VM. |
 | ✅ реализовано | **Test isolation (AGENT_TOKENS_ROOT)** | `src/user-tokens.js` читает `AGENT_TOKENS_ROOT` env var — тесты больше не трогают реальный `~/agent-tokens/`. PR #201. |
+| ✅ реализовано | **Token-notify dedupe + полная изоляция токенов** | Флуд дубликатов в чатах (инцидент 2026-09-24): автоматические/повторные сохранения токенов через `POST /tokens` слали одну и ту же фразу в чат десятки раз. Введён `src/tg-notice-dedupe.js` — идентичное сообщение в тот же чат подавляется в окне 10 мин (`TG_NOTICE_DEDUPE_MS`). Плюс `data-paths.js` теперь признаёт и `AGENT_TOKENS_ROOT` (алиас `AGENT_TOKENS_DIR`), а `runner/index.js` пишет `.chatid`/токены через `TOKENS_ROOT` — раньше хардкод `~/agent-tokens` обходил изоляцию тестов и залил 12k тест-профилей в прод. |
 | 🔵 планируется | **Credential Store (шифрование at rest)** | Токены юзеров хранятся plain text. Перевести на AES-256-GCM с мастер-ключом из GCP SM. Детальный план: `docs/credential-store-migration.md`. |
 | 🔵 планируется | **TTL для nalog-токенов** | `/capabilities` отдаёт `nalog` даже если токен протух 3ч назад. Добавить `.meta` с `expires_at`, фильтровать. Входит в credential store migration. |
 | 🔵 планируется | **CI: кэш node_modules** | `npm ci` переустанавливает Playwright каждый раз (~30-60s). Добавить `actions/cache` по хешу `package-lock.json`. |

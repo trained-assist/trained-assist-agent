@@ -62,9 +62,21 @@ trap on_deploy_error ERR
 
 # Dependencies: only reinstall when they actually changed. Staged in a side directory so a
 # network/npm failure never leaves the live node_modules half-deleted.
+#
+# The lockfile-unchanged fast path used to trust node_modules on disk unconditionally — but
+# node_modules can go stale/broken for reasons the lockfile diff can't see (a previous deploy's
+# npm ci left it partial, disk issue, manual meddling), and an unverified "keeping node_modules"
+# then ships a service that MODULE_NOT_FOUNDs on every boot. Concrete incident: 2026-09-23,
+# node_modules/better-sqlite3 went missing on disk with package.json/package-lock.json fully
+# unchanged — three deploys in a row trusted the stale node_modules, each shipped a crash-looping
+# service, and each deploy's own `systemctl reset-failed` re-armed systemd's StartLimitBurst fuse
+# before it could trip and alert the operator — ~10 minutes of the bot silently unresponsive.
+# `npm ls` is a fast (~1s), no-network, no-mutation read of the dependency tree — cheap enough to
+# run on every deploy as a trust-but-verify check on the skip decision.
 if [ -d "$REPO_DIR/node_modules" ] && [ -n "$PREV_COMMIT" ] &&
-   git -C "$REPO_DIR" diff --quiet "$PREV_COMMIT" HEAD -- package.json package-lock.json; then
-  echo "==> package.json / package-lock.json unchanged — keeping node_modules"
+   git -C "$REPO_DIR" diff --quiet "$PREV_COMMIT" HEAD -- package.json package-lock.json &&
+   npm ls --prefix "$REPO_DIR" --omit=dev --depth=0 >/dev/null 2>&1; then
+  echo "==> package.json / package-lock.json unchanged and node_modules verified intact — keeping it"
 else
   echo "==> Preparing dependencies in an isolated directory..."
   DEPS_STAGE=$(mktemp -d "$REPO_DIR/../.agent-deps.XXXXXX")
@@ -174,6 +186,15 @@ cd "$REPO_DIR"
 
 # Orphan processes (started outside systemd) stay alive on port 8080 and serve stale code.
 sudo fuser -k 8080/tcp 2>/dev/null || true
+
+# ── Workspace storage migration (legacy AGENT_DATA_DIR/sessions → USERS_DIR) ──────
+# Idempotent + ledgered. Runs while the service is stopped so the new code starts
+# with data already in the canonical root (identity ≠ location). Never blocks the
+# deploy — a partial run is reported and can be re-run; the ledger enables rollback.
+echo "==> Migrating legacy per-profile workspaces (agent-data/sessions → users)..."
+USERS_DIR="${USERS_DIR:-$HOME/users}" AGENT_DATA_DIR="${AGENT_DATA_DIR:-$HOME/agent-data}" \
+  node "$REPO_DIR/scripts/migrate-workspaces.mjs" --apply --quiet \
+  || echo "  ⚠️  workspace migration reported issues — re-run scripts/migrate-workspaces.mjs (see ledger)"
 
 echo "==> Starting service..."
 # Clear any failed state (e.g. StartLimitBurst exhausted from crash loops) so

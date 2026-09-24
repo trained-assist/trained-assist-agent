@@ -88,7 +88,7 @@ const DEV_INTENT = /разраб[оа][тк]|(?:создай|сделай|нап
 const NEW_JOB_INTENT            = /новая вакансия|new job post|\/new_job_post|создать вакансию|добавить вакансию|создай вакансию/i;
 const STOP_TASK_INTENT          = /^\/stop$|^стоп[!.?]?$|^stop[!.?]?$|^остановись[!.?]?$|^отмена[!.?]?$/i;
 const GTD_STOP_INTENT           = /^(?:\[Сообщение \d+\]\s*)?\/(?:gtd_stop|stop_gtd|checklist_turn_off)(?:@\w+)?$|стоп.{0,5}gtd\b|gtd.{0,5}стоп\b/i;
-const ACTIVE_CHECKLIST_INTENT   = /^(?:\[Сообщение \d+\]\s*)?\/active_checklist(?:@\w+)?$/i;
+const ACTIVE_CHECKLIST_INTENT   = /^(?:\[Сообщение \d+\]\s*)?\/(?:show_active_cheklist|active_checklist)(?:@\w+)?$/i;
 // Natural-language "хочу поправить чек-лист" — hand back checklist.trainedassist.store
 // autologin link instead of asking for a password. Edit/view verbs + "чек-лист" in either
 // order; deliberately excludes GTD_STOP_INTENT's "стоп"/"выключи" and bare /active_checklist.
@@ -161,10 +161,17 @@ const MODEL_INFO_INTENT = /(?:на\s+какой\s+(?:модел|нейросет
 // PROJECT_INTENT (they can mutate persona/project files) and SESSIONS_INTENT/
 // SESSION_DETAIL_INTENT (they may call out to an LLM to generate a summary) — those stay
 // on the queued path for now.
+// ENGINE_SWITCH_INTENT (/switch2klod, /switch2codex, /switch2opencode) IS included: it's a
+// sync profiles.json write with no Claude/network call, and its own handler already documents
+// that a running task keeps its already-captured engine — the switch only affects the NEXT
+// task in this chat, so applying it immediately is safe. Was missing from this whitelist
+// (2026-09-24 bug report: /switch2codex sat behind "Ожидаю завершения предыдущей работы"
+// instead of answering instantly like /ping does).
 function isPreQueueQuickIntent(task) {
   return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
     MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
-    USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task);
+    USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
+    ENGINE_SWITCH_INTENT.test(task);
 }
 // A slash command is an unambiguous, registry-backed user command — never fuzzy prose.
 function isSlashCommand(task) {
@@ -1187,6 +1194,14 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
 async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
+  // Handle complete credential-disconnect requests before broad connect/status patterns.
+  if (userId && HH_DISCONNECT_INTENT.test(task)) {
+    const revoked = revokeService(userId, 'hh');
+    if (revoked === 'hh') return '✅ HeadHunter отключён — токен удалён. Чтобы подключить снова: /hh_connect';
+    if (revoked === 'not_found') return '⚠️ HeadHunter не подключён. Скажи /hh_connect чтобы добавить.';
+    return '⚠️ Не удалось отключить HeadHunter. Удаление токена не подтверждено.';
+  }
+
   // Session summaries (durable artifact) — handled here (async) so we can generate
   // missing/stale summaries via LLM before rendering. "Подробнее N" expands one.
   if (workDir) {
@@ -1478,16 +1493,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     if (HH_SCAN_INTENT.test(task)) return await hhManualScan(userId, workDir).catch(() => '⚠️ Не удалось запустить скан.');
   }
 
-  // /hh_disconnect — revoke HH token. Outside the hhConnected gate so it works
-  // both when a token is saved (revoke it) and when no token exists (idempotent
-  // "HH не подключён"). Slash form bypasses verifyQuickAnswerIntent because
-  // task starts with '/'.
-  if (userId && HH_DISCONNECT_INTENT.test(task)) {
-    const revoked = revokeService(userId, 'hh');
-    return revoked === 'not_found'
-      ? '⚠️ HeadHunter не подключён. Скажи /hh_connect чтобы добавить.'
-      : '✅ HeadHunter отключён — токен удалён. Чтобы подключить снова: /hh_connect';
-  }
+
 
   return null;
 }

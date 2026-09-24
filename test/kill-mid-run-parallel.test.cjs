@@ -18,7 +18,7 @@ const task = (over = {}) => ({ taskId: `t-${over.username || 'alice'}-1`, userna
 // A harness whose setTimeout is DEFERRED (queued, not run) so tests can control exactly when a
 // backoff delay "elapses" relative to a second simulated restart — the real bug this guards
 // against only shows up when the delayed resume hasn't fired yet and another restart happens.
-function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50 }) {
+function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50, startError = null }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
   const calls = [], runs = [], cleared = [], timers = [];
@@ -37,8 +37,13 @@ function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50 })
     // the current for-loop is iterating over, only what the *next* resumePendingTasks() call sees.
     getPendingTasks: () => journal.slice(),
     clearPendingTask: id => { cleared.push(id); const i = journal.findIndex(p => p.taskId === id); if (i >= 0) journal.splice(i, 1); },
+    // Native-resume lookup (#1234): none on disk here → the pre-#1234 fallback path these
+    // tests assert on. (Native resume itself is covered in instant-restart.test.cjs.)
+    getEngineSessionId: () => null,
+    isNonTaskMessage: require('../src/resume-hygiene').isNonTaskMessage,
+    recordResume: () => {},
     fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return {}; },
-    runTask: opts => { runs.push(opts); return Promise.resolve(); },
+    runTask: opts => { if (startError) throw startError; runs.push(opts); return Promise.resolve(); },
   };
   vm.createContext(sandbox);
   vm.runInContext(`${serverSrc.slice(start, end)}; this.resume = resumePendingTasks;`, sandbox);
@@ -76,28 +81,28 @@ test('several sessions killed mid-run by the same restart each resume independen
   assert.deepEqual(new Set(h.cleared), new Set(['a-1', 'b-1', 'c-1']));
 });
 
-test('a restart that lands while an earlier resume is still waiting out backoff does not fire it twice', async () => {
-  const h = deferredHarness({
-    pending: [task({ taskId: 'a-1', resumeAttempts: 0 })],
-    retryDelayMs: () => 180_000, // 3-minute backoff, well outside a rapid-restart window
-  });
-
-  // Restart #1: schedules the delayed resume and — critically — clears the journal entry
-  // immediately (server.js:365-367), before the delay has actually elapsed.
-  await h.resume();
-  assert.equal(h.runs.length, 0, 'resume has not fired yet — it is still waiting out its backoff');
-  assert.deepEqual(h.cleared, ['a-1']);
-
-  // Restart #2 happens (e.g. another deploy) before the first backoff timer has fired.
-  // getPendingTasks() now reflects the already-cleared journal — nothing left to resume again.
-  await h.resume();
-  assert.equal(h.runs.length, 0, 'second restart must not schedule a duplicate resume for the same task');
-  assert.equal(h.cleared.length, 1, 'the entry is cleared exactly once, not once per restart');
-
-  // Only now does the original backoff timer elapse.
-  h.flushTimers();
-  assert.equal(h.runs.length, 1, 'the original delayed resume still fires exactly once');
-  assert.equal(h.runs[0].sessionId, 's1');
+test('restart during backoff loses timers but retains the task for exactly one resumed run', async () => {
+  let pending = [task({ taskId: 'a-1', resumeAttempts: 1, mode: 'deep', continuationCount: 2,
+    initiatedAt: 123, threadId: 'thread-1' })];
+  for (let restart = 0; restart < 3; restart++) {
+    const killed = deferredHarness({ pending, retryDelayMs: () => 180_000 });
+    await killed.resume();
+    assert.equal(killed.runs.length, 0);
+    assert.deepEqual(killed.cleared, [], 'cannot delete a task owned only by a volatile timer');
+    pending = killed.journal.slice();
+    // Simulate actual process death: discard this harness AND all its timers.
+  }
+  const alive = deferredHarness({ pending, retryDelayMs: () => 180_000 });
+  await alive.resume();
+  alive.flushTimers();
+  assert.equal(alive.runs.length, 1);
+  assert.deepEqual(alive.cleared, ['a-1']);
+  assert.equal(alive.runs[0].resumeAttempts, 2, 'waiting does not consume retry budget');
+  assert.equal(alive.runs[0].sessionId, 's1');
+  assert.equal(alive.runs[0].mode, 'deep');
+  assert.equal(alive.runs[0].continuationCount, 2);
+  assert.equal(alive.runs[0].initiatedAt, 123);
+  assert.equal(alive.runs[0].threadId, 'thread-1');
 });
 
 test('the backoff delay actually gates when a killed session comes back — nothing runs before flush', async () => {
@@ -106,4 +111,15 @@ test('the backoff delay actually gates when a killed session comes back — noth
   assert.equal(h.runs.length, 0, 'a killed session must not be resumed synchronously — the delay must be honored');
   h.flushTimers();
   assert.equal(h.runs.length, 1);
+});
+
+ test('a synchronous handoff failure retains the old journal and reports failure', async () => {
+  const h = deferredHarness({ pending: [task()], startError: new Error('disk write failed') });
+  await h.resume();
+  h.flushTimers();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.runs.length, 0);
+  assert.equal(h.journal.length, 1);
+  assert.deepEqual(h.cleared, []);
+  assert.equal(h.calls.length, 1);
 });
