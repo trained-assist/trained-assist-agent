@@ -6,6 +6,7 @@ const os = require('os');
 const { readHhToken } = require('./hh-utils');
 const { userWorkDir } = require('./data-paths');
 
+const evidence = require('./hh-evidence-evaluator');
 const { resolveSearchAreas, searchResumes } = require('./hh-cold-search-transport');
 
 // Significant words (4+ chars) from a criterion name, used for cheap substring matching
@@ -65,9 +66,7 @@ function normalizeAtsConfig(raw) {
 // a cheap sort to pick the top-30 for AI enrichment below — the AI step does the real,
 // accurate scoring against the same criteria.
 function scoreCandidate(r, atsConfig) {
-  const minExpMonths = Math.round((atsConfig.filters?.min_experience_years ?? 2) * 12);
   const totalMonths = r.total_experience?.months ?? 0;
-  if (totalMonths < minExpMonths) return null;
 
   const expList = r.experience || [];
   let allText = (r.title || '').toLowerCase();
@@ -92,94 +91,45 @@ function scoreCandidate(r, atsConfig) {
   }
 
   const totalPossible = baseScore + criteria.reduce((s, c) => s + (c.weight || 0), 0);
-  const passThreshold = totalPossible * 0.55;
-  const reviewThreshold = totalPossible * 0.32;
-  const tag = score >= passThreshold ? 'PASS' : score >= reviewThreshold ? 'REVIEW' : 'WEAK';
-
-  return { score, signals, tag, totalPossible };
+  return { score, signals, tag: 'PENDING', totalPossible };
 }
 
-// AI enrichment: plus/yellow/red tags + 2-para summary for one candidate
-async function enrichCandidate(candidate, atsConfig, orKey) {
-  const cfg = normalizeAtsConfig(atsConfig);
-  const knockoutStr = (cfg.knockout || []).map(k => `- ${k}`).join('\n') || '—';
-  const requiredStr = (cfg.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
-  const preferredStr = (cfg.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n') || '—';
-  const expStr = (candidate.experience || [])
-    .map(e => `${e.position} — ${e.company} (${e.start || '?'} – ${e.end || 'н.в.'})`)
-    .join('\n') || '—';
-
-  const prompt = `Оцени кандидата для вакансии "${cfg.vacancy_title || 'Вакансия'}".
-${cfg.vacancy_context ? `\nКонтекст вакансии: ${cfg.vacancy_context}` : ''}
-
-СТОП-ФАКТОРЫ (knockout, критичны):
-${knockoutStr}
-
-Обязательные критерии (с весами):
-${requiredStr}
-
-Желательные:
-${preferredStr}
-
-Кандидат:
-Должность: ${candidate.title}
-Опыт: ${candidate.total_exp_years} лет
-Компании: ${(candidate.recent_companies || []).join(', ')}
-Карьера:
-${expStr}
-Эвристический score: ${candidate.score} (${candidate.tag})
-
-Верни ТОЛЬКО JSON без markdown:
-{
-  "plus_tags": ["3-6 слов", ...],
-  "yellow_tags": ["3-6 слов", ...],
-  "red_tags": ["3-6 слов", ...],
-  "summary_why": "2-3 предложения: почему кандидат сильный, конкретные факты из карьеры",
-  "summary_pitch": "1-2 предложения: что конкретно сказать клиенту о кандидате"
-}
-
-Правила:
-- plus_tags (2-5 штук): сильные стороны, явно подходящие под требования
-- yellow_tags (0-3): моменты стоит уточнить на интервью, небольшие риски
-- red_tags (0-2): только явные несоответствия knockout-критериям; если много плюсов — не стоп
-- Теги КРАТКО (3-6 слов каждый)
-- summary_why — живо, как рекрутер рассказывает коллеге
-- summary_pitch — конкретные факты которые продают кандидата клиенту`;
-
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'google/gemini-2.5-flash',
-      max_tokens: 600,
-      temperature: 0.1,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-    signal: AbortSignal.timeout(25_000),
-  });
-
-  if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || '{}';
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('no JSON in AI response');
-  return JSON.parse(match[0]);
+async function enrichCandidate(candidate, atsConfig, orKey, options = {}) {
+  const brief = options.brief || evidence.buildBrief(normalizeAtsConfig(atsConfig));
+  if (options.token) {
+    try {
+      const resume = await require('./hh-utils').hhFetch(`/resumes/${encodeURIComponent(candidate.id)}`, options.token);
+      if (String(resume.id) !== String(candidate.id)) throw new Error('Resume identity mismatch');
+      candidate.resume_snapshot = evidence.snapshotOf(resume);
+      candidate.data_completeness = { full_resume: true };
+      candidate.experience = resume.experience || [];
+      candidate.area = resume.area?.name || candidate.area;
+    } catch {
+      candidate.data_completeness = { full_resume: false, reason: 'full_resume_unavailable' };
+    }
+  }
+  const prior = options.previous?.[candidate.id];
+  if (prior && evidence.isFresh({ ...prior, resume_snapshot: candidate.resume_snapshot, data_completeness: candidate.data_completeness }, brief)) {
+    return Object.fromEntries(Object.entries(prior).filter(([key]) => ['evaluation_status','verdict','tag','ai_pending','assessment_hash','brief_revision','prompt_version','evaluator_version','candidate_snapshot_hash','checks','summary_why','summary_pitch','plus_tags','yellow_tags','red_tags','evaluated_at'].includes(key)));
+  }
+  return evidence.evaluateCandidate(candidate, brief, orKey);
 }
 
 // Enrich top-N candidates in parallel batches of 5
-async function enrichCandidates(candidates, atsConfig, orKey) {
+async function enrichCandidates(candidates, atsConfig, orKey, options = {}) {
   const BATCH = 5;
   const enriched = [...candidates];
   for (let i = 0; i < enriched.length; i += BATCH) {
     const batch = enriched.slice(i, i + BATCH);
     const results = await Promise.allSettled(
-      batch.map(c => enrichCandidate(c, atsConfig, orKey))
+      batch.map(c => enrichCandidate(c, atsConfig, orKey, options))
     );
     for (let j = 0; j < batch.length; j++) {
       const r = results[j];
       if (r.status === 'fulfilled') {
         Object.assign(enriched[i + j], r.value);
       } else {
+        Object.assign(enriched[i + j], { evaluation_status: 'error', verdict: null, tag: 'ERROR', ai_pending: true, evaluation_error: 'assessment_failed', evaluation_attempted_at: new Date().toISOString() });
         console.error(`[proactive-enrich] candidate ${batch[j].id} failed:`, r.reason?.message);
       }
     }
@@ -312,7 +262,16 @@ function loadAllCandidates(username, vacancyId) {
     if (!vacancyId) return store;
     return Object.fromEntries(Object.entries(store)
       .filter(([, c]) => candidateMatchesVacancy(c, vacancyId))
-      .map(([id, c]) => [id, candidateForVacancy(c, vacancyId)]));
+      .map(([id, c]) => {
+        let view = candidateForVacancy(c, vacancyId);
+        try {
+          const current = require('./hh-cold-search-context').resolveSearchContext(userWorkDir(username), vacancyId);
+          const brief = require('./hh-recruitment-brief').loadBrief(username, normalizeAtsConfig(current.config), current.vacancy || {}, vacancyId);
+          if (evidence.isComplete(view) && !evidence.isFresh(view, brief)) view = evidence.pendingAssessment(view, 'stale');
+          else view = evidence.displayCandidate(view);
+        } catch { view = evidence.pendingAssessment(view, 'stale'); }
+        return [id, view];
+      }));
   } catch (e) {
     if (e.code !== 'ENOENT') console.error('[proactive-search] all-candidates read failed:', e.message);
     return {};
@@ -383,6 +342,7 @@ function mergeSearchCandidatesIntoAll(username, candidates, foundAtById, vacancy
     if (vacancyId) {
       const prior = vacancyData[String(vacancyId)] || {};
       vacancyData[String(vacancyId)] = { ...prior, ...c,
+        previous_assessment: prior.assessment_hash && prior.assessment_hash !== c.assessment_hash ? { verdict: prior.verdict, checks: prior.checks, assessment_hash: prior.assessment_hash, evaluated_at: prior.evaluated_at } : prior.previous_assessment,
         status: prior.status || 'active', status_changed_at: prior.status_changed_at,
         found_at: prior.found_at || foundAt };
     }
@@ -435,6 +395,9 @@ function addManualCandidate(username, resumeData, vacancyId) {
       end: e.end || null,
     })),
     ...existing,
+    resume_snapshot: evidence.snapshotOf(resumeData),
+    data_completeness: { full_resume: true },
+    ...evidence.pendingAssessment({}, 'pending'),
     source: 'manual',
     added_at: existing?.added_at || now,
     found_at: existing?.found_at || now,
@@ -692,23 +655,13 @@ function buildScoringPromptText(username, vacancyId) {
   const reqStr = (cfg.required || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
   const prefStr = (cfg.preferred || []).map(c => `• +${c.weight} — ${c.name}`).join('\n') || '(не задано)';
 
-  return `Как мы подбираем кандидатов для «${cfg.vacancy_title || 'вакансии'}» (проактивный поиск):
-
-🔍 Поисковые запросы в базе резюме HH (сгенерированы под эту вакансию):
+  return `Холодный поиск для «${cfg.vacancy_title || 'вакансии'}».
+Запросы HH (первая страница, до 50 резюме на запрос):
 ${queriesStr}
+Совпадения слов задают только порядок проверки. Общий стаж не исключает кандидата.
+Оценка проверяет обязательные условия по цитатам резюме: нарушение → FAIL, неизвестное → REVIEW. PASS возможен только после полной проверки актуального задания. Ошибки, ожидание и устаревшие оценки не рекомендации.
+Бюджет: до 30 резюме на первом запуске, затем до 50 дополнительных новых; фон — до 30 на профиль за проход. Полное резюме запрашивается у HH перед проверкой.`;
 
-⛔ Отсекаем на этапе поиска: опыт работы менее ${minExp} лет
-⛔ Стоп-факторы, которые дальше проверяет AI:
-${knockoutStr}
-
-📊 Предварительный скоринг (для отбора топ-30 перед AI):
-• +1.5 — базовый порог по опыту
-${reqStr}
-${prefStr}
-PASS/REVIEW считаются относительно суммы весов этой вакансии — точную оценку даёт следующий шаг.
-
-🤖 AI-теги (Gemini 2.5 Flash через OpenRouter):
-До 30 лучших кандидатов по предварительному скорингу и до 50 новых вне этого списка (кроме первого запуска) оцениваются AI по тем же критериям; неизменившиеся оценки берутся из кэша — получают зелёные теги (плюсы), жёлтые (стоит уточнить), красные (явные стоп-факторы) и краткое резюме для клиента. В Telegram-дайджест кандидаты по именам не попадают — только счётчик и ссылка на страницу со списком.`;
 }
 
 // HH resume search with optional one-shot refresh on token-expired (401/403).
@@ -738,12 +691,17 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
       && (!activeVacancy?.area || typeof activeVacancy.area === 'string' && !/^\d+$/.test(activeVacancy.area))) {
     activeVacancy = await require('./hh-utils').hhFetch(`/vacancies/${encodeURIComponent(vacancyKey)}`, token);
   }
-  const searchAreas = resolveSearchAreas(atsConfig, activeVacancy, options);
-
   // Read OpenRouter key for AI enrichment + query generation
   const tokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const orKeyFile = path.join(tokensBase, String(username), 'openrouter');
   const orKey = fs.existsSync(orKeyFile) ? fs.readFileSync(orKeyFile, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
+
+  if (orKey && !activeVacancy?.description && !atsConfig.vacancy_text) {
+    try { activeVacancy = await require('./hh-utils').hhFetch(`/vacancies/${encodeURIComponent(vacancyKey)}`, token); } catch { /* incomplete brief cannot PASS */ }
+  }
+  const brief = await require('./hh-recruitment-brief').prepareBrief(username, atsConfig, activeVacancy || {}, vacancyKey, orKey);
+  const searchPlan = evidence.buildSearchPlan(brief, atsConfig, activeVacancy || {}, options);
+  const searchAreas = searchPlan.areas;
 
   // Search queries are generated per-vacancy and cached in a per-vacancy file keyed by
   // vacancyKey. They are reused as long as the ATS config fields that influence query
@@ -774,7 +732,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   const allCandidates = new Map();
 
   for (const query of queries) {
-    const data = await searchResumes(query, token, username, { areas: searchAreas, refreshAccessToken });
+    const data = await searchResumes(query, token, username, { areas: searchAreas, relocation: searchPlan.relocation, refreshAccessToken });
     for (const r of (data.items || [])) {
       if (r.id && !allCandidates.has(r.id)) allCandidates.set(r.id, r);
     }
@@ -796,6 +754,9 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
       last_name: r.last_name || '',
       age: r.age || null,
       area: r.area?.name || '',
+      resume_snapshot: evidence.snapshotOf(r),
+      data_completeness: { full_resume: false, reason: 'search_excerpt' },
+      evaluation_status: 'pending', verdict: null, ai_pending: true,
       total_exp_months: expMonths,
       total_exp_years: Math.round(expMonths / 12 * 10) / 10,
       score,
@@ -807,7 +768,8 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
       score_signals: signals,
       salary: r.salary || null,
       recent_companies: companies,
-      experience: (r.experience || []).slice(0, 5).map(e => ({
+      experience: (r.experience || []).map(e => ({
+        description: e.description || '',
         position: e.position || '',
         company: e.company || '',
         start: e.start || '',
@@ -848,19 +810,18 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   const toEnrich = [...top30, ...newButNotTop30];
 
   const previous = loadAllCandidates(username, vacancyKey);
-  const assessmentHash = c => require('crypto').createHash('sha256').update(JSON.stringify({ candidate: c, config: atsConfig })).digest('hex');
   const pending = [];
   const cached = [];
   for (const c of toEnrich) {
-    const hash = assessmentHash(c);
-    if (previous[c.id]?.assessment_hash === hash && previous[c.id]?.plus_tags) cached.push({ ...previous[c.id], ...c });
-    else pending.push({ ...c, assessment_hash: hash });
+    // Search excerpts cannot prove that a full resume stayed unchanged.
+    // Re-fetch only inside the same bounded evaluation budget.
+    pending.push(c);
   }
   let enriched = [...cached, ...pending];
   if (orKey && pending.length > 0) {
     console.log(`[proactive-search] enriching ${toEnrich.length} candidates with AI (top-30 + ${newButNotTop30.length} new)…`);
     try {
-      enriched = [...cached, ...await enrichCandidates(pending, atsConfig, orKey)];
+      enriched = [...cached, ...await enrichCandidates(pending, atsConfig, orKey, { brief, token, previous })];
     } catch (e) {
       console.error('[proactive-search] enrichment failed:', e.message);
     }
@@ -880,7 +841,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   // budget. A candidate must exist durably before it can become "seen".
   const markedCandidates = scored.map(c => ({
     ...(enrichedById.get(c.id) || c), is_new: seenInfo.newIds.has(c.id),
-    ai_pending: enrichedById.has(c.id),
+    ai_pending: !evidence.isComplete(enrichedById.get(c.id) || c),
   }));
   const foundAtById = {};
   for (const c of markedCandidates) {
@@ -898,9 +859,10 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
     searched_at: now.toISOString(),
     total_collected: allCandidates.size,
     total_after_knockout: scored.length,
-    ai_enriched: enriched.length > 0 && enriched.every(c => Array.isArray(c.plus_tags)),
-    ai_pending_count: enriched.filter(c => !Array.isArray(c.plus_tags)).length,
+    ai_enriched: enriched.length > 0 && enriched.every(evidence.isComplete),
+    ai_pending_count: markedCandidates.filter(c => !evidence.isComplete(c)).length,
     ats_config: atsConfig,
+    recruitment_brief: brief, search_plan: { ...searchPlan, queries },
     candidates: markedCandidates,
   };
   fs.writeFileSync(outFile + '.tmp-' + process.pid, JSON.stringify(output, null, 2), 'utf8');
@@ -922,7 +884,7 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
   // on-demand tool already reports 0-results in its own chat reply, so it keeps the
   // old skip-when-nothing-qualifies behavior to avoid a duplicate message.
   if (notifyChat && (options.alwaysNotify || seenInfo.newCount > 0)) {
-    const allNewCandidates = enriched.filter(c => seenInfo.newIds.has(c.id));
+    const allNewCandidates = enriched.filter(c => seenInfo.newIds.has(c.id) && evidence.isComplete(c) && c.verdict === 'PASS');
     // Recruiter-configurable noise filter (schedule.notify_threshold, 0-100, default 0 =
     // no filter, set via hh_proactive_schedule action=enable). Without it every run pings
     // Telegram with the raw new-candidate count even when none of them are actually
@@ -1003,21 +965,30 @@ async function scoreUnscoredProactiveCandidates(username, options = {}) {
     let remaining = 30, completed = 0, vacanciesLeft = latest.size;
     for (const { file, results } of latest.values()) {
       if (remaining <= 0) break;
-      const candidates = results.candidates || [];
+      const { resolveSearchContext } = require('./hh-cold-search-context');
+      let current;
+      try { current = resolveSearchContext(userWorkDir(username), results.vacancy_id); } catch { continue; }
+      const brief = await require('./hh-recruitment-brief').prepareBrief(username, normalizeAtsConfig(current.config), current.vacancy || {}, results.vacancy_id, key);
+      const candidates = Object.values(loadAllCandidates(username, results.vacancy_id));
+      results.candidates = candidates;
+      for (const c of candidates) {
+        if (!evidence.isFresh(c, brief)) Object.assign(c, evidence.pendingAssessment(c, 'stale'));
+      }
       const allowance = Math.ceil(remaining / vacanciesLeft--);
-      const unscored = candidates.filter(c => c.ai_pending !== false && !c.plus_tags).slice(0, allowance);
+      const unscored = candidates.filter(c => !evidence.isFresh(c, brief)).sort((a, b) => String(a.evaluation_attempted_at || '').localeCompare(String(b.evaluation_attempted_at || ''))).slice(0, allowance);
       if (!unscored.length) continue;
       remaining -= unscored.length;
-      const enriched = await enrichCandidates(unscored, results.ats_config || {}, key);
+      const enriched = await enrichCandidates(unscored, current.config, key, { brief, token: readHhToken(username) });
       for (const candidate of enriched) {
         const idx = candidates.findIndex(c => c.id === candidate.id);
         if (idx >= 0) Object.assign(candidates[idx], candidate);
       }
       mergeSearchCandidatesIntoAll(username, enriched, {}, results.vacancy_id);
+      results.recruitment_brief = brief;
       const temp = file + '.tmp-' + process.pid;
       fs.writeFileSync(temp, JSON.stringify(results, null, 2), 'utf8');
       fs.renameSync(temp, file);
-      completed += enriched.filter(c => c.plus_tags).length;
+      completed += enriched.filter(evidence.isComplete).length;
     }
     return completed;
   } finally { release(); }
@@ -1049,6 +1020,8 @@ function saveSchedule(username, data) {
 }
 
 module.exports = {
+  enrichCandidate,
+  enrichCandidates,
   runProactiveSearch,
   buildScoringPromptText,
   scoreUnscoredProactiveCandidates,

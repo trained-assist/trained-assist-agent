@@ -19,6 +19,10 @@ function resolveSearchAreas(config, vacancy, options = {}) {
 async function searchResumes(query, token, username, options = {}) {
   const params = new URLSearchParams({ text: query, page: '0', per_page: '50', order_by: 'relevance' });
   for (const area of options.areas || []) params.append('area', area);
+  if (options.relocation) {
+    if (!['living', 'living_or_relocation'].includes(options.relocation)) throw new Error('Invalid relocation');
+    params.set('relocation', options.relocation);
+  }
   const base = process.env.HH_API_BASE_URL || 'https://api.hh.ru';
   const agent = `trained-assist-agent/1.0 (${process.env.HH_APP_CONTACT || 'support@recruiter-assistant.ru'})`;
   const sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));

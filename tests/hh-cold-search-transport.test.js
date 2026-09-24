@@ -213,25 +213,33 @@ describe('background scoring isolation', () => {
     const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
     const api = require('../src/hh-proactive-search');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-bg-scope-'));
-    const old = { AGENT_DATA_DIR: process.env.AGENT_DATA_DIR, AGENT_TOKENS_DIR: process.env.AGENT_TOKENS_DIR, OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY };
-    process.env.AGENT_DATA_DIR = root; process.env.AGENT_TOKENS_DIR = path.join(root, 'tokens'); process.env.OPENROUTER_API_KEY = 'fixture';
+    const old = { AGENT_DATA_DIR: process.env.AGENT_DATA_DIR, AGENT_TOKENS_DIR: process.env.AGENT_TOKENS_DIR, OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY, USERS_DIR: process.env.USERS_DIR };
+    process.env.AGENT_DATA_DIR = root; process.env.AGENT_TOKENS_DIR = path.join(root, 'tokens'); process.env.OPENROUTER_API_KEY = 'fixture'; process.env.USERS_DIR = path.join(root, 'users');
     const dir = path.join(root, 'hh', 'fixture', 'proactive'); fs.mkdirSync(dir, { recursive: true });
     const prompts = [];
     vi.stubGlobal('fetch', async (_url, init) => {
-      prompts.push(JSON.parse(init.body).messages[0].content);
-      return response(200, { choices: [{ message: { content: JSON.stringify({ plus_tags: ['match'] }) } }] });
+      const payload = JSON.parse(JSON.parse(init.body).messages[1].content);
+      prompts.push(JSON.stringify(payload));
+      return response(200, { choices: [{ message: { content: JSON.stringify({ checks: payload.recruitment_brief.requirements.map(r => ({ requirement_id: r.id, status: 'unknown', evidence: [], explanation: 'Нужно уточнить', clarification_question: 'Готовы?' })), summary: 'Неизвестно' }) } }] });
     });
     try {
       for (const [id, title, date] of [['A', 'Old criteria', '2026-09-21'], ['A', 'Designer', '2026-09-23'], ['B', 'Sales', '2026-09-24']]) {
         fs.writeFileSync(path.join(dir, `search-results-${id}-${date}.json`), JSON.stringify({ vacancy_id: id, searched_at: date,
           ats_config: { vacancy_title: title }, candidates: [{ id: 'same', title: 'Role', ai_pending: true }] }));
       }
+      const contextDir = path.join(require('../src/data-paths').userWorkDir('fixture'), 'contexts', 'hh');
+      fs.mkdirSync(contextDir, { recursive: true });
+      for (const [id, title] of [['A', 'Designer'], ['B', 'Sales']]) {
+        const config = { vacancy_id: id, vacancy_title: title };
+        fs.writeFileSync(path.join(contextDir, `ats_config:${id}.json`), JSON.stringify({ value: config }));
+        api.mergeSearchCandidatesIntoAll('fixture', [{ id: 'same', title, ai_pending: true }], {}, id);
+      }
       expect(await api.scoreUnscoredProactiveCandidates('fixture')).toBe(2);
       expect(prompts).toHaveLength(2);
       expect(prompts.join('\n')).not.toContain('Old criteria');
       expect(prompts.join('\n')).toContain('Designer'); expect(prompts.join('\n')).toContain('Sales');
-      expect(api.loadAllCandidates('fixture', 'A').same.plus_tags).toEqual(['match']);
-      expect(api.loadAllCandidates('fixture', 'B').same.plus_tags).toEqual(['match']);
+      expect(api.loadAllCandidates('fixture', 'A').same.verdict).toBe('REVIEW');
+      expect(api.loadAllCandidates('fixture', 'B').same.verdict).toBe('REVIEW');
       expect(await api.scoreUnscoredProactiveCandidates('fixture')).toBe(0);
     } finally {
       for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }

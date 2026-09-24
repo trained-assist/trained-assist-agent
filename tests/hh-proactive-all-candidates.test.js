@@ -138,7 +138,7 @@ describe('addManualCandidate', () => {
     expect(() => addManualCandidate('alice', { title: 'no id' })).toThrow();
   });
 
-  it('re-adding the same id preserves prior score/tag rather than resetting to defaults', () => {
+  it('re-adding keeps ranking but invalidates assessment for the new snapshot', () => {
     addManualCandidate('alice', { id: 'res-1', title: 'X' });
     // Simulate the candidate having been AI-scored later (e.g. via ai-score route).
     const store = loadAllCandidates('alice');
@@ -148,13 +148,13 @@ describe('addManualCandidate', () => {
 
     const record = addManualCandidate('alice', { id: 'res-1', title: 'X (re-added)' });
     expect(record.score).toBe(9.5);
-    expect(record.tag).toBe('PASS');
+    expect(record.tag).toBe('PENDING');
   });
 
-  it('defaults score to 0 and tag to REVIEW for a brand-new manual candidate', () => {
+  it('defaults to pending rather than implying evaluation for a new manual candidate', () => {
     const record = addManualCandidate('alice', { id: 'res-9', title: 'Brand new' });
     expect(record.score).toBe(0);
-    expect(record.tag).toBe('REVIEW');
+    expect(record.tag).toBe('PENDING');
   });
 });
 

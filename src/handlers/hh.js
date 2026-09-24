@@ -1014,7 +1014,7 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
     unified.sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
     // Fallback for the very first run, before anything has been merged into the
     // unified store yet — show the freshly-computed (already score-sorted) results.
-    if (!byVacancy.length) unified = results.candidates || [];
+    if (!byVacancy.length) unified = (results.candidates || []).map(c => require('../hh-evidence-evaluator').pendingAssessment(c, 'stale'));
   } else {
     // Starred/archived: most recently moved into this tab first.
     unified.sort((a, b) => new Date(b.status_changed_at || 0) - new Date(a.status_changed_at || 0));
@@ -1048,61 +1048,17 @@ if (req.method === 'POST' && url.pathname === '/api/hh/proactive/ai-score') {
   const candidate = require('../hh-proactive-search').loadAllCandidates(username, vacancyId)[candidate_id]
     || (results.candidates || []).find(c => c.id === candidate_id);
   if (!candidate) return json(res, 404, { error: 'candidate not found' });
-  const cfg = results.ats_config || {};
-  const knockoutList = (cfg.knockout || []).map(k => `- ${k}`).join('\n');
-  const requiredList = (cfg.required || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n');
-  const preferredList = (cfg.preferred || []).map(r => `- ${r.name} (вес ${r.weight})`).join('\n');
-  const expLines = (candidate.experience || []).map(e => `  ${e.position} — ${e.company} (${e.start || '?'} – ${e.end || 'н.в.'})`).join('\n');
-  const prompt = `Оцени кандидата для вакансии "${cfg.vacancy_title || 'Вакансия'}".
-
-Критерии knockout (если отсутствует — отклонить):
-${knockoutList || '—'}
-
-Обязательные критерии (с весами):
-${requiredList || '—'}
-
-Желательные критерии:
-${preferredList || '—'}
-
-Данные кандидата:
-Должность: ${candidate.title}
-Опыт: ${candidate.total_exp_years} лет
-Регион: ${candidate.area}
-Компании: ${(candidate.recent_companies || []).join(', ')}
-Опыт (должности):
-${expLines || '—'}
-Текущий score (эвристика): ${candidate.score} (${candidate.tag})
-
-Дай развёрнутую оценку (3-5 предложений): соответствует ли кандидат? Какие сигналы "за" и "против"?
-Предложи уточнённый score (число от 0 до 12) и тег (PASS/REVIEW/WEAK).
-
-Ответ строго в JSON: {"evaluation": "...", "score": N, "tag": "PASS|REVIEW|WEAK"}`;
-
   const hhTokensBase2 = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
   const orKeyFile2 = path.join(hhTokensBase2, String(username), 'openrouter');
   const orKey2 = fs.existsSync(orKeyFile2) ? fs.readFileSync(orKeyFile2, 'utf8').trim() : (process.env.OPENROUTER_API_KEY || '');
   if (!orKey2) return json(res, 500, { error: 'OpenRouter API key not configured. Add key via /settoken openrouter <key>' });
   try {
-    const aiRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${orKey2}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'google/gemini-2.5-flash', max_tokens: 1024, temperature: 0.1, messages: [{ role: 'user', content: prompt }] }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!aiRes.ok) {
-      const errText = await aiRes.text().catch(() => '');
-      return json(res, 500, { error: `OpenRouter API ${aiRes.status}: ${errText.slice(0, 200)}` });
-    }
-    const aiData = await aiRes.json();
-    const text = aiData.choices?.[0]?.message?.content || '{}';
-    let parsed;
-    try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { evaluation: text, score: candidate.score, tag: candidate.tag };
-    } catch {
-      parsed = { evaluation: text, score: candidate.score, tag: candidate.tag };
-    }
-    return json(res, 200, parsed);
+    const search = require('../hh-proactive-search');
+    const current = require('../hh-cold-search-context').resolveSearchContext(path.join(BASE_USERS_DIR, username), vacancyId);
+    const brief = await require('../hh-recruitment-brief').prepareBrief(username, search.normalizeAtsConfig(current.config), current.vacancy || {}, vacancyId, orKey2);
+    const assessment = await search.enrichCandidate(candidate, current.config, orKey2, { brief, token: require('../hh-utils').readHhToken(username) });
+    search.mergeSearchCandidatesIntoAll(username, [{ ...candidate, ...assessment }], {}, vacancyId);
+    return json(res, 200, { ...assessment, evaluation: assessment.summary_why });
   } catch (e) {
     return json(res, 500, { error: e.message });
   }

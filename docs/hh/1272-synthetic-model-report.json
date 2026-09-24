@@ -1,0 +1,210 @@
+{
+  "date": "2026-09-24T08:51:27.069Z",
+  "model": "google/gemini-2.5-flash",
+  "calls_limit": 8,
+  "synthetic": true,
+  "briefs": [
+    {
+      "tenant_id": "",
+      "vacancy_id": "",
+      "sources": {
+        "vacancy_text": "Дизайнер мебели. Единственное обязательное условие этой проверки — работа очно в Сыктывкаре. Можно переехать в Сыктывкар к началу работы. Требования к профессии в этой проверке не оцениваются.",
+        "recruiter_notes": "",
+        "workplace": {
+          "id": "51",
+          "name": "Сыктывкар"
+        },
+        "work_format": null,
+        "legacy_hints": {
+          "required": [],
+          "knockout": []
+        }
+      },
+      "requirements": [
+        {
+          "id": "work_format_onsite",
+          "text": "Работа очно",
+          "type": "mandatory",
+          "source_ref": "vacancy_text",
+          "quote": "работа очно в Сыктывкаре",
+          "provenance": "explicit"
+        }
+      ],
+      "preferred": [],
+      "conflicts": [],
+      "geography": {
+        "requirement_id": "work_format_onsite",
+        "work_format": "onsite",
+        "residence_restriction": "unrestricted",
+        "relocation": "allowed",
+        "travel": "none",
+        "area_ids": [
+          "51"
+        ]
+      },
+      "source_revision": "8c2fd2678afcab366e3cd0e376ea73f309b5ec4ae0a19ef6ab3a6336540e1855",
+      "revision": "fb56309b87bfcc3af65edd4e7993e6ac60d2c31a215ae3b5a54474c0fd02f342",
+      "compiled": true
+    },
+    {
+      "tenant_id": "",
+      "vacancy_id": "",
+      "sources": {
+        "vacancy_text": "Работа полностью удалённая из любого города. Единственное обязательное условие — регулярные личные выезды к клиентам в Республике Коми, еженедельно. Требования к профессии в этой проверке не оцениваются.",
+        "recruiter_notes": "",
+        "workplace": {
+          "id": "51",
+          "name": "Сыктывкар"
+        },
+        "work_format": null,
+        "legacy_hints": {
+          "required": [],
+          "knockout": []
+        }
+      },
+      "requirements": [
+        {
+          "id": "travel_komi",
+          "text": "Регулярные личные выезды к клиентам в Республике Коми, еженедельно.",
+          "type": "mandatory",
+          "source_ref": "vacancy_text",
+          "quote": "регулярные личные выезды к клиентам в Республике Коми, еженедельно",
+          "provenance": "explicit"
+        }
+      ],
+      "preferred": [],
+      "conflicts": [],
+      "geography": {
+        "requirement_id": "travel_komi",
+        "work_format": "remote",
+        "residence_restriction": "unrestricted",
+        "relocation": "unknown",
+        "travel": "required",
+        "area_ids": [
+          "51"
+        ]
+      },
+      "source_revision": "dfce4e7ad282c4acd26cec9d9ef14f3ba1f1619550de1811d4ef12191bc56499",
+      "revision": "937d8998e8833124f58919a5e1a320e5d6924db5a398c26f47aabfbb42889376",
+      "compiled": true
+    }
+  ],
+  "results": [
+    {
+      "name": "onsite-refusal",
+      "expected": "FAIL",
+      "actual": "FAIL",
+      "checks": [
+        {
+          "requirement_id": "work_format_onsite",
+          "status": "not_met",
+          "evidence": [
+            {
+              "source_ref": "skills",
+              "quote": "Только удалённая работа."
+            },
+            {
+              "source_ref": "skills",
+              "quote": "Переезд в Сыктывкар исключён."
+            },
+            {
+              "source_ref": "skills",
+              "quote": "Очную работу не рассматриваю."
+            }
+          ],
+          "explanation": "Кандидат явно указывает, что рассматривает только удаленную работу, не готов к переезду в Сыктывкар и не рассматривает очную работу, что прямо противоречит требованию очной работы в Сыктывкаре с возможностью переезда."
+        }
+      ],
+      "pass": true
+    },
+    {
+      "name": "onsite-unknown",
+      "expected": "REVIEW",
+      "actual": "REVIEW",
+      "checks": [
+        {
+          "requirement_id": "work_format_onsite",
+          "status": "unknown",
+          "evidence": [],
+          "explanation": "Кандидат проживает в Москве, но нет информации о готовности или неготовности к переезду в Сыктывкар для очной работы.",
+          "clarification_question": "Готовы ли вы переехать в Сыктывкар для очной работы?"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "name": "onsite-relocation",
+      "expected": "PASS",
+      "actual": "PASS",
+      "checks": [
+        {
+          "requirement_id": "work_format_onsite",
+          "status": "met",
+          "evidence": [
+            {
+              "source_ref": "skills",
+              "quote": "Готов переехать в Сыктывкар к началу работы и работать очно в офисе в Сыктывкаре."
+            }
+          ],
+          "explanation": "Кандидат явно выражает готовность переехать в Сыктывкар и работать очно, что соответствует требованию вакансии."
+        }
+      ],
+      "pass": true
+    },
+    {
+      "name": "remote-travel-refusal",
+      "expected": "FAIL",
+      "actual": "FAIL",
+      "checks": [
+        {
+          "requirement_id": "travel_komi",
+          "status": "not_met",
+          "evidence": [
+            {
+              "source_ref": "skills",
+              "quote": "на регулярные личные выезды в Коми не согласен"
+            }
+          ],
+          "explanation": "Кандидат явно указывает, что не согласен на регулярные личные выезды в Республику Коми, что является обязательным условием вакансии.",
+          "clarification_question": null
+        }
+      ],
+      "pass": true
+    },
+    {
+      "name": "remote-travel-unknown",
+      "expected": "REVIEW",
+      "actual": "REVIEW",
+      "checks": [
+        {
+          "requirement_id": "travel_komi",
+          "status": "unknown",
+          "evidence": [],
+          "explanation": "Кандидат указывает, что работает удаленно из Москвы, но не предоставляет информации о готовности или неготовности к регулярным выездам в Республику Коми.",
+          "clarification_question": "Готовы ли вы к регулярным личным выездам к клиентам в Республике Коми еженедельно?"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "name": "remote-travel-confirmed",
+      "expected": "PASS",
+      "actual": "PASS",
+      "checks": [
+        {
+          "requirement_id": "travel_komi",
+          "status": "met",
+          "evidence": [
+            {
+              "source_ref": "skills",
+              "quote": "Готов лично выезжать к клиентам в Республику Коми каждую неделю."
+            }
+          ],
+          "explanation": "Кандидат явно указывает готовность к еженедельным выездам в Республику Коми.",
+          "clarification_question": null
+        }
+      ],
+      "pass": true
+    }
+  ]
+}

@@ -109,7 +109,7 @@ function candidateCard(c, idx, existingComment) {
       </div>
     </div>
     <div class="card-right">
-      <span class="badge" style="background:${tagBadgeBg(c.tag)}">${escHtml(c.tag)} ${(Number(c.score) || 0).toFixed(1)}</span>
+      <span class="badge" style="background:${tagBadgeBg(c.tag)}">${escHtml(c.tag)}</span>
     </div>
   </div>
 
@@ -139,7 +139,7 @@ function candidateCard(c, idx, existingComment) {
 function generateProactivePageHtml(results, username, callbackBase, token, existingComments, opts = {}) {
   const { activeVacancies = [], vacancyId = '', listView = 'active', stateCounts = { active: 0, starred: 0, archived: 0 } } = opts;
   const monitoring = opts.monitoring || {};
-  const candidates = results.candidates || [];
+  const candidates = (results.candidates || []).map(require('./hh-evidence-evaluator').displayCandidate);
   const comments = existingComments || {};
   const searchedAt = results.searched_at
     ? new Date(results.searched_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })
@@ -369,7 +369,7 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
   </div>
   <div class="stats">
     <div class="stat">Собрано: <strong>${results.total_collected || 0}</strong></div>
-    <div class="stat">После фильтра: <strong>${results.total_after_knockout || 0}</strong></div>
+    <div class="stat">Найдено для проверки: <strong>${results.total_after_knockout || 0}</strong></div>
     <div class="stat">PASS: <strong style="color:#16a34a">${passCount}</strong></div>
     ${reviewCount ? `<div class="stat">REVIEW: <strong style="color:#ca8a04">${reviewCount}</strong></div>` : ''}
     ${newCount ? `<div class="stat">Новых: <strong style="color:#2563eb">${newCount}</strong></div>` : ''}
@@ -394,7 +394,7 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
   <div class="filter-bar">
     <input id="nameSearch" class="search-input" type="text" placeholder="Поиск по имени / должности…">
     <div class="score-filter">
-      <span class="score-filter-label">Score ≥</span>
+      <span class="score-filter-label">Приоритет ≥</span>
       <input id="scoreSlider" type="range" min="0" max="${sliderMax}" step="0.1" value="0">
       <span class="score-filter-label" id="scoreSliderVal">0.0</span>
     </div>
@@ -402,7 +402,8 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
       <button class="btn-preset active" data-preset="all">Все</button>
       <button class="btn-preset" data-preset="pass">PASS</button>
       <button class="btn-preset" data-preset="review">REVIEW</button>
-      <button class="btn-preset" data-preset="top9">Топ ≥9</button>
+      <button class="btn-preset" data-preset="fail">FAIL</button>
+      <button class="btn-preset" data-preset="pending">Ожидание / ошибка / устарели</button>
     </div>
     <select id="sourceFilter" class="source-filter">
       <option value="">Все источники</option>
@@ -458,7 +459,7 @@ try {
   document.getElementById('scoreSlider').value = filters.score || 0;
   document.getElementById('scoreSliderVal').textContent = Number(document.getElementById('scoreSlider').value).toFixed(1);
   document.getElementById('sourceFilter').value = filters.source || '';
-  activePreset = ['all', 'pass', 'review', 'top9'].includes(filters.preset) ? filters.preset : 'all';
+  activePreset = ['all', 'pass', 'review', 'fail', 'pending'].includes(filters.preset) ? filters.preset : 'all';
   document.querySelectorAll('#presetBtns .btn-preset').forEach(b => b.classList.toggle('active', b.dataset.preset === activePreset));
 } catch {}
 window.addEventListener('pagehide', saveFilters);
@@ -484,6 +485,8 @@ function matchesFilters(el, nameQuery, minScore, preset, source) {
   if (score < minScore) return false;
   if (preset === 'pass' && tag !== 'PASS') return false;
   if (preset === 'review' && tag !== 'REVIEW') return false;
+  if (preset === 'fail' && tag !== 'FAIL') return false;
+  if (preset === 'pending' && ['PASS', 'REVIEW', 'FAIL'].includes(tag)) return false;
   if (preset === 'top9' && score < 9) return false;
   if (source && el.dataset.source !== source) return false;
   return true;

@@ -68,3 +68,28 @@ it('late AI response cannot overwrite a newer modal; requests carry the displaye
     expect(requests.map(r => r.vacancy_id)).toEqual(['A', 'A']);
   } finally { await browser.close(); }
 }, 15000);
+
+it('only complete current verdicts enter recommendation filters; old heuristic PASS is stale', async () => {
+  const e = require('../src/hh-evidence-evaluator');
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const complete = verdict => ({ evaluation_status: 'complete', verdict, prompt_version: e.PROMPT_VERSION, evaluator_version: e.EVALUATOR_VERSION });
+    const candidates = [
+      { id: 'fresh', title: 'Fresh', area: 'Москва', ...complete('PASS') },
+      { id: 'review', title: 'Review', ...complete('REVIEW') },
+      { id: 'fail', title: 'Fail', ...complete('FAIL') },
+      { id: 'legacy', title: 'Legacy', tag: 'PASS', score: 999, plus_tags: ['Misleading endorsement'] },
+      { id: 'error', title: 'Error', evaluation_status: 'error', tag: 'PASS' },
+    ];
+    await page.route('https://hh-fixture.test/**', route => route.fulfill({ contentType: 'text/html', body: generateProactivePageHtml({ candidates }, 'user', 'https://hh-fixture.test', 'token', {}, { vacancyId: 'A' }) }));
+    await page.goto('https://hh-fixture.test/');
+    expect(await page.locator('.stats').innerText()).toContain('PASS: 1');
+    expect(await page.locator('.card[data-id="legacy"]').getAttribute('data-tag')).toBe('STALE');
+    expect(await page.locator('body').innerText()).not.toContain('Misleading endorsement');
+    for (const [preset, ids] of [['pass', ['fresh']], ['review', ['review']], ['fail', ['fail']], ['pending', ['legacy', 'error']]]) {
+      await page.locator(`[data-preset="${preset}"]`).click();
+      expect(await page.locator('.card:visible').evaluateAll(cards => cards.map(c => c.dataset.id))).toEqual(ids);
+    }
+  } finally { await browser.close(); }
+});

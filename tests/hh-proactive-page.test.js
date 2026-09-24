@@ -75,7 +75,7 @@ describe('client-side filter data attributes (#3, #4, #5)', () => {
       { id: 'r1', title: 'Аналитик Данных', first_name: 'Иван', last_name: 'Петров', score: 9.2, tag: 'PASS', source: 'search', found_at: '2026-09-15T00:00:00Z', experience: [] },
     ]);
     expect(html).toContain('data-score=\\"9.2\\"');
-    expect(html).toContain('data-tag=\\"PASS\\"');
+    expect(html).toContain('data-tag=\\"STALE\\"');
     expect(html).toContain('data-source=\\"search\\"');
     expect(html).toContain('иван петров аналитик данных');
   });
@@ -108,7 +108,8 @@ describe('header markup (#3, #4, #5)', () => {
     expect(html).toContain('data-preset="all"');
     expect(html).toContain('data-preset="pass"');
     expect(html).toContain('data-preset="review"');
-    expect(html).toContain('data-preset="top9"');
+    expect(html).toContain('data-preset="pending"');
+    expect(html).toContain('data-preset="fail"');
   });
 
   it('includes the source filter dropdown', () => {
