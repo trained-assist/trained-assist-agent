@@ -112,3 +112,9 @@ Goal: Remove assist-agent from the RU VM — keep only a thin RU-IP edge (browse
 - [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1292
 - [ ] Merged to main
 - [ ] Deployed to prod — verify both `assist-agent` (GCP) and `ru-edge` (RU) are healthy after deploy, and run `scripts/smoke-test-ru-edge.sh` against the RU VM
+
+Goal: ZeroCreds preflight detection — the real root cause of the 2026-09-24 duplicate-notification flood. ZeroCreds destination probes (`{value:"{\"_zerocreds_preflight\":true}"}`) were saved as real tokens and sent user notices, because POST /tokens only checked the flag at the top level. Now detected top-level / nested-in-value / via X-ZeroCreds-Preflight header; runner-e2e forced to the local connect-link path so tests stop hitting prod ZeroCreds.
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1305
+- [ ] Merged to main
+- [ ] Deployed to prod — verify POST /tokens with a preflight body returns {ok,preflight:true} and writes nothing

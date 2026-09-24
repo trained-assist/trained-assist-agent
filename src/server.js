@@ -89,6 +89,9 @@ const { createNoticeDeduper } = require('./tg-notice-dedupe');
 const tokenNoticeDeduper = createNoticeDeduper();
 const noticeAlreadySent = (chatId, text) => tokenNoticeDeduper.alreadySent(chatId, text);
 
+// ZeroCreds destination preflight detection — see src/zerocreds-preflight.js.
+const { isZeroCredsPreflight } = require('./zerocreds-preflight');
+
 // Narrow ("specialized") bots delegate into a real profile instead of owning their
 // own. @cmr_management_bot ("misha") IS Flexi Consulting — its data (6 expo projects,
 // interviews, contexts) lives under the `flexi-consult` profile, so the bot must
@@ -1405,8 +1408,8 @@ ${recent || '(пока нет)'}
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
       // Preflight: ZeroCreds tests reachability before showing the form to the user.
-      // Respond immediately without writing anything.
-      if (payload._zerocreds_preflight === true) return json(res, 200, { ok: true, preflight: true });
+      // Respond immediately without writing anything. See isZeroCredsPreflight().
+      if (isZeroCredsPreflight(payload, req.headers)) return json(res, 200, { ok: true, preflight: true });
 
       const userId = payload.userId || url.searchParams.get('userId');
       const label = payload.label || url.searchParams.get('label');
