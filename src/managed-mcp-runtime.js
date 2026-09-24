@@ -3,6 +3,7 @@
 const path = require('path');
 const { ActionProviderRegistry } = require('./action-provider-registry');
 const { McpSkillSourceRegistry } = require('./mcp-skill-source-registry');
+const { cleanupAbandonedArtifacts } = require('./mcp-skill-artifact');
 const { ActionExecutions } = require('./action-executions');
 const { createActionInvoker } = require('./action-invoke');
 const { createManagedActionPolicy } = require('./managed-action-policy');
@@ -17,6 +18,7 @@ async function createManagedMcpRuntime({ config, root, databasePath, executionRo
   if (typeof validateScope !== 'function' || typeof validateSession !== 'function' || typeof resolveContext !== 'function') {
     throw new Error('Managed runtime requires core scope/session/context resolvers');
   }
+  cleanupAbandonedArtifacts(executionRoot);
   const registry = new ActionProviderRegistry();
   const sources = new McpSkillSourceRegistry({ config, root, actionRegistry: registry });
   for (const source of sources.list()) {

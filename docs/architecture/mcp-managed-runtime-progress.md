@@ -10,6 +10,8 @@ Implemented in this branch:
   third-party sources need explicit administrative enable. Scope/schema/triggers,
   exact artifact verification, idempotency and history still apply. Epic §25
   supersedes the earlier proposal to build persistent first-party consent UI.
+- Conservative startup cleanup of abandoned owned execution copies preserves
+  live child process groups and ambiguous/unrecorded ownership.
 - Runtime composition factory and per-attempt private engine configs/grants.
   Adapter restarts receive a distinct request identity. Release revokes grants.
   Codex/OpenCode translations tested; optional isolated OpenCode output directory.
@@ -38,7 +40,6 @@ Required before PR2 can ship:
    Prepare approved exact-SHA HH artifact and explicit profile eligibility before
    rollout: an empty config must not silently remove existing users' HH tools.
    Refresh source configuration atomically for new calls without disrupting leases.
-4. Add abandoned execution-copy cleanup without removing live children’s copies.
 5. Real HH/main-bot/second-bot/restart/rollback E2E plus exact-head CI/staging in
    core and gateway. Gateway must ship after core; no live gateway deploy yet.
 6. PR3 Freelance and PR4 domain surface remain untouched. /domain still absent

@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const { McpSkillSourceRegistry } = require('../src/mcp-skill-source-registry');
 const { ActionProviderRegistry } = require('../src/action-provider-registry');
-const { digest, inventory, verifyArtifact } = require('../src/mcp-skill-artifact');
+const { digest, inventory, verifyArtifact, cleanupAbandonedArtifacts } = require('../src/mcp-skill-artifact');
 const { prepareRelease, activateConfig, repositoryName } = require('../scripts/prepare-mcp-skill-artifact');
 const roots = [];
 function tmp() { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-source-test-')); roots.push(root); return root; }
@@ -129,6 +129,27 @@ describe('approved MCP sources', () => {
     lease.release(); lease.release();
     expect(fs.existsSync(lease.entrypoint)).toBe(false);
     expect(fs.readdirSync(path.join(root, 'executions'))).toEqual([]);
+  });
+  it('cleans only abandoned owned execution copies and retains live process groups or ambiguous ownership', () => {
+    const root = tmp(), s = fixture(root), r = registry(root, [s]), executionRoot = path.join(root, 'executions');
+    const dead = r.acquireAction('first_list', 'alice', executionRoot);
+    const live = r.acquireAction('first_list', 'alice', executionRoot);
+    const ambiguous = r.acquireAction('first_list', 'alice', executionRoot);
+    dead.recordChild(10001); live.recordChild(10002);
+    const directories = fs.readdirSync(executionRoot);
+    for (const name of directories) {
+      const ownerPath = path.join(executionRoot, name, 'owner.json');
+      const owner = JSON.parse(fs.readFileSync(ownerPath)); owner.pid = 20000;
+      fs.writeFileSync(ownerPath, JSON.stringify(owner));
+    }
+    const removed = cleanupAbandonedArtifacts(executionRoot, { graceMs: 0, now: Date.now() + 1000,
+      alive: pid => pid === -10002, referenced: () => false });
+    expect(removed).toHaveLength(1);
+    expect(fs.existsSync(dead.entrypoint)).toBe(false);
+    expect(fs.existsSync(live.entrypoint)).toBe(true);
+    expect(fs.existsSync(ambiguous.entrypoint)).toBe(true);
+    live.release(); ambiguous.release(); dead.release();
+    expect(fs.readdirSync(executionRoot)).toEqual([]);
   });
   it.each(['../outside', '/tmp/outside', 'a/../../b', 'a//b', 'a/./b', 'a\\b'])('rejects unsafe config paths: %s', artifactDir => {
     const root = tmp(), s = fixture(root), r = registry(root, [{ ...s, artifactDir }]);

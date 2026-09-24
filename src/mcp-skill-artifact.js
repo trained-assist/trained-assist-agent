@@ -102,6 +102,54 @@ function sealReadOnly(dir) {
   fs.chmodSync(dir, 0o555);
 }
 
+function removeExecutionCopy(directory) {
+  function writable(dir) {
+    if (!fs.lstatSync(dir).isDirectory()) return;
+    fs.chmodSync(dir, 0o700);
+    for (const name of fs.readdirSync(dir)) writable(path.join(dir, name));
+  }
+  if (fs.existsSync(directory)) { writable(directory); fs.rmSync(directory, { recursive: true, force: true }); }
+}
+function processExists(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return err.code !== 'ESRCH'; } // unknown/permission denied means retain
+}
+// Startup-only conservative cleanup. PID reuse can retain an old copy, never
+// justify deleting a live one. Unowned/invalid directories are left untouched.
+function cleanupAbandonedArtifacts(executionRoot, { now = Date.now(), graceMs = 60000,
+  alive = processExists, referenced } = {}) {
+  if (!fs.existsSync(executionRoot)) return [];
+  const removed = [];
+  if (!referenced) {
+    if (process.platform !== 'linux') return removed;
+    const commands = [];
+    for (const name of fs.readdirSync('/proc').filter(n => /^[0-9]+$/.test(n))) {
+      try {
+        const dir = '/proc/' + name;
+        if (fs.statSync(dir).uid !== process.getuid()) continue;
+        commands.push(fs.readFileSync(dir + '/cmdline'));
+      } catch (err) { if (err.code !== 'ENOENT' && err.code !== 'ESRCH') return removed; }
+    }
+    referenced = directory => commands.some(command => command.includes(Buffer.from(directory + path.sep)));
+  }
+  for (const name of fs.readdirSync(executionRoot).filter(n => /^mcp-[A-Za-z0-9]{6}$/.test(n))) {
+    const directory = path.join(executionRoot, name);
+    try {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || now - stat.mtimeMs < graceMs) continue;
+      const owner = JSON.parse(fs.readFileSync(path.join(directory, 'owner.json'), 'utf8'));
+      if (owner.version !== 1 || !Number.isSafeInteger(owner.pid) || owner.pid < 1 ||
+          owner.childPid !== null && (!Number.isSafeInteger(owner.childPid) || owner.childPid < 1)) continue;
+      // A crash between spawn and recordChild leaves ambiguous ownership.
+      // Retain that copy rather than racing the child's exec transition.
+      if (owner.childPid === null) continue;
+      if (alive(owner.pid) || owner.childPid && (alive(owner.childPid) || alive(-owner.childPid)) || referenced(directory)) continue;
+      removeExecutionCopy(directory); removed.push(name);
+    } catch { /* Corrupt/unknown ownership is not permission to delete. */ }
+  }
+  return removed;
+}
+
 // Pin approved bytes for one child, not a mutable deployment pathname. The
 // post-copy verification is essential: source may change after discovery or
 // during copying. The private parent prevents other OS users accessing a lease.
@@ -116,25 +164,23 @@ function acquireArtifact(root, source, executionRoot) {
   const release = () => {
     if (released) return;
     released = true;
-    function writable(dir) {
-      if (!fs.lstatSync(dir).isDirectory()) return;
-      fs.chmodSync(dir, 0o700);
-      for (const name of fs.readdirSync(dir)) writable(path.join(dir, name));
-    }
-    if (fs.existsSync(lease)) {
-      writable(lease);
-      fs.rmSync(lease, { recursive: true, force: true });
-    }
+    removeExecutionCopy(lease);
   };
+  const owner = { version: 1, pid: process.pid, childPid: null };
+  const writeOwner = () => fs.writeFileSync(path.join(lease, 'owner.json'), JSON.stringify(owner), { mode: 0o600 });
   try {
+    writeOwner();
     fs.cpSync(approved.artifact, target, { recursive: true, dereference: false, verbatimSymlinks: true });
     // Node versions differ in directory permissions created by cpSync.
     // Normalize the private copy; its bytes/execute bits are still verified.
     sealReadOnly(target);
     const pinned = verifyArtifact(lease, { ...source, artifactDir: 'artifact' });
     if (pinned.status !== 'available') fail(pinned.status);
-    return { ...pinned, release };
+    return { ...pinned, release, recordChild(pid) {
+      if (!Number.isSafeInteger(pid) || pid < 1) fail('invalid_child');
+      owner.childPid = pid; writeOwner();
+    } };
   } catch (e) { release(); throw e; }
 }
 
-module.exports = { digest, relative, contained, inventory, verifyArtifact, acquireArtifact, sealReadOnly };
+module.exports = { digest, relative, contained, inventory, verifyArtifact, acquireArtifact, sealReadOnly, cleanupAbandonedArtifacts };

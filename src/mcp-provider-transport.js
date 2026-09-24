@@ -26,7 +26,7 @@ function providerEnvironment({ profileId, workDir, base = {}, capabilities = {} 
 // 2024-11-05). No sampling/roots/resources/server requests. No SDK or provider
 // imports in the shared process. All content blocks survive the transport.
 function callProvider({ entrypoint, workDir, env, tool, args, timeoutMs = 45000,
-  maxBytes = 8 * 1024 * 1024, spawnChild = spawn }) {
+  maxBytes = 8 * 1024 * 1024, spawnChild = spawn, onSpawn = () => {} }) {
   return new Promise((resolve, reject) => {
     let child, result, failure, buffer = '', bytes = 0, phase = 1, closed = false;
     const terminate = () => {
@@ -102,6 +102,7 @@ function callProvider({ entrypoint, workDir, env, tool, args, timeoutMs = 45000,
       else if (result) resolve(result);
       else reject(error('PROVIDER_UNAVAILABLE', 'Provider exited without a result'));
     });
+    try { if (child.pid) onSpawn(child.pid); } catch { fail('PROVIDER_UNAVAILABLE', 'Unable to record provider ownership'); }
     request(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'trained-assist-control-plane', version: '1' } });
   });
 }
@@ -113,7 +114,7 @@ function createApprovedMcpTransport({ sources, executionRoot, resolveContext, ti
     const lease = sources.acquireAction(action, profileId, executionRoot);
     try {
       return await callProvider({ entrypoint: lease.entrypoint, workDir: context.workDir,
-        env, tool: action, args, timeoutMs });
+        env, tool: action, args, timeoutMs, onSpawn: lease.recordChild });
     } finally { lease.release(); }
   };
 }
