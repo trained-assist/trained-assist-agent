@@ -445,6 +445,56 @@ echo '{"type":"result","result":"'"$REPLY"'","usage":{"input_tokens":100,"output
     }
   });
 
+  // Regression for 2026-09-24 bug report: /switch2codex sat behind "Ожидаю завершения
+  // предыдущей работы" instead of answering instantly, because ENGINE_SWITCH_INTENT was
+  // missing from isPreQueueQuickIntent's whitelist even though its handler is a sync,
+  // local profiles.json write with no Claude/network call — same shape as /agent_info above.
+  it('/switch2codex answers immediately while a real task is still running in the same chat', { timeout: 20000 }, async () => {
+    const SLOW_MS = 4000;
+    writeSlowClaudeScript(SLOW_MS);
+    const userId = 555444334;
+    try {
+      const slowTask = runTask({
+        taskId: `slow-${Date.now()}`,
+        user: makeUser(userId),
+        task: 'сделай что-нибудь долгое',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+
+      await new Promise(r => setTimeout(r, 300));
+
+      const t0 = Date.now();
+      await runTask({
+        taskId: `switch-${Date.now()}`,
+        user: makeUser(userId),
+        task: '/switch2codex',
+        context: null,
+        sessionId: null,
+        contextFromSession: null,
+        secrets: { BOT_TOKEN: 'fake:token', TELEGRAM_BOT_TOKEN: 'fake:token' },
+      });
+      const elapsedMs = Date.now() - t0;
+
+      expect(elapsedMs, `/switch2codex took ${elapsedMs}ms — looks like it waited behind the slow task instead of bypassing the queue`).toBeLessThan(SLOW_MS / 2);
+
+      let texts = [];
+      for (let i = 0; i < 20; i++) {
+        texts = tgTexts();
+        if (texts.some(t => /движок/i.test(t))) break;
+        await new Promise(r => setTimeout(r, 25));
+      }
+      expect(texts.some(t => /движок/i.test(t)), 'expected an engine-switch-shaped reply').toBe(true);
+      expect(texts.some(t => /Ожидаю завершения предыдущей работы/i.test(t)), 'must NOT get the queued-behind-previous-task message').toBe(false);
+
+      await slowTask;
+    } finally {
+      restoreNormalClaude();
+    }
+  });
+
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
