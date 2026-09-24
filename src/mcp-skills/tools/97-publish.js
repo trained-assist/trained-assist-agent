@@ -11,6 +11,7 @@ const path = require('path');
 const os = require('os');
 const { createHash } = require('crypto');
 const { marked } = require('marked');
+const { publicPageBase } = require('../../public-links');
 
 const USER_ID = process.env.USER_ID || '';
 const AGENT_DATA_DIR = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
@@ -39,9 +40,9 @@ function profileDomain(username) {
   const domainFile = path.join(os.homedir(), 'agent-tokens', String(username || USER_ID), 'publish-domain');
   try {
     const d = fs.readFileSync(domainFile, 'utf8').trim();
-    return d.replace(/\/$/, '');
+    return publicPageBase(d);
   } catch {
-    return DEFAULT_BASE;
+    return publicPageBase(DEFAULT_BASE);
   }
 }
 

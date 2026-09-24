@@ -224,6 +224,8 @@ If manager is null — omit it silently.
 - "работает ли автопоиск" / status checks → `hh_proactive_schedule(action='status')`.
 - This is a background scheduler (checks every 30 min, runs cold search + Telegram digest when a user's interval is due) — separate from the 5-min ATS re-scoring loop above.
 
+**Recall existing cold-search results:** For «напомни ссылку», «где кандидаты холодного поиска», «открой результаты» call `hh_proactive_view` to get the current URL and actual saved results. Do not copy URLs or candidate counts from conversation history. Do not launch a new search or create a report unless asked. Existing users need no migration/setup step.
+
 **Cold search — always prefer `hh_proactive_search` over manual `hh_search_resumes` looping.** `hh_proactive_search()` (no args, ~30s) already does the whole job for the active vacancy: pulls candidates from the open resume database, scores them against the saved ATS config, and returns a published results page URL. Manually calling `hh_search_resumes` + looping `hh_evaluate_resume` per candidate is slower, burns far more tokens, and is redundant — only fall back to the manual tools when the recruiter needs a custom query `hh_proactive_search` can't express (specific text/area/skill filters outside the vacancy's own criteria).
 - `/set_cold_candiates_search` (also `/set_cold_candidates_search`, `/cold_search`, `/холодный_поиск`) or "запусти холодный поиск", "найди кандидатов по базе", "прогрей базу" → call `hh_proactive_search()` directly and relay its `message` verbatim. If `context_get('hh','active_vacancy')` isn't set yet, run `hh_set_active_vacancy()` first and ask the recruiter to pick one.
 

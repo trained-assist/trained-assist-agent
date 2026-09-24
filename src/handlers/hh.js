@@ -57,7 +57,7 @@ function proactiveHmac(uname) {
 // straight into the right tab. Omitted (falsy) → no param, unchanged for
 // single-vacancy callers.
 function proactiveUrl(username, vacancyId) {
-  const base = (process.env.AGENT_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
+  const base = (process.env.HH_COLD_SEARCH_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
   const token = proactiveHmac(username);
   const vacancyParam = vacancyId ? `&vacancy_id=${encodeURIComponent(vacancyId)}` : '';
   return `${base}/hh/proactive?username=${encodeURIComponent(username)}&token=${token}${vacancyParam}`;
@@ -992,7 +992,7 @@ if (req.method === 'GET' && url.pathname === '/hh/proactive') {
   if (file) {
     try { results = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return proactiveErrPage('Ошибка чтения данных.'); }
   }
-  const callbackBase = (process.env.AGENT_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+  const callbackBase = (process.env.HH_COLD_SEARCH_PUBLIC_URL || 'https://recruiter-assistant.ru').replace(/\/$/, '');
   const { loadCandidateComments, loadAllCandidates, candidateMatchesVacancy, candidateStatusOf } = require('../hh-proactive-search');
   const pageComments = loadCandidateComments(username, vacancyId);
   // Render from the unified all-candidates store (search + manual, accumulated

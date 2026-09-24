@@ -71,3 +71,11 @@ upstream, cleans up automatically). Staging runs both the existing user scenario
 and the real nginx smoke. The test covers OAuth query encoding, www/HTTP/ACME,
 login/candidate/vacancy forwarding, 2 and 20 MiB uploads, the 413 boundary and
 immediate streaming. It does not claim live HH account acceptance.
+
+Cold search uses https://recruiter-assistant.ru/hh/proactive with the existing
+per-profile signed token. The apex proxies only this page and /api/hh/proactive/
+to the GCP data owner over verified TLS; RU must not serve its empty local store.
+HH_COLD_SEARCH_PUBLIC_URL overrides the public cold-search base for isolated
+environments. AGENT_PUBLIC_URL remains the infrastructure URL for other services.
+Deploy the apex nginx config with DEPLOY_RECRUITER_APEX=1 on RU after CI/staging;
+roll back by restoring the previous nginx backup and reverting the URL change.
