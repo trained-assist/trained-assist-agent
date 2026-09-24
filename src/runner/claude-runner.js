@@ -39,11 +39,12 @@ const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').repl
 
 // Reads the per-user .mcp.json (written by writeMcpConfig) and returns its mcpServers map.
 // Shared translation source for codex (-c overrides) and opencode (OPENCODE_CONFIG file) below.
-function loadMcpServers(mcpConfig) {
+function loadMcpServers(mcpConfig, strict = false) {
   try {
     const raw = JSON.parse(fs.readFileSync(mcpConfig, 'utf8'));
+    if (strict && (!raw.mcpServers || typeof raw.mcpServers !== 'object' || Array.isArray(raw.mcpServers))) throw new Error('Invalid managed MCP configuration');
     return raw.mcpServers || {};
-  } catch { return {}; }
+  } catch (err) { if (strict) throw new Error('Managed MCP configuration unavailable'); return {}; }
 }
 
 // TOML inline-table literal, e.g. {FOO="bar",BAZ="qux"} — for codex's `-c key=value` overrides,
@@ -54,9 +55,12 @@ function tomlInlineTable(obj) {
   return '{' + Object.entries(obj).map(([k, v]) => `${k}=${JSON.stringify(String(v))}`).join(',') + '}';
 }
 
-function codexMcpArgs(mcpConfig) {
-  const servers = loadMcpServers(mcpConfig);
-  const args = [];
+function codexMcpArgs(mcpConfig, { exclusive = false } = {}) {
+  const servers = loadMcpServers(mcpConfig, exclusive);
+  // A per-server override merges with global/project MCP entries. Reset the
+  // whole table first in managed mode so stale external servers cannot survive.
+  // Verified with codex mcp list --json (0.154.0), without running a model.
+  const args = exclusive ? ['-c', 'mcp_servers={}'] : [];
   for (const [name, srv] of Object.entries(servers)) {
     if (!srv.command) continue;
     args.push('-c', `mcp_servers.${name}.command=${JSON.stringify(srv.command)}`);
@@ -112,7 +116,7 @@ function readOcAgentModels() {
 
 // Build the argv for the selected engine (claude/codex/opencode).
 // Returns [bin, args].
-function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user, resumeSessionId = null }) {
+function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user, resumeSessionId = null, managedMcp = false }) {
   const opencodeModelResolved = opencodeModel || process.env.OPENCODE_MODEL || null;
   if (engine === 'codex') {
     // Validated 2026-09-23: capping raw tool-output tokens cuts the *uncached* input
@@ -134,7 +138,7 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
       '--dangerously-bypass-approvals-and-sandbox',
       ...(resumeSessionId ? [] : ['-C', user.cwd || user.workDir]),
       '-c', `tool_output_token_limit=${toolOutputTokenLimit}`,
-      ...codexMcpArgs(mcpConfig),
+      ...codexMcpArgs(mcpConfig, { exclusive: managedMcp }),
       systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
     ]];
   }
@@ -162,6 +166,7 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
     '--output-format', 'stream-json',
     '--verbose',
     '--mcp-config', mcpConfig,
+    ...(managedMcp ? ['--strict-mcp-config'] : []),
     ...(systemPromptFile && fs.existsSync(systemPromptFile) ? ['--append-system-prompt-file', systemPromptFile] : []),
     '--print', prompt,
   ]];
@@ -232,12 +237,10 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig, mcpConfigDirectory,
-    ocProfileOverrides, onHeartbeat, onEngineSessionId,
+    ocProfileOverrides, onHeartbeat, onEngineSessionId, managedMcp = false,
   } = opts;
 
-  const proc = spawn(engineBin, engineArgs, {
-    cwd,
-    env: {
+  let engineEnv = {
       ...cleanEnv,
       ...userTokens,
       AGENT_USER_ID: String(user.username),
@@ -255,7 +258,15 @@ async function runEngineProcess(opts) {
       AGENT_TASK_ID: taskId,
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
       ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides, mcpConfigDirectory) } : {}),
-    },
+    };
+  if (managedMcp && engine === 'opencode') {
+    engineEnv = await require('../managed-opencode-config').isolateOpencodeMcp({
+      engineBin, cwd, env: engineEnv, configPath: engineEnv.OPENCODE_CONFIG,
+    });
+  }
+  const proc = spawn(engineBin, engineArgs, {
+    cwd,
+    env: engineEnv,
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
     // opencode waits 3s for stdin data before proceeding — use 'pipe' + immediate .end()

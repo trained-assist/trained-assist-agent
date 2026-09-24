@@ -10,14 +10,16 @@ const { createManagedActionPolicy } = require('./managed-action-policy');
 const { createApprovedMcpTransport } = require('./mcp-provider-transport');
 const { createManagedMcpGateway } = require('./managed-mcp-gateway');
 const { listenManagedMcp } = require('./managed-mcp-socket');
+const { createManagedCallbackAuthority, createManagedCallbackDispatcher, createManagedCallbackHandler } = require('./managed-action-callback');
 
 // Core composition root. It deliberately has no import-time IO or global
 // process.env inheritance; server supplies trusted paths, credentials and scope.
 async function createManagedMcpRuntime({ config, root, databasePath, executionRoot,
-  socketRoot, validateScope, validateSession, resolveContext, readiness = () => true }) {
+  socketRoot, validateScope, validateSession, resolveContext, readiness = () => true, callbackSecret, reservedActions = [] }) {
   if (typeof validateScope !== 'function' || typeof validateSession !== 'function' || typeof resolveContext !== 'function') {
     throw new Error('Managed runtime requires core scope/session/context resolvers');
   }
+  const callbackAuthority = callbackSecret === undefined ? null : createManagedCallbackAuthority({ secret: callbackSecret });
   cleanupAbandonedArtifacts(executionRoot);
   const executions = new ActionExecutions(databasePath);
   const scope = async context => await validateScope(context);
@@ -26,6 +28,9 @@ async function createManagedMcpRuntime({ config, root, databasePath, executionRo
     const registry = new ActionProviderRegistry();
     const sources = new McpSkillSourceRegistry({ config: candidate, root, actionRegistry: registry });
     if (sources.diagnostics().length) throw Object.assign(new Error('Invalid managed source generation'), { code: 'INVALID_ARGUMENTS' });
+    if (registry.list().some(action => reservedActions.includes(action.name))) {
+      throw Object.assign(new Error('Managed source shadows a core action'), { code: 'CONFLICT' });
+    }
     for (const source of sources.list()) {
       if (['trained-skills', 'playwright'].includes(source.mcpServerId)) throw new Error('Reserved MCP server identity');
     }
@@ -80,7 +85,54 @@ async function createManagedMcpRuntime({ config, root, databasePath, executionRo
     } catch (err) { tokens.forEach(token => gateway.revoke(token)); throw err; }
     return { mcpServers, release() { tokens.splice(0).forEach(token => gateway.revoke(token)); } };
   }
+  async function bindCallback({ profileId, projectId = null, providerId, actions, ttlMs }) {
+    if (closed || !callbackAuthority || !Array.isArray(actions) || !actions.length ||
+        !await scope({ profileId, projectId })) {
+      throw Object.assign(new Error('Managed callback scope denied'), { code: 'FORBIDDEN' });
+    }
+    const selected = current;
+    const source = selected.sources.get(providerId);
+    if (!source || selected.sources.availability(providerId, profileId).status !== 'available') {
+      throw Object.assign(new Error('Managed callback provider unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+    }
+    // The same policy decides both issuance and execution. A third-party source
+    // does not gain approval just because it can render an HTML page.
+    selected.sources.authorization(providerId, profileId);
+    for (const action of actions) {
+      const descriptor = selected.registry.get(action);
+      if (descriptor.providerId !== providerId || !descriptor.allowedTriggers.includes('user') ||
+          await readiness({ profileId, projectId, providerId, action }) !== true) {
+        throw Object.assign(new Error('Managed callback action denied'), { code: 'FORBIDDEN' });
+      }
+    }
+    const scopeStillValid = await scope({ profileId, projectId });
+    if (closed || selected !== current || !scopeStillValid) {
+      throw Object.assign(new Error('Managed callback source changed'), { code: 'CONFLICT' });
+    }
+    return callbackAuthority.issue({ profileId, projectId, providerId, actions, ttlMs,
+      revision: source.revision, digest: source.artifactDigest });
+  }
+  const dispatchCallback = callbackAuthority && createManagedCallbackDispatcher({ authority: callbackAuthority, invokeAction });
+  const handleCallback = createManagedCallbackHandler({ dispatch: dispatchCallback || (() => {
+    throw Object.assign(new Error('Managed callbacks disabled'), { code: 'PROVIDER_UNAVAILABLE' });
+  }) });
+  async function listTools({ profileId, projectId = null }) {
+    if (closed || !await scope({ profileId, projectId })) throw Object.assign(new Error('Managed catalog scope denied'), { code: 'FORBIDDEN' });
+    const selected = current, result = [];
+    for (const action of selected.sources.listTools(profileId)) {
+      if (action.allowedTriggers.includes('user') && await readiness({ profileId, projectId, providerId: action.providerId, action: action.name }) === true) result.push(action);
+    }
+    if (closed || selected !== current) throw Object.assign(new Error('Managed catalog changed'), { code: 'CONFLICT' });
+    return result;
+  }
+  async function listSkills(context) {
+    const tools = await listTools(context);
+    return [...new Set(tools.map(t => t.providerId))].sort().map(providerId => ({
+      id: providerId, providerId, name: providerId, description: tools.filter(t => t.providerId === providerId).map(t => t.description || t.name).join('\n'),
+    }));
+  }
   return { get registry() { return current.registry; }, get sources() { return current.sources; }, executions, invokeAction, bindSession,
+    bindCallback, dispatchCallback, handleCallback, listTools, listSkills,
     reload(candidate) {
       if (closed) throw new Error('Managed runtime closed');
       const next = generation(candidate); // Validate fully before atomic replacement.

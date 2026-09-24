@@ -137,6 +137,7 @@ const SKILLS = [
   },
   {
     id: 'hh-recruiting',
+    providerId: 'hh',
     name: 'HeadHunter — рекрутинг',
     description: 'Полный цикл работы с откликами на hh.ru: список вакансий, откликов, LLM-оценка резюме (ATS-скоринг с нокаутами и весами), генерация первого сообщения, отправка, перевод в статусы, bulk-отказ для здоровья аккаунта, профиль кандидата для заказчика.',
     requires: 'hh_set_token — получи access token на hh.ru (Настройки → API) или через OAuth и передай сюда. Для LLM-функций нужен OPENROUTER_API_KEY в env.',
@@ -149,6 +150,7 @@ const SKILLS = [
   },
   {
     id: 'hh-discovery',
+    providerId: 'hh',
     name: 'HeadHunter — Discovery (расширенный доступ к API)',
     description: 'Fallback для операций с HH которые не покрыты основным hh-recruiting скилом: создание вакансий, справочники (города, профроли, валюты), биллинг, произвольные API-запросы. hh_discover показывает доступные endpoints; hh_api_call выполняет любой из них.',
     requires: 'HH токен (тот же что для hh-recruiting).',
@@ -172,7 +174,15 @@ module.exports = {
     list_skills: {
       description: 'List all available agent skills and integrations. Call this when user asks "what can you do?" or "what integrations do you have?"',
       inputSchema: { type: 'object', properties: {} },
-      handler: async () => ({ skills: SKILLS }),
+      handler: async () => {
+        if (process.env.MANAGED_SKILLS_CATALOG !== undefined) {
+          const external = JSON.parse(process.env.MANAGED_SKILLS_CATALOG);
+          if (!Array.isArray(external)) throw new Error('Managed skills catalog unavailable');
+          return { skills: [...SKILLS.filter(s => !s.providerId), ...external] };
+        }
+        return { skills: SKILLS };
+      },
     },
   },
+  localSkills: () => SKILLS.filter(s => !s.providerId),
 };

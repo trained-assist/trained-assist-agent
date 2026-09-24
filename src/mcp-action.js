@@ -20,6 +20,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const registry = require('./mcp-skills/registry');
 const { mergeToolCatalogs } = require('./action-provider-registry');
+const { getManagedRuntime } = require('./managed-mcp-control');
 
 const INDEX_PATH = path.join(__dirname, 'mcp-skills', 'index.js');
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -27,12 +28,17 @@ const DEFAULT_TIMEOUT_MS = 45_000;
 // HH metadata is discovered from the existing external provider. Duplicate names
 // are configuration errors, never implicit local-first overrides (contract v1).
 const HH_SKILL_INDEX_PATH = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
-const hhRegistry = fs.existsSync(HH_SKILL_INDEX_PATH)
-  ? require(path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'registry'))
-  : null;
+function legacyHhRegistry() {
+  if (getManagedRuntime()) return null;
+  return fs.existsSync(HH_SKILL_INDEX_PATH)
+    ? require(path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'registry')) : null;
+}
 
 // Safe in-process: listTools() is static tool metadata, not user-scoped execution.
 function listActionTools() {
+  const managed = getManagedRuntime();
+  if (managed) return mergeToolCatalogs(registry.listTools(), managed.registry.list());
+  const hhRegistry = legacyHhRegistry();
   return mergeToolCatalogs(registry.listTools(), hhRegistry ? hhRegistry.listTools() : []);
 }
 
@@ -47,11 +53,29 @@ function resolveToolSource(tool, localNames, hhNames) {
 
 function resolveIndexPath(tool) {
   const localNames = new Set(registry.listTools().map(t => t.name));
+  const hhRegistry = legacyHhRegistry();
   const hhNames = hhRegistry ? new Set(hhRegistry.listTools().map(t => t.name)) : null;
   return resolveToolSource(tool, localNames, hhNames) === 'hh' ? HH_SKILL_INDEX_PATH : INDEX_PATH;
 }
 
-function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+async function runMcpTool({ tool, params, username, workDir, timeoutMs = DEFAULT_TIMEOUT_MS,
+  projectId = null, idempotencyKey = require('crypto').randomUUID(), trigger = 'user', origin = 'telegram' }) {
+  const managed = getManagedRuntime();
+  if (managed) {
+    // Also detects any accidental local/managed name collision before dispatch.
+    listActionTools();
+    const descriptor = managed.registry.list().find(action => action.name === tool);
+    if (descriptor) {
+      const result = await managed.invokeAction({ version: 1, action: tool, arguments: params || {},
+        profileId: username, projectId, idempotencyKey, trigger, origin, channel: 'action' });
+      if (result.status !== 'succeeded') throw Object.assign(new Error(result.error.code), { code: result.error.code });
+      const output = result.output;
+      // Retain the legacy quick-command text shape when there is one text block;
+      // do not discard images/resources or additional text from a managed tool.
+      return output?.content?.length === 1 && output.content[0].type === 'text'
+        ? output.content[0].text : JSON.stringify(output);
+    }
+  }
   return new Promise((resolve, reject) => {
     const fail = (code, message) => reject(Object.assign(new Error(message), { code }));
 

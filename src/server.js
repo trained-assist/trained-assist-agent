@@ -368,6 +368,15 @@ async function resumePendingTasks(secrets) {
 async function main() {
   const secrets = await loadSecrets();
   _secretsCache = secrets; // expose to background tasks for HH auto-refresh
+  const managedRuntime = await require('./managed-mcp-deployment').createManagedDeployment({
+    sourceFile: process.env.MCP_SKILL_SOURCES_CONFIG,
+    policyFile: process.env.MCP_SKILL_CAPABILITIES_CONFIG,
+    root: process.env.MCP_SKILLS_ROOT,
+    stateRoot: path.join(require('./data-paths').SYSTEM_ROOT, 'managed-mcp'),
+    usersRoot: BASE_USERS_DIR, home: os.homedir(), executablePath: process.env.PATH || '', secrets,
+    reservedActions: require('./mcp-skills/registry').listTools().map(t => t.name),
+  });
+  if (managedRuntime) require('./managed-mcp-control').installManagedRuntime(managedRuntime);
   resumePendingTasks(secrets).catch(err => console.error('[resume] failed:', err.message));
   reconcileSoftContinuations(secrets).catch(err => console.error('[soft-incomplete] reconcile failed:', err.message));
   const intakeQuick = require('./intake-quick').createIntakeQuick({
@@ -401,6 +410,7 @@ async function main() {
   const server = http.createServer(async (req, res) => {
     try {
     const url = new URL(req.url, `http://localhost:${PORT}`);
+    if (managedRuntime && await managedRuntime.handleCallback(req, url, res)) return;
     // ── /connect/* OAuth + token-collection + /hh-callback — dispatched to src/handlers/connect.js (#942 P3.3) ──
     if (await handleConnect(req, url, res, { ...connectCtx, secrets }) !== false) return;
 
@@ -880,7 +890,9 @@ ${recent || '(пока нет)'}
       // hh skill was extracted (#942) — its MCP tools no longer live under toolsDir,
       // so detect it the same way src/mcp-action.js does: sibling checkout present.
       const HH_SKILL_SIBLING = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
-      const skills = computeSkillsList(toolFilenames, fs.existsSync(HH_SKILL_SIBLING));
+      const skills = managedRuntime
+        ? [...computeSkillsList(toolFilenames, false), ...(await managedRuntime.listSkills({ profileId: userId })).map(s => s.id)]
+        : computeSkillsList(toolFilenames, fs.existsSync(HH_SKILL_SIBLING));
       const upsell_text = process.env.AGENT_UPSELL_TEXT ||
         'За HH-рекрутингом, налогами, задачами Weeek и другим — обратитесь к @super_personal_assistant_bot';
       return json(res, 200, { capabilities, skills, upsell_text });
@@ -913,6 +925,12 @@ ${recent || '(пока нет)'}
 
     // GET /skills — list all available MCP skills (for bot /skills command)
     if (req.method === 'GET' && url.pathname === '/skills') {
+      if (managedRuntime) {
+        const profileId = url.searchParams.get('userId') || url.searchParams.get('username');
+        if (!profileId) return json(res, 400, { error: 'profile required' });
+        const local = require('./mcp-skills/tools/00-meta.js').localSkills();
+        return json(res, 200, { skills: [...local, ...await managedRuntime.listSkills({ profileId })] });
+      }
       const { tools: metaTools } = require('./mcp-skills/tools/00-meta.js');
       const { skills } = await metaTools.list_skills.handler();
       return json(res, 200, { skills });
@@ -1349,7 +1367,7 @@ ${recent || '(пока нет)'}
       let body;
       try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'bad json' }); }
 
-      const { username, tool, params } = body || {};
+      const { username, tool, params, projectId = null, idempotencyKey } = body || {};
       if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return json(res, 400, { error: 'invalid username' });
       if (!tool || typeof tool !== 'string') return json(res, 400, { error: 'tool required' });
       if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) {
@@ -1357,15 +1375,16 @@ ${recent || '(пока нет)'}
       }
 
       const workDir = path.join(BASE_USERS_DIR, username);
-      fs.mkdirSync(workDir, { recursive: true });
+      if (!managedRuntime) fs.mkdirSync(workDir, { recursive: true });
 
       try {
-        const text = await runMcpTool({ tool, params: params || {}, username, workDir });
+        const text = await runMcpTool({ tool, params: params || {}, username, workDir, projectId, idempotencyKey });
         let result = text;
         try { result = JSON.parse(text); } catch { /* tool returned plain text — keep as-is */ }
         return json(res, 200, { ok: true, result, ms: Date.now() - start });
       } catch (e) {
-        const statusByCode = { bad_request: 400, tool_error: 400, timeout: 504 };
+        const statusByCode = { bad_request: 400, tool_error: 400, timeout: 504, INVALID_ARGUMENTS: 400,
+          FORBIDDEN: 403, APPROVAL_REQUIRED: 403, ACTION_NOT_FOUND: 404, PROVIDER_UNAVAILABLE: 503, CONFLICT: 409, TIMEOUT: 504 };
         const status = statusByCode[e.code] || 502;
         console.error('[/action]', username, tool, `${status}:`, e.message);
         return json(res, status, { error: e.message });
@@ -2162,4 +2181,3 @@ function publishPasswordForm(slug, error) {
 // ── Misha bot ─────────────────────────────────────────────────────────────────
 // Direct Telegram webhook for @cmr_management_bot.
 // Handles text, voice (Deepgram transcription), photos, /new_deal command.
-

@@ -5,6 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { writeMcpConfig } = require('../browser');
+const { getManagedRuntime } = require('../managed-mcp-control');
+const { prepareManagedMcpSession } = require('../managed-mcp-session');
 const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
@@ -1691,9 +1693,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // the system prompt is folded into the prompt text instead.
   const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
 
-  // Write per-user MCP config — gives Claude access only to this user's Chrome profile
-  const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username, sessionFilePath });
-
   // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
   const { ANTHROPIC_API_KEY: _stripped, ...cleanEnv } = process.env;
@@ -1750,10 +1749,6 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     : systemPromptText;
 
   const opencodeModel = process.env.OPENCODE_MODEL || null;
-  const [engineBin, engineArgs] = buildEngineCommand({
-    engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel,
-    mcpConfig, systemPromptFile, user, resumeSessionId,
-  });
 
   // Per-profile OpenCode model ladder (max|value|free|russian), resolved to the flat
   // {model, agent: {role: {model}}} shape and folded into the per-invocation OPENCODE_CONFIG in
@@ -1795,12 +1790,28 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // and the progress edits; this block interprets its result: on timeout →
   // auto-continuation (needs runTask recursion, so it stays in the runner),
   // otherwise the post-processing below (retry, incomplete detection, usage).
-  const engineResult = await runEngineProcess({
+  const managedRuntime = getManagedRuntime();
+  const browserOptions = { userName: user.name, userHandle: user.username, sessionFilePath };
+  const managedBinding = managedRuntime ? await prepareManagedMcpSession({
+    runtime: managedRuntime,
+    scope: { profileId: user.username, projectId: boundProjectId || null, sessionId: activeSessionId },
+    configRoot: path.join(require('../data-paths').SYSTEM_ROOT, 'managed-mcp', 'engine-configs'),
+    localServers: writeMcpConfig(user.workDir, user.username, { ...browserOptions, includeExternal: false, returnConfig: true }).mcpServers,
+  }) : null;
+  let engineResult;
+  try {
+    const mcpConfig = managedBinding?.configPath || writeMcpConfig(user.workDir, user.username, browserOptions);
+    const [engineBin, engineArgs] = buildEngineCommand({
+      engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel,
+      mcpConfig, systemPromptFile, user, resumeSessionId, managedMcp: !!managedBinding,
+    });
+    engineResult = await runEngineProcess({
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
     engineBin, engineArgs, mcpConfig, ocProfileOverrides,
+    managedMcp: !!managedBinding, mcpConfigDirectory: managedBinding?.configDirectory,
     cwd: user.cwd || user.workDir,
     // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
     // same 30s tick claude-runner.js already runs for the inactivity check, so a
@@ -1816,7 +1827,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
       savePendingTask(taskId, { engineSessionId: sid, engine });
     },
-  });
+    });
+  } finally {
+    // Revoke before any timeout/engine-fallback recursion below. Every retry
+    // and restart receives a new grant, never one persisted in the task journal.
+    managedBinding?.release();
+  }
   const {
     fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, engineSessionId, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,

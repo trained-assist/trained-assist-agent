@@ -74,7 +74,7 @@ function buildStorageState(tokensDir) {
  * Writes per-user .mcp.json with Playwright MCP scoped to this user's Chrome profile.
  * If the user has captured service cookies (via Chrome extension), injects them via --storage-state.
  */
-function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath } = {}) {
+function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath, includeExternal = true, returnConfig = false } = {}) {
   // Note: --user-data-dir creates a persistent context, which is incompatible
   // with --storage-state (Playwright limitation). We rely on --storage-state
   // for both cookie injection and session persistence. Per-user isolation is
@@ -161,7 +161,7 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath
   // in a sibling checkout. Register it only when that checkout is present, so
   // environments without the hh-skill repo cloned keep working unchanged.
   const hhSkillIndex = path.join(__dirname, '..', '..', 'trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
-  if (fs.existsSync(hhSkillIndex)) {
+  if (includeExternal && fs.existsSync(hhSkillIndex)) {
     config.mcpServers['hh-skills'] = {
       command: 'node',
       args: [hhSkillIndex],
@@ -169,6 +169,7 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath
     };
   }
 
+  if (returnConfig) return config;
   const configPath = path.join(workDir, '.mcp.json');
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   return configPath;

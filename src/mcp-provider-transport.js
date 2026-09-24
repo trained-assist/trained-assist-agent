@@ -108,8 +108,9 @@ function callProvider({ entrypoint, workDir, env, tool, args, timeoutMs = 45000,
 }
 
 function createApprovedMcpTransport({ sources, executionRoot, resolveContext, timeoutMs }) {
-  return async ({ action, arguments: args, profileId, projectId }) => {
-    const context = await resolveContext({ profileId, projectId, providerId: sources.resolveAction(action, profileId).action.providerId });
+  return async ({ action, arguments: args, profileId, projectId, executionId }) => {
+    const context = await resolveContext({ profileId, projectId, action, executionId,
+      providerId: sources.resolveAction(action, profileId).action.providerId });
     const env = providerEnvironment({ ...context, profileId });
     const lease = sources.acquireAction(action, profileId, executionRoot);
     try {

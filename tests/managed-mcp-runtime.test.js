@@ -219,6 +219,41 @@ describe('approved MCP transport and managed policy', () => {
       await expect(requestCore(rpc)).rejects.toMatchObject({ code: 'FORBIDDEN' });
     } finally { await runtime.close(); }
   });
+  it('runs browser callbacks through the same policy and journal, including replay after restart', async () => {
+    const s = setup({ repository: 'trained-assist/fixture' });
+    const config = { version: 1, sources: s.sources.list() };
+    const options = { config, root: s.root, databasePath: path.join(s.root, 'callback.db'),
+      executionRoot: path.join(s.root, 'callback-leases'), socketRoot: path.join(s.root, 'callback-sockets'),
+      validateScope: ({ profileId, projectId }) => profileId === 'alice' && projectId === null,
+      validateSession: () => true, resolveContext: () => ({ workDir: s.root, base: {}, capabilities: {} }),
+      callbackSecret: 'only-core-knows-this-signing-key-'.repeat(2) };
+    let runtime = await createManagedMcpRuntime(options);
+    const marker = path.join(s.root, 'callback-marker');
+    try {
+      const token = await runtime.bindCallback({ profileId: 'alice', providerId: 'fixture', actions: ['fixture_write'] });
+      const call = { action: 'fixture_write', arguments: { marker }, requestId: 'browser-click' };
+      const result = await runtime.dispatchCallback(token, call);
+      expect(result.status).toBe('succeeded');
+      await expect(runtime.dispatchCallback(token, { ...call, profileId: 'bob' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(runtime.bindCallback({ profileId: 'bob', providerId: 'fixture', actions: ['fixture_write'] })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(runtime.bindCallback({ profileId: 'alice', providerId: 'fixture', actions: ['fixture_cron'] })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await runtime.close();
+      runtime = await createManagedMcpRuntime(options);
+      expect(await runtime.dispatchCallback(token, call)).toEqual(result);
+      expect(fs.readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(1);
+      const row = runtime.executions.db.prepare('SELECT * FROM action_executions').get();
+      expect(row).toMatchObject({ profile_id: 'alice', origin: 'web', channel: 'managed-callback', status: 'succeeded' });
+      await expect(runtime.dispatchCallback(token, { ...call, arguments: { marker, extra: true } })).rejects.toMatchObject({ code: 'CONFLICT' });
+      const disabled = structuredClone(config); disabled.sources[0].enabled = false;
+      runtime.reload(disabled);
+      await expect(runtime.dispatchCallback(token, call)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      const upgraded = structuredClone(config); upgraded.sources[0].revision = 'b'.repeat(40);
+      runtime.reload(upgraded);
+      await expect(runtime.dispatchCallback(token, call)).rejects.toMatchObject({ code: 'CONFLICT' });
+      runtime.reload(config);
+      expect(await runtime.dispatchCallback(token, call)).toEqual(result);
+    } finally { await runtime.close(); }
+  });
   it('atomically reloads sources while admitted calls retain their approved generation', async () => {
     const s = setup({ repository: 'trained-assist/fixture' });
     const config = { version: 1, sources: s.sources.list() };

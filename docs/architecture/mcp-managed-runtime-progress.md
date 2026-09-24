@@ -58,3 +58,39 @@ Tests are isolated harnesses, not proof of live production integration.
 No production server was started locally. Same-UID providers are trusted code,
 not a sandbox. Per-call artifact hashing/copying adds IO until a later measured
 optimization. Approved manifest descriptions require the new optional schema field.
+
+## 2026-09-24 continuation: core wiring, not a production cutover
+
+Implemented opt-in startup composition, trusted profile/project/session scope,
+explicit deployment credential policy, generic capabilities/skills discovery,
+private runner configs and cleanup, and scoped signed web callbacks that invoke
+the same action policy/history/idempotency path. Claude uses strict MCP config;
+Codex resets inherited MCP servers; OpenCode disables inherited servers through
+the highest-priority inline config and verifies the effective config. OpenCode
+requires two config-only CLI startups per engine attempt (no model calls).
+
+Validation: full npm test passed (77 Vitest files, 1174 tests + one existing skip;
+CJS suites passed). Real isolated runner lifecycle test verifies two distinct
+grants, revocation and private-file cleanup. Installed-engine config smoke passed
+for Claude, Codex and OpenCode without provider/model calls. Mandatory staging
+must additionally be recorded against the committed SHA.
+
+Release blockers remain; do not set MCP_SKILL_SOURCES_CONFIG in production:
+- HH review callbacks currently bypass invokeAction and use a global bearer.
+  Legacy HTTP actions differ from available MCP tools: bulk reject accepts
+  vacancy_ids, not selected negotiation_ids; send guards/force semantics differ.
+  Migrating these contracts needs provider+core+page changes and executable
+  regression tests; blindly mapping route names to existing tools is incorrect.
+- HH ATS editor signing and vacancy publication need scoped capabilities.
+- Correction to earlier inventory: HH connect and auth-error paths call
+  generateLegacyConnectLink, not user-tokens.generateConnectLink. The latter's
+  ZeroCreds admin bearer is not evidence of a dependency in HH connect.
+- Deployment readiness currently checks declared environment dependencies;
+  per-profile HH credential readiness and approved HH artifact rollout remain.
+- Trusted cron/automatic trigger propagation must be verified at the actual
+  runner/gateway boundary, together with policy and history parity.
+- Main/secondary bot live regression, restart, rollback and exact-head remote
+  CI/staging remain required. Legacy hardcodes remain until compatibility.
+- Freelance manifest/storage adapter and domain read-only UI are still pending.
+
+This commit is reviewable infrastructure, not completion of epic #1271.

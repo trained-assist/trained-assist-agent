@@ -14,11 +14,16 @@ async function prepareManagedMcpSession({ runtime, scope, configRoot, localServe
   const binding = await runtime.bindSession(scope);
   let directory;
   try {
+    const servers = structuredClone(localServers);
+    if (servers['trained-skills'] && typeof runtime.listSkills === 'function') {
+      const catalog = await runtime.listSkills(scope);
+      servers['trained-skills'].env = { ...servers['trained-skills'].env, MANAGED_SKILLS_CATALOG: JSON.stringify(catalog) };
+    }
     fs.mkdirSync(configRoot, { recursive: true, mode: 0o700 });
     directory = fs.mkdtempSync(path.join(configRoot, 'engine-'));
     fs.chmodSync(directory, 0o700);
     const configPath = path.join(directory, 'mcp.json');
-    fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { ...localServers, ...binding.mcpServers } }), { mode: 0o600 });
+    fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { ...servers, ...binding.mcpServers } }), { mode: 0o600 });
     return { configPath, configDirectory: directory, release() {
       binding.release();
       fs.rmSync(directory, { recursive: true, force: true });
