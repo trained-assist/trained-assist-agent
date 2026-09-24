@@ -10,6 +10,7 @@ const error = (code, message) => Object.assign(new Error(message), { code });
 class ActionProviderRegistry {
   #providers = new Set();
   #actions = new Map();
+  #providerMeta = new Map();
   #validateV1;
   #validateV2;
 
@@ -62,6 +63,17 @@ class ActionProviderRegistry {
     // Registration is atomic: a bad final action cannot leak earlier entries.
     for (const [name, entry] of pending) this.#actions.set(name, entry);
     this.#providers.add(snapshot.providerId);
+    // Retain the declared v2 sections for surface/context/collection lookup
+    // (the route and effective-context resolvers read these). Metadata only —
+    // it grants nothing; invokeAction still authorizes every call.
+    this.#providerMeta.set(snapshot.providerId, {
+      version: isV2 ? 2 : 1,
+      providerId: snapshot.providerId,
+      contextFields: snapshot.contextFields ?? [],
+      collections: snapshot.collections ?? [],
+      connections: snapshot.connections ?? [],
+      webSurfaces: snapshot.webSurfaces ?? [],
+    });
     return this.list(snapshot.providerId);
   }
 
@@ -110,6 +122,25 @@ class ActionProviderRegistry {
     const entry = this.#actions.get(name);
     if (!entry) throw error('ACTION_NOT_FOUND', 'Action is not registered');
     return { providerId: entry.providerId, ...clone(entry.action) };
+  }
+
+  // Metadata lookups return null for an unknown provider/surface so a route can
+  // answer 404 without inventing error codes. v1 providers normalize to empty
+  // domain sections, so callers never branch on version.
+  listProviders() {
+    return [...this.#providerMeta.keys()];
+  }
+
+  getProvider(providerId) {
+    const meta = this.#providerMeta.get(providerId);
+    return meta ? clone(meta) : null;
+  }
+
+  getSurface(providerId, surfaceId) {
+    const meta = this.#providerMeta.get(providerId);
+    if (!meta) return null;
+    const surface = meta.webSurfaces.find(s => s.id === surfaceId);
+    return surface ? clone(surface) : null;
   }
 
   validateCall(name, args, trigger) {
