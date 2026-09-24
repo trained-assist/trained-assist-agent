@@ -34,6 +34,17 @@
         "system"
       ]
     },
+    "origin": {
+      "description": "Where the call entered core. Distinguishes web/mcp/telegram without adding a trigger (spec §7). Core sets it from trusted call context, never from provider arguments.",
+      "enum": [
+        "web",
+        "mcp",
+        "telegram",
+        "api",
+        "cron-service",
+        "durable"
+      ]
+    },
     "invocation": {
       "type": "object",
       "additionalProperties": false,
@@ -57,6 +68,14 @@
         },
         "trigger": {
           "$ref": "#/$defs/trigger"
+        },
+        "origin": {
+          "$ref": "#/$defs/origin"
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         },
         "idempotencyKey": {
           "type": "string",
