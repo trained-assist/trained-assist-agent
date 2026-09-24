@@ -86,7 +86,7 @@ function formatCostFooter(usage) {
   const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
   const parts = [`вход ${fmt(inp)}`, `выход ${fmt(out)}`];
   if (cw > 0) parts.push(`кэш +${fmtK(cw)}`);
-  if (cr > 0) parts.push(`кэш /${fmtK(cr)}`);
+  if (cr > 0) parts.push(`кэш ${fmtK(cr)}`);
   return `\n\nИспользование: ${parts.join(' · ')}`;
 }
 
@@ -105,7 +105,7 @@ function formatOcFooter(usage, breakdown) {
   }
   const parts = [`вход ${fmt(usage.input)}`, `выход ${fmt(usage.output)}`];
   if (usage.cacheWrite > 0) parts.push(`кэш +${fmtK(usage.cacheWrite)}`);
-  if (usage.cacheRead > 0) parts.push(`кэш /${fmtK(usage.cacheRead)}`);
+  if (usage.cacheRead > 0) parts.push(`кэш ${fmtK(usage.cacheRead)}`);
   const m = model ? ` ${model}` : '';
   return `\n\nИспользование${m}: ${parts.join(' · ')}`;
 }

@@ -53,7 +53,7 @@ ok(cf.includes('вход') && cf.includes('выход'), 'claude footer words');
 
 // Token-only contract replaces the former required-price assertion (owner request 2026-09-24).
 const example = { input_tokens: 42, output_tokens: 20028, cache_creation_input_tokens: 42900, cache_read_input_tokens: 977500 };
-const expected = '\n\nИспользование: вход 42 · выход 20\u202f028 · кэш +42.9K · кэш /977.5K';
+const expected = '\n\nИспользование: вход 42 · выход 20\u202f028 · кэш +42.9K · кэш 977.5K';
 for (const model of ['opus', 'sonnet', 'haiku', 'unknown']) {
   ok(formatCostFooter(example, model) === expected, `Claude ${model}: tokens and cache only`);
 }
