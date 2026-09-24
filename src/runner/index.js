@@ -736,6 +736,14 @@ function buildContextCard(username, workDir, chatId) {
 
   const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
 
+  // Chat's project (issue #1312, «чат = проект»): every new session of this chat goes
+  // into it. Pinned = explicit user choice; otherwise the last-used one.
+  try {
+    const pid = chatId ? (projects.getPinnedProjectId(workDir, chatId) || projects.getActiveProjectId(workDir, chatId)) : null;
+    const pmeta = pid ? projects.getProject(workDir, pid) : null;
+    if (pmeta) lines.push(`📁 Проект: ${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''} · сменить: /project`);
+  } catch (e) { console.warn('[runner] project pin line:', e.message); }
+
   // HH: active vacancy(ies) + ATS config / scoring status.
   // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
   // the legacy singleton active_vacancy.json is the fallback for profiles that never
@@ -1337,15 +1345,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
   //     so we never block silently here.
   let boundProjectId = null;
+  let pinProject = false; // explicit user choice → becomes the chat's pinned project (#1312)
   try {
     if (sessionExists && activeSessionId) {
       const s = sessions.getSession(user.workDir, activeSessionId);
       boundProjectId = s && s.projectId ? s.projectId : projects.getActiveProjectId(user.workDir, chatId, audience);
     } else if (projectId && projects.getProject(user.workDir, projectId)) {
       boundProjectId = projectId; // explicit choice from the gateway picker
+      pinProject = true;
     } else if (newProjectName) {
       // gateway "➕ Новый проект" — provisional name derived from the first message
       boundProjectId = projects.createProject(user.workDir, newProjectName, { audience }).id;
+      pinProject = true;
     } else {
       const decision = projects.decideNewSessionProject(user.workDir, chatId, undefined, audience);
       if (decision.action === 'auto') {
@@ -1359,7 +1370,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (boundProjectId) {
       const dir = projects.resolveProjectDir(user.workDir, boundProjectId);
       if (dir) {
-        projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience });
+        projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience, pinned: pinProject });
         user.cwd = dir; // session runs inside its project
       } else {
         // Project folder is gone — e.g. archived/merged by a projects reorg since this
