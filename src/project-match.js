@@ -16,19 +16,22 @@ const MIN_TASK_CHARS = 20; // «привет», «ок», «делай» carry n
 
 const clip = (s, n) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
 
-function describeProject(p) {
+function describeProject(p, pinnedId) {
   const s = p.summary || {};
   const sense = [s.start, s.middle, s.end].filter(Boolean).join(' / ');
-  return `id=${p.id} | ${clip(p.name || p.label || p.id, 80)} | тип ${p.type || 'generic'}${sense ? ` | ${clip(sense, 400)}` : ''}`;
+  return `${p.id === pinnedId ? '[ЗАКРЕПЛЁН] ' : ''}id=${p.id} | ${clip(p.name || p.label || p.id, 80)} | тип ${p.type || 'generic'}${sense ? ` | ${clip(sense, 400)}` : ''}`;
 }
 
 const SYSTEM_PROMPT = [
   'Ты маршрутизатор задач по проектам пользователя ИИ-ассистента.',
-  'Дано: новая задача и список проектов (id, название, тип, краткая история).',
-  'Определи, к какому ОДНОМУ проекту задача относится по смыслу.',
-  'Ответь СТРОГО JSON: {"projectId": "<id из списка>", "confidence": <0..1>, "reason": "<до 12 слов>"}.',
-  'confidence ≥ 0.85 ставь только если задача явно и однозначно про этот проект (прямо названа его тема, вакансия, клиент, продукт).',
-  'Если задача общая, короткая или подходит нескольким проектам — confidence ниже 0.5.',
+  'Чат закреплён за одним проектом (помечен [ЗАКРЕПЛЁН]) — по умолчанию новая задача идёт туда.',
+  'Твоя работа — заметить, когда задача ЯВНО про ДРУГОЙ проект из списка.',
+  'Ответь СТРОГО JSON: {"projectId": "<id из списка>", "confidence": <0.1|0.5|0.9>, "reason": "<до 12 слов>"}.',
+  'Шкала confidence (только эти три значения):',
+  '  0.9 — в задаче есть конкретная тема/сущность (выставка, вакансия, клиент, продукт, сервис), которая совпадает с историей этого проекта и НЕ совпадает с закреплённым;',
+  '  0.5 — задача скорее про этот проект, но прямого совпадения нет;',
+  '  0.1 — задача общая/короткая/подходит нескольким проектам.',
+  'Если задача про закреплённый проект или неясно — верни id закреплённого проекта.',
 ].join('\n');
 
 // Pure: turn a decideNewSessionProject() result + classifier verdict into the response.
@@ -52,7 +55,7 @@ function applyMismatch(decision, verdict, { threshold = DEFAULT_THRESHOLD, allPr
 }
 
 // One provider call → parsed verdict or null (http error / garbage / unknown id).
-async function _ask(url, key, model, projects, text, { timeoutMs, fetchImpl }) {
+async function _ask(url, key, model, projects, text, { timeoutMs, fetchImpl, pinnedId }) {
   const res = await fetchImpl(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -60,7 +63,7 @@ async function _ask(url, key, model, projects, text, { timeoutMs, fetchImpl }) {
       model,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: `Проекты:\n${projects.map(describeProject).join('\n')}\n\nЗадача:\n${text}` },
+        { role: 'user', content: `Проекты:\n${projects.map(p => describeProject(p, pinnedId)).join('\n')}\n\nЗадача:\n${text}` },
       ],
       response_format: { type: 'json_object' },
       max_tokens: 80,
@@ -81,12 +84,16 @@ async function _ask(url, key, model, projects, text, { timeoutMs, fetchImpl }) {
 
 // Returns {projectId, confidence, reason} or null. Never throws. OpenRouter first; if it
 // is unavailable (402 out of credits, 5xx, timeout) and an OpenAI key exists → gpt-4o-mini.
-async function classifyTaskProject(task, projects, { apiKey, openaiKey, model = DEFAULT_MODEL, timeoutMs = 3500, fetchImpl = fetch } = {}) {
+async function classifyTaskProject(task, projects, { apiKey, openaiKey, model = DEFAULT_MODEL, timeoutMs = 3500, fetchImpl = fetch, pinnedId = null } = {}) {
   const orKey = apiKey || process.env.OPENROUTER_API_KEY;
   const oaKey = openaiKey || process.env.OPENAI_API_KEY;
   const text = clip(task, 1500);
   if ((!orKey && !oaKey) || text.length < MIN_TASK_CHARS || !Array.isArray(projects) || projects.length < 2) return null;
-  const opts = { timeoutMs, fetchImpl };
+  // Deterministic order (pinned first, rest by id): list order used to swing the model's
+  // confidence 0.7↔0.9 on the same task.
+  const ordered = [...projects].sort((x, y) => (y.id === pinnedId) - (x.id === pinnedId) || String(x.id).localeCompare(String(y.id)));
+  projects = ordered;
+  const opts = { timeoutMs, fetchImpl, pinnedId };
   if (orKey) {
     try {
       const v = await _ask('https://openrouter.ai/api/v1/chat/completions', orKey, model, projects, text, opts);

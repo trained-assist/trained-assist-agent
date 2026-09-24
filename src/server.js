@@ -1213,7 +1213,7 @@ ${recent || '(пока нет)'}
           try {
             const match = require('./project-match');
             const all = projects.listProjects(workDir, audience);
-            const verdict = await match.classifyTaskProject(taskParam, all);
+            const verdict = await match.classifyTaskProject(taskParam, all, { pinnedId: d.project.id });
             d = match.applyMismatch(d, verdict, { allProjects: all });
             if (d.mismatch) console.log(`[project-decision] pin mismatch: ${d.mismatch.pinned} → ${d.mismatch.suggested} (${d.mismatch.confidence})`);
           } catch (e) { console.warn('[project-decision] mismatch check:', e.message); }
