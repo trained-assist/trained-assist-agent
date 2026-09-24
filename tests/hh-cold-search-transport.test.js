@@ -1,0 +1,184 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { resolveSearchAreas, searchResumes } = require('../src/hh-cold-search-transport');
+afterEach(() => vi.unstubAllGlobals());
+const response = (status, body = {}) => ({ ok: status === 200, status, headers: new Headers(), json: async () => body });
+describe('cold search geography and failures (#1232)', () => {
+  it('uses vacancy geography and allows an explicit unrestricted override', () => {
+    expect(resolveSearchAreas({}, { area: { id: '2' } }, {})).toEqual(['2']);
+    expect(resolveSearchAreas({}, { area: { id: '1' } }, { area: null })).toEqual([]);
+    expect(resolveSearchAreas({ filters: { area: ['2', '4'] } }, { area: { id: '1' } }, {})).toEqual(['2', '4']);
+    expect(() => resolveSearchAreas({}, {}, {})).toThrow(/географ/);
+  });
+  it('sends repeated area parameters, never an implicit Moscow', async () => {
+    const fetch = vi.fn(async () => response(200, { items: [] })); vi.stubGlobal('fetch', fetch);
+    await searchResumes('engineer', { access_token: 'test' }, 'user', { areas: ['2', '4'] });
+    expect(new URL(fetch.mock.calls[0][0]).searchParams.getAll('area')).toEqual(['2', '4']);
+    await searchResumes('engineer', { access_token: 'test' }, 'user', { areas: [] });
+    expect(new URL(fetch.mock.calls[1][0]).searchParams.has('area')).toBe(false);
+  });
+  it('refreshes expired auth once and reuses the refreshed token', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(401)).mockResolvedValue(response(200, { items: [] })); vi.stubGlobal('fetch', fetch);
+    const token = { access_token: 'old' }; const refresh = vi.fn(async () => 'new');
+    await searchResumes('x', token, 'u', { areas: [], refreshAccessToken: refresh });
+    expect(refresh).toHaveBeenCalledTimes(1); expect(token.access_token).toBe('new');
+    expect(fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer new');
+  });
+  it.each([401, 403, 429, 500])('never reports HTTP %s as zero results', async status => {
+    const fetch = vi.fn(async () => response(status)); vi.stubGlobal('fetch', fetch);
+    await expect(searchResumes('x', { access_token: 'x' }, 'u', { areas: [], sleep: async () => {} })).rejects.toThrow(`HH resumes ${status}`);
+    expect(fetch).toHaveBeenCalledTimes(status >= 429 ? 3 : 1);
+  });
+  it('bounds network retries and rejects malformed successful responses', async () => {
+    const fetch = vi.fn(async () => { throw new TypeError('network down'); }); vi.stubGlobal('fetch', fetch);
+    await expect(searchResumes('x', {}, 'u', { areas: [], sleep: async () => {} })).rejects.toThrow('network down');
+    expect(fetch).toHaveBeenCalledTimes(3);
+    fetch.mockResolvedValue(response(200, {}));
+    await expect(searchResumes('x', {}, 'u', { areas: [] })).rejects.toThrow(/items/);
+  });
+});
+
+describe('vacancy-scoped context', () => {
+  it('selects B without changing A, rejects unowned legacy config', () => {
+    const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os');
+    const { resolveSearchContext } = require('../src/hh-cold-search-context');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-context-'));
+    const dir = path.join(root, 'contexts', 'hh'); fs.mkdirSync(dir, { recursive: true });
+    const put = (key, value) => fs.writeFileSync(path.join(dir, key + '.json'), JSON.stringify({ value }));
+    try {
+      put('active_vacancy', { id: 'A', area: { id: '1' } });
+      put('ats_config', { vacancy_id: 'A', vacancy_title: 'Sales' });
+      put('ats_config:B', { vacancy_id: 'B', vacancy_title: 'Engineering' });
+      expect(resolveSearchContext(root, 'B').config.vacancy_title).toBe('Engineering');
+      expect(resolveSearchContext(root).vacancyId).toBe('A');
+      expect(() => resolveSearchContext(root, 'C')).toThrow(/ATS/);
+      put('ats_config:B', { vacancy_id: 'C' });
+      expect(() => resolveSearchContext(root, 'B')).toThrow(/другой/);
+      put('ats_config', { vacancy_title: 'Unowned' });
+      expect(() => resolveSearchContext(root)).toThrow(/ATS/);
+      expect(() => resolveSearchContext(root, '../x')).toThrow(/ID/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+  it('does not resurrect legacy selection after explicitly removing all vacancies', () => {
+    const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os');
+    const { readActiveVacancies } = require('../src/hh-utils');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-active-'));
+    const dir = path.join(root, 'contexts', 'hh'); fs.mkdirSync(dir, { recursive: true });
+    try {
+      fs.writeFileSync(path.join(dir, 'active_vacancy.json'), JSON.stringify({ value: { id: 'A' } }));
+      expect(readActiveVacancies(root)).toEqual([{ id: 'A' }]);
+      fs.writeFileSync(path.join(dir, 'active_vacancies.json'), JSON.stringify({ value: [] }));
+      expect(readActiveVacancies(root)).toEqual([]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('candidate triage and score per vacancy', () => {
+  it('keeps A starred and B archived across search repeats and reloads', () => {
+    const { mergeSearchCandidatesIntoAll, setCandidateStatus, loadAllCandidates, allCandidatesPath } = require('../src/hh-proactive-search');
+    const fs = require('node:fs'); const user = 'triage-' + Date.now();
+    try {
+      mergeSearchCandidatesIntoAll(user, [{ id: 'same', score: 9 }], {}, 'A');
+      setCandidateStatus(user, 'same', 'starred', 'A');
+      mergeSearchCandidatesIntoAll(user, [{ id: 'same', score: 2 }], {}, 'B');
+      setCandidateStatus(user, 'same', 'archived', 'B');
+      mergeSearchCandidatesIntoAll(user, [{ id: 'same', score: 10 }], {}, 'A');
+      expect(loadAllCandidates(user, 'A').same).toMatchObject({ score: 10, status: 'starred' });
+      expect(loadAllCandidates(user, 'B').same).toMatchObject({ score: 2, status: 'archived' });
+      expect(() => setCandidateStatus(user, 'same', 'starred', 'C')).toThrow(/not found/);
+      setCandidateStatus(user, 'same', 'active', 'B');
+      expect(loadAllCandidates(user, 'B').same.status).toBe('active');
+      expect(loadAllCandidates(user, 'A').same.status).toBe('starred');
+    } finally { fs.rmSync(allCandidatesPath(user), { force: true }); }
+  });
+});
+
+describe('full cold-search execution', () => {
+  it('uses B criteria and region, preserves A, and saves every candidate before seen', async () => {
+    const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os');
+    const api = require('../src/hh-proactive-search');
+    const { latestProactiveFile } = require('../src/hh-cold-search-snapshots');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-run-'));
+    const oldData = process.env.AGENT_DATA_DIR, oldTokens = process.env.AGENT_TOKENS_DIR, oldKey = process.env.OPENROUTER_API_KEY;
+    process.env.AGENT_DATA_DIR = path.join(root, 'data'); process.env.AGENT_TOKENS_DIR = path.join(root, 'tokens'); delete process.env.OPENROUTER_API_KEY;
+    const user = 'fixture'; const ctx = path.join(root, 'contexts', 'hh'); fs.mkdirSync(ctx, { recursive: true });
+    fs.mkdirSync(path.join(root, 'tokens', user), { recursive: true }); fs.writeFileSync(path.join(root, 'tokens', user, 'hh'), '{"access_token":"fixture"}');
+    const put = (key, value) => fs.writeFileSync(path.join(ctx, key + '.json'), JSON.stringify({ value }));
+    put('active_vacancy', { id: 'A', area: { id: '1' } });
+    put('active_vacancies', [{ id: 'A', area: { id: '1' } }, { id: 'B', area: { id: '2' } }]);
+    for (const id of ['A', 'B']) {
+      const config = { vacancy_id: id, vacancy_title: 'Engineer', required: [{ name: 'Engineer', weight: 5 }] };
+      put('ats_config:' + id, config); api.saveStoredQueries(user, id, ['Engineer'], api.atsConfigHash(config));
+    }
+    const fetch = vi.fn(async () => response(200, { items: Array.from({ length: 35 }, (_, i) => ({ id: 'r' + i, title: 'Engineer', total_experience: { months: 60 } })) }));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      await api.runProactiveSearch(user, root, { vacancyId: 'A' });
+      await api.runProactiveSearch(user, root, { vacancyId: 'B' });
+      expect(new URL(fetch.mock.calls[1][0]).searchParams.get('area')).toBe('2');
+      expect(JSON.parse(fs.readFileSync(path.join(ctx, 'active_vacancy.json'))).value.id).toBe('A');
+      expect(Object.keys(api.loadAllCandidates(user, 'B'))).toHaveLength(35);
+      expect(Object.keys(api.loadSeenIds(user).B)).toHaveLength(35);
+      expect(latestProactiveFile(user, 'A')).not.toBe(latestProactiveFile(user, 'B'));
+      expect(JSON.parse(fs.readFileSync(latestProactiveFile(user, 'B'))).search_area_ids).toEqual(['2']);
+      const write = fs.writeFileSync;
+      const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...args) => {
+        if (String(file).includes('all-candidates.json.tmp')) throw new Error('disk full');
+        return write(file, ...args);
+      });
+      fetch.mockResolvedValue(response(200, { items: [{ id: 'unsaved', title: 'Engineer', total_experience: { months: 60 } }] }));
+      try { await expect(api.runProactiveSearch(user, root, { vacancyId: 'B' })).rejects.toThrow('disk full'); }
+      finally { spy.mockRestore(); }
+      expect(api.loadSeenIds(user).B.unsaved).toBeUndefined();
+      fetch.mockResolvedValue(response(403));
+      await expect(api.runProactiveSearch(user, root, { vacancyId: 'B' })).rejects.toThrow('403');
+      expect(JSON.parse(fs.readFileSync(latestProactiveFile(user, 'B'))).total_collected).toBe(35);
+    } finally {
+      for (const [key, value] of Object.entries({ AGENT_DATA_DIR: oldData, AGENT_TOKENS_DIR: oldTokens, OPENROUTER_API_KEY: oldKey })) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('monitoring lifecycle and run exclusion', () => {
+  it('runs A and B independently, preserves a disable during work, and never resurrects an empty list', async () => {
+    const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os');
+    const { updateSchedule, getSchedules, runDueSearches } = require('../src/hh-cold-search-schedule');
+    const { acquireSearchLock } = require('../src/hh-cold-search-lock');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-schedule-')); const old = process.env.AGENT_DATA_DIR;
+    process.env.AGENT_DATA_DIR = path.join(root, 'data');
+    const ctx = path.join(root, 'contexts', 'hh'); fs.mkdirSync(ctx, { recursive: true });
+    const put = (key, value) => fs.writeFileSync(path.join(ctx, key + '.json'), JSON.stringify({ value }));
+    put('active_vacancy', { id: 'A' }); put('active_vacancies', [{ id: 'A' }, { id: 'B' }]);
+    try {
+      updateSchedule('u', root, 'A', { enabled: true, interval_hours: 24 });
+      updateSchedule('u', root, 'B', { enabled: true, interval_hours: 24 });
+      const run = vi.fn(async id => {
+        if (id === 'A') throw new Error('HH resumes 403');
+        updateSchedule('u', root, 'B', { enabled: false });
+        return { new_count: 2 };
+      });
+      const outcomes = await runDueSearches('u', root, run);
+      expect(outcomes.map(x => x.ok)).toEqual([false, true]);
+      expect(getSchedules('u', root).A.status).toBe('failed');
+      expect(getSchedules('u', root).B).toMatchObject({ status: 'success', enabled: false });
+      expect(getSchedules('u', root).B.last_success).toBeTruthy();
+      run.mockClear(); put('active_vacancies', []);
+      await runDueSearches('u', root, run, Date.now() + 86400000);
+      expect(run).not.toHaveBeenCalled();
+      const release = acquireSearchLock('u');
+      expect(() => acquireSearchLock('u')).toThrow(/уже выполняется/);
+      release(); acquireSearchLock('u')();
+      const lock = path.join(root, 'data', 'hh', 'u', 'proactive', 'search.lock');
+      fs.writeFileSync(lock, JSON.stringify({ pid: 2147483647 }));
+      acquireSearchLock('u')();
+      expect(fs.existsSync(lock)).toBe(false);
+    } finally {
+      if (old === undefined) delete process.env.AGENT_DATA_DIR; else process.env.AGENT_DATA_DIR = old;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

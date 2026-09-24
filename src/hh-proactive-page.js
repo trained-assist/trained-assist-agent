@@ -138,6 +138,7 @@ function candidateCard(c, idx, existingComment) {
 
 function generateProactivePageHtml(results, username, callbackBase, token, existingComments, opts = {}) {
   const { activeVacancies = [], vacancyId = '', listView = 'active', stateCounts = { active: 0, starred: 0, archived: 0 } } = opts;
+  const monitoring = opts.monitoring || {};
   const candidates = results.candidates || [];
   const comments = existingComments || {};
   const searchedAt = results.searched_at
@@ -347,6 +348,15 @@ ${activeVacancies.length > 1 ? `<div class="vacancy-tabs">${activeVacancies.map(
     const isActive = key === listView;
     return `<a class="state-tab${isActive ? ' active' : ''}" href="${href}">${label} (${stateCounts[key] || 0})</a>`;
   }).join('')}</div>
+  ${vacancyId ? `<div data-testid="vacancy-monitoring">
+    <span role="status">Мониторинг: ${monitoring.archived ? 'вакансия в архиве' : monitoring.enabled ? 'включён' : 'выключен'}.
+    Попытка: ${escHtml(monitoring.last_attempt || '—')}. Успешно: ${escHtml(monitoring.last_success || '—')}.
+    Результат: ${escHtml(({ success: 'есть новые', zero_new: 'новых нет', failed: 'ошибка', running: 'выполняется' })[monitoring.status] || 'ещё не запускался')}.</span>
+    ${monitoring.error ? `<span role="alert">${escHtml(monitoring.error)}</span>` : ''}
+    <button data-testid="monitor-toggle" onclick="vacancyAction('${monitoring.enabled ? 'disable' : 'enable'}',this)">${monitoring.enabled ? 'Отключить мониторинг' : 'Включить мониторинг'}</button>
+    <button data-testid="vacancy-star" onclick="vacancyAction('${monitoring.starred ? 'unstar' : 'star'}',this)">${monitoring.starred ? '★ Убрать звезду вакансии' : '☆ Отметить вакансию'}</button>
+    <button data-testid="vacancy-archive" onclick="vacancyAction('${monitoring.archived ? 'restore' : 'archive'}',this)">${monitoring.archived ? 'Вернуть вакансию из архива' : 'Архивировать вакансию'}</button>
+  </div>` : ''}
   <div class="header-top">
     <div>
       <div class="vacancy-title">
@@ -563,6 +573,19 @@ function esc(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+async function vacancyAction(action, button) {
+  button.disabled = true;
+  try {
+    const response = await fetch(CALLBACK_BASE + '/api/hh/proactive/vacancy-state', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, vacancy_id: VACANCY_ID, action }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || 'Ошибка сохранения');
+    location.reload();
+  } catch (error) { alert(error.message); button.disabled = false; }
+}
+
 async function runSearch() {
   const btn = document.getElementById('searchBtn');
   btn.disabled = true;
@@ -571,7 +594,7 @@ async function runSearch() {
     const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, vacancy_id: VACANCY_ID }),
     });
     const data = await res.json();
     if (data.error) {
@@ -632,7 +655,7 @@ async function setStatus(candidateId, status, btn) {
     const res = await fetch(CALLBACK_BASE + '/api/hh/proactive/set-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, status }),
+      body: JSON.stringify({ username: USERNAME, token: TOKEN, candidate_id: candidateId, status, vacancy_id: VACANCY_ID }),
     });
     const data = await res.json();
     if (data.error) {
