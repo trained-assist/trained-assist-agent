@@ -408,6 +408,7 @@ async function resumePendingTasks(secrets) {
 async function main() {
   const secrets = await loadSecrets();
   _secretsCache = secrets; // expose to background tasks for HH auto-refresh
+  require('./secrets').alertMissingBotTokens(secrets).catch(() => {});
   resumePendingTasks(secrets).catch(err => console.error('[resume] failed:', err.message));
   reconcileSoftContinuations(secrets).catch(err => console.error('[soft-incomplete] reconcile failed:', err.message));
   const intakeQuick = require('./intake-quick').createIntakeQuick({

@@ -1,9 +1,10 @@
 'use strict';
 
-// Explicit per-audience bot-token map. Adding a 4th bot is +1 entry here (+1 secret
-// in src/secrets.js and infra/env-manifest.json) — never a registry/generator.
-// `default` has no dedicated secret name: it uses the classic BOT_TOKEN already in `secrets`.
-const BOT_TOKEN_SECRET = { default: null, recruiter: 'RECRUITER_BOT_TOKEN', freelance: 'FREELANCE_BOT_TOKEN' };
+// Per-audience bot token names come from the bot registry (epic #1342,
+// infra/env-manifest.json → bots.registry). `default` is the classic bot: its token
+// is already `secrets.BOT_TOKEN`, so it needs no re-routing.
+const { BOTS } = require('./bot-registry');
+const BOT_TOKEN_SECRET = Object.fromEntries(BOTS.map(b => [b.audience, b.audience === 'default' ? null : b.token_secret_name]));
 
 // Bot credentials stay server-side. An audience must never fall back to another bot.
 // A missing audience (legacy pending/session records) resolves to 'default' by the

@@ -25,6 +25,15 @@
     }
   },
 
+  "bots": {
+    "_doc": "Bot registry (epic #1342) — the ONE source of truth for Telegram bots. Adding a bot = 1 entry here + its token in GCP Secret Manager + the name in src/secrets.js OPTIONAL. botId/audience come from the transport (webhook path / bot token), never from message text or LLM args. check-env-sync.js validates every entry; scripts/check-bot-secrets.js --live probes Secret Manager after each GCP deploy; src/secrets.js alerts the operator at boot when an enabled bot's token is missing.",
+    "registry": [
+      { "botId": "default",   "audience": "default",   "token_secret_name": "TELEGRAM_BOT_TOKEN",  "enabled": true, "commands_profile": "classic",   "media_profile": "full", "gateway_env": "trained-assist-tg-bot" },
+      { "botId": "recruiter", "audience": "recruiter", "token_secret_name": "RECRUITER_BOT_TOKEN", "enabled": true, "commands_profile": "recruiter", "media_profile": "full", "gateway_env": "trained-assist-tg-bot-recruiter" },
+      { "botId": "freelance", "audience": "freelance", "token_secret_name": "FREELANCE_BOT_TOKEN", "enabled": true, "commands_profile": "freelance", "media_profile": "full", "gateway_env": "trained-assist-tg-bot-freelance" }
+    ]
+  },
+
   "github_actions_secrets": {
     "_doc": "All secrets that must exist in GitHub repo Settings → Secrets and variables → Actions",
     "infra": [
@@ -124,6 +133,7 @@
     "4. Add to GitHub repo Secrets (Settings → Secrets and variables → Actions)",
     "5. Add to .github/workflows/ci.yml printf block for each VM listed in written_to",
     "6. Run: node scripts/check-env-sync.js — must pass before commit",
-    "7. If GCP-only (not in written_to): add to gcp_secret_manager_only section instead"
+    "7. If GCP-only (not in written_to): add to gcp_secret_manager_only section instead",
+    "8. A Telegram bot token? Also add a bots.registry entry (botId, audience, token_secret_name) — delivery routing reads it from there"
   ]
 }
