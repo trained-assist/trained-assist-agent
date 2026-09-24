@@ -129,3 +129,6 @@
 | 🔵 планируется | #1329 freelance handoff | drain standalone `freelance-bot.service`, mapping `chat-<id> → profile`, движок opencode. |
 | 🔵 планируется | #1303 | ownership-проверка `POST /tasks/:taskId/stop`. |
 | 🔵 планируется | #1302 | третий бот на общем контуре (A1+A2 merged; canary). |
+
+## 2026-09-25 — forum topic isolation (#255)
+- Current-session and active-project pointer helpers accept an optional valid thread suffix while preserving legacy filenames without one.

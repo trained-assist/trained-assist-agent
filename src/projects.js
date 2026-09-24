@@ -354,11 +354,12 @@ function bugsProject(workDir, { now = Date.now(), audience } = {}) {
 // same pattern as session-store's _currentSessionFile. Falsy or 'default' → EXACTLY the
 // pre-existing filename (note: the chatId-less fallback already used the literal string
 // 'default' before audience existed — preserved as-is so that path never moves).
-function _activePath(workDir, chatId, audience) {
+function _activePath(workDir, chatId, audience, threadId = null) {
+  const suffix = Number.isInteger(threadId) && threadId > 0 ? `-${threadId}` : '';
   if (!audience || audience === 'default') {
-    return path.join(projectsRoot(workDir), `active-${chatId || 'default'}.json`);
+    return path.join(projectsRoot(workDir), `active-${chatId || 'default'}${suffix}.json`);
   }
-  return path.join(projectsRoot(workDir), `active-${audience}-${chatId || 'default'}.json`);
+  return path.join(projectsRoot(workDir), `active-${audience}-${chatId || 'default'}${suffix}.json`);
 }
 function _readActive(workDir, chatId, audience) {
   try { return JSON.parse(fs.readFileSync(_activePath(workDir, chatId, audience), 'utf8')); } catch { return null; }
