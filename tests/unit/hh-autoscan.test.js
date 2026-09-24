@@ -106,12 +106,12 @@ describe('shouldRun cadence gate', () => {
 describe('proactiveUrlFor', () => {
   it('builds a signed url with username + token', () => {
     const a = freshModule();
-    process.env.AGENT_PUBLIC_URL = 'https://example.test';
+    process.env.HH_COLD_SEARCH_PUBLIC_URL = 'https://example.test';
     process.env.AGENT_SECRET = 'secret';
     const url = a.proactiveUrlFor(UID);
     expect(url).toContain('https://example.test/hh/proactive?username=');
     expect(url).toMatch(/token=[a-f0-9]{16}$/);
-    delete process.env.AGENT_PUBLIC_URL;
+    delete process.env.HH_COLD_SEARCH_PUBLIC_URL;
     delete process.env.AGENT_SECRET;
   });
 
@@ -119,21 +119,21 @@ describe('proactiveUrlFor', () => {
   // alongside the token — same pattern as hhReviewUrl (src/hh-quick.js).
   it('appends vacancy_id when given, after the token', () => {
     const a = freshModule();
-    process.env.AGENT_PUBLIC_URL = 'https://example.test';
+    process.env.HH_COLD_SEARCH_PUBLIC_URL = 'https://example.test';
     process.env.AGENT_SECRET = 'secret';
     const url = a.proactiveUrlFor(UID, 'vac-001');
     expect(url).toMatch(/token=[a-f0-9]{16}&vacancy_id=vac-001$/);
-    delete process.env.AGENT_PUBLIC_URL;
+    delete process.env.HH_COLD_SEARCH_PUBLIC_URL;
     delete process.env.AGENT_SECRET;
   });
 
   it('omits vacancy_id entirely when not given (unchanged for single-vacancy callers)', () => {
     const a = freshModule();
-    process.env.AGENT_PUBLIC_URL = 'https://example.test';
+    process.env.HH_COLD_SEARCH_PUBLIC_URL = 'https://example.test';
     process.env.AGENT_SECRET = 'secret';
     const url = a.proactiveUrlFor(UID);
     expect(url).not.toContain('vacancy_id');
-    delete process.env.AGENT_PUBLIC_URL;
+    delete process.env.HH_COLD_SEARCH_PUBLIC_URL;
     delete process.env.AGENT_SECRET;
   });
 });
