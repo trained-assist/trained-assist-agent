@@ -180,3 +180,14 @@ test('fallback: no engine session id anywhere → null resumeSessionId + origina
   assert.equal(h.runs[0].resumeSessionId, null, 'no id → no --resume (fresh run, pre-#1234 behavior)');
   assert.equal(h.runs[0].task, 'work', 'fallback replays the original task');
 });
+
+test('native resume: codex wired (Sub-3); opencode still falls back (Sub-4 pending)', async () => {
+  const hc = resumeHarness({ pending: [task({ engine: 'codex' })], engineSessionIds: { codex: 'thr-x' } });
+  await hc.resume();
+  assert.equal(hc.runs[0].resumeSessionId, 'thr-x', 'codex native resume must be wired');
+  assert.equal(hc.runs[0].engine, 'codex');
+
+  const ho = resumeHarness({ pending: [task({ engine: 'opencode' })], engineSessionIds: { opencode: 'ses-x' } });
+  await ho.resume();
+  assert.equal(ho.runs[0].resumeSessionId, null, 'opencode takes the context-rebuild path until Sub-4');
+});
