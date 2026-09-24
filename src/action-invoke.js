@@ -50,6 +50,9 @@ function createActionInvoker({ registry, executions, transport, now = () => Date
   const validateInvocation = ajv.compile({ $ref: `${contract.$id}#/$defs/invocation` });
 
   function resultFromRow(row) {
+    if (row.status === 'claimed' || row.status === 'running') {
+      throw serviceError('CONFLICT', 'Action invocation is still running');
+    }
     if (row.status === 'succeeded') return { version: 1, executionId: row.id, status: 'succeeded', output: row.result };
     return { version: 1, executionId: row.id, status: row.status, error: row.error };
   }
@@ -91,7 +94,12 @@ function createActionInvoker({ registry, executions, transport, now = () => Date
     } catch (err) {
       // Lost a race on the unique key — return the winner's execution.
       const row = executions.findByKey({ profileId, projectId, idempotencyKey });
-      if (row) return resultFromRow(row);
+      if (row) {
+        if (row.action !== action || JSON.stringify(row.arguments) !== JSON.stringify(args)) {
+          throw serviceError('CONFLICT', 'Idempotency key reused with different action or arguments');
+        }
+        return resultFromRow(row);
+      }
       throw err;
     }
 
@@ -102,7 +110,10 @@ function createActionInvoker({ registry, executions, transport, now = () => Date
     } catch (err) {
       const { code, retryable } = mapTransportError(err);
       const status = code === 'TIMEOUT' ? 'unknown' : 'failed';
-      const error = { code, message: String((err && err.message) || err).slice(0, 500), retryable };
+      // A timeout may have happened AFTER a provider's external side effect.
+      // Availability failures are not permission to retry an unsafe mutation.
+      const error = { code, message: String((err && err.message) || err).slice(0, 500),
+        retryable: retryable && descriptor.retrySafety !== 'unsafe' };
       executions.finishExecution(executionId, { status, error, leaseOwner, now: now() });
       return { version: 1, executionId, status, error };
     }

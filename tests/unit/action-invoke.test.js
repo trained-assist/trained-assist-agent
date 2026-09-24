@@ -85,4 +85,23 @@ describe('invokeAction', () => {
     const t = await timeout.invokeAction(inv());
     expect(t).toMatchObject({ status: 'unknown', error: { code: 'TIMEOUT', retryable: true } });
   });
+  it('never advertises an unsafe timed-out mutation as retryable or executes a replay twice', async () => {
+    const s = setup(async () => { throw Object.assign(new Error('unknown outcome'), { code: 'TIMEOUT' }); });
+    const request = inv({ action: 'send_msg', arguments: { text: 'message' } });
+    const first = await s.invokeAction(request, { approved: true });
+    expect(first).toMatchObject({ status: 'unknown', error: { code: 'TIMEOUT', retryable: false } });
+    expect(await s.invokeAction(request, { approved: true })).toEqual(first);
+    expect(s.calls).toHaveLength(1);
+  });
+  it('concurrent replay returns a stable conflict while one handler is running', async () => {
+    let finish;
+    const s = setup(() => new Promise(resolve => { finish = resolve; }));
+    const first = s.invokeAction(inv());
+    await expect(s.invokeAction(inv())).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(s.calls).toHaveLength(1);
+    finish({ ok: true });
+    expect((await first).status).toBe('succeeded');
+    expect((await s.invokeAction(inv())).status).toBe('succeeded');
+    expect(s.calls).toHaveLength(1);
+  });
 });
