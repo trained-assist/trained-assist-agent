@@ -94,6 +94,22 @@ const r5c = await tgEdit('tok', 777, 1, 'c', {}, { bestEffort: true }); // other
 assert.ok(r5c.ok, 'flood: other chat is not suppressed');
 assert.equal(calls.length, 2, `flood: other chat should fetch, got ${calls.length}`);
 
+    // (5b) flood gate must ALSO advance the starve streak — otherwise a chat
+    // that keeps re-flooding (sibling sessions + GTD + quick-answers share the
+    // per-chat flood bucket) skips every progress tick forever and the counter
+    // freezes on its first landed value ("Думаю… (2с)" that never moves, the
+    // surviving half of #1282). Repeated flood-skips must reach MAX_STARVE_STREAK
+    // and then force ONE edit through by waiting out the window.
+    installFetch(200, 1);
+    await tgEdit('tok', 999, 1, 'warm', {}, { bestEffort: true }); // seed a landed edit
+    installFetch([429, 200], 1); // next edit 429s → opens flood window; forced retry then lands
+    const fl0 = await tgEdit('tok', 999, 1, 'a', {}, { bestEffort: true }); // 429 → flooded, drop 1
+    assert.equal(fl0.flooded, true, 'flood-starve: 429 edit reports flooded');
+    const fl1 = await tgEdit('tok', 999, 1, 'b', {}, { bestEffort: true }); // flood-skip → drop 2 (was streak 0 before fix)
+    assert.equal(fl1.skipped, true, 'flood-starve: 2nd edit skipped inside window');
+    const fl2 = await tgEdit('tok', 999, 1, 'c', {}, { bestEffort: true }); // forced: waits out window, lands
+    assert.ok(!fl2.skipped, 'flood-starve: 3rd attempt must be forced through, not skipped forever');
+
     // (4) starve backstop — msgA wins the coalesce slot every tick, msgB keeps
     // losing; after MAX_STARVE_STREAK (2) consecutive drops, msgB's next edit
     // must be forced through instead of skipped again.
