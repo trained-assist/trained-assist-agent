@@ -13,16 +13,22 @@ class Upstream(http.server.BaseHTTPRequestHandler):
         if self.path == '/stream': time.sleep(1.5); self.wfile.write(b'END')
     def do_POST(self):
         body=self.rfile.read(int(self.headers.get('Content-Length',0)))
-        self.send_response(200); self.end_headers(); self.wfile.write(str(len(body)).encode())
+        self.send_response(200); self.end_headers(); self.wfile.write((self.path+'|'+body.decode()).encode() if self.path.startswith('/agent/api/hh/proactive/') else str(len(body)).encode())
 with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
     d=pathlib.Path(d); hp,sp=port(),port()
     upstream=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
     threading.Thread(target=upstream.serve_forever,daemon=True).start()
-    subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(d/'key.pem'),'-out',str(d/'cert.pem'),'-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(d/'key.pem'),'-out',str(d/'cert.pem'),'-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1,DNS:localhost'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    cold=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
+    cold_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);cold_tls.load_cert_chain(str(d/'cert.pem'),str(d/'key.pem'))
+    cold.socket=cold_tls.wrap_socket(cold.socket,server_side=True)
+    threading.Thread(target=cold.serve_forever,daemon=True).start()
     config=(REPO/'infra/nginx/recruiter-assistant.conf').read_text()
     config=config.replace('listen 80;',f'listen 127.0.0.1:{hp};').replace('listen 443 ssl;',f'listen 127.0.0.1:{sp} ssl;')
     config=config.replace('/etc/letsencrypt/live/recruiter-assistant.ru/fullchain.pem',str(d/'cert.pem')).replace('/etc/letsencrypt/live/recruiter-assistant.ru/privkey.pem',str(d/'key.pem'))
     config=config.replace('127.0.0.1:8080',f'127.0.0.1:{upstream.server_port}')
+    config=config.replace('proxy_pass https://136-65-7-197.sslip.io',f'proxy_pass https://localhost:{cold.server_port}')
+    config=config.replace('/etc/ssl/certs/ca-certificates.crt',str(d/'cert.pem'))
     config=config.replace('/var/www/html',str(d/'webroot'))
     challenge=d/'webroot/.well-known/acme-challenge';challenge.mkdir(parents=True);(challenge/'probe').write_text('acme-ok')
     (d/'nginx.conf').write_text(f'pid {d}/nginx.pid; error_log {d}/error.log; events {{}} http {{ access_log off; client_body_temp_path {d}/body; proxy_temp_path {d}/proxy; {config} }}')
@@ -43,6 +49,13 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
             assert h['Cache-Control']=='no-store' and h['Referrer-Policy']=='no-referrer'
         for path in ['/web/login.html','/hh/candidate?neg_id=x','/vacancy/user/id']:
             s,h,b=request(path);assert s==200 and b.decode()==path+'|https'
+        for path in ['/hh/proactive?username=alice&token=signed&vacancy_id=v1&list=starred','/api/hh/proactive/candidates?username=alice&token=signed&vacancy_id=v1']:
+            s,h,b=request(path);assert s==200 and b.decode()=='/agent'+path+'|https', (s,b)
+            assert h['Cache-Control']=='no-store' and h['Referrer-Policy']=='no-referrer'
+        for action in ['search','comment','set-status','add-manual','import-seen','ai-score','vacancy-state']:
+            path='/api/hh/proactive/'+action
+            s,h,b=request(path,body=b'{"username":"alice","token":"signed"}')
+            assert s==200 and b.decode()=='/agent'+path+'|'+ '{"username":"alice","token":"signed"}', (s,b)
         s,h,b=request('/hh-callback?state=a%2Bb',host='www.recruiter-assistant.ru');assert s==308 and h['Location']=='https://recruiter-assistant.ru/hh-callback?state=a%2Bb'
         s,h,b=request('/test?a=b',secure=False);assert s==308 and h['Location']=='https://recruiter-assistant.ru/test?a=b'
         s,h,b=request('/.well-known/acme-challenge/probe',secure=False);assert s==200 and b==b'acme-ok'
@@ -54,6 +67,6 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
         c=http.client.HTTPSConnection('127.0.0.1',sp,context=context,timeout=5);start=time.monotonic();c.request('GET','/stream',headers={'Host':'recruiter-assistant.ru'});r=c.getresponse()
         assert r.read(1)==b'/' and time.monotonic()-start<1,'SSE first bytes must arrive before upstream completes'
         assert r.read().endswith(b'END');c.close()
-        print('PASS: TLS, root/login, OAuth query preservation, www, HTTP, ACME, candidate/vacancy routes, 2/20 MiB uploads, 413 boundary, streaming')
+        print('PASS: TLS, root/login, OAuth query preservation, www, HTTP, ACME, candidate/vacancy routes, 2/20 MiB uploads, 413 boundary, streaming, cold-search TLS upstream, signed query and POST body preservation')
     finally:
-        p.terminate();p.wait(timeout=5);upstream.shutdown()
+        p.terminate();p.wait(timeout=5);upstream.shutdown();cold.shutdown()
