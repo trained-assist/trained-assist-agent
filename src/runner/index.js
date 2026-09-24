@@ -1804,9 +1804,17 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // OS process died and nobody ever wrote a terminal state". savePendingTask does
     // a partial merge ({...previous, ...params}) so this only touches the one field.
     onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
+    // Persist the engine's native session id the moment it appears (#1234): to the durable
+    // session record (source of truth for resume) AND the pending journal (read by
+    // resumePendingTasks before the session is loaded). Written mid-run so a deploy SIGKILL
+    // can't lose it — that is exactly the restart case resume exists for.
+    onEngineSessionId: (sid) => {
+      if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
+      savePendingTask(taskId, { engineSessionId: sid, engine });
+    },
   });
   const {
-    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, terminalSuccess,
+    fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, engineSessionId, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
     lastActivity, exitCode, processSignal, processError, timedOut,
     inactivityKill, outputPersistenceError, codexErrorMsg, sessionState,
