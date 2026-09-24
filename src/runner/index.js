@@ -75,31 +75,18 @@ const HEARTBEAT_INTERVAL_MS = 3000;
 const STOP_BUTTON_AFTER_SECS = 5;
 const MAX_MSG_LEN = 3500;
 
-// Anthropic pricing per 1M tokens (USD), updated August 2025
-const MODEL_PRICING = {
-  opus:   { in: 15.00, out: 75.00, cacheRead: 1.50,  cacheWrite: 18.75 },
-  sonnet: { in: 3.00,  out: 15.00, cacheRead: 0.30,  cacheWrite: 3.75  },
-  haiku:  { in: 0.80,  out: 4.00,  cacheRead: 0.08,  cacheWrite: 1.00  },
-};
-
-function formatCostFooter(usage, model) {
+// Telegram cards report token usage only; monetary estimates are not displayed.
+function formatCostFooter(usage) {
   if (!usage) return '';
-  const m = (model || '').toLowerCase();
-  const price = m.includes('opus') ? MODEL_PRICING.opus
-              : m.includes('haiku') ? MODEL_PRICING.haiku
-              : MODEL_PRICING.sonnet;
   const inp = usage.input_tokens || 0;
   const out = usage.output_tokens || 0;
   const cr  = usage.cache_read_input_tokens || 0;
   const cw  = usage.cache_creation_input_tokens || 0;
-  const cost = (inp * price.in + out * price.out + cr * price.cacheRead + cw * price.cacheWrite) / 1_000_000;
   const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
-  const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
   const parts = [`вход ${fmt(inp)}`, `выход ${fmt(out)}`];
   if (cw > 0) parts.push(`кэш +${fmtK(cw)}`);
   if (cr > 0) parts.push(`кэш /${fmtK(cr)}`);
-  parts.push(`~${costStr}`);
   return `\n\nИспользование: ${parts.join(' · ')}`;
 }
 
@@ -110,8 +97,6 @@ function formatOcFooter(usage, breakdown) {
   if (!usage) return '';
   const fmt = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
   const fmtK = n => n >= 1000 ? `${Math.round(n / 100) / 10}K` : String(n);
-  const cost = usage.cost || 0;
-  const costStr = cost < 0.001 ? `$${cost.toFixed(5)}` : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
   let model = '';
   if (breakdown) {
     for (const s of breakdown) {
@@ -121,7 +106,6 @@ function formatOcFooter(usage, breakdown) {
   const parts = [`вход ${fmt(usage.input)}`, `выход ${fmt(usage.output)}`];
   if (usage.cacheWrite > 0) parts.push(`кэш +${fmtK(usage.cacheWrite)}`);
   if (usage.cacheRead > 0) parts.push(`кэш /${fmtK(usage.cacheRead)}`);
-  parts.push(`~${costStr}`);
   const m = model ? ` ${model}` : '';
   return `\n\nИспользование${m}: ${parts.join(' · ')}`;
 }
