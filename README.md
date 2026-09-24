@@ -1015,6 +1015,23 @@ GitHub branch protection is not available on this private repo (free plan), so t
 - **pre-push** blocks pushing to `main`/`master`, and blocks pushing *again* to a branch that already has an OPEN pull request. **PRs are immutable**: once a branch is submitted as a PR, don't amend/force-push it — open a new branch and a new PR for further changes, even to fix CI. This is what keeps sessions from colliding on the same branch/PR.
 - Both have a documented emergency override env var (`ALLOW_PROTECTED_COMMIT=1` / `ALLOW_PR_UPDATE=1`) for the rare intentional exception — always explain why in the commit/PR when used.
 
+### Спавн сессии на реализацию issue — дешёвый агент, не claude
+
+Реализацию issue запускать **отдельной сессией** через Session Manager (не внутренним субагентом):
+
+```bash
+curl -s -N -X POST http://localhost:3000/api/sessions/start \
+  -H "Content-Type: application/json" \
+  -d '{"path": "'"$PWD"'", "message": "Implement issue #N: <title>", "agent": "opencode"}'
+```
+
+Выбор агента — `claude` дорогой, не ставить по умолчанию:
+- `opencode` — **дефолт для реализации кода** (deepseek), самый дешёвый;
+- `codex` (`gpt-5.4-mini`) — если opencode не тянет (сложный рефакторинг, много файлов);
+- `claude` — только для архитектуры, ревью, research.
+
+Всегда `-N` и вытаскивать `session_id` из SSE-ответа, иначе не видно, что сессия стартовала.
+
 ---
 
 ## CI Failure Handling — автоматическое
