@@ -136,22 +136,23 @@ function _rememberFlood(chatId, retryAfterSec) {
  * (e.g. message deleted) survives all retries, so callers can fall back to send.
  */
 async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
+  const deliveryKey = `${String(token).split(':')[0]}:${chatId}`;
   const { retries = 3, bestEffort = false, coalesce = false } = opts;
   const f = await tgFormat(text, extra);
   // A message that's been dropped MAX_STARVE_STREAK times in a row (coalesce-skip
   // or best-effort 429-drop) is forced through below: skip coalescing, and if it
   // still 429s, actually wait it out instead of dropping — see MAX_STARVE_STREAK.
-  const forced = _isStarved(chatId, messageId);
+  const forced = _isStarved(deliveryKey, messageId);
   // Telegram's own 429 backoff: once a chat is flood-limited, skip ALL progress
   // edits for it until retry_after closes. This is a chat-wide gate, not a
   // per-message race — it must NOT advance the starve streak (forcing through a
   // flood would just re-429). Best-effort only: terminal edits still go through
   // so the final result can land the moment the flood allows.
-  if (!forced && bestEffort && _floodBlocked(chatId)) {
+  if (!forced && bestEffort && _floodBlocked(deliveryKey)) {
     return { ok: true, skipped: true };
   }
-  if (!forced && _coalesceTracked(chatId, coalesce)) {
-    _recordDrop(chatId, messageId);
+  if (!forced && _coalesceTracked(deliveryKey, coalesce)) {
+    _recordDrop(deliveryKey, messageId);
     return { ok: true, skipped: true };
   }
   for (let i = 0; i < retries; i++) {
@@ -168,9 +169,9 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
       console.warn(`[tg] 429 rate limit on editMessageText, retry after ${raw}s (attempt ${i + 1}/${retries}, wait capped ${waitSec}s)`);
       // Chat-wide flood window: subsequent best-effort edits skip until retry_after
       // passes instead of re-attacking every 3s (frozen "Думаю… (3с)" bug).
-      _rememberFlood(chatId, raw);
+      _rememberFlood(deliveryKey, raw);
       if (bestEffort && !forced) {
-        _recordDrop(chatId, messageId);
+        _recordDrop(deliveryKey, messageId);
         return { ok: false, flooded: true }; // progress: drop, flood gate holds the next ticks
       }
       await new Promise(r => setTimeout(r, waitSec * 1000));
@@ -178,16 +179,16 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
     }
     if (!res.ok || !data.ok) {
       if (data.error_code === 400 && /message is not modified/i.test(data.description || '')) {
-        floodUntil.delete(chatId);
-        _recordLanded(chatId, messageId);
+        floodUntil.delete(deliveryKey);
+        _recordLanded(deliveryKey, messageId);
         return data;
       }
       throw new Error(`Telegram editMessageText failed (${data.error_code || res.status})`);
     }
     // A landed edit proves the chat is no longer flooded — drop any stale window.
-    floodUntil.delete(chatId);
-    lastEditAt.set(chatId, Date.now());
-    _recordLanded(chatId, messageId);
+    floodUntil.delete(deliveryKey);
+    lastEditAt.set(deliveryKey, Date.now());
+    _recordLanded(deliveryKey, messageId);
     return data;
   }
   throw new Error('Telegram editMessageText rate limit retries exhausted');

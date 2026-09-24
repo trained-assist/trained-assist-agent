@@ -24,6 +24,7 @@ function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50, s
   const calls = [], runs = [], cleared = [], timers = [];
   const journal = pending.slice(); // mutable — mirrors the on-disk pending-tasks file
   const sandbox = {
+    taskDelivery: require('../src/bot-delivery').taskDelivery,
     path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise,
     // server.js staggers loop iterations with a fixed 200ms `await new Promise(setTimeout(...))`

@@ -20,6 +20,7 @@
     "test/per-chat-queue.test.cjs",
     "test/execution-owner-lock.test.cjs",
     "test/instant-restart.test.cjs",
-    "test/intake-gate.test.cjs"
+    "test/intake-gate.test.cjs",
+    "test/bot-delivery.test.cjs"
   ]
 }

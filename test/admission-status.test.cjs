@@ -13,13 +13,14 @@ const opts = { taskId: 'task', user: { id: 42, username: 'test' }, secrets: { BO
 // the global OOM guard (RAM + MAX_CONCURRENT_TASKS). Session-lane and
 // per-profile cap waits were removed — a stuck predecessor in the same chat is
 // the one case where the "waiting for previous work" message may still appear.
-function harness({ chatPending, run = async () => {} } = {}) {
+function harness({ chatPending, run = async () => {}, taskOpts = opts, expectedToken = 'canonical-token' } = {}) {
   const source = fs.readFileSync(require.resolve('../src/runner'), 'utf8');
   const start = source.indexOf('function runTask(opts) {');
   const end = source.indexOf('// Returns context card string', start);
   const messages = [], journal = new Map();
   const gate = chatPending ? deferred() : null;
   const sandbox = {
+    taskDelivery: require('../src/bot-delivery').taskDelivery,
     require: name => { assert.equal(name, '../admission-status'); return { createAdmissionStatus }; },
     recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
     restartShutdown: false,
@@ -32,14 +33,14 @@ function harness({ chatPending, run = async () => {} } = {}) {
       enqueue: (_id, fn) => gate ? gate.promise.then(fn) : Promise.resolve().then(fn),
     },
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
-    tgEdit: async (token, chat, id, text) => { assert.equal(token, 'canonical-token'); messages.push(text); return { ok: true }; },
+    tgEdit: async (token, chat, id, text) => { assert.equal(token, expectedToken); messages.push(text); return { ok: true }; },
     tgSend: async () => { throw Error('unexpected fallback'); },
     _waitForRam: async () => {}, _acquireSlot: async () => {}, _releaseSlot: () => {},
     _runTask: run,
   };
   vm.createContext(sandbox);
   vm.runInContext(source.slice(start, end), sandbox);
-  return { start: () => sandbox.runTask(opts), messages, journal, gate };
+  return { start: () => sandbox.runTask(taskOpts), messages, journal, gate };
 }
 
 test('per-chat wait: a pending task in the same chat shows the waiting message and the new task follows it', async () => {
@@ -95,3 +96,14 @@ test('best-effort 429 drop (flooded) is skipped, not sent as a duplicate message
 
 // Legacy unconditional resume assertion replaced by restart-execution.test.cjs
 // and planned-restart-http.test.js: >=5m work is retained and requires confirmation.
+
+test('recruiter admission, runner replies and restart journal keep the originating bot', async () => {
+ const original={BOT_TOKEN:'classic',TELEGRAM_BOT_TOKEN:'classic',RECRUITER_BOT_TOKEN:'recruiter'};
+ const h=harness({chatPending:true,expectedToken:'recruiter',taskOpts:{...opts,user:{...opts.user,audience:'recruiter'},secrets:original},run:async received=>{
+  assert.equal(received.secrets.BOT_TOKEN,'recruiter');assert.equal(received.secrets.TELEGRAM_BOT_TOKEN,'recruiter');
+ }});
+ const done=h.start();assert.equal(h.journal.get('task').audience,'recruiter');
+ await tick();h.gate.resolve();await done;
+ assert.equal(original.BOT_TOKEN,'classic','concurrent classic tasks must retain their token');
+ assert.ok(h.messages.some(m=>/Начинаю работу/.test(m)));
+});

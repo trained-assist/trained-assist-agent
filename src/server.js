@@ -2,6 +2,7 @@
 const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
 process.once('exit', () => executionOwner.close());
 const { atomicJson } = require('./atomic-json');
+const { deliverySecrets, taskDelivery } = require('./bot-delivery');
 const { isTaskResumable } = require('./pending-task-resume');
 const { isNonTaskMessage } = require('./resume-hygiene');
 const { recordResume, getResumeStats } = require('./resume-stats');
@@ -260,16 +261,21 @@ async function resumePendingTasks(secrets) {
   if (pending.length === 0) return;
 
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const tgCall = (method, body) =>
-    fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/${method}`, {
+  const tgCall = (token, method, body) =>
+    fetch(`${TG_BASE}/bot${token}/${method}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     }).catch(() => {});
   // Failure notice: replaces the task's status message when it has one, else sends a new one.
-  const notifyFailure = (p, text) => p.initialMsgId
-    ? tgCall('editMessageText', { chat_id: p.userId, message_id: p.initialMsgId, text })
-    : tgCall('sendMessage', { chat_id: p.userId, text });
+  const notifyFailure = (p, text) => {
+    let token;
+    try { token = taskDelivery({ user: { audience: p.audience, workDir: p.workDir || path.join(BASE_USERS_DIR, p.username) }, sessionId: p.sessionId, secrets }).secrets.BOT_TOKEN; }
+    catch (e) { console.error('[resume] delivery unavailable:', e.message); return Promise.resolve(); }
+    return p.initialMsgId
+      ? tgCall(token, 'editMessageText', { chat_id: p.userId, message_id: p.initialMsgId, text })
+      : tgCall(token, 'sendMessage', { chat_id: p.userId, text });
+  };
 
   for (const p of pending) {
     const now = Date.now();
@@ -327,7 +333,7 @@ async function resumePendingTasks(secrets) {
     recordResume(nativeResumeId ? 'native' : 'fallback', engine); // #1240: measure native-vs-fallback
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
-      profileId: p.profileId, telegramUserId: p.telegramUserId,
+      profileId: p.profileId, telegramUserId: p.telegramUserId, audience: p.audience,
     };
     const fireResume = async () => {
       try {
@@ -1230,8 +1236,21 @@ ${recent || '(пока нет)'}
         return json(res, 400, { error: 'invalid newProjectName' });
 
       if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
-      const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
+      // Validate delivery before accepting durable work; never leak replies to the default bot.
+      try { deliverySecrets(secrets, audience); }
+      catch (e) { return json(res, audience === 'recruiter' ? 503 : 400, { error: e.message }); }
+      const requestOwner = audience && audience !== 'default' ? `${username}-${audience}` : username;
+      const taskId = requestId ? `${requestOwner}-${requestId}` : `${requestOwner}-${require('crypto').randomUUID()}`;
       const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
+      // Preserve ACK-loss deduplication for requests accepted before bot-scoped IDs.
+      // Legacy receipts have no audience: conservatively acknowledge rather than replay work.
+      if (requestId && audience && audience !== 'default') {
+        const legacyId = `${username}-${requestId}`;
+        const legacyReceipt = path.join(path.dirname(receipt), `${legacyId}.json`);
+        if ((fs.existsSync(legacyReceipt) && !JSON.parse(fs.readFileSync(legacyReceipt, 'utf8')).audience) || getPendingTasks().some(p => p.taskId === legacyId && (!p.audience || p.audience === audience))) {
+          return json(res, 202, { taskId: legacyId, requestId, durable: true, duplicate: true });
+        }
+      }
       if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
         return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
       }
@@ -1325,7 +1344,7 @@ ${recent || '(пока нет)'}
       // runTask journals synchronously, before any await or acknowledgement.
       const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
       completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
-      if (requestId) atomicJson(receipt, { taskId, acceptedAt: Date.now() });
+      if (requestId) atomicJson(receipt, { taskId, audience: audience || 'default', acceptedAt: Date.now() });
       json(res, 202, { taskId, requestId, durable: true });
       return;
     }

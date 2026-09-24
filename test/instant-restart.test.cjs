@@ -38,11 +38,12 @@ test('SIGTERM handler flags the restart and exits without draining', () => {
 
 const { isTaskResumable } = require('../src/pending-task-resume');
 
-function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engineSessionIds = {} }) {
+function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engineSessionIds = {}, secrets = { BOT_TOKEN: 'tok' } }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
   const calls = [], runs = [], cleared = [], delays = [], resumeKinds = [];
   const sandbox = {
+    taskDelivery: require('../src/bot-delivery').taskDelivery,
     path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise,
     setTimeout: (fn, ms) => { delays.push(ms); fn(); return 0; },
@@ -62,7 +63,7 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engi
   };
   vm.createContext(sandbox);
   vm.runInContext(`${serverSrc.slice(start, end)}; this.resume = resumePendingTasks;`, sandbox);
-  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, delays, resumeKinds, now };
+  return { resume: () => sandbox.resume(secrets), calls, runs, cleared, delays, resumeKinds, now };
 }
 
 const task = (over = {}) => ({ taskId: 'alice-1', username: 'alice', userId: 42, task: 'work', initialMsgId: 7,
@@ -124,6 +125,7 @@ test('a resumed task that fails to start tells the user', async () => {
   const pending = [task()];
   const calls = [];
   const sandbox = {
+    taskDelivery: require('../src/bot-delivery').taskDelivery,
     path, console: { log() {}, error() {}, warn() {} }, BASE_USERS_DIR: '/users', AbortSignal, Promise,
     setTimeout: fn => { fn(); return 0; }, process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
     getRetryDelayMs: () => 0,
@@ -220,4 +222,14 @@ test('a real task alongside pings is still resumed', async () => {
   assert.equal(h.runs[0].task, 'сделай отчёт по продажам за неделю');
   assert.ok(h.cleared.includes('ping'), 'the ping entry is dropped');
   assert.ok(h.cleared.includes('real'), 'the resumed real task entry is cleared after handoff (as before)');
+});
+
+test('restart retains recruiter audience and failure notices never use the classic bot',async()=>{
+ const secrets={BOT_TOKEN:'classic',RECRUITER_BOT_TOKEN:'recruiter'};
+ const h=resumeHarness({pending:[task({audience:'recruiter'})],secrets});await h.resume();
+ assert.equal(h.runs[0].user.audience,'recruiter');
+ const failure=resumeHarness({pending:[task({audience:'recruiter',resumeAttempts:3})],secrets});await failure.resume();
+ assert.equal(failure.calls.length,1);assert.match(failure.calls[0].url,/botrecruiter\//);
+ const missing=resumeHarness({pending:[task({audience:'recruiter',resumeAttempts:3})]});await missing.resume();
+ assert.equal(missing.calls.length,0);
 });
