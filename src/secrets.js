@@ -22,6 +22,20 @@ async function loadFromGcp() {
 
     const names = [...REQUIRED, ...OPTIONAL];
     const results = await Promise.allSettled(names.map(n => getSecret(n)));
+    // allSettled folds every per-secret rejection into `null`, which is
+    // indistinguishable from "optional and intentionally unset". A genuinely
+    // missing/unfetchable secret (NOT_FOUND, IAM, network) must be loud — an
+    // OPTIONAL bot token silently resolving to null for weeks broke recruiter
+    // delivery with zero operator signal (2026-09-24). Log every rejection's
+    // code+message at boot. The `rate` is a hint that a missing OPTIONAL secret
+    // is a real problem, not a deliberate "off".
+    for (let i = 0; i < names.length; i++) {
+      const r = results[i];
+      if (r.status === 'rejected') {
+        const reason = r.reason || {};
+        console.error(`[secrets] FAILED to load ${names[i]}: ${reason.code || ''} ${reason.message || r.reason}`);
+      }
+    }
     return Object.fromEntries(names.map((n, i) => [
       n,
       results[i].status === 'fulfilled' ? results[i].value : null,
