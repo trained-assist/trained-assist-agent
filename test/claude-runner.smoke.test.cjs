@@ -151,7 +151,7 @@ const baseOpts = {
   const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-buttons-'));
   const quietBin = path.join(tmp3, 'fake-claude-quiet');
   writeFake(quietBin, `#!/usr/bin/env sh
-sleep 10
+sleep 17
 echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens":1}}'
 `);
   const buttonEdits = [];
@@ -164,7 +164,7 @@ echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens"
   };
   await runEngineProcess({
     ...baseOpts, engineBin: quietBin, cwd: tmp3, msgId: 'm-1', taskId: 't-retry',
-    user: { username: 'smoke', workDir: tmp3, name: 'Smoke' },
+    thinkingStart: Date.now(), user: { username: 'smoke', workDir: tmp3, name: 'Smoke' },
     tgEdit: flakyTgEdit,
   });
   assert.ok(buttonEdits.length >= 2, `expected a dropped attempt + a landed retry, got ${buttonEdits.length} button-carrying edits`);
@@ -184,7 +184,7 @@ echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens"
   const tmp4 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-persist-'));
   const quietBin2 = path.join(tmp4, 'fake-claude-quiet2');
   writeFake(quietBin2, `#!/usr/bin/env sh
-sleep 10
+sleep 17
 echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens":1}}'
 `);
   const landedEdits = [];
@@ -195,7 +195,7 @@ echo '{"type":"result","result":"done","usage":{"input_tokens":1,"output_tokens"
   };
   await runEngineProcess({
     ...baseOpts, engineBin: quietBin2, cwd: tmp4, msgId: 'm-1', taskId: 't-persist',
-    user: { username: 'smoke', workDir: tmp4, name: 'Smoke' },
+    thinkingStart: Date.now(), user: { username: 'smoke', workDir: tmp4, name: 'Smoke' },
     tgEdit: persistTgEdit,
   });
   const postThreshold = landedEdits.filter(e => !e.bare);
