@@ -910,6 +910,24 @@ ${recent || '(пока нет)'}
       }
     }
 
+    // GET /internal/gtd-status — GTD tick heartbeat + backlog (issue #512 pt.3). The tick lives
+    // inside an in-process setInterval (scheduleGtdController below); if it ever silently stopped
+    // firing, open records would sit forever with no external signal. `stale` flips once we've
+    // missed 3 ticks' worth of time AND there's backlog waiting on it — cheap enough to poll from
+    // a cron-skill job without spawning Claude.
+    if (req.method === 'GET' && url.pathname === '/internal/gtd-status') {
+      const gtd = require('./gtd-controller');
+      const heartbeat = gtd.tickHeartbeat();
+      const legacy = gtd.countOpenLegacy(BASE_USERS_DIR);
+      const durable = gtd.durableItemCounts();
+      const msSinceLastTick = heartbeat.lastFinishAt != null ? Date.now() - heartbeat.lastFinishAt : null;
+      const backlog = legacy.open + durable.pending + durable.waiting;
+      const stale = msSinceLastTick != null && msSinceLastTick > 3 * 5 * 60 * 1000;
+      return json(res, stale && backlog > 0 ? 503 : 200, {
+        heartbeat, msSinceLastTick, stale, backlog, legacy, durable,
+      });
+    }
+
     // GET /internal/auth-status — engine auth + health. Derived view of current state (spec §12):
     // `engine_health` is the operational truth (healthy|degraded|unavailable, self-healed on the
     // next successful call); `claude_auth_ok`/`reason`/… and `engines` are kept for back-compat
