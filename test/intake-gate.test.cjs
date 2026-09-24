@@ -10,22 +10,22 @@ function fakeFetch(content) {
   });
 }
 
-test('fails open to "clear" when text or key is missing', async () => {
-  assert.deepEqual(await checkCompleteness('', 'key'), { level: 'clear', complete: true });
-  assert.deepEqual(await checkCompleteness('hi', ''), { level: 'clear', complete: true });
+test('holds when text or key is missing', async () => {
+  assert.deepEqual(await checkCompleteness('', 'key'), { level: 'insufficient', complete: false });
+  assert.deepEqual(await checkCompleteness('hi', ''), { level: 'insufficient', complete: false });
 });
 
-test('fails open to "clear" when the OpenRouter call throws', async () => {
+test('propagates API errors to the fail-closed HTTP boundary', async () => {
   const fetchImpl = async () => ({ ok: false, status: 500, text: async () => 'boom' });
   await assert.rejects(() => checkCompleteness('do the thing', 'key', { fetchImpl }));
 });
 
-test('maps model answer "clear" to an immediate-launch level', async () => {
+test('maps clear to actionable after the gateway quiet period', async () => {
   const result = await checkCompleteness('запусти отчёт по кандидатам', 'key', { fetchImpl: fakeFetch('clear') });
   assert.deepEqual(result, { level: 'clear', complete: true });
 });
 
-test('maps model answer "likely" to the grace-period level (still complete=true)', async () => {
+test('maps likely to actionable after the gateway quiet period', async () => {
   const result = await checkCompleteness('наверное готово', 'key', { fetchImpl: fakeFetch('likely') });
   assert.deepEqual(result, { level: 'likely', complete: true });
 });
@@ -35,9 +35,9 @@ test('maps model answer "insufficient" to complete=false', async () => {
   assert.deepEqual(result, { level: 'insufficient', complete: false });
 });
 
-test('an unrecognised answer defaults to "clear" (fail open)', async () => {
+test('an unrecognised answer holds the buffer', async () => {
   const result = await checkCompleteness('что-то', 'key', { fetchImpl: fakeFetch('maybe???') });
-  assert.deepEqual(result, { level: 'clear', complete: true });
+  assert.deepEqual(result, { level: 'insufficient', complete: false });
 });
 
 // The exact voice transcript must be actionable even if the model would refuse it.
@@ -56,4 +56,17 @@ test('unfinished link requests remain subject to the gate', async () => {
     const result = await checkCompleteness(text, 'key', { fetchImpl: fakeFetch('insufficient') });
     assert.deepEqual(result, { level: 'insufficient', complete: false });
   }
+});
+
+test('wait instructions dominate named-link shortcuts and optimistic model answers', async () => {
+  for (const text of ['пришли ссылку на отчёт, подожди, ещё допишу', 'я ещё пишу', 'не запускай', 'сейчас пришлю файл']) {
+    assert.deepEqual(await checkCompleteness(text, 'key', {fetchImpl: () => {throw Error('must not call');}}), {level:'insufficient',complete:false});
+  }
+});
+test('keeps the end of long input where waiting instructions or task details arrive', async () => {
+  let prompt;
+  await checkCompleteness('a'.repeat(7000)+' LAST DETAIL', 'key', {fetchImpl: async (_, options) => {
+    prompt=JSON.parse(options.body).messages[0].content; return fakeFetch('likely')();
+  }});
+  assert.ok(prompt.includes('LAST DETAIL'));
 });

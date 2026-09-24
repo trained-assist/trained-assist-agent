@@ -1730,7 +1730,7 @@ ${recent || '(пока нет)'}
         return json(res, 200, result);
       } catch (e) {
         console.error('[intake-gate] error:', e.message);
-        return json(res, 200, { level: 'clear', complete: true }); // fail open — never trap the user
+        return json(res, 200, { level: 'insufficient', complete: false }); // preserve intake; manual launch remains available
       }
     }
 
