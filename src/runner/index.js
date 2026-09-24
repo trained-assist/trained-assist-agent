@@ -1274,6 +1274,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const actionButtons = answerRouter.oneshotActionMarkup;
   const { BOT_TOKEN } = secrets;
   const chatId = user.id;
+  // The gateway sent the task placeholder ("📨 Передаю задачу агенту…") and passed its
+  // id as initialMsgId; remember it so /clean_up_flood can delete it too (same bot token).
+  try { require('../sent-messages').record(BOT_TOKEN, chatId, initialMsgId); } catch { /* best-effort */ }
   // Scopes session/project lookups to the calling bot/surface (see AUDIENCE-SCOPE-SPEC)
   // — e.g. the recruiter bot sets user.audience='recruiter' so its sessions never mix
   // with the general-purpose bot's for the same shared username+chatId. Defaults to

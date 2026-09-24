@@ -61,6 +61,9 @@ async function tgSend(token, chatId, text, extra = {}) {
   });
   const data = await res.json();
   if (!res.ok || !data.ok) throw new Error(`Telegram sendMessage failed (${data.error_code || res.status})`);
+  // Remember the id so /clean_up_flood can delete this text message later.
+  // Best-effort: a tracking hiccup must never fail an otherwise delivered message.
+  try { require('../sent-messages').record(token, chatId, data?.result?.message_id); } catch { /* ignore */ }
   return data;
 }
 
