@@ -23,6 +23,8 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci --include=dev
+      - name: Install Chromium for response review scenario
+        run: npx playwright install --with-deps chromium
       - name: Replay mandatory user scenarios
         run: npm run test:staging
       - name: Verify recruiter domain with real nginx

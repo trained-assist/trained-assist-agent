@@ -13,7 +13,7 @@ class Upstream(http.server.BaseHTTPRequestHandler):
         if self.path == '/stream': time.sleep(1.5); self.wfile.write(b'END')
     def do_POST(self):
         body=self.rfile.read(int(self.headers.get('Content-Length',0)))
-        self.send_response(200); self.end_headers(); self.wfile.write((self.path+'|'+body.decode()).encode() if self.path.startswith('/agent/api/hh/proactive/') else str(len(body)).encode())
+        self.send_response(200); self.end_headers(); self.wfile.write((self.path+'|'+body.decode()).encode() if self.path.startswith(('/agent/api/hh/proactive/', '/agent/hh/')) else str(len(body)).encode())
 with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
     d=pathlib.Path(d); hp,sp=port(),port()
     upstream=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
@@ -66,11 +66,15 @@ with tempfile.TemporaryDirectory(prefix='recruiter-nginx-') as d:
         for path in ['/hh-callback?code=a%2Bb&state=c%2Fd','/hh-callback?error=access_denied&state=x','/connect/hh/start?t=abc','/connect/hh/authorize?t=abc','/connect/hh?t=abc']:
             s,h,b=request(path);assert s==307 and h['Location']=='https://136-65-7-197.sslip.io'+path
             assert h['Cache-Control']=='no-store' and h['Referrer-Policy']=='no-referrer'
-        for path in ['/web/login.html','/hh/candidate?neg_id=x','/vacancy/user/id']:
+        for path in ['/web/login.html','/vacancy/user/id']:
             s,h,b=request(path);assert s==200 and b.decode()==path+'|https'
-        for path in ['/p/cold-candidates-report-designer-137230181', '/p/private-report?password=a%2Bb&format=source', '/hh/proactive?username=alice&token=signed&vacancy_id=v1&list=starred','/api/hh/proactive/candidates?username=alice&token=signed&vacancy_id=v1']:
+        for path in ['/hh/response-updates?username=alice&token=signed&vacancy_id=v1','/hh/review?username=alice&token=signed&vacancy_id=v1','/hh/candidate?neg_id=x','/p/cold-candidates-report-designer-137230181', '/p/private-report?password=a%2Bb&format=source', '/hh/proactive?username=alice&token=signed&vacancy_id=v1&list=starred','/api/hh/proactive/candidates?username=alice&token=signed&vacancy_id=v1']:
             s,h,b=request(path);assert s==200 and b.decode()=='/agent'+path+'|https', (s,b)
             assert h['Cache-Control']=='no-store' and h['Referrer-Policy']=='no-referrer'
+        for action in ['sync-negotiations','response-state','send','reject','send-and-reject','generate-message']:
+            path='/hh/'+action
+            s,h,b=request(path,body=b'{"username":"alice","token":"signed"}')
+            assert s==200 and b.decode()=='/agent'+path+'|'+ '{"username":"alice","token":"signed"}', (s,b)
         for action in ['search','comment','set-status','add-manual','import-seen','ai-score','vacancy-state']:
             path='/api/hh/proactive/'+action
             s,h,b=request(path,body=b'{"username":"alice","token":"signed"}')

@@ -10,7 +10,8 @@
     "tests/hh-cold-search-transport.test.js",
     "tests/unit/hh-proactive-endpoints.test.js",
     "tests/mcp-skill-source-registry.test.js",
-    "tests/unit/soft-continuation-journal.test.js"
+    "tests/unit/soft-continuation-journal.test.js",
+    "tests/unit/hh-response-refresh.test.js"
   ],
   "node": [
     "test/run-ingress.test.cjs",

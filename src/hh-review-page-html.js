@@ -10,7 +10,8 @@ const BASE_USERS_DIR = process.env.USERS_DIR ||
 
 // Generates the HH candidates review page HTML (moved from server.js, see issue #942 Phase 0).
 function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBase, dataDir, opts = {}) {
-  const { syncedAt, vacancyId, lastScoredAt, vacancies = [] } = opts;
+  const { syncedAt, vacancyId, lastScoredAt, vacancies = [], syncError = null } = opts;
+  const listView = ['active', 'starred', 'archived'].includes(opts.list) ? opts.list : 'active';
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const candDir = path.join(dataDir || path.join(os.homedir(), 'agent-data'), 'hh', String(username), 'candidates');
@@ -40,6 +41,10 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const daysAgo = neg.updated_at ? Math.floor((Date.now() - new Date(neg.updated_at).getTime()) / 86400000) : null;
     return {
       negotiation_id: neg.id,
+      response_status: vacancyId ? require('./hh-response-state').readResponseState(dataDir || path.join(os.homedir(), 'agent-data'), username, vacancyId, neg.id) : 'active',
+      created_at: neg.created_at || '',
+      updated_at: neg.updated_at || '',
+      has_updates: !!neg.has_updates || (neg.counters?.unread_messages || 0) > 0,
       neg_state: neg._state || 'response',
       first_name: r.first_name || '',
       name: [r.last_name, r.first_name].filter(Boolean).join(' ') || 'Кандидат',
@@ -85,23 +90,26 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
 
   function sortCandidates(list) {
     return [...list].sort((a, b) => {
-      if (a.score != null && b.score != null) return (b.score || 0) - (a.score || 0);
+      if (a.score != null && b.score != null) return (b.score || 0) - (a.score || 0) || (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
       if (a.score != null) return -1;
       if (b.score != null) return 1;
-      return 0;
+      return (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
     });
   }
 
-  const sorted = sortCandidates(candidates);
-  const waitingCandidates = sortCandidates(candidates.filter(c => c.needs_reply));
+  const counts = { active: 0, starred: 0, archived: 0 };
+  candidates.forEach(c => { counts[c.response_status]++; });
+  const visibleCandidates = candidates.filter(c => c.response_status === listView);
+  const sorted = sortCandidates(visibleCandidates);
+  const waitingCandidates = sortCandidates(visibleCandidates.filter(c => c.needs_reply));
   // We wrote, but the candidate has never replied
-  const silentCandidates = sortCandidates(candidates.filter(c =>
+  const silentCandidates = sortCandidates(visibleCandidates.filter(c =>
     c.msg_from_us > 0 && c.msg_from_candidate === 0 && !c.needs_reply
   ));
   // No employer message at all — never initiated contact
-  const noContactCandidates = sortCandidates(candidates.filter(c => c.msg_from_us === 0));
+  const noContactCandidates = sortCandidates(visibleCandidates.filter(c => c.msg_from_us === 0));
   // Both sides wrote; our reply is last and no action is pending
-  const dialogCandidates = sortCandidates(candidates.filter(c =>
+  const dialogCandidates = sortCandidates(visibleCandidates.filter(c =>
     c.msg_from_us > 0 && c.msg_from_candidate > 0 && c.last_msg_role === 'employer' && !c.needs_reply
   ));
 
@@ -168,7 +176,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const profileToken = agentSecret
       ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16)
       : '';
-    const profileBtn = ` <a href="${esc(callbackBase)}/hh/candidate?neg_id=${esc(c.negotiation_id)}&username=${esc(username)}&token=${profileToken}" target="_blank" class="hh-link-btn" title="Открыть профиль кандидата">👤 Профиль</a>`;
+    const profileBtn = ` <a href="candidate?neg_id=${esc(c.negotiation_id)}&username=${esc(username)}&token=${profileToken}&vacancy_id=${esc(vacancyId || '')}" target="_blank" class="hh-link-btn" title="Открыть профиль кандидата">👤 Профиль</a>`;
     const nameHtml = `${esc(c.name)}${hhBtn}${profileBtn}`;
 
     const hasDraft = !!c.draft_message;
@@ -188,7 +196,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            <div class="btns">
              <button class="btn btn-send-reject" onclick="rejectWithMessage(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
              <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
-             <button class="btn btn-skip" onclick="skipOne(${i})">Пропустить</button>
+             <button class="btn btn-skip" onclick="setResponseState(this,'${esc(c.negotiation_id)}','archived')">В архив</button>
            </div>
          </div>`
       : `<div class="msg-section">
@@ -202,8 +210,8 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
            <div class="btns">
              <button class="btn btn-send" onclick="sendOne(${i},'${esc(c.negotiation_id)}')">✓ Отправить</button>
              <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
-             <button class="btn btn-skip" onclick="skipOne(${i})">✗ Пропустить</button>
-             <button class="btn btn-send-reject" onclick="rejectWithMessage(${i},'${esc(c.negotiation_id)}')">🚫 Отказать</button>
+             <button class="btn btn-skip" onclick="setResponseState(this,'${esc(c.negotiation_id)}','archived')">В архив</button>
+             <button class="btn btn-send-reject" onclick="rejectWithMessage(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
            </div>
          </div>`;
 
@@ -218,6 +226,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       </div>
     </div>
     ${scoreHtml}
+  </div>
+  <div class="btns">
+    <button class="btn" data-testid="response-star" onclick="setResponseState(this,'${esc(c.negotiation_id)}','${c.response_status === 'starred' ? 'active' : 'starred'}')">${c.response_status === 'starred' ? '★ Убрать звезду' : '☆ В избранное'}</button>
+    ${c.response_status === 'archived' ? `<button class="btn" data-testid="response-restore" onclick="setResponseState(this,'${esc(c.negotiation_id)}','active')">Восстановить</button>` : ''}
+    <span class="meta">Отклик: ${esc(c.created_at.slice(0,10))} · Обновление HH: ${esc(c.updated_at.slice(0,10))}${c.has_updates ? ' · Есть обновления HH' : ''}</span>
   </div>
   ${c.reasoning ? `<p class="reasoning">${esc(c.reasoning)}</p>` : ''}
   ${matched || gaps ? `<div class="tags">${matched}${gaps}</div>` : ''}
@@ -349,11 +362,14 @@ h1{font-size:18px}
 <body>
 <h1>Кандидаты: ${esc(vacancyTitle)}</h1>
 ${vacancies.length > 1 ? `<div class="vacancy-tabs">${vacancies.map(v => {
-  const href = `${esc(callbackBase)}/hh/review?username=${esc(username)}&token=${pageToken}&vacancy_id=${esc(v.id)}`;
+  const href = `?username=${esc(username)}&token=${pageToken}&vacancy_id=${esc(v.id)}`;
   const isActive = String(v.id) === String(vacancyId);
   return `<a class="vacancy-tab${isActive ? ' active' : ''}" href="${href}">${esc(v.title || v.id)}</a>`;
 }).join('')}</div>` : ''}
+${syncError ? `<p role="alert">${esc(syncError)}</p>` : ''}
+<nav class="vacancy-tabs" aria-label="Статус отклика">${[['active','Активные'],['starred','★ Избранные'],['archived','Архив']].map(([status,label]) => `<a class="vacancy-tab${status === listView ? ' active' : ''}" href="?username=${encodeURIComponent(username)}&token=${pageToken}&vacancy_id=${encodeURIComponent(vacancyId || '')}&list=${status}">${label} (${counts[status]})</a>`).join('')}</nav>
 <p class="subtitle">${sorted.length} откликов · ${waitingCandidates.length} ждут ответа${ageText ? ` · обновлено ${ageText}` : ''}${scoredText ? ` · ${scoredText}` : ''} · <button class="sync-btn" id="syncBtn" onclick="syncNow()">↻ Обновить</button></p>
+<p id="responseUpdates" role="status" aria-live="polite"></p>
 <div class="toolbar">
   <span class="toolbar-label">Балл:</span>
   <button class="tb-btn score-btn" data-bucket="10" onclick="toggleBucket(10)">10</button>
@@ -371,13 +387,13 @@ ${vacancies.length > 1 ? `<div class="vacancy-tabs">${vacancies.map(v => {
   <button class="tb-btn" onclick="selectAll(false)">✗ Снять все</button>
 </div>
 <div class="tabs">
-  <button class="tab-btn active" onclick="switchTab('waiting',this)">🔴 Неотвеченные (${waitingCandidates.length})</button>
+  <button class="tab-btn" onclick="switchTab('waiting',this)">🔴 Неотвеченные (${waitingCandidates.length})</button>
   <button class="tab-btn" onclick="switchTab('silent',this)">😴 Молчат (${silentCandidates.length})</button>
   <button class="tab-btn" onclick="switchTab('nocontact',this)">📭 Ещё не писали (${noContactCandidates.length})</button>
   <button class="tab-btn" onclick="switchTab('dialog',this)">💬 Диалог (${dialogCandidates.length})</button>
-  <button class="tab-btn" onclick="switchTab('all',this)">📨 Все (${sorted.length})</button>
+  <button class="tab-btn active" onclick="switchTab('all',this)">📨 Все (${sorted.length})</button>
 </div>
-<div id="tab-waiting" class="tab-panel active">
+<div id="tab-waiting" class="tab-panel">
   ${waitingCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Все отвечено — нет кандидатов, ожидающих ответа.</p>' : waitingCardsHtml.join('')}
 </div>
 <div id="tab-silent" class="tab-panel">
@@ -389,7 +405,7 @@ ${vacancies.length > 1 ? `<div class="vacancy-tabs">${vacancies.map(v => {
 <div id="tab-dialog" class="tab-panel">
   ${dialogCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Нет активных диалогов без ожидающих ответов.</p>' : dialogCardsHtml.join('')}
 </div>
-<div id="tab-all" class="tab-panel">
+<div id="tab-all" class="tab-panel active">
   ${allCardsHtml.join('')}
 </div>
 <div class="footer">
@@ -401,9 +417,28 @@ ${vacancies.length > 1 ? `<div class="vacancy-tabs">${vacancies.map(v => {
 <script>
 const CALLBACK_BASE = '${callbackBase}';
 const HH_USER = '${esc(username)}';
-const HH_SECRET = '${esc(agentSecret)}';
 const HH_VACANCY_ID = '${esc(String(vacancyId || ''))}';
+const HH_PAGE_TOKEN = '${pageToken}';
 const done = new Set();
+async function checkResponseUpdates() {
+  if (document.hidden) return;
+  try {
+    const q = new URLSearchParams({ username: HH_USER, token: HH_PAGE_TOKEN, vacancy_id: HH_VACANCY_ID });
+    const r = await fetch(CALLBACK_BASE + '/hh/response-updates?' + q);
+    if (!r.ok) throw new Error('sync status unavailable');
+    const data = await r.json();
+    if (data.synced_at > ${Number(syncedAt) || 0}) document.getElementById('responseUpdates').textContent = 'Данные HH обновились. Нажмите «Обновить», чтобы загрузить их; текущий текст сообщения сохранён на экране.';
+  } catch { document.getElementById('responseUpdates').textContent = 'Не удалось проверить обновления HH. Нажмите «Обновить» для повтора.'; }
+}
+setInterval(checkResponseUpdates, 60000);
+async function setResponseState(btn, negId, status) {
+  btn.disabled = true;
+  try {
+    const r = await fetch(CALLBACK_BASE + '/hh/response-state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: HH_USER, token: HH_PAGE_TOKEN, vacancy_id: HH_VACANCY_ID, negotiation_id: negId, status }) });
+    if (!r.ok) throw new Error('Не удалось сохранить статус');
+    location.reload();
+  } catch (e) { btn.disabled = false; showToast(e.message, true); }
+}
 
 function switchTab(id, btn) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
@@ -428,7 +463,7 @@ async function syncNow() {
     const r = await fetch(CALLBACK_BASE + '/hh/sync-negotiations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: HH_USER, vacancy_id: HH_VACANCY_ID }),
+      body: JSON.stringify({ username: HH_USER, vacancy_id: HH_VACANCY_ID, token: HH_PAGE_TOKEN }),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     location.reload();
@@ -452,7 +487,7 @@ async function hhAction(endpoint, payload) {
   try {
     const r = await fetch(CALLBACK_BASE + endpoint, {
       method: 'POST', signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + HH_SECRET },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: HH_USER, ...payload }),
     });
     const data = await r.json();
