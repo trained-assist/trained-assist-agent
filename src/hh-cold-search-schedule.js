@@ -16,6 +16,20 @@ function updateSchedule(username, workDir, vacancyId, patch) {
   saveSchedule(username, { ...saved, enabled: Object.values(vacancies).some(v => v.enabled), vacancies });
   return vacancies[vacancyId];
 }
+// No vacancy argument means an explicit profile-wide stop, independent of selection.
+function disableSearches(username, workDir, vacancyId) {
+  if (vacancyId) return updateSchedule(username, workDir, vacancyId, { enabled: false });
+  const saved = loadSchedule(username) || {};
+  const vacancies = Object.fromEntries(Object.entries(getSchedules(username, workDir))
+    .map(([id, state]) => [id, { ...state, enabled: false }]));
+  saveSchedule(username, { ...saved, enabled: false, vacancies });
+  require('./hh-autoscan').disable(username);
+  return { enabled: false, vacancies };
+}
+function notificationsEnabled(username, workDir, vacancyId) {
+  const state = getSchedules(username, workDir)[vacancyId];
+  return !!state?.enabled && !state.archived;
+}
 async function runDueSearches(username, workDir, runSearch, now = Date.now()) {
   const tracked = new Set(readActiveVacancies(workDir).map(v => String(v.id)));
   const outcomes = [];
@@ -42,4 +56,4 @@ async function runDueSearches(username, workDir, runSearch, now = Date.now()) {
   }
   return outcomes;
 }
-module.exports = { getSchedules, updateSchedule, runDueSearches };
+module.exports = { getSchedules, updateSchedule, disableSearches, notificationsEnabled, runDueSearches };

@@ -184,6 +184,8 @@ This reveals if context files exist at a different path than expected. Only repo
 
 ## HeadHunter Recruiting — workflow notes
 
+**Notification controls exception:** Disabling cold-search notifications or checking their status does not require a selected vacancy, ATS config, or HH login. Handle these requests before the vacancy-selection workflow. A complaint about broken notification controls is a service-fix task, not a request to list candidates.
+
 **At the start of any HH session:** always call `context_get('hh', 'active_vacancy')` first.
 - If found → say «Работаю с вакансией «{title}»» and proceed.
 - If not found → call `hh_set_active_vacancy()` (no args) to show list, let user pick, then `hh_set_active_vacancy(vacancy_id)` to save.
@@ -220,7 +222,7 @@ If manager is null — omit it silently.
 
 **Auto-notifications on new candidates (`/hh_notify_on` / `/hh_notify_off`):** these slash commands forward as raw text — map them yourself, there is no separate intent handler:
 - `/hh_notify_on` or "включи уведомления о новых кандидатах" / "включи автопоиск" → call `hh_proactive_schedule(action='enable')` (default 24h interval unless user gives a different one), then relay its `message` verbatim.
-- `/hh_notify_off` or "выключи уведомления/автопоиск" → call `hh_proactive_schedule(action='disable')`, relay its `message`.
+- `/hh_notify_off` or "выключи уведомления/автопоиск" → call `hh_proactive_schedule(action='disable')` WITHOUT vacancy_id to stop all cold-search schedules in the caller's profile; no active vacancy is needed. Pass vacancy_id only when the user explicitly requests stopping one vacancy. Relay its `message`.
 - "работает ли автопоиск" / status checks → `hh_proactive_schedule(action='status')`.
 - This is a background scheduler (checks every 30 min, runs cold search + Telegram digest when a user's interval is due) — separate from the 5-min ATS re-scoring loop above.
 

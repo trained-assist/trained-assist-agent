@@ -41,7 +41,12 @@ const VACANCY_PREP_DRAFT_INTENT = /подготов.{0,20}(?:черновик|д
 
 const HH_SERVICE_CHANGE_INTENT = /(?:почин|исправ|прокач|доработ|устарел|отстала от жизни|сервис.{0,20}(?:стар|подост)|логик.{0,50}(?:архив|звезд|звёзд)|(?:кнопк|ссылк|апдейт).{0,30}(?:не работа|стар|не включ))/i;
 
+// Only standalone stop commands mutate state. Longer complaints go to the full agent.
+const HH_NOTIFY_OFF_INTENT = /^\s*(?:\[Сообщение \d+\]\s*)?(?:\/hh_notify_off(?:@[a-z0-9_]+)?|(?:выключи|отключи|останови)(?:,?\s+пожалуйста,?)?\s+(?:автопоиск|холодный поиск|уведомления(?:\s+(?:о новых кандидатах|холодного поиска|о холодном поиске|hh|хх))?))(?:,?\s+пожалуйста)?[.!]?\s*$/i;
+const HH_NOTIFICATION_REQUEST = /\/hh_notify_(?:on|off)|автопоиск|уведомлен[\s\S]{0,160}(?:кандидат|холодн|hh|хх)|(?:кандидат|холодн)[\s\S]{0,160}уведомлен/i;
 module.exports = {
+  HH_NOTIFY_OFF_INTENT,
+  HH_NOTIFICATION_REQUEST,
   HH_SERVICE_CHANGE_INTENT,
   HH_STATUS_INTENT,
   HH_MY_VACANCIES_INTENT,

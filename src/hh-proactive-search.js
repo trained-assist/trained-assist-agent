@@ -944,17 +944,20 @@ async function runProactiveSearchUnlocked(username, workDir, options = {}) {
         ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}vacancy_id=${encodeURIComponent(vacancyKey)}`
         : '';
       Promise.resolve()
-        .then(() => notifyChat({
-          username,
-          vacancyTitle: output.vacancy_title,
-          newCount: newCandidates.length,
-          totalNewCount: seenInfo.newCount,
-          totalSeen: seenInfo.totalSeenAfter,
-          firstRun: seenInfo.firstRun,
-          newCandidates,
-          threshold: notifyThreshold,
-          proactiveUrl: proactiveUrlWithVacancy,
-        }))
+        .then(() => {
+          if (options.alwaysNotify && !require('./hh-cold-search-schedule').notificationsEnabled(username, workDir, vacancyKey)) return;
+          return notifyChat({
+            username,
+            vacancyTitle: output.vacancy_title,
+            newCount: newCandidates.length,
+            totalNewCount: seenInfo.newCount,
+            totalSeen: seenInfo.totalSeenAfter,
+            firstRun: seenInfo.firstRun,
+            newCandidates,
+            threshold: notifyThreshold,
+            proactiveUrl: proactiveUrlWithVacancy,
+          });
+        })
         .catch(e => console.error('[proactive-search] notify failed:', e.message));
     }
   }
