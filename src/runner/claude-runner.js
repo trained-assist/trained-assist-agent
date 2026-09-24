@@ -334,15 +334,50 @@ async function runEngineProcess(opts) {
   // only on the first landing (and bare text afterwards) makes the buttons
   // visible for one tick and then vanish on the next — the reported bug.
   let stopButtonShown = false;
+  // Cadence of progress edits: burst at 1s/2s/5s/10s/15s so the counter feels
+  // live, then settle to one edit every 15s. A fixed 3s tick hammered Telegram's
+  // per-chat edit flood limit (~1/s) when concurrent sessions (user task + GTD +
+  // quick-answers) shared one bot token — retry_after escalated to 9-17s, every
+  // edit dropped, and the "Думаю… (Nс)" counter froze at its first landed value
+  // for minutes. Backing off after the burst window keeps it live without
+  // re-429'ing. progressStart (not thinkingStart) drives the schedule so a long
+  // pre-spawn queue doesn't shift the cadence; the DISPLAYED secs still uses
+  // thinkingStart.
+  const progressStart = Date.now();
+  function nextProgressDelayMs(secs) {
+    if (secs < 1) return 1000;
+    if (secs < 2) return 1000;
+    if (secs < 5) return 3000;
+    if (secs < 10) return 5000;
+    if (secs < 15) return 5000;
+    return 15000;
+  }
   if (msgId) {
-    heartbeatTimer = setInterval(async () => {
-      if (outputStarted) return;
+    const heartbeatTick = async () => {
+      // Engine dead → stop right away (see exitWatcher for why close may never fire).
+      if (outputStarted || progressStopped || proc.exitCode !== null) return;
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
       if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
       const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {});
       if (stopButtonShown && editLanded(result)) stopButtonShown = true;
-    }, HEARTBEAT_INTERVAL_MS);
+      // Re-arm ONLY while the engine process is still alive AND stopProgress()
+      // hasn't run. Two guards, two different zombie paths:
+      //   1. progressStopped — stopProgress() ran (finally reached). Re-arming
+      //      after this would resurrect a timer the finally already cleared.
+      //   2. proc.exitCode !== null — the engine died but `close` may never
+      //      fire (codex spawns codex-code-mode-host which inherits the stdout
+      //      pipe, so on('close') stalls until the host exits too). Without
+      //      this guard the timer keeps ticking for the full 40-min killTimer,
+      //      editing ITS message while a successor session edits its own —
+      //      the "742с + 3с in one chat" overlap bug.
+      if (!progressStopped && proc.exitCode === null) {
+        heartbeatTimer = setTimeout(heartbeatTick, nextProgressDelayMs(Math.round((Date.now() - progressStart) / 1000)));
+      } else {
+        heartbeatTimer = null;
+      }
+    };
+    heartbeatTimer = setTimeout(heartbeatTick, nextProgressDelayMs(0));
   }
 
   function scheduleStream() {
@@ -361,7 +396,8 @@ async function runEngineProcess(opts) {
       typingTimer = setInterval(sendTyping, 4_000);
     }
     let streamEditInProgress = false;
-    streamTimer = setInterval(async () => {
+    const streamTick = async () => {
+      if (progressStopped || proc.exitCode !== null) return;
       if (streamEditInProgress) return;
       streamEditInProgress = true;
       try {
@@ -388,8 +424,19 @@ async function runEngineProcess(opts) {
         }
       } finally {
         streamEditInProgress = false;
+        // Re-arm ONLY while the engine is alive AND stopProgress hasn't run —
+        // same dual guard as heartbeat (zombie path 2: codex-code-mode-host
+        // inheriting the stdout pipe stalls on('close'), so a dead engine with
+        // exitCode set must stop this chain on its own instead of editing its
+        // message for the rest of the 40-min killTimer while a successor runs).
+        if (!progressStopped && proc.exitCode === null) {
+          streamTimer = setTimeout(streamTick, nextProgressDelayMs(Math.round((Date.now() - progressStart) / 1000)));
+        } else {
+          streamTimer = null;
+        }
       }
-    }, STREAM_INTERVAL_MS);
+    };
+    streamTimer = setTimeout(streamTick, nextProgressDelayMs(0));
   }
 
   let firstJsonEventSeen = false;
@@ -626,7 +673,22 @@ async function runEngineProcess(opts) {
         }
       }, 30_000);
 
+      // Zombie watchdog: codex spawns codex-code-mode-host which inherits the
+      // stdout pipe, so proc.on('close') may NEVER fire even after the engine
+      // process is dead. That leaves this promise hanging, which means finally /
+      // stopProgress() never run, the progress timer keeps editing its message
+      // for the rest of the 40-min killTimer, and the per-chat lane stays held
+      // ("Думаю… (742с)" + "(3с)" overlap in one chat). exitCode is set by the
+      // runtime the moment the engine dies, independent of the pipe — poll it
+      // and finish the run as `close` would. Grace period lets a well-behaved
+      // `close` fire first (it normally arrives within ms); we only force when
+      // the pipe genuinely stalls.
+      let exitWatcher = null;
+      let engineDiedAt = null;
+      let settled = false;
+
       proc.on('close', (code, signal) => {
+        if (exitWatcher) { clearInterval(exitWatcher); exitWatcher = null; }
         processSignal = signal;
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
@@ -643,10 +705,33 @@ async function runEngineProcess(opts) {
         }
       });
       proc.on('error', (err) => {
+        if (exitWatcher) { clearInterval(exitWatcher); exitWatcher = null; }
         clearTimeout(sessionState.killTimer);
         clearTimeout(warnTimer);
         reject(err);
       });
+
+      exitWatcher = setInterval(() => {
+        if (settled) { clearInterval(exitWatcher); return; }
+        if (proc.exitCode === null) return; // engine still alive
+        const now = Date.now();
+        if (engineDiedAt === null) engineDiedAt = now;
+        if (now - engineDiedAt < 3000) return; // give close a grace period
+        settled = true;
+        clearInterval(exitWatcher);
+        clearTimeout(sessionState.killTimer);
+        clearTimeout(warnTimer);
+        clearInterval(inactivityCheckTimer); inactivityCheckTimer = null;
+        const code = proc.exitCode;
+        exitCode = code; // mirror the close handler so the caller reports the real exit
+        processSignal = null;
+        console.warn(`[${taskId}] engine exited (code=${code}) but close stalled (host holds pipe?) — force-finishing`);
+        if (timedOut && !restartShutdown()) {
+          reject(new Error(`claude exited after SIGTERM (code ${code})`));
+        } else {
+          resolve(code);
+        }
+      }, 1000);
     });
   } catch (err) {
     processError = err.message;

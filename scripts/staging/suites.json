@@ -16,7 +16,8 @@
     "tests/managed-deployment.test.js",
     "tests/managed-runner-lifecycle.test.js",
     "tests/telegram-bot-registry.test.js",
-    "tests/unit/action-invoke.test.js"
+    "tests/unit/action-invoke.test.js",
+    "tests/unit/soft-continuation-journal.test.js"
   ],
   "node": [
     "test/run-ingress.test.cjs",
@@ -25,6 +26,7 @@
     "test/admission-status.test.cjs",
     "test/per-chat-queue.test.cjs",
     "test/execution-owner-lock.test.cjs",
-    "test/instant-restart.test.cjs"
+    "test/instant-restart.test.cjs",
+    "test/intake-gate.test.cjs"
   ]
 }

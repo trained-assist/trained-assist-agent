@@ -12,7 +12,7 @@
  *   2. `claude` binary → shell script that outputs our reply JSON
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -1077,4 +1077,29 @@ describe('terminal answer delivery', () => {
     });
   }
 
+});
+
+
+describe('Completed answers do not authorize speculative continuation', () => {
+  it('does not ask an optimistic LLM to schedule more paid work', { timeout: 15000 }, async () => {
+    setupFakeClaude('Задеплоил и проверил. Ложная кнопка продолжения пока остаётся отдельной неисправленной проблемой.');
+    const requests = [];
+    const originalFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+      if (!String(url).startsWith('https://openrouter.ai/')) return originalFetch(url, options);
+      requests.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+        plan: false, menu: false, incomplete: true, auto_continue: true, reason: 'still_working',
+      }) } }] }) };
+    });
+    try {
+      await runTask({ taskId: `terminal-${Date.now()}`, user: makeUser(), task: 'Исправь обещание запуска',
+        forceClaude: true, mode: 'deep', secrets: { BOT_TOKEN: 'fake:token', OPENROUTER_API_KEY: 'fake' } });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(tgTexts().join(' ')).toContain('Задеплоил и проверил');
+      expect(tgTexts().join(' ')).not.toContain('Продолжу через');
+      expect(requests.some(r => JSON.stringify(r).includes('auto_continue'))).toBe(false);
+      expect(existsSync(join(testDataRoot, 'soft-continuations', `${testUsername}.json`))).toBe(false);
+    } finally { spy.mockRestore(); }
+  });
 });

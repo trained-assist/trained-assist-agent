@@ -38,7 +38,12 @@ Environment=TELEGRAM_API_URL=https://136-65-7-197.sslip.io/tg-proxy
 
 # Route Anthropic API through GCP proxy (Anthropic blocks Russian IPs)
 Environment=ANTHROPIC_BASE_URL=https://136-65-7-197.sslip.io/anthropic-proxy
-Environment=ANTHROPIC_MODEL=claude-sonnet-5
+Environment=ANTHROPIC_MODEL=claude-opus-5-5
+
+# Claude Code is installed natively under ~/.local/bin on this box (the root-owned
+# /usr/bin/claude from npm can't self-update without sudo). Put ~/.local/bin first
+# so every `claude` spawn (runner.js, server.js, refresh scripts) uses the current CLI.
+Environment=PATH=/home/vova/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Secrets loaded from /home/vova/secrets.env (not in git — set manually on the VM)
 # Format: KEY=value lines (no quotes, no export)
