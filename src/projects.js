@@ -360,18 +360,37 @@ function _activePath(workDir, chatId, audience) {
   }
   return path.join(projectsRoot(workDir), `active-${audience}-${chatId || 'default'}.json`);
 }
-function getActiveProjectId(workDir, chatId, audience) {
-  try {
-    const { id } = JSON.parse(fs.readFileSync(_activePath(workDir, chatId, audience), 'utf8'));
-    return getProject(workDir, id) ? id : null; // ignore stale pointer
-  } catch {
-    return null;
-  }
+function _readActive(workDir, chatId, audience) {
+  try { return JSON.parse(fs.readFileSync(_activePath(workDir, chatId, audience), 'utf8')); } catch { return null; }
 }
-function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience } = {}) {
+function getActiveProjectId(workDir, chatId, audience) {
+  const rec = _readActive(workDir, chatId, audience);
+  return rec && rec.id && getProject(workDir, rec.id) ? rec.id : null; // ignore stale pointer
+}
+// The chat's PINNED project (issue #1312, "чат = проект"): set only by an explicit user
+// choice (picker, /project switch/create, «➕ Новый проект»). While it exists, every new
+// session of this chat goes into it without asking. null if none / archived.
+function getPinnedProjectId(workDir, chatId, audience) {
+  const rec = _readActive(workDir, chatId, audience);
+  return rec && rec.pinned && rec.id && getProject(workDir, rec.id) ? rec.id : null;
+}
+// pinned:true  — explicit user choice → becomes the chat's pinned project.
+// pinned:false/undefined — automatic bookkeeping (runner binding on every run): records
+//   "last used" but NEVER replaces a live pinned project of this chat (continuing an old
+//   session from another project must not silently re-pin the chat).
+function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience, pinned = false } = {}) {
   try {
     fs.mkdirSync(projectsRoot(workDir), { recursive: true });
-    atomicWrite(_activePath(workDir, chatId, audience), JSON.stringify({ id, at: now }));
+    if (!pinned) {
+      const cur = _readActive(workDir, chatId, audience);
+      if (cur && cur.pinned && cur.id && cur.id !== id && getProject(workDir, cur.id)) {
+        touchProject(workDir, id, { now });
+        return;
+      }
+    }
+    const cur = _readActive(workDir, chatId, audience);
+    const keepPin = !pinned && cur && cur.pinned && cur.id === id;
+    atomicWrite(_activePath(workDir, chatId, audience), JSON.stringify({ id, at: now, ...(pinned || keepPin ? { pinned: true } : {}) }));
     touchProject(workDir, id, { now });
   } catch (e) {
     console.warn('[projects] setActiveProjectId:', e.message);
@@ -380,13 +399,16 @@ function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience } 
 
 // ── Binding decision for a NEW session ──────────────────────────────────────
 // Pure over the on-disk state. Caller (runner/gateway) turns 'ask' into a prompt.
-//   { action:'auto',   project }              exactly one project -> bind silently
-//   { action:'ask',    choices, active }      several projects   -> ask which / offer new
+//   { action:'auto',   project, pinned? }     one project, or the chat's pinned one -> bind silently
+//   { action:'ask',    choices, active }      several projects, nothing pinned -> ask which / offer new
 //   { action:'create', suggestType }          no projects yet    -> create the first one
 // A CONTINUING session never calls this — it keeps the project stored on the session.
 function decideNewSessionProject(workDir, chatId, countByProject, audience = 'default') {
   const projects = sortByUsage(listProjects(workDir, audience), countByProject);
   if (projects.length === 0) return { action: 'create', suggestType: 'generic' };
+  const pinnedId = getPinnedProjectId(workDir, chatId, audience);
+  const pinned = pinnedId && projects.find(p => p.id === pinnedId);
+  if (pinned) return { action: 'auto', project: pinned, pinned: true };
   if (projects.length === 1) return { action: 'auto', project: projects[0] };
   return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId, audience) };
 }
@@ -431,6 +453,7 @@ module.exports = {
   bugsProject,
   touchProject,
   getActiveProjectId,
+  getPinnedProjectId,
   setActiveProjectId,
   decideNewSessionProject,
   profileText,
