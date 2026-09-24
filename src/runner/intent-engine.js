@@ -280,6 +280,21 @@ function renderSessionDetail(meta, n) {
   return out.join('\n');
 }
 
+// The static ANTHROPIC_MODEL env can name a model Claude Code doesn't actually run (a
+// retired/unauthorised id makes the CLI fall back to its own default). Prefer the model the
+// last completed claude task really used, from the per-profile usage log (recordUsage stores
+// claudeModel); fall back to the env only when there's no history yet.
+function lastClaudeModel(workDir) {
+  if (!workDir) return null;
+  try {
+    const log = require('../usage-store').getUsageLog(workDir);
+    for (let i = log.length - 1; i >= 0; i--) {
+      if ((log[i].engine || 'claude') === 'claude' && log[i].model) return log[i].model;
+    }
+  } catch (e) { /* usage log is best-effort */ }
+  return null;
+}
+
 // Guard rule for return null inside a matched intent block:
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
@@ -454,7 +469,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       ? `🧠 Модель: \`${ocModel}\`\n📦 Профиль OC: ${ocProfile}`
       : eng === 'codex'
         ? `🧠 Модель: настроена в ~/.codex/config.toml (вне нашего профиля)`
-        : `🧠 Модель: \`${process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
+        : `🧠 Модель: \`${lastClaudeModel(workDir) || process.env.ANTHROPIC_MODEL || 'claude-sonnet'}\``;
     return `🤖 Агент: \`${userId || '?'}\`\n🖥 VM: ${vmName}\n⚙️ Движок: ${engineLabel}\n${modelLine}\n🔖 Версия: \`${commit}\``;
   }
 
