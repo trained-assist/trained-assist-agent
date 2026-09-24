@@ -7,10 +7,14 @@ const require = createRequire(import.meta.url);
 const { McpSkillSourceRegistry } = require('../src/mcp-skill-source-registry');
 const { ActionProviderRegistry } = require('../src/action-provider-registry');
 const { ActionExecutions } = require('../src/action-executions');
+const { createManagedActionPolicy } = require('../src/managed-action-policy');
 const { createActionInvoker } = require('../src/action-invoke');
 const { inventory, digest, sealReadOnly } = require('../src/mcp-skill-artifact');
 const { callProvider, providerEnvironment, createApprovedMcpTransport } = require('../src/mcp-provider-transport');
 const { createManagedMcpGateway } = require('../src/managed-mcp-gateway');
+const { prepareManagedMcpSession } = require('../src/managed-mcp-session');
+const { codexMcpArgs, writeOpencodeMcpConfig } = require('../src/runner/claude-runner');
+const { createManagedMcpRuntime } = require('../src/managed-mcp-runtime');
 const { listenManagedMcp, requestCore } = require('../src/managed-mcp-socket');
 const temporary = [], databases = [];
 function tmp() { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-mcp-')); temporary.push(p); return p; }
@@ -22,16 +26,16 @@ afterEach(() => {
 const fixturePath = new URL('./fixtures/approved-mcp-provider.cjs', import.meta.url).pathname;
 const inputSchema = { type: 'object', additionalProperties: true };
 const descriptor = (name, changes = {}) => ({ name, inputSchema, effect: 'read', retrySafety: 'read_only', requiresApproval: false, allowedTriggers: ['user'], ...changes });
-function setup({ approvalFor, timeoutMs = 2000 } = {}) {
+function setup({ approvalFor, timeoutMs = 2000, repository = 'outside/fixture', thirdPartyApproved = true } = {}) {
   const root = tmp(), dir = path.join(root, 'release'); fs.mkdirSync(dir);
   const manifest = { version: 1, providerId: 'fixture', actions: [
     descriptor('fixture_read'),
-    descriptor('fixture_write', { effect: 'external_message', requiresApproval: true, retrySafety: 'unsafe' }),
+    descriptor('fixture_write', { allowedTriggers: ['user', 'cron', 'durable_task'], effect: 'external_message', requiresApproval: true, retrySafety: 'unsafe' }),
     descriptor('fixture_cron', { allowedTriggers: ['cron'] }),
   ] };
   fs.copyFileSync(fixturePath, path.join(dir, 'index.cjs'));
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
-  const s = { id: 'fixture', providerId: 'fixture', mcpServerId: 'fixture-skills', repository: 'trained-assist/fixture', revision: 'a'.repeat(40), manifestVersion: 1,
+  const s = { id: 'fixture', providerId: 'fixture', mcpServerId: 'fixture-skills', repository, thirdPartyApproved, revision: 'a'.repeat(40), manifestVersion: 1,
     artifactDir: 'release', entrypoint: 'index.cjs', manifest: 'manifest.json', approvedManifest: manifest, profiles: ['alice', 'bob'], enabled: true };
   const raw = JSON.stringify({ version: 1, ...Object.fromEntries(['repository','providerId','revision','manifestVersion','entrypoint','manifest'].map(k => [k, s[k]])), files: inventory(dir, { readOnly: false }) });
   fs.writeFileSync(path.join(dir, 'artifact-manifest.json'), raw); s.artifactDigest = digest(raw); sealReadOnly(dir);
@@ -44,7 +48,8 @@ function setup({ approvalFor, timeoutMs = 2000 } = {}) {
       return { workDir, base: { PATH: process.env.PATH, HOME: root, USERS_DIR: root, AGENT_SECRET: 'must-not-pass', CLOUD_KEY: 'must-not-pass' },
         capabilities: { OPENROUTER_API_KEY: 'approved-fixture-key' } };
     } });
-  const { invokeAction } = createActionInvoker({ registry, executions, transport });
+  const authorize = createManagedActionPolicy({ sources, validateScope: ({ profileId, projectId }) => ['alice', 'bob'].includes(profileId) && projectId === null });
+  const { invokeAction } = createActionInvoker({ registry, executions, transport, authorize });
   const gateway = createManagedMcpGateway({ sources, registry, invokeAction, approvalFor,
     validateScope: ({ profileId, projectId }) => ['alice','bob'].includes(profileId) && projectId === null });
   return { root, registry, sources, executions, transport, invokeAction, gateway };
@@ -75,6 +80,42 @@ describe('approved MCP transport and managed policy', () => {
     await expect(s.gateway.dispatch(token, { ...request(2, 'fixture_write', { marker }), params: { name: 'fixture_write', arguments: { marker }, approved: true } })).rejects.toMatchObject({ code: 'INVALID_ARGUMENTS' });
     expect(fs.existsSync(marker)).toBe(false);
     expect(s.executions.db.prepare('SELECT count(*) AS n FROM action_executions').get().n).toBe(0);
+  });
+  it('authorizes first-party approval-required actions across MCP, Web, Cron and durable tasks', async () => {
+    const s = setup({ repository: 'trained-assist/fixture' }), token = await bind(s.gateway);
+    expect(s.sources.trust('fixture')).toBe('first_party');
+    const marker = path.join(s.root, 'called');
+    await s.gateway.dispatch(token, request(1, 'fixture_write', { marker }));
+    for (const [trigger, origin] of [['user', 'web'], ['cron', 'cron-service'], ['durable_task', 'durable']]) {
+      const result = await s.invokeAction({ version: 1, profileId: 'alice', projectId: null,
+        action: 'fixture_write', arguments: { marker }, trigger, origin, idempotencyKey: origin });
+      expect(result.status).toBe('succeeded');
+    }
+    expect(fs.readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(4);
+    expect(s.executions.db.prepare('SELECT count(*) AS n FROM action_executions').get().n).toBe(4);
+  });
+  it('does not grant organization trust to a matching provider name or lookalike repository owner', async () => {
+    for (const repository of ['other/fixture', 'trained-assist-evil/fixture']) {
+      const s = setup({ repository, thirdPartyApproved: false }), token = await bind(s.gateway);
+      expect(s.sources.trust('fixture')).toBe('third_party');
+      expect(s.sources.availability('fixture', 'alice').status).toBe('approval_required');
+      const marker = path.join(s.root, 'called');
+      await expect(s.gateway.dispatch(token, request(1, 'fixture_write', { marker, approved: true }))).rejects.toMatchObject({ code: 'APPROVAL_REQUIRED' });
+      expect(fs.existsSync(marker)).toBe(false);
+      expect(s.sources.listTools('alice')).toEqual([]);
+    }
+  });
+  it('first-party trust does not bypass scope, triggers, schema or exact artifact bytes', async () => {
+    const s = setup({ repository: 'trained-assist/fixture' }), token = await bind(s.gateway);
+    const req = { version: 1, profileId: 'alice', projectId: null, action: 'fixture_write', arguments: {}, trigger: 'user', idempotencyKey: 'scope' };
+    await expect(s.invokeAction({ ...req, profileId: 'mallory' }, { approved: true })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(s.invokeAction({ ...req, projectId: 'foreign' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(s.invokeAction({ ...req, action: 'fixture_read', trigger: 'cron' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(s.gateway.dispatch(token, request(2, 'fixture_write', 'invalid'))).rejects.toMatchObject({ code: 'INVALID_ARGUMENTS' });
+    const file = path.join(s.root, 'release', 'index.cjs');
+    fs.chmodSync(file, 0o600); fs.appendFileSync(file, '\n// changed bytes'); fs.chmodSync(file, 0o400);
+    const out = await s.gateway.dispatch(token, request(3, 'fixture_write'));
+    expect(JSON.parse(out.content[0].text).code).toBe('PROVIDER_UNAVAILABLE');
   });
   it('retains the unavailable action identity and journals a missing executable', async () => {
     const s = setup(), token = await bind(s.gateway);
@@ -131,6 +172,52 @@ describe('approved MCP transport and managed policy', () => {
     const workDir = tmp(), env = providerEnvironment({ profileId:'alice', workDir });
     await expect(callProvider({ entrypoint:fixturePath, workDir, env, tool:'fixture_read', args:{ mode:'large' }, maxBytes:1024 })).rejects.toMatchObject({ code:'PROVIDER_UNAVAILABLE' });
     await expect(callProvider({ entrypoint:'/missing-provider.cjs', workDir, env, tool:'fixture_read', args:{} })).rejects.toMatchObject({ code:'PROVIDER_UNAVAILABLE' });
+  });
+  it('composes core runtime, separates adapter restarts and revokes completed session grants', async () => {
+    const s = setup({ repository: 'trained-assist/fixture' });
+    let sessionActive = true;
+    const runtime = await createManagedMcpRuntime({ config: { version: 1, sources: s.sources.list() }, root: s.root,
+      databasePath: path.join(s.root, 'composed.db'), executionRoot: path.join(s.root, 'composed-leases'),
+      socketRoot: path.join(s.root, 'composed-sockets'),
+      validateScope: ({ profileId, projectId }) => profileId === 'alice' && projectId === null,
+      validateSession: ({ sessionId }) => sessionActive && sessionId === 'real-session',
+      resolveContext: () => ({ workDir: s.root }),
+    });
+    try {
+      await expect(runtime.bindSession({ profileId: 'alice', sessionId: 'forged-session' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      const options = { runtime, scope: { profileId: 'alice', sessionId: 'real-session' }, configRoot: path.join(s.root, 'engine-configs') };
+      const binding = await prepareManagedMcpSession(options);
+      const other = await prepareManagedMcpSession(options);
+      const config = JSON.parse(fs.readFileSync(binding.configPath));
+      const adapter = config.mcpServers['fixture-skills'];
+      const second = JSON.parse(fs.readFileSync(other.configPath)).mcpServers['fixture-skills'];
+      expect(adapter.env.MANAGED_MCP_GRANT).not.toBe(second.env.MANAGED_MCP_GRANT);
+      expect(fs.statSync(binding.configPath).mode & 0o777).toBe(0o600);
+      expect(codexMcpArgs(binding.configPath).join(' ')).toContain(adapter.env.MANAGED_MCP_GRANT);
+      const ocPath = writeOpencodeMcpConfig(s.root, binding.configPath, {}, binding.configDirectory);
+      const oc = JSON.parse(fs.readFileSync(ocPath));
+      expect(oc.mcp['fixture-skills'].environment).toEqual(adapter.env);
+      expect(path.dirname(ocPath)).toBe(binding.configDirectory);
+      other.release();
+      await expect(prepareManagedMcpSession({ ...options, localServers: { rogue: { command: 'node' } } })).rejects.toThrow('managed registry');
+      expect(Object.keys(adapter.env).sort()).toEqual(['MANAGED_MCP_GRANT', 'MANAGED_MCP_SOCKET']);
+      const marker = path.join(s.root, 'composed-calls');
+      for (let i = 0; i < 2; i++) {
+        await callProvider({ entrypoint: adapter.args[0], env: adapter.env, workDir: s.root,
+          tool: 'fixture_write', args: { marker } });
+      }
+      // Both fresh adapter processes start at MCP ID 3, but these are distinct
+      // user calls; the second must not silently replay the first result.
+      expect(fs.readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(2);
+      expect(runtime.executions.db.prepare('SELECT count(*) AS n FROM action_executions').get().n).toBe(2);
+      const rpc = { socketPath: adapter.env.MANAGED_MCP_SOCKET, token: adapter.env.MANAGED_MCP_GRANT, request: request(9) };
+      sessionActive = false;
+      await expect(requestCore(rpc)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      sessionActive = true;
+      binding.release();
+      expect(fs.existsSync(binding.configDirectory)).toBe(false);
+      await expect(requestCore(rpc)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    } finally { await runtime.close(); }
   });
   it('runs the real stdio adapter through a private socket to invokeAction and a separate approved child', async () => {
     const s = setup(), token = await bind(s.gateway);

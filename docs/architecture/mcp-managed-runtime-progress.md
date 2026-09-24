@@ -1,65 +1,56 @@
-# #1271 PR2 — implementation checkpoint (not released)
+# #1271 PR2 checkpoint — not released
 
-The production HH route is intentionally not switched in this worktree yet.
-PR1 shipped as #1275, main c20ad48. This branch builds on that release.
+PR1 shipped as agent #1275. HH static manifest prerequisite shipped as hh-skill
+#14, merge b9467be (head 0265cf4: CI and mandatory staging both successful).
+No core/gateway PR2 release yet. No runtime cutover.
 
-## Implemented and executable
+Implemented in this branch:
+- Approved child MCP transport, core gateway/socket and real adapter integration.
+- Shared first-party authorization in invokeAction: trusted source owner only;
+  third-party sources need explicit administrative enable. Scope/schema/triggers,
+  exact artifact verification, idempotency and history still apply. Epic §25
+  supersedes the earlier proposal to build persistent first-party consent UI.
+- Runtime composition factory and per-attempt private engine configs/grants.
+  Adapter restarts receive a distinct request identity. Release revokes grants.
+  Codex/OpenCode translations tested; optional isolated OpenCode output directory.
+- Generic config/telegram-bots.json (or TELEGRAM_BOTS_JSON) maps IDs to secret
+  names. secrets.js loads approved names from GCP/env. Never persist raw tokens.
+- /run botId/audience, independent durable receipt keys; queued/running journal,
+  restart failures/resume, soft continuation and GTD preserve identity.
+- Queue keys, stop/running, GTD stop, quick audience and context pins are scoped.
+  Missing non-default bot token fails closed and retains restart/GTD work.
+  Active processes match exact username rather than a prefix shared by another
+  profile. Web stop uses the stored session delivery identity.
+- Tests include actual local Telegram capture for two bots sharing a profile/chat,
+  restart/failure routing, GTD reload, private adapter subprocesses and SQLite.
 
-- mcp-provider-transport.js consumes acquireAction leases, initializes MCP
-  2024-11-05, sends notifications/initialized, checks tools/list, routes response
-  IDs, preserves every content block, rejects protocol/isError failures and bounds
-  output/time. Provider children receive only core-resolved environment values.
-- managed-mcp-gateway.js binds random capabilities to a core-validated
-  profile/project/session/provider. tools/list filters availability and trigger.
-  tools/call builds trusted origin/channel, delegates to invokeAction and obtains
-  approval only from a core callback. Tool arguments cannot approve a call.
-- managed-mcp-socket.js hosts a private Unix socket (0600 in 0700 directory).
-  managed-mcp-adapter.js is the engine-launched stdio client; no provider code,
-  action DB or credential resolver lives in this client.
-- Unsafe timed-out actions are not marked retryable. Concurrent replay produces
-  CONFLICT rather than an invalid running ActionResult or a second handler call.
-- Integration tests actually spawn adapter and provider processes and record
-  SQLite history, including negative consent/tenant/trigger/protocol/timeout cases.
-  These are fixture integration tests, not live engine or HH acceptance.
+Required before PR2 can ship:
+1. HH currently uses AGENT_SECRET to sign profile URLs and authorize callbacks.
+   Managed providers must not receive the global secret. Replace with scoped core
+   capabilities, including old review HTML callbacks and vacancy remote publish.
+   Relevant HH files: 90-hh.js, 92-hh-proactive.js, hh-review-page-html.js,
+   hh-vacancy.js, hh-quick.js, hh-autoscan.js, user-tokens.js.
+2. Wire createManagedMcpRuntime into server startup, validated profile/project
+   and session ownership, approved credential/readiness resolvers. Wire
+   prepareManagedMcpSession into actual runner try/finally and all engine retries.
+   The new factories are tested but not called by production server yet.
+3. Replace legacy HH branches in mcp-action/browser/server capabilities/meta tools.
+   Prepare approved exact-SHA HH artifact and explicit profile eligibility before
+   rollout: an empty config must not silently remove existing users' HH tools.
+   Refresh source configuration atomically for new calls without disrupting leases.
+4. Add abandoned execution-copy cleanup without removing live children’s copies.
+5. Real HH/main-bot/second-bot/restart/rollback E2E plus exact-head CI/staging in
+   core and gateway. Gateway must ship after core; no live gateway deploy yet.
+6. PR3 Freelance and PR4 domain surface remain untouched. /domain still absent
+   from current main; #1220 dependency must be finished before PR4.
 
-## Required before opening/releasing PR2
+Checks before final checkpoint: core full npm test 1144 passed + one existing
+skip, CJS passed; local mandatory staging passed with no skip. Then added GTD
+reload and private config tests (targeted tests passed). Rerun final staging after
+commit/rebase and record SHA in project progress-1271.md.
+Gateway full 437 and mandatory staging 233 passed; npm run check passed.
 
-1. Add a static approved HH manifest to the provider repository. Its current
-   src/action-manifest.js requires its registry and cannot be runtime discovery.
-   Coordinate with concurrent HH geography work; do not mutate the live checkout.
-2. Finish trusted user-consent plumbing. Existing invokeAction supports a
-   core-only approved option, but server/Telegram/Web currently provide no generic
-   verified consent record. Default deny in gateway is correct; switching all HH
-   actions now would make approval-required actions unusable. Never replace this
-   gap with params.approved or an agent-controlled header.
-3. Compose shared action registry/executions/transport in core and wire socket
-   grants to runner session lifecycle. Bind profile/project ownership from core.
-   Revoke grants at session end; issue new grants on resume and adapter restart.
-   Request IDs restart with an MCP client process: isolate connection identity
-   without silently replaying unsafe operations after a failed connection.
-4. Replace HH branches in mcp-action.js, browser.js, server /capabilities,
-   capabilities-skills.js and list_skills. Preserve hh-skills and existing tools.
-   Default empty source config must not silently remove HH from deployed users:
-   prepare/approve the HH release and eligibility as a coordinated deployment.
-5. Verify adapter-generated MCP config under all three real launchers; credential
-   readiness is distinct from installation eligibility. Add crash cleanup for
-   abandoned execution copies, retaining copies belonging to live children.
-6. Complete generic botId token registry, /run binding, durable journals, resume,
-   GTD/soft-continuation and failure notices; no fallback to default bot.
-   Current pending-task resume also drops audience — persist and restore both.
-7. Complete scoped stop/running and /quick audience. Existing activeTimers records
-   have chatId/sessionId but no audience/username. Plain-text stop and GTD cleanup,
-   not just HTTP /tasks/stop, must respect bot audience. Per-chat queue currently
-   keys chatId alone; two bot surfaces sharing that ID must not block each other.
-8. Gateway worktree /home/vova/worktrees/mcp-sources-1271-gateway adds generic
-   audience/botId forwarding, distinct outbox scope and chat-scoped stop.
-   It must ship AFTER core supports these fields. No live gateway deploy yet.
-9. Full HH/main-bot/second-bot/restart/rollback E2E, CI and mandatory staging at
-   exact head in BOTH repositories before merge/deploy.
-
-Protocol profile excludes paginated tools/list, sampling/resources/roots and
-other server-initiated capabilities. Runtime does not claim arbitrary MCP
-compatibility. It drains stderr without exposing provider secrets to callers.
-Per-call full artifact verification/copy adds disk IO; lease lifetime ends only
-after the child exits. Same-UID hostile providers remain outside the v1 trust
-boundary.
+Tests are isolated harnesses, not proof of live production integration.
+No production server was started locally. Same-UID providers are trusted code,
+not a sandbox. Per-call artifact hashing/copying adds IO until a later measured
+optimization. Approved manifest descriptions require the new optional schema field.

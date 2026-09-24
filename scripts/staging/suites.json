@@ -11,6 +11,7 @@
     "tests/unit/hh-proactive-endpoints.test.js",
     "tests/mcp-skill-source-registry.test.js",
     "tests/managed-mcp-runtime.test.js",
+    "tests/telegram-bot-registry.test.js",
     "tests/unit/action-invoke.test.js"
   ],
   "node": [

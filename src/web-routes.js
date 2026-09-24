@@ -63,7 +63,7 @@ function getSessionFor(username, sessionId) {
 function stopSessionFor(username, sessionId) {
   const session = getSession(userWorkDir(username), sessionId);
   const chatId = session ? (session.liveChatId ?? session.ownerChatId) : null;
-  return stopUserTask(username, chatId);
+  return stopUserTask(username, chatId, { audience: session?.audience || 'default', botId: session?.botId || 'default' });
 }
 
 // Resolve session status: running (process alive) or from stored field, fallback completed

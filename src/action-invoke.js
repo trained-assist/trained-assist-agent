@@ -41,7 +41,7 @@ function mapTransportError(err) {
   return { code: 'ACTION_FAILED', retryable: false };
 }
 
-function createActionInvoker({ registry, executions, transport, now = () => Date.now() }) {
+function createActionInvoker({ registry, executions, transport, authorize = async () => false, now = () => Date.now() }) {
   if (!registry || !executions || typeof transport !== 'function') {
     throw new Error('createActionInvoker requires { registry, executions, transport }');
   }
@@ -71,6 +71,11 @@ function createActionInvoker({ registry, executions, transport, now = () => Date
     // Registration + trigger + argument schema. Throws ACTION_NOT_FOUND / FORBIDDEN / INVALID_ARGUMENTS.
     const descriptor = registry.validateCall(action, args, trigger);
 
+    // The policy is installed by core, shared by every trigger and evaluated
+    // before history lookup so a revoked scope cannot read a cached result.
+    // It receives no client approval flags. Schema/trigger checks still run first.
+    const policyApproved = await authorize({ ...request, descriptor });
+
     // Idempotency: one logical invocation per (profile, project, key) across triggers.
     const existing = executions.findByKey({ profileId, projectId, idempotencyKey });
     if (existing) {
@@ -80,7 +85,7 @@ function createActionInvoker({ registry, executions, transport, now = () => Date
       return resultFromRow(existing);
     }
 
-    if (descriptor.requiresApproval && options.approved !== true) {
+    if (descriptor.requiresApproval && options.approved !== true && policyApproved !== true) {
       throw serviceError('APPROVAL_REQUIRED', 'Action requires explicit approval');
     }
 

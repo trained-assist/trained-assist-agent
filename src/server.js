@@ -1,3 +1,4 @@
+const { deliveryIdentity, resolveBotSecrets } = require('./telegram-bot-registry');
 // Acquire before modules can recover tasks: only one server may own the data directory.
 const executionOwner = require('./execution-owner-lock').acquireExecutionOwner(require('./data-paths').SYSTEM_ROOT);
 process.once('exit', () => executionOwner.close());
@@ -254,24 +255,24 @@ const RESUME_WINDOW_MS = 2 * 60 * 60 * 1000;    // re-run tasks interrupted with
 const ABANDONED_NOTICE_MS = 6 * 60 * 60 * 1000; // older but not ancient: tell the user it is gone
 
 async function resumePendingTasks(secrets) {
-  if (!secrets?.BOT_TOKEN) return;
-
   const pending = getPendingTasks();
   if (pending.length === 0) return;
 
   const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const tgCall = (method, body) =>
-    fetch(`${TG_BASE}/bot${secrets.BOT_TOKEN}/${method}`, {
+  const tgCall = (p, method, body) =>
+    fetch(`${TG_BASE}/bot${resolveBotSecrets(secrets, p).BOT_TOKEN}/${method}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     }).catch(() => {});
   // Failure notice: replaces the task's status message when it has one, else sends a new one.
   const notifyFailure = (p, text) => p.initialMsgId
-    ? tgCall('editMessageText', { chat_id: p.userId, message_id: p.initialMsgId, text })
-    : tgCall('sendMessage', { chat_id: p.userId, text });
+    ? tgCall(p, 'editMessageText', { chat_id: p.userId, message_id: p.initialMsgId, text })
+    : tgCall(p, 'sendMessage', { chat_id: p.userId, text });
 
   for (const p of pending) {
+    try { resolveBotSecrets(secrets, p); }
+    catch { console.error(`[resume] bot unavailable for ${p.taskId}; journal retained`); continue; }
     const now = Date.now();
     const age = now - (p.startedAt || 0);
     // Journal hygiene (#1239): never resume a ping / status question — replaying "движется?"
@@ -327,7 +328,7 @@ async function resumePendingTasks(secrets) {
     recordResume(nativeResumeId ? 'native' : 'fallback', engine); // #1240: measure native-vs-fallback
     const user = {
       id: p.userId, name: p.username, username: p.username, workDir,
-      profileId: p.profileId, telegramUserId: p.telegramUserId,
+      ...deliveryIdentity(p), profileId: p.profileId, telegramUserId: p.telegramUserId,
     };
     const fireResume = async () => {
       try {
@@ -900,11 +901,13 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
       const { userId, query } = payload;
+      let quickIdentity;
+      try { quickIdentity = deliveryIdentity(payload); } catch { return json(res, 400, { error: 'invalid bot or audience' }); }
       if (!userId || !query) return json(res, 400, { error: 'missing fields' });
       if (!/^[a-zA-Z0-9_-]{1,64}$/.test(String(userId))) return json(res, 400, { error: 'invalid userId' });
       const workDir = path.join(BASE_USERS_DIR, String(userId));
       const start = Date.now();
-      const answer = getQuickAnswer(String(query), String(userId), workDir) || null;
+      const answer = getQuickAnswer(String(query), String(userId), workDir, false, payload.chatId, payload.telegramUserId, quickIdentity.audience) || null;
       return json(res, 200, { answer, ms: Date.now() - start });
     }
 
@@ -1062,7 +1065,9 @@ ${recent || '(пока нет)'}
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
       const { killTaskByUsername } = require('./runner');
-      const killed = killTaskByUsername(username);
+      let scope;
+      try { scope = { ...deliveryIdentity(payload), chatId: payload.chatId ?? null }; } catch { return json(res, 400, { error: 'invalid bot or audience' }); }
+      const killed = killTaskByUsername(username, scope);
       return json(res, 200, { ok: true, killed });
     }
 
@@ -1077,7 +1082,9 @@ ${recent || '(пока нет)'}
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
       const { isTaskRunning } = require('./runner');
-      return json(res, 200, { running: isTaskRunning(username) });
+      let scope;
+      try { scope = { ...deliveryIdentity({ audience: url.searchParams.get('audience') ?? undefined, botId: url.searchParams.get('botId') ?? undefined }), chatId: url.searchParams.get('chatId') }; } catch { return json(res, 400, { error: 'invalid bot or audience' }); }
+      return json(res, 200, { running: isTaskRunning(username, scope) });
     }
 
     // GET /projects?username=xxx — TYPED project list (projects.js), most-used first
@@ -1198,6 +1205,9 @@ ${recent || '(пока нет)'}
       // (still `invalid userId`/`missing fields`) so this is not a client-visible
       // behavior change, only an internal rename.
       const chatId = payload.chatId ?? payload.userId;
+      let delivery;
+      try { delivery = deliveryIdentity(payload); resolveBotSecrets(secrets, delivery); }
+      catch { return json(res, 400, { error: 'bot unavailable or invalid audience' }); }
       if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))) return json(res, 400, { error: 'invalid audience' });
       if (initiatedAt != null && (!Number.isSafeInteger(initiatedAt) || initiatedAt < 0 || initiatedAt > Date.now() + 30000)) return json(res, 400, { error: 'invalid initiatedAt' });
       if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return json(res, 400, { error: 'invalid threadId' });
@@ -1230,7 +1240,7 @@ ${recent || '(пока нет)'}
         return json(res, 400, { error: 'invalid newProjectName' });
 
       if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
-      const taskId = requestId ? `${username}-${requestId}` : `${username}-${require('crypto').randomUUID()}`;
+      const taskId = requestId ? `${username}-${delivery.botId === 'default' && delivery.audience === 'default' ? requestId : require('crypto').createHash('sha256').update(JSON.stringify([delivery.botId, delivery.audience, String(chatId), requestId])).digest('hex')}` : `${username}-${require('crypto').randomUUID()}`;
       const receipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${taskId}.json`);
       if (requestId && (fs.existsSync(receipt) || getPendingTasks().some(p => p.taskId === taskId))) {
         return json(res, 202, { taskId, requestId, durable: true, duplicate: true });
@@ -1251,7 +1261,7 @@ ${recent || '(пока нет)'}
       // (see AUDIENCE-SCOPE-SPEC) — e.g. the recruiter bot passes 'recruiter' so its
       // sessions never mix with the general-purpose bot's. Defaults to 'default', which
       // is byte-for-byte identical to pre-audience behavior.
-      const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
+      const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, ...delivery };
       trackChat(chatId);
 
       // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude

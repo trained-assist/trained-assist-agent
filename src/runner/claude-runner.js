@@ -77,7 +77,7 @@ function codexMcpArgs(mcpConfig) {
 // opencode-switch-profile.sh, which overwrote the one shared ~/.config/opencode/opencode.json
 // for every profile on the VM. Deep merge means agent.review's base fields (prompt/permission/
 // etc., only present in the global file) survive; only .model gets overridden per profile.
-function writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) {
+function writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides, configDirectory = cwd) {
   const servers = loadMcpServers(mcpConfig);
   const mcp = {};
   for (const [name, srv] of Object.entries(servers)) {
@@ -88,8 +88,9 @@ function writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) {
       ...(srv.env ? { environment: srv.env } : {}),
     };
   }
-  const configPath = path.join(cwd, '.opencode-mcp.json');
-  fs.writeFileSync(configPath, JSON.stringify({ mcp, ...ocProfileOverrides }, null, 2));
+  const configPath = path.join(configDirectory, '.opencode-mcp.json');
+  fs.writeFileSync(configPath, JSON.stringify({ mcp, ...ocProfileOverrides }, null, 2), { mode: 0o600 });
+  fs.chmodSync(configPath, 0o600);
   return configPath;
 }
 
@@ -230,7 +231,7 @@ async function runEngineProcess(opts) {
   const {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
-    tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
+    tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig, mcpConfigDirectory,
     ocProfileOverrides, onHeartbeat, onEngineSessionId,
   } = opts;
 
@@ -253,7 +254,7 @@ async function runEngineProcess(opts) {
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
       AGENT_TASK_ID: taskId,
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
-      ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) } : {}),
+      ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides, mcpConfigDirectory) } : {}),
     },
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
@@ -567,7 +568,7 @@ async function runEngineProcess(opts) {
   proc.stderr.on('data', chunk => console.error(`[${taskId}] stderr:`, chunk.toString()));
 
   let timedOut = false;
-  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId, sessionId };
+  const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId, sessionId, username: user.username, audience: user.audience || 'default', botId: user.botId || 'default' };
   activeTimers.set(taskId, sessionState);
   try {
     await new Promise((resolve, reject) => {

@@ -669,6 +669,25 @@ describe('Telegram delivery', () => {
     expect(sent[0].body.text).toMatch(/онлайн|Онлайн/i);
   });
 
+  it('two approved bots deliver through their own token for the same profile and chat', { timeout: 20000 }, async () => {
+    const previous = process.env.TELEGRAM_BOTS_JSON;
+    process.env.TELEGRAM_BOTS_JSON = JSON.stringify({ version: 1, bots: [
+      { id: 'default', tokenSecret: 'BOT_TOKEN' }, { id: 'freelance', tokenSecret: 'FREELANCE_BOT_TOKEN' },
+    ] });
+    try {
+      for (const [botId, audience, token] of [['default', 'default', 'main:token'], ['freelance', 'jobs', 'jobs:token']]) {
+        tgLog = [];
+        await runTask({ taskId: `${testUsername}-${botId}`, user: { ...makeUser(), botId, audience },
+          task: 'подключи github', context: null, secrets: { BOT_TOKEN: 'main:token', FREELANCE_BOT_TOKEN: 'jobs:token' } });
+        expect(tgSent().length).toBeGreaterThan(0);
+        expect(tgSent().every(call => call.url.startsWith('/bot' + token + '/'))).toBe(true);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.TELEGRAM_BOTS_JSON;
+      else process.env.TELEGRAM_BOTS_JSON = previous;
+    }
+  });
+
   it('quick answer sends exactly one message (no thinking step)', { timeout: 10000 }, async () => {
     await chat('подключи github');  // always quick answer
     const sent = tgSent();

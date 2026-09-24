@@ -190,6 +190,7 @@
           "pattern": "^[a-z][a-z0-9_]*$",
           "maxLength": 120
         },
+        "description": { "type": "string", "maxLength": 20000 },
         "inputSchema": {
           "type": "object",
           "required": [

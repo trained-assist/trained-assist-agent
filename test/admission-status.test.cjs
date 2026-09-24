@@ -19,7 +19,7 @@ function harness({ chatPending, run = async () => {} } = {}) {
   const end = source.indexOf('// Returns context card string', start);
   const messages = [], journal = new Map();
   const gate = chatPending ? deferred() : null;
-  const sandbox = {
+  const sandbox = { ...require('../src/telegram-bot-registry'),
     require: name => { assert.equal(name, '../admission-status'); return { createAdmissionStatus }; },
     recordTaskActivity: () => {}, fs: { existsSync: () => false }, path: require('node:path'), PENDING_DIR: '/isolated',
     restartShutdown: false,

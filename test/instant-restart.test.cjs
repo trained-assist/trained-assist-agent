@@ -38,11 +38,13 @@ test('SIGTERM handler flags the restart and exits without draining', () => {
 
 const { isTaskResumable } = require('../src/pending-task-resume');
 
-function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engineSessionIds = {} }) {
+function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engineSessionIds = {}, secrets = { BOT_TOKEN: 'tok' }, botsConfig }) {
   const start = serverSrc.indexOf('const RESUME_WINDOW_MS');
   const end = serverSrc.indexOf('async function main()', start);
   const calls = [], runs = [], cleared = [], delays = [], resumeKinds = [];
   const sandbox = {
+    ...require('../src/telegram-bot-registry'),
+    resolveBotSecrets: (s, identity) => require('../src/telegram-bot-registry').resolveBotSecrets(s, identity, botsConfig),
     path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise,
     setTimeout: (fn, ms) => { delays.push(ms); fn(); return 0; },
@@ -62,7 +64,7 @@ function resumeHarness({ pending, now = Date.now(), retryDelayMs = () => 0, engi
   };
   vm.createContext(sandbox);
   vm.runInContext(`${serverSrc.slice(start, end)}; this.resume = resumePendingTasks;`, sandbox);
-  return { resume: () => sandbox.resume({ BOT_TOKEN: 'tok' }), calls, runs, cleared, delays, resumeKinds, now };
+  return { resume: () => sandbox.resume(secrets), calls, runs, cleared, delays, resumeKinds, now };
 }
 
 const task = (over = {}) => ({ taskId: 'alice-1', username: 'alice', userId: 42, task: 'work', initialMsgId: 7,
@@ -124,6 +126,7 @@ test('a resumed task that fails to start tells the user', async () => {
   const pending = [task()];
   const calls = [];
   const sandbox = {
+    ...require('../src/telegram-bot-registry'),
     path, console: { log() {}, error() {}, warn() {} }, BASE_USERS_DIR: '/users', AbortSignal, Promise,
     setTimeout: fn => { fn(); return 0; }, process: { env: {} }, isTaskResumable, MAX_RESUME_ATTEMPTS: 3,
     getRetryDelayMs: () => 0,
@@ -220,4 +223,25 @@ test('a real task alongside pings is still resumed', async () => {
   assert.equal(h.runs[0].task, 'сделай отчёт по продажам за неделю');
   assert.ok(h.cleared.includes('ping'), 'the ping entry is dropped');
   assert.ok(h.cleared.includes('real'), 'the resumed real task entry is cleared after handoff (as before)');
+});
+
+const twoBots = { version: 1, bots: [{ id: 'default', tokenSecret: 'BOT_TOKEN' }, { id: 'freelance', tokenSecret: 'FREELANCE_BOT_TOKEN' }] };
+test('restart retains bot/audience and sends failure only through the original bot', async () => {
+  const h = resumeHarness({ pending: [task({ botId: 'freelance', audience: 'jobs' })], botsConfig: twoBots,
+    secrets: { BOT_TOKEN: 'main-token', FREELANCE_BOT_TOKEN: 'jobs-token' } });
+  await h.resume();
+  assert.equal(h.runs[0].user.botId, 'freelance');
+  assert.equal(h.runs[0].user.audience, 'jobs');
+  const failed = resumeHarness({ pending: [task({ botId: 'freelance', audience: 'jobs', resumeAttempts: 3 })], botsConfig: twoBots,
+    secrets: { BOT_TOKEN: 'main-token', FREELANCE_BOT_TOKEN: 'jobs-token' } });
+  await failed.resume();
+  assert.equal(failed.calls.length, 1);
+  assert.ok(failed.calls[0].url.includes('/botjobs-token/'));
+});
+test('missing additional bot credential retains pending work without falling back to main bot', async () => {
+  const h = resumeHarness({ pending: [task({ botId: 'freelance', audience: 'jobs' })], botsConfig: twoBots });
+  await h.resume();
+  assert.equal(h.runs.length, 0);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.cleared.length, 0);
 });

@@ -55,13 +55,13 @@ function saveIndex(workDir, sessions) {
  *  `audience` scopes the session to a bot/surface (e.g. 'recruiter') sharing the same
  *  username+chatId (see AUDIENCE-SCOPE-SPEC). Defaults to 'default' — omitting it, or
  *  passing 'default' explicitly, is byte-for-byte identical to the pre-audience behavior. */
-function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience }) {
+function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience, botId = 'default' }) {
   const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
   const aud = audience || 'default';
 
-  const meta = { id, topic, projectId: projectId || null, audience: aud, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
+  const meta = { id, topic, botId, projectId: projectId || null, audience: aud, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
 
   const sessions = loadIndex(workDir);
   sessions.unshift(meta);

@@ -8,7 +8,7 @@ const ID = /^[A-Za-z0-9_-]{1,128}$/;
 // session. The agent holds only a random capability, never profile/approval
 // authority. Restart intentionally revokes grants; resumed runners bind anew.
 function createManagedMcpGateway({ sources, registry, invokeAction, validateScope,
-  approvalFor = async () => false, now = Date.now, ttlMs = 24 * 60 * 60 * 1000 }) {
+  approvalFor = async () => false, readiness = () => true, now = Date.now, ttlMs = 24 * 60 * 60 * 1000 }) {
   const grants = new Map();
   async function bind({ profileId, projectId = null, sessionId, providerId }) {
     if (!ID.test(profileId) || !ID.test(sessionId) || !registry.getProvider(providerId)) throw error('FORBIDDEN', 'Invalid MCP session');
@@ -28,9 +28,14 @@ function createManagedMcpGateway({ sources, registry, invokeAction, validateScop
     if (id === undefined || id === null || !['string', 'number'].includes(typeof id)) throw error('INVALID_ARGUMENTS', 'MCP request id required');
     if (method === 'initialize') return { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'trained-assist-managed', version: '1' } };
     if (method === 'tools/list') {
-      return { tools: sources.listTools(grant.profileId)
-        .filter(a => a.providerId === grant.providerId && a.allowedTriggers.includes('user'))
-        .map(a => ({ name: a.name, description: a.description || a.name, inputSchema: a.inputSchema })) };
+      const tools = [];
+      for (const a of sources.listTools(grant.profileId)) {
+        if (a.providerId === grant.providerId && a.allowedTriggers.includes('user') &&
+            await readiness({ ...grant, action: a.name }) === true) {
+          tools.push({ name: a.name, description: a.description || a.name, inputSchema: a.inputSchema });
+        }
+      }
+      return { tools };
     }
     if (method !== 'tools/call') throw error('INVALID_ARGUMENTS', 'Unsupported MCP method');
     const params = request.params;

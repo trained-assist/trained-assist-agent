@@ -67,6 +67,19 @@ function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
   ok(calls.filter(c => c.method === 'sendMessage').length === 0, 'chat A: no new send (was clobbered before fix)');
   ok(calls.some(c => c.method === 'editMessageText' && c.message_id === msgA), 'chat A: still edits original msgId');
 
+  // Same chat through a second bot gets a separate pin and never edits main's message.
+  calls.length = 0;
+  const scope = { botId: 'freelance', audience: 'jobs' };
+  await updateContextPin('J', chatA, wd, 'jobs pin', null, scope);
+  ok(!calls.some(c => c.method === 'editMessageText' && c.message_id === msgA), 'second bot never edits main pin');
+  const jobsKey = JSON.stringify(['freelance', 'jobs', String(chatA)]);
+  const jobsId = readPinStore(pinFile).chats[jobsKey]?.msgId;
+  ok(jobsId && jobsId !== msgA, 'second bot has its own durable pin');
+  calls.length = 0;
+  await updateContextPin('J', chatA, wd, 'jobs pin updated', null, scope);
+  ok(calls.some(c => c.method === 'editMessageText' && c.message_id === jobsId), 'second bot reuses its own pin');
+  ok(readPinStore(pinFile).chats[String(chatA)]?.msgId === msgA, 'main bot pin survives');
+
   // 5. Legacy flat format migrates under its chatId.
   const legacy = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pin2-')), '.pin_state.json');
   fs.writeFileSync(legacy, JSON.stringify({ msgId: 777, chatId: chatA, lastCard: 'old', noPin: true }));

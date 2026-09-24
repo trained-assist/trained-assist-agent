@@ -9,7 +9,7 @@ function fixture(t) {
  const start=source.indexOf("    if (req.method === 'POST' && url.pathname === '/run') {");
  const end=source.indexOf('    // POST /action',start);
  const runs=[];const pending=new Map();
- const sandbox={fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
+ const sandbox={...require('../src/telegram-bot-registry'),fs,path,os,Buffer,require:name=>name==='./restart-execution'?{currentExecution:()=>null}:require(name),console,process:{env:{AGENT_DATA_DIR:root}},BASE_USERS_DIR:path.join(root,'users'),secrets:{},
   isValidProjectId:()=>true,trackChat:()=>{},getPendingTasks:()=>[...pending.values()],atomicJson,profiles,
   readBody:async req=>JSON.stringify(req.body),json:(res,status,data)=>Object.assign(res,{status,data}),
   runTask:opts=>{pending.set(opts.taskId,opts);runs.push(opts);return Promise.resolve();},
@@ -103,4 +103,23 @@ test('a failed R2 integrity check prevents acknowledgement or text-only launch',
  const ref={storage:'r2',version:1,id:'d'.repeat(64),name:'doc.pdf',size:3,sha256:'0'.repeat(64)};
  const response=await f.send({fileRefs:[ref]});assert.equal(response.status,503);assert.equal(f.runs.length,0);
  assert.equal(fs.existsSync(path.join(f.root,'accepted-requests','request-1.json')),false);
+});
+
+test('two bots sharing profile/chat/request id retain independent durable receipts', async t => {
+ const f=fixture(t);
+ f.sandbox.secrets={BOT_TOKEN:'main-token',FREELANCE_BOT_TOKEN:'jobs-token'};
+ const config={version:1,bots:[{id:'default',tokenSecret:'BOT_TOKEN'},{id:'freelance',tokenSecret:'FREELANCE_BOT_TOKEN'}]};
+ f.sandbox.resolveBotSecrets=(secrets, identity)=>require('../src/telegram-bot-registry').resolveBotSecrets(secrets,identity,config);
+ assert.equal((await f.send()).status,202);
+ assert.equal((await f.send({botId:'freelance',audience:'jobs'})).status,202);
+ assert.equal(f.runs.length,2);
+ assert.equal(f.runs[1].user.botId,'freelance');
+ assert.equal(f.runs[1].user.audience,'jobs');
+ assert.notEqual(f.runs[0].taskId,f.runs[1].taskId);
+ f.pending.clear();
+ assert.equal((await f.send({botId:'freelance',audience:'jobs'})).data.duplicate,true);
+ assert.equal((await f.send({botId:'missing'})).status,400);
+ delete f.sandbox.secrets.FREELANCE_BOT_TOKEN;
+ assert.equal((await f.send({botId:'freelance',audience:'jobs',requestId:'new'})).status,400);
+ assert.equal(f.runs.length,2);
 });

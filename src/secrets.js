@@ -1,3 +1,4 @@
+const { botSecretNames } = require('./telegram-bot-registry');
 const REQUIRED = ['TELEGRAM_BOT_TOKEN', 'AGENT_SECRET'];
 const OPTIONAL = ['ANTHROPIC_API_KEY', 'DEEPGRAM_API_KEY', 'BOT_SECRET', 'CF_API_TOKEN', 'OPERATOR_CHAT_ID', 'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'HH_CLIENT_ID', 'HH_CLIENT_SECRET', 'OPENAI_API_KEY', 'FAL_KEY', 'IDEOGRAM_API_KEY', 'RECRAFT_API_KEY', 'OPENROUTER_API_KEY', 'GITHUB_ISSUES_TOKEN', 'WEB_JWT_SECRET', 'WEB_VERIFY_SECRET', 'CHECKLIST_API_KEY'];
 
@@ -20,7 +21,7 @@ async function loadFromGcp() {
       return version.payload.data.toString('utf8').trim();
     }
 
-    const names = [...REQUIRED, ...OPTIONAL];
+    const names = [...new Set([...REQUIRED, ...OPTIONAL, ...botSecretNames()])];
     const results = await Promise.allSettled(names.map(n => getSecret(n)));
     return Object.fromEntries(names.map((n, i) => [
       n,
@@ -33,7 +34,7 @@ async function loadFromGcp() {
 
 // Env-var fallback — used on non-GCP VMs (e.g. Hostland RU VM)
 function loadFromEnv() {
-  const names = [...REQUIRED, ...OPTIONAL];
+  const names = [...new Set([...REQUIRED, ...OPTIONAL, ...botSecretNames()])];
   return Object.fromEntries(names.map(n => [n, process.env[n] || null]));
 }
 
@@ -47,7 +48,7 @@ async function loadSecrets() {
     try {
       values = await loadFromGcp();
       // Fill missing with env vars
-      for (const n of [...REQUIRED, ...OPTIONAL]) {
+      for (const n of [...new Set([...REQUIRED, ...OPTIONAL, ...botSecretNames()])]) {
         if (!values[n] && process.env[n]) values[n] = process.env[n];
       }
     } catch {
@@ -60,6 +61,7 @@ async function loadSecrets() {
   }
 
   return {
+    ...Object.fromEntries(botSecretNames().map(name => [name, values[name]])),
     BOT_TOKEN: values.TELEGRAM_BOT_TOKEN,
     ANTHROPIC_API_KEY: values.ANTHROPIC_API_KEY, // not used for direct API calls — Claude Code uses OAuth; OpenRouter for LLM calls
     AGENT_SECRET: values.AGENT_SECRET,

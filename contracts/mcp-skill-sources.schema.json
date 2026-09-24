@@ -25,6 +25,7 @@
         "manifest": { "$ref": "#/$defs/relativePath" },
         "artifactDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "approvedManifest": { "type": "object" },
+        "thirdPartyApproved": { "type": "boolean" },
         "enabled": { "type": "boolean" },
         "profiles": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" } }
       }

@@ -1,3 +1,4 @@
+const { deliveryIdentity, resolveBotSecrets, deliveryQueueKey, continuationKey, matchesDelivery } = require('../telegram-bot-registry');
 const { atomicJson } = require('../atomic-json');
 let restartShutdown = false;
 const fs = require('fs');
@@ -321,11 +322,11 @@ function stopTask(taskId) {
 // must NOT reach into another chat's running task or orphaned process — pass
 // chatId to scope the kill to the task that chat actually started. Omit chatId
 // only for genuinely profile-wide callers (e.g. /gtd_stop's explicit hard-stop).
-function stopUserTask(username, chatId = null) {
+function stopUserTask(username, chatId = null, scope = {}) {
   let stopped = false;
   for (const [taskId, s] of activeTimers.entries()) {
-    if (!taskId.startsWith(username + '-') || !s.proc) continue;
-    if (chatId != null && s.chatId != null && String(s.chatId) !== String(chatId)) continue;
+    if (s.username !== username || !s.proc) continue;
+    if (!matchesDelivery(s, { ...scope, chatId })) continue;
     s.userStopped = true;
     try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
     console.log(`[${taskId}] stopped by user command`);
@@ -337,7 +338,7 @@ function stopUserTask(username, chatId = null) {
   // Orphans carry no chat attribution, so this fallback only runs for a genuinely
   // profile-wide stop (chatId omitted) — otherwise it would kill another chat's
   // orphan under a chat-scoped "стоп", recreating the cross-chat leak this guards.
-  if (!stopped && !chatId) {
+  if (!stopped && !chatId && !scope.audience && !scope.botId) {
     try {
       const { execSync } = require('child_process');
       // Find PIDs of claude processes for this user by mcp-config path
@@ -371,10 +372,9 @@ function extendTaskTimeout(taskId) {
   return { ok: true, extendCount: s.extendCount, extensionsLeft: 8 - s.extendCount, newDeadlineMins: 15 };
 }
 
-function isTaskRunning(username) {
-  const prefix = `${username}-`;
-  for (const [taskId] of activeTimers.entries()) {
-    if (taskId.startsWith(prefix)) return true;
+function isTaskRunning(username, scope = {}) {
+  for (const [taskId, state] of activeTimers.entries()) {
+    if (state.username === username && matchesDelivery(state, scope)) return true;
   }
   return false;
 }
@@ -412,11 +412,10 @@ function isSessionRunning(sessionId) {
  * Finds all entries in activeTimers whose taskId starts with `${username}-`
  * and sends SIGTERM. Returns how many tasks were killed.
  */
-function killTaskByUsername(username) {
+function killTaskByUsername(username, scope = {}) {
   let killed = 0;
-  const prefix = `${username}-`;
   for (const [taskId, state] of activeTimers.entries()) {
-    if (!taskId.startsWith(prefix)) continue;
+    if (state.username !== username || !matchesDelivery(state, scope)) continue;
     try {
       if (state.proc) {
         state.userStopped = true;
@@ -445,6 +444,8 @@ function killTaskByUsername(username) {
  * @param {object} opts.secrets - { BOT_TOKEN, ANTHROPIC_API_KEY, ... }
  */
 function runTask(opts) {
+  opts = { ...opts, user: { ...opts.user, ...deliveryIdentity(opts.user) },
+    secrets: resolveBotSecrets(opts.secrets, opts.user) };
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -452,10 +453,10 @@ function runTask(opts) {
     const chatId = opts.user.id;
     // Chat-scoped: a plain "стоп" typed in one chat must only touch this chat's
     // task/GTD tracking, not a profile-mate's — workDir is shared across chats.
-    const stopped = stopUserTask(username, chatId);
+    const stopped = stopUserTask(username, chatId, opts.user);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
+      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId, opts.user); }
       catch (e) { console.warn('[runner] stop gtd clear:', e.message); }
     }
     const parts = [];
@@ -479,10 +480,10 @@ function runTask(opts) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
     const chatId = opts.user.id;
-    stopUserTask(username, chatId);
+    stopUserTask(username, chatId, opts.user);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
+      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId, opts.user); }
       catch (e) { console.warn('[runner] gtd_stop clear:', e.message); }
     }
     const msg = gtdCancelled > 0
@@ -508,7 +509,7 @@ function runTask(opts) {
       if (!workDir) {
         msg = '📋 Нет активных чек-листов.';
       } else {
-        const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open'); } catch { return []; } })();
+        const openRecs = (() => { try { return require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open' && matchesDelivery(r, { ...scope, chatId })); } catch { return []; } })();
         if (!openRecs.length) {
           msg = '📋 Нет активных чек-листов.';
         } else {
@@ -570,9 +571,9 @@ function runTask(opts) {
     const username = opts.user.username;
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
-    const stopped = stopUserTask(username, chatId);
+    const stopped = stopUserTask(username, chatId, opts.user);
     // Clear this chat's queue so the next task doesn't wait behind a stuck one.
-    chatQueue.clearChat(chatId);
+    chatQueue.clearChat(deliveryQueueKey(opts.user));
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const msg = stopped
       ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
@@ -592,7 +593,7 @@ function runTask(opts) {
   if (SKIP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const chatId = opts.user.id;
-    const stopped = stopUserTask(username, chatId);
+    const stopped = stopUserTask(username, chatId, opts.user);
     const msg = stopped
       ? '⏭ Текущая задача пропущена. Следующая начнётся автоматически.'
       : '✅ Нет активной задачи для пропуска.';
@@ -644,7 +645,7 @@ function runTask(opts) {
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode, userMessageRecorded: opts.userMessageRecorded,
     projectId: opts.projectId, newProjectName: opts.newProjectName, engine: opts.engine,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId, fileRefs: opts.fileRefs,
-    profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
+    ...deliveryIdentity(opts.user), profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId,
     continuationCount: opts.continuationCount, retryCount: opts.retryCount, internalGtd: opts.internalGtd,
     resumedAfterRestart: opts.resumedAfterRestart, resumeAttempts: opts.resumeAttempts,
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
@@ -656,7 +657,7 @@ function runTask(opts) {
   // running. Any number of tasks may run concurrently across chats and sessions of
   // one profile — context is rebuilt from the session store (no `claude --resume`),
   // so parallel claudes never share a transcript file.
-  if (chatQueue.hasPending(opts.user.id)) status.waiting(
+  if (chatQueue.hasPending(deliveryQueueKey(opts.user))) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
@@ -670,7 +671,7 @@ function runTask(opts) {
   // re-entrancy guard (isSessionRunning) relies on this window before the
   // process spawns. Read-only membership, not a lock.
   if (opts.sessionId) queuedSessions.add(opts.sessionId);
-  const current = chatQueue.enqueue(opts.user.id, async () => {
+  const current = chatQueue.enqueue(deliveryQueueKey(opts.user), async () => {
     try {
       // Global admission control: wait for a free slot + enough RAM before we
       // actually spawn `claude`. This is the OOM guard — the only remaining gate.
@@ -736,7 +737,7 @@ function _hasProactiveResults(dataDir, username, vacancyId) {
 // Returns context card string, or null if no skills configured (no pin needed). Quick-answer
 // commands (/ping etc.) are contractually one-message-only (see runner-e2e.test.js) — this must
 // stay opt-in via connected services, never fire unconditionally on every task completion.
-function buildContextCard(username, workDir, chatId) {
+function buildContextCard(username, workDir, chatId, scope = {}) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
 
@@ -848,7 +849,7 @@ function buildContextCard(username, workDir, chatId) {
   // GTD section: show when ≥1 open record exists
   if (workDir) {
     try {
-      const openRecs = require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open');
+      const openRecs = require('../gtd-controller').listGtd(workDir).filter(r => r.status === 'open' && matchesDelivery(r, { ...scope, chatId }));
       if (openRecs.length === 1) {
         const r = openRecs[0];
         const preview = (r.originalTask || '').slice(0, 40);
@@ -889,14 +890,16 @@ function readPinStore(pinFile) {
 // Creates or silently updates the context pin after task completion.
 // State is stored per-chat in workDir/.pin_state.json (see readPinStore).
 // botPinnedMsgId: the pinned message ID known to the bot — used to seed state when we have none.
-async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
+async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null, scope = {}) {
   const pinFile = path.join(workDir, '.pin_state.json');
   const store = readPinStore(pinFile);
-  const key = String(chatId);
+  const { botId, audience } = deliveryIdentity(scope);
+  const key = botId === 'default' && audience === 'default' ? String(chatId) : JSON.stringify([botId, audience, String(chatId)]);
   let entry = store.chats[key] || null;
   const save = (next) => {
-    store.chats[key] = next;
-    fs.writeFileSync(pinFile, JSON.stringify(store));
+    const latest = readPinStore(pinFile);
+    latest.chats[key] = next;
+    atomicJson(pinFile, latest);
   };
 
   // Seed from bot's authoritative pinned message when this chat has no local state.
@@ -1289,7 +1292,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
   savePendingTask(taskId, {
     phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir,
-    profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
+    ...deliveryIdentity(user), profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
     task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, newProjectName,
     initialMsgId, pinnedMsgId, initiatedAt, threadId, resumedAfterRestart, resumeAttempts,
     startedAt: Date.now(),
@@ -1307,7 +1310,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   try {
   const isAutoFile = rawTask && rawTask.startsWith("[Файл сохранён:");
   if (!isAutoFile && !internalGtd) {
-    clearPendingContinuation(user.username); // cancel any pending soft-continuation from previous response
+    clearPendingContinuation(continuationKey(user)); // cancel any pending soft-continuation from previous response
   }
   initLog(user.workDir);
   ensureProfileLayoutSkill(user.workDir, user.username);
@@ -1505,7 +1508,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       } else {
         // New conversation — create session with first exchange
-        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience });
+        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience, botId: user.botId });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
       bindTaskActivity(taskId, user, activeSessionId);
@@ -1539,7 +1542,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (sessionExists) {
     if (!userMessageRecorded) sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
-    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience });
+    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience, botId: user.botId });
   }
 
   bindTaskActivity(taskId, user, activeSessionId);
@@ -2461,17 +2464,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}${footer}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       console.log(`[soft-incomplete] username=${user.username} reason=${cls.reason} round=${continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
       const record = {
-        username: user.username, workDir: user.workDir, profileId: user.profileId, telegramUserId: user.telegramUserId,
+        username: user.username, workDir: user.workDir, ...deliveryIdentity(user), profileId: user.profileId, telegramUserId: user.telegramUserId,
         chatId, msgId, sessionId: activeSessionId, pinnedMsgId, engine, internalGtd,
         task, finalText: final, reason: cls.reason, continuationCount, dueAt: Date.now() + delayMs,
       };
-      saveSoftContinuationFile(user.username, record);
+      record.continuationKey = continuationKey(user);
+      saveSoftContinuationFile(record.continuationKey, record);
       const timer = setTimeout(() => {
-        if (!pendingContinuations.has(user.username)) return; // cancelled by new message
-        pendingContinuations.delete(user.username);
+        if (!pendingContinuations.has(record.continuationKey)) return; // cancelled by new message
+        pendingContinuations.delete(record.continuationKey);
         fireSoftContinuation(record, secrets).catch(() => {});
       }, delayMs);
-      setPendingContinuation(user.username, { chatId, msgId, sessionId: activeSessionId }, timer);
+      setPendingContinuation(record.continuationKey, { chatId, msgId, sessionId: activeSessionId }, timer);
     }).catch(() => {});
   }
 
@@ -2480,8 +2484,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Update context pin after task (skipped when user ran /context_off)
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
-    const card = buildContextCard(user.username, user.workDir, chatId);
-    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
+    const card = buildContextCard(user.username, user.workDir, chatId, user);
+    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, user).catch(() => {});
   }
 
   if (activeSessionId) {
@@ -2492,7 +2496,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         const gtd = require('../gtd-controller');
         const checklistArgs = {
           workDir: user.workDir, sessionId: activeSessionId, chatId,
-          username: user.username, projectDir: user.cwd || null,
+          username: user.username, ...deliveryIdentity(user), projectDir: user.cwd || null,
         };
         if (explicitMode === 'deep') {
           // Осознанный launch — «⏻ Запустить проработку» (workrun). Свободный текст
@@ -2561,13 +2565,14 @@ function interruptForRestart() {
 // (drops the "Продолжу через ~3 мин" footer), then re-opens the session. Shared
 // by the live setTimeout callback and reconcileSoftContinuations() below.
 async function fireSoftContinuation(record, secrets) {
-  clearSoftContinuationFile(record.username);
+  secrets = resolveBotSecrets(secrets, record);
+  clearSoftContinuationFile(record.continuationKey || record.username);
   const { BOT_TOKEN } = secrets;
   await tgEdit(BOT_TOKEN, record.chatId, record.msgId, `🧠 ${record.finalText}`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
   console.log(`[soft-incomplete] fire username=${record.username} reason=${record.reason} round=${record.continuationCount + 1}/${MAX_SOFT_CONTINUATIONS}`);
   const user = {
     id: record.chatId, name: record.username, username: record.username, workDir: record.workDir,
-    profileId: record.profileId, telegramUserId: record.telegramUserId,
+    ...deliveryIdentity(record), profileId: record.profileId, telegramUserId: record.telegramUserId,
   };
   return runTask({
     taskId: `${record.username}-${Date.now()}`,
@@ -2598,11 +2603,11 @@ async function reconcileSoftContinuations(secrets) {
     } else {
       console.log(`[soft-incomplete] reconcile: re-arming username=${record.username} in ${Math.round(remaining / 1000)}s`);
       const timer = setTimeout(() => {
-        if (!pendingContinuations.has(record.username)) return; // cancelled by new message
-        pendingContinuations.delete(record.username);
+        if (!pendingContinuations.has(record.continuationKey || record.username)) return; // cancelled by new message
+        pendingContinuations.delete(record.continuationKey || record.username);
         fireSoftContinuation(record, secrets).catch(() => {});
       }, remaining);
-      setPendingContinuation(record.username, { chatId: record.chatId, msgId: record.msgId, sessionId: record.sessionId }, timer);
+      setPendingContinuation(record.continuationKey || record.username, { chatId: record.chatId, msgId: record.msgId, sessionId: record.sessionId }, timer);
     }
   }
 }

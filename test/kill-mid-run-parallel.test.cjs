@@ -23,7 +23,7 @@ function deferredHarness({ pending, now = Date.now(), retryDelayMs = () => 50, s
   const end = serverSrc.indexOf('async function main()', start);
   const calls = [], runs = [], cleared = [], timers = [];
   const journal = pending.slice(); // mutable — mirrors the on-disk pending-tasks file
-  const sandbox = {
+  const sandbox = { ...require('../src/telegram-bot-registry'),
     path, console: { log() {}, error() {}, warn() {} }, Date: class extends Date { static now() { return now; } },
     BASE_USERS_DIR: '/users', AbortSignal, Promise,
     // server.js staggers loop iterations with a fixed 200ms `await new Promise(setTimeout(...))`

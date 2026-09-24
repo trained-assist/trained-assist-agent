@@ -65,12 +65,31 @@ class McpSkillSourceRegistry {
   diagnostics() { return clone(this.#diagnostics).sort((a, b) => String(a.id).localeCompare(String(b.id))); }
   list() { return [...this.#sources.values()].map(s => clone(s)); }
   get(providerId) { const source = this.#sources.get(providerId); return source ? clone(source) : null; }
+  trust(providerId) {
+    const source = this.#sources.get(providerId);
+    if (!source) return null;
+    // Repository identity belongs to the approved source configuration. Never
+    // infer ownership from providerId, tool names or provider-supplied metadata.
+    return source.repository.split('/')[0].toLowerCase() === 'trained-assist'
+      ? 'first_party' : 'third_party';
+  }
+  authorization(providerId, profileId) {
+    const source = this.#sources.get(providerId);
+    if (!source || !source.enabled || !source.profiles.includes(profileId)) {
+      throw error('FORBIDDEN', 'Provider outside approved profile scope');
+    }
+    if (this.trust(providerId) === 'third_party' && source.thirdPartyApproved !== true) {
+      throw error('APPROVAL_REQUIRED', 'Third-party source requires explicit administrative approval');
+    }
+    return this.trust(providerId) === 'first_party';
+  }
   availability(providerId, profileId) {
     const source = this.#sources.get(providerId);
     if (!source) return { status: 'unknown_provider' };
     if (!source.enabled) return { status: 'disabled' };
     // Empty list grants no profiles. Installation is not authorization.
     if (!source.profiles.includes(profileId)) return { status: 'ineligible' };
+    if (this.trust(providerId) === 'third_party' && source.thirdPartyApproved !== true) return { status: 'approval_required' };
     return verifyArtifact(this.#root, source);
   }
   resolveAction(name, profileId) {
