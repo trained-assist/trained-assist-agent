@@ -65,7 +65,7 @@ function withFakeConnectedService(username) {
   ok(!/⚙️ Claude/.test(card), 'no Claude model line for codex engine');
 }
 
-// 4. HH single vacancy (legacy singleton) — unchanged format, no numbering, no vacancy_id in links.
+// 4. HH single vacancy — no numbering; review stays bound to this vacancy even after switching.
 {
   const username = 'u-hh-single-' + Date.now();
   withFakeConnectedService(username);
@@ -79,7 +79,10 @@ function withFakeConnectedService(username) {
   const card = buildContextCard(username, wd, 1);
   ok(/💼 Backend разработчик/.test(card), `single vacancy title shown, got: ${card}`);
   ok(/⚡ Скоринг активен/.test(card), 'single vacancy scoring-on line shown');
-  ok(!/vacancy_id=/.test(card), 'no vacancy_id query param when only 1 vacancy tracked');
+  const reviewUrl = new URL(card.match(/\[Кандидаты →\]\(([^)]+)\)/)[1]);
+  ok(reviewUrl.origin === 'https://recruiter-assistant.ru', 'review uses the public recruiter domain');
+  ok(reviewUrl.searchParams.get('vacancy_id') === 'v1', 'single-vacancy review preserves explicit vacancy binding');
+  ok(reviewUrl.searchParams.get('username') === username && !!reviewUrl.searchParams.get('token'), 'review preserves signed profile scope');
   ok(!/Активные вакансии/.test(card), 'no multi-vacancy header for a single tracked vacancy');
 }
 

@@ -159,7 +159,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
     const isActionable = c.verdict && c.verdict !== 'ОТКЛОНИТЬ';
     const isReject = c.verdict === 'ОТКЛОНИТЬ';
 
-    const checkboxHtml = (isReject ? '' : `<label><input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" ${isActionable ? 'checked' : ''} onchange="onCheck()"> Отправить</label>`)
+    const checkboxHtml = (isReject ? '' : `<label><input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" ${isActionable && c.response_status !== 'archived' ? 'checked' : ''} onchange="onCheck()"> Отправить</label>`)
       + `<label><input type="checkbox" class="reject-cb" id="reject-cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()"> Отказать</label>`;
 
     const scoreHtml = hasScore
