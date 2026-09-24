@@ -280,13 +280,12 @@ async function resumePendingTasks(secrets) {
     const attempt = (p.resumeAttempts || 0) + 1;
     const workDir = p.workDir || path.join(BASE_USERS_DIR, p.username);
 
-    // Native resume (#1234 Sub-2, claude only so far): if we know the engine's own session id,
-    // continue the REAL session (full history + tool state) instead of replaying the task with a
-    // rebuilt 6-message context. Source: the pending journal (written mid-run, survives SIGKILL)
-    // with the durable session record as fallback. codex/opencode still take the context-rebuild
-    // path until Sub-3/Sub-4 land — see the explicit engine check.
-    const nativeResumeId = engine === 'claude'
-      ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, 'claude') : null))
+    // Native resume (#1234): claude (Sub-2) and codex (Sub-3) are wired. Source: the pending
+    // journal (written mid-run, survives SIGKILL) with the durable session record as fallback.
+    // opencode (Sub-4) still takes the context-rebuild path until its resume path is validated.
+    const NATIVE_RESUME_ENGINES = ['claude', 'codex'];
+    const nativeResumeId = NATIVE_RESUME_ENGINES.includes(engine)
+      ? (p.engineSessionId || (p.sessionId ? getEngineSessionId(workDir, p.sessionId, engine) : null))
       : null;
     // With a native resume the engine already holds the task, so replaying it is redundant (and
     // risks redoing finished steps); send a short "keep going" instead.
