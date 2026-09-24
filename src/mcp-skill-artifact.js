@@ -92,6 +92,16 @@ function verifyArtifact(root, source) {
   }
 }
 
+function sealReadOnly(dir) {
+  for (const name of fs.readdirSync(dir)) {
+    const file = path.join(dir, name);
+    const stat = fs.lstatSync(file);
+    if (stat.isDirectory()) sealReadOnly(file);
+    else if (stat.isFile()) fs.chmodSync(file, stat.mode & 0o111 ? 0o555 : 0o444);
+  }
+  fs.chmodSync(dir, 0o555);
+}
+
 // Pin approved bytes for one child, not a mutable deployment pathname. The
 // post-copy verification is essential: source may change after discovery or
 // during copying. The private parent prevents other OS users accessing a lease.
@@ -118,10 +128,13 @@ function acquireArtifact(root, source, executionRoot) {
   };
   try {
     fs.cpSync(approved.artifact, target, { recursive: true, dereference: false, verbatimSymlinks: true });
+    // Node versions differ in directory permissions created by cpSync.
+    // Normalize the private copy; its bytes/execute bits are still verified.
+    sealReadOnly(target);
     const pinned = verifyArtifact(lease, { ...source, artifactDir: 'artifact' });
     if (pinned.status !== 'available') fail(pinned.status);
     return { ...pinned, release };
   } catch (e) { release(); throw e; }
 }
 
-module.exports = { digest, relative, contained, inventory, verifyArtifact, acquireArtifact };
+module.exports = { digest, relative, contained, inventory, verifyArtifact, acquireArtifact, sealReadOnly };

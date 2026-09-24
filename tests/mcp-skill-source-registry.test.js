@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,7 +20,7 @@ function chmodTree(dir, mode) {
     else fs.chmodSync(p, mode);
   }
 }
-afterEach(() => { for (const root of roots.splice(0)) { chmodTree(root, 0o700); fs.rmSync(root, { recursive: true, force: true }); } });
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) { chmodTree(root, 0o700); fs.rmSync(root, { recursive: true, force: true }); } });
 const action = name => ({ name, inputSchema: { type: 'object', additionalProperties: false },
   allowedTriggers: ['user'], effect: 'read', requiresApproval: false, retrySafety: 'read_only' });
 function manifest(id) {
@@ -113,6 +113,11 @@ describe('approved MCP sources', () => {
   });
   it('pins executable bytes across deploy/rollback until the child releases them', () => {
     const root = tmp(), s = fixture(root), r = registry(root, [s]);
+    const cp = fs.cpSync;
+    vi.spyOn(fs, 'cpSync').mockImplementation((from, to, options) => {
+      cp(from, to, options);
+      fs.chmodSync(to, 0o755); // Node 22 directory-copy behavior.
+    });
     const lease = r.acquireAction('first_list', 'alice', path.join(root, 'executions'));
     const original = fs.readFileSync(lease.entrypoint, 'utf8');
     const dir = path.join(root, s.artifactDir);

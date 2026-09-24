@@ -8,7 +8,7 @@ const { execFileSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const { ActionProviderRegistry } = require('../src/action-provider-registry');
 const { McpSkillSourceRegistry } = require('../src/mcp-skill-source-registry');
-const { digest, relative, contained, inventory, verifyArtifact } = require('../src/mcp-skill-artifact');
+const { digest, relative, contained, inventory, verifyArtifact, sealReadOnly } = require('../src/mcp-skill-artifact');
 const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 function repositoryName(remote) {
@@ -17,15 +17,6 @@ function repositoryName(remote) {
   return match[1];
 }
 
-function seal(dir) {
-  for (const name of fs.readdirSync(dir)) {
-    const file = path.join(dir, name);
-    const stat = fs.lstatSync(file);
-    if (stat.isDirectory()) seal(file);
-    else if (stat.isFile()) fs.chmodSync(file, stat.mode & 0o111 ? 0o555 : 0o444);
-  }
-  fs.chmodSync(dir, 0o555);
-}
 function removeTemporary(dir) {
   if (!fs.existsSync(dir)) return;
   function writable(p) {
@@ -78,7 +69,7 @@ function prepareRelease({ checkout, root, id, providerId, mcpServerId, repositor
     const bytes = JSON.stringify(metadata, null, 2) + '\n';
     fs.writeFileSync(path.join(temporary, 'artifact-manifest.json'), bytes);
     source.artifactDigest = digest(bytes);
-    seal(temporary);
+    sealReadOnly(temporary);
     fs.renameSync(temporary, path.join(realRoot, source.artifactDir));
     const registry = new McpSkillSourceRegistry({ root: realRoot, config: { version: 1, sources: [source] } });
     if (registry.diagnostics().length || verifyArtifact(realRoot, source).status !== 'available') throw new Error('Prepared artifact failed verification');
