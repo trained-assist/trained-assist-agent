@@ -379,7 +379,7 @@ async function resumePendingTasks(secrets) {
           user, task: resumeTask, context: p.context || null,
           engine, sessionId: p.sessionId || null,
           contextFromSession: p.contextFromSession || null,
-          forceClaude: true, projectId: p.projectId || null,
+          forceClaude: true, projectId: p.projectId || null, projectPicked: p.projectPicked === true,
           initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
           resumedAfterRestart: true, resumeAttempts: attempt,
           resumeSessionId: nativeResumeId || null,
@@ -1234,7 +1234,7 @@ ${recent || '(пока нет)'}
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid json' }); }
 
-      const { username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
+      const { username, task, context, sessionId, contextFromSession, forceClaude, forceNew, telegramUserId, initialMsgId, pinnedMsgId, projectId, projectPicked, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, mode, threadId, initiatedAt, audience } = payload;
       // `chatId` is the canonical field for the Telegram chat to stream into (plan
       // generic-naming-conventions-refactoring, P1-C). `userId` is now a legacy wire
       // alias, normalized once right here — PR-D drops tg-bot's `userId` send, PR-E
@@ -1389,7 +1389,7 @@ ${recent || '(пока нет)'}
         }
 
         // runTask journals synchronously, before any await or acknowledgement.
-        const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, newProjectName: newProjectName || null });
+        const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, projectPicked: projectPicked === true, newProjectName: newProjectName || null });
         completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
         if (requestId) atomicJson(receipt, { taskId, audience: audience || 'default', acceptedAt: Date.now() });
         json(res, 202, { taskId, requestId, durable: true });
