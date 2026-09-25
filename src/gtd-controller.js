@@ -28,8 +28,9 @@ const path = require('path');
 const os = require('os');
 const { readTokenValue } = require('./token-value');
 const { DurableTaskStore } = require('./durable-task-store');
-const { durableTaskDbPath, userWorkDir } = require('./data-paths');
+const { durableTaskDbPath, userWorkDir, projectDir: projectDirPath } = require('./data-paths');
 const { resolveStepExecution } = require('./playbook-executor');
+const { evaluateItemValidations, getDefaultRegistry } = require('./playbook-validators');
 
 // ── Разумные дефолты (небольшие, но осмысленные) ────────────────────────────
 const DEFAULT_ETA_MIN = 60;   // через сколько минут после завершения проверить
@@ -163,14 +164,85 @@ function retryFailedItem(store, itemId, profileId, { retryDelayMs = 0, escalate 
   return { retried: true, attempts, maxAttempts };
 }
 
+// Which acceptance criterion does this validation belong to? Prefer the
+// criterion whose validations declare this key for this step; fall back to the
+// plan's single criterion, then to the item's stage/position. P3d-2's gate reads
+// rows back keyed by (criterion_id, validator), so an honest id here matters.
+function criterionIdForItem(task, item, validatorKey) {
+  let criteria = null;
+  try { criteria = task.acceptance_criteria_json ? JSON.parse(task.acceptance_criteria_json) : null; } catch { criteria = null; }
+  if (Array.isArray(criteria) && criteria.length) {
+    for (const c of criteria) {
+      const validations = Array.isArray(c && c.validations) ? c.validations : [];
+      for (const v of validations) {
+        const obj = v && v.validation;
+        if (obj && typeof obj === 'object'
+          && Object.prototype.hasOwnProperty.call(obj, validatorKey)
+          && (v.step == null || v.step === item.title)) {
+          return c.id || 'acceptance';
+        }
+      }
+    }
+    if (criteria.length === 1 && criteria[0] && criteria[0].id) return criteria[0].id;
+  }
+  return item.stage != null ? String(item.stage) : 'acceptance';
+}
+
+// Evaluate an item's declared validations through the registry and persist each
+// verdict as a task_validation_results row (profile-scoped). Returns the raw
+// results so the caller can decide complete vs fail. A validator that throws is
+// recorded as inconclusive — a broken check must not look like a pass.
+async function recordItemValidations(store, { task, item, executionId, registry, projectDir }) {
+  let results;
+  try {
+    results = await evaluateItemValidations(item, {
+      task, profileId: task.profile_id, projectDir, registry,
+    });
+  } catch (e) {
+    results = [{ key: '*', status: 'inconclusive', subject: null, evidence: { reason: 'evaluator-error', error: e.message } }];
+  }
+  for (const r of results) {
+    try {
+      store.recordValidation({
+        task_id: task.id, profile_id: task.profile_id, task_item_id: item.id, execution_id: executionId,
+        criterion_id: criterionIdForItem(task, item, r.key),
+        contract_revision: task.contract_revision || 1,
+        validator: r.key, status: r.status,
+        subject_json: r.subject == null ? null : JSON.stringify(r.subject),
+        evidence_json: r.evidence == null ? null : JSON.stringify(r.evidence),
+      });
+    } catch (e) {
+      console.error(`[gtd-durable] recordValidation ${item.id.slice(0, 8)} ${r.key}:`, e.message);
+    }
+  }
+  return results;
+}
+
+// All items finished → close the task. Contract plans still finalize through the
+// raw SQL the P3d-2 gate will replace (this slice must not touch the gate).
+function settleTaskCompletion(store, task) {
+  const progress = store.progressSummary(task.id, task.profile_id);
+  if (progress.total > 0 && progress.finished >= progress.total) {
+    if (!task.acceptance_criteria_json) store.completeTask(task.id, task.profile_id, 'done');
+    else store.db.prepare('UPDATE durable_tasks SET status=?, updated_at=? WHERE id=?').run('done', Date.now(), task.id);
+    console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
+  }
+}
+
 // Fire a claimed durable item through the same pipeline as legacy GTD fires.
 // Contract plans are executable once explicitly activated (P3a: draft→active via
 // task_update); they stay unclaimable while draft. The step honors the item's
 // own max_attempts / execution_timeout_seconds. delay_after_sec / wait_deadline_at
 // shape when the store hands the item out (see durable-task-store.completeItem /
 // expireWaitingDeadlines).
-async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK }) {
+async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null }) {
   const store = durableStore();
+  const validators = registry || getDefaultRegistry();
+  // A programmatic step that fails is retried synchronously inside this pass
+  // (no engine round-trip). Its re-pended due_at lands in the same tick, so
+  // without this guard claimNextRunnable could hand it straight back and
+  // double-fire it. Items fired as agent runs are 'running' and never re-claimed.
+  const claimedThisPass = new Set();
   let fired = 0;
   for (;;) {
     if (fired >= maxFires) return fired;
@@ -178,6 +250,11 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     if (!item) return fired;
     const task = store.db.prepare('SELECT * FROM durable_tasks WHERE id = ?').get(item.task_id);
     if (!task) { store.failItem(item.id, '__system__', { error: 'task vanished' }); continue; }
+    if (claimedThisPass.has(item.id)) {
+      store.updateTaskItem(item.id, { status: 'waiting', due_at: Date.now() + FRESH_CLAIM_GRACE_MS }, task.profile_id);
+      continue;
+    }
+    claimedThisPass.add(item.id);
 
     // Re-entrancy: a live session for this task must not be double-fired.
     const sessionRow = store.db.prepare(
@@ -197,19 +274,52 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     // legacy (non-contract) durable items keep the pre-P3b default engine.
     const step = task.acceptance_criteria_json
       ? resolveStepExecution(item)
-      : { engine: 'claude', ocProfile: null, ocRole: null, skipModels: [] };
+      : { executionKind: 'agent', engine: 'claude', ocProfile: null, ocRole: null, skipModels: [] };
     // A durable step has no session chat but DOES have a profile workspace. Passing
     // it (instead of null) is both correct context and required: writeMcpConfig
     // path.join()s the workDir, so null crashed every real durable fire.
     const workDir = userWorkDir(task.profile_id);
+    // Deterministic checks (file_exists / command_exit_zero) resolve against the
+    // plan's project dir; a project-less plan falls back to the profile workspace.
+    const itemProjectDir = task.project_id ? projectDirPath(task.profile_id, task.project_id) : workDir;
+
+    // P3d-1: a programmatic step is executed deterministically — never spawned as
+    // an agent prompt. Its `validation` keys are evaluated by the registry, each
+    // verdict recorded, and the step completes only when every check passes.
+    if (step.executionKind === 'programmatic') {
+      const results = await recordItemValidations(store, {
+        task, item, executionId, registry: validators, projectDir: itemProjectDir,
+      });
+      const allPass = results.length > 0 && results.every(r => r.status === 'pass');
+      store.setItemEvidence(item.id, task.profile_id, {
+        evidence_json: JSON.stringify({ validations: results.map(r => ({ key: r.key, status: r.status, evidence: r.evidence })) }),
+        completed_at: allPass ? Date.now() : null,
+      });
+      if (allPass) {
+        store.completeItem(item.id, task.profile_id, { executionId });
+        store.finishExecution(executionId, { status: 'success' });
+        console.log(`[gtd-durable] programmatic item done: ${item.id.slice(0, 8)}`);
+      } else {
+        const failedKeys = results.filter(r => r.status !== 'pass').map(r => r.key).join(', ');
+        store.failItem(item.id, task.profile_id, {
+          executionId, error: `programmatic validation not passed: ${failedKeys || 'no validations'}`,
+        });
+        store.finishExecution(executionId, { status: 'failed', error_class: 'validation', error_text: failedKeys.slice(0, 500) });
+        const r = retryFailedItem(store, item.id, task.profile_id, { escalate: false, retryDelayMs: FRESH_CLAIM_GRACE_MS });
+        if (r.retried) console.log(`[gtd-durable] programmatic retry ${item.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
+        else console.log(`[gtd-durable] programmatic item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${item.id.slice(0, 8)}`);
+      }
+      settleTaskCompletion(store, task);
+      continue;
+    }
 
     const prompt = [
       '[DURABLE TASK — auto-execution]',
       `Task: ${task.goal}`,
       `Step (${item.position + 1}/${store.progressSummary(task.id, task.profile_id).total}): ${item.title}`,
       item.instructions ? `\nInstructions: ${item.instructions}` : '',
-      item.validation && Object.keys(item.validation).length
-        ? `\nValidation (must pass before completion): ${JSON.stringify(item.validation)}` : '',
+      item.validation_json
+        ? `\nValidation (must pass before completion): ${item.validation_json}` : '',
       '\nВыполни этот шаг. Если шаг выполнен и проверка прошла — ответь финальной строкой: DURABLE: done.',
       'Если шаг не удался — опиши ошибку и ответь финальной строкой: DURABLE: failed: <причина>.',
     ].filter(Boolean).join('\n');
@@ -228,9 +338,24 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
       task: prompt, forceClaude: true, engine: step.engine, secrets, internalGtd: true,
       ocProfile: step.ocProfile || null, contextSkipModels: step.skipModels,
       stepTimeoutMs,
-    }).then(reply => {
+    }).then(async reply => {
       const said = typeof reply === 'string' ? reply : '';
       if (/DURABLE:\s*done/i.test(said)) {
+        // P3d-1: record the step's validations (registered → verdict, self-reported
+        // → inconclusive) + the reply as evidence BEFORE completing the item, so a
+        // finalizer that reads rows (P3d-2) never sees a completed step with no
+        // verdict. The tick is fire-and-forget: this runs in the run's completion
+        // callback, not on the tick's critical path.
+        try {
+          await recordItemValidations(store, {
+            task, item: itemSnap, executionId, registry: validators, projectDir: itemProjectDir,
+          });
+          store.setItemEvidence(itemSnap.id, task.profile_id, {
+            evidence_json: JSON.stringify({ reply: said.slice(0, 4000) }), completed_at: Date.now(),
+          });
+        } catch (e) {
+          console.error(`[gtd-durable] recordValidations ${itemSnap.id.slice(0, 8)}:`, e.message);
+        }
         store.completeItem(itemSnap.id, task.profile_id, { executionId });
         store.finishExecution(executionId, { status: 'success' });
         console.log(`[gtd-durable] item done: ${itemSnap.id.slice(0, 8)}`);
@@ -248,15 +373,7 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
         if (!r.retried) console.log(`[gtd-durable] item failed (no marker), budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
       }
       // Keep the task row's revision ticking so projections/UI notice progress.
-      const progress = store.progressSummary(task.id, task.profile_id);
-      if (progress.total > 0 && progress.finished >= progress.total) {
-        // updateTask's finalization gate blocks contract-plan completion until
-        // per-criterion validation lands (P3d); finalize via the same SQL the gate
-        // protects, for contract plans only, while legacy tasks go through the store.
-        if (!task.acceptance_criteria_json) store.completeTask(task.id, task.profile_id, 'done');
-        else store.db.prepare('UPDATE durable_tasks SET status=?, updated_at=? WHERE id=?').run('done', Date.now(), task.id);
-        console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
-      }
+      settleTaskCompletion(store, task);
     }).catch(e => {
       console.error(`[gtd-durable] runTask ${itemSnap.id.slice(0, 8)}:`, e.message);
       store.failItem(itemSnap.id, task.profile_id, { executionId, error: e.message.slice(0, 500) });
@@ -968,6 +1085,7 @@ module.exports = {
   readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE, checklistAutologinUrl,
+  _ghToken, _ghFetch,
   durableStore, runDueDurable, reconcileOrphanedRunning, claimNextDurableItem, retryFailedItem,
   tickHeartbeat, countOpenLegacy, durableItemCounts,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,

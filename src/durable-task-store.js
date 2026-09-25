@@ -364,6 +364,64 @@ class DurableTaskStore {
     })();
   }
 
+  // ── Validation results + item evidence (P3d) ───────────────────────────
+  /**
+   * Append one machine-checked validation verdict (task_validation_results).
+   * The write is anchored to the parent task's owner: `profile_id` is optional
+   * for the caller but, when passed, must match — no cross-profile write.
+   * `subject_json` / `evidence_json` are already-serialized JSON strings.
+   */
+  recordValidation({ task_id, profile_id = null, task_item_id = null, execution_id = null,
+    criterion_id, contract_revision = 1, validator, status, subject_json = null, evidence_json = null }) {
+    if (!task_id) throw new Error('task_id is required');
+    if (!criterion_id) throw new Error('criterion_id is required');
+    if (!validator) throw new Error('validator is required');
+    if (!['pass', 'fail', 'inconclusive'].includes(status)) throw new Error(`invalid validation status: ${status}`);
+    const task = this._prep('SELECT id, profile_id FROM durable_tasks WHERE id = ?').get(task_id);
+    if (!task) throw new Error(`task not found: ${task_id}`);
+    if (profile_id && task.profile_id !== profile_id) throw new Error('validation ownership mismatch');
+    const id = crypto.randomUUID();
+    this._prep(`INSERT INTO task_validation_results
+        (id, task_id, task_item_id, execution_id, criterion_id, contract_revision, validator,
+         status, subject_json, evidence_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, task_id, task_item_id, execution_id, criterion_id, contract_revision, validator,
+        status, subject_json, evidence_json, nowMs());
+    return this.getValidation(id);
+  }
+
+  getValidation(id) {
+    return this._prep('SELECT * FROM task_validation_results WHERE id = ?').get(id) || null;
+  }
+
+  /** All validation rows for a task, profile-scoped, oldest first. */
+  listValidations(taskId, profileId) {
+    return this._prep(`SELECT v.* FROM task_validation_results v
+      JOIN durable_tasks t ON t.id = v.task_id
+      WHERE v.task_id = ? AND t.profile_id = ?
+      ORDER BY v.rowid`).all(taskId, profileId);
+  }
+
+  /**
+   * Attach step evidence (and a completion timestamp) to an item. Kept separate
+   * from completeItem: `evidence_json` / `completed_at` are contract-plan fields,
+   * while completeItem stays the legacy status transition.
+   */
+  setItemEvidence(itemId, profileId, { evidence_json = null, completed_at = null } = {}) {
+    if (!this._itemOwnedBy(itemId, profileId)) return null;
+    const sets = ['updated_at = ?'];
+    const args = [nowMs()];
+    if (evidence_json !== null) { sets.push('evidence_json = ?'); args.push(evidence_json); }
+    if (completed_at !== null) { sets.push('completed_at = ?'); args.push(completed_at); }
+    args.push(itemId);
+    this.db.transaction(() => {
+      this._prep(`UPDATE task_items SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+      const item = this.getTaskItem(itemId);
+      this._bump(item.task_id);
+    })();
+    return this.getTaskItem(itemId);
+  }
+
   progressSummary(taskId, profileId) {
     const row = this._prep(`SELECT
         COUNT(*) AS total,
