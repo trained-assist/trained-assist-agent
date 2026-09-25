@@ -131,4 +131,49 @@ describe('DurableTaskStore', () => {
     expect(s.updateTask('plan', 'p', { status: 'active' }).status).toBe('active');
     expect(() => s.updateTask('plan', 'p', { status: 'done' })).toThrow(/finalization/);
   });
+
+  it('validation results are appended, listed and profile-scoped (P3d)', () => {
+    const s = tmpStore();
+    const r = s.createPlan({
+      id: 'p1', profile_id: 'alice', goal: 'g', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'done' }],
+      items: [{ title: 'step', execution_kind: 'programmatic', validation: { command_exit_zero: 'true' } }],
+    });
+    const itemId = r.items[0].id;
+    s.recordValidation({
+      task_id: 'p1', profile_id: 'alice', task_item_id: itemId, criterion_id: 'crit',
+      contract_revision: 1, validator: 'command_exit_zero', status: 'pass',
+      subject_json: JSON.stringify({ command: 'true' }), evidence_json: JSON.stringify({ exit_code: 0 }),
+    });
+    s.recordValidation({
+      task_id: 'p1', criterion_id: 'crit', validator: 'mystery', status: 'inconclusive',
+    });
+    const rows = s.listValidations('p1', 'alice');
+    expect(rows.map(v => [v.validator, v.status])).toEqual([
+      ['command_exit_zero', 'pass'], ['mystery', 'inconclusive'],
+    ]);
+    expect(s.listValidations('p1', 'bob')).toEqual([]); // profile-scoped read
+    expect(() => s.recordValidation({
+      task_id: 'p1', profile_id: 'bob', criterion_id: 'crit', validator: 'x', status: 'pass',
+    })).toThrow(/ownership/);
+    expect(() => s.recordValidation({
+      task_id: 'p1', criterion_id: 'crit', validator: 'x', status: 'maybe',
+    })).toThrow(/invalid validation status/);
+  });
+
+  it('setItemEvidence attaches evidence and completion time, profile-scoped', () => {
+    const s = tmpStore();
+    const r = s.createPlan({
+      id: 'p2', profile_id: 'alice', goal: 'g', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'done' }],
+      items: [{ title: 'step', execution_kind: 'programmatic', validation: { file_exists: 'x' } }],
+    });
+    const itemId = r.items[0].id;
+    expect(s.setItemEvidence(itemId, 'bob', { evidence_json: '{}', completed_at: 5 })).toBeNull();
+    const updated = s.setItemEvidence(itemId, 'alice', {
+      evidence_json: JSON.stringify({ validations: [{ key: 'file_exists', status: 'fail' }] }), completed_at: 12345,
+    });
+    expect(updated.evidence_json).toContain('file_exists');
+    expect(updated.completed_at).toBe(12345);
+  });
 });
