@@ -2,6 +2,27 @@ const fs = require('fs');
 const path = require('path');
 const TTL_MS = 48 * 60 * 60 * 1000;
 
+function releaseIntakeRefs(baseDir, username, ids, extra = {}, now = Date.now()) {
+  if (!username || !Array.isArray(ids) || !ids.length) return { released: 0, missing: 0, failed: 0 };
+  let released = 0, missing = 0, failed = 0;
+  for (const id of ids) {
+    if (typeof id !== 'string' || !/^[a-f0-9]{16,64}$/.test(id)) { failed++; continue; }
+    const metaPath = path.join(baseDir, username, 'media', 'intake-store', id, 'meta.json');
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      const next = { ...meta, ...extra, buffered: false, releasedAt: now };
+      const tmp = `${metaPath}.${process.pid}.${now}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(next), { mode: 0o600 });
+      fs.renameSync(tmp, metaPath);
+      released++;
+    } catch (e) {
+      if (e.code === 'ENOENT') missing++;
+      else failed++;
+    }
+  }
+  return { released, missing, failed };
+}
+
 // Only new transient intake media; never scan project artifacts or legacy uploads.
 function purgeIntakeMedia(baseDir, now = Date.now()) {
   let deleted = 0;
@@ -37,10 +58,29 @@ function purgeIntakeMedia(baseDir, now = Date.now()) {
       }
     } catch (error) { if (error.code !== 'ENOENT') console.warn('[intake-media cleanup]', error.code); }
 
-    // intake-store contains legacy ORIGINALS, not a disposable cache. The
-    // gateway can still reference them in an unlaunched/failed batch, invisible
-    // to this VM's pending journal. Keep until reference-aware retirement exists.
-    // R2 originals likewise have no blanket age-based lifecycle rule.
+    // intake-store originals are only eligible after an explicit release. This
+    // preserves unseen gateway retries (buffered=true / no releasedAt) forever,
+    // while web/gateway flows that have durably accepted + materialized the ref
+    // can retire their original after the same 48h safety window.
+    const store = path.join(baseDir, profile.name, 'media', 'intake-store');
+    try {
+      if (!fs.existsSync(store) || fs.lstatSync(store).isSymbolicLink() || !fs.lstatSync(store).isDirectory()) continue;
+      for (const entry of fs.readdirSync(store, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const refDir = path.join(store, entry.name);
+        if (fs.lstatSync(refDir).isSymbolicLink()) continue;
+        const metaPath = path.join(refDir, 'meta.json');
+        let meta;
+        try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); }
+        catch { continue; } // corrupt/unknown ownership => fail closed
+        if (meta.buffered !== false || !Number.isFinite(meta.releasedAt)) continue;
+        if (now - meta.releasedAt < TTL_MS) continue;
+        fs.rmSync(refDir, { recursive: true, force: true });
+        deleted++;
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') console.warn('[intake-store cleanup]', error.code);
+    }
 
   }
   return deleted;
@@ -52,4 +92,4 @@ function startIntakeMediaRetention(baseDir) {
   timer.unref();
   return timer;
 }
-module.exports = { TTL_MS, purgeIntakeMedia, startIntakeMediaRetention };
+module.exports = { TTL_MS, releaseIntakeRefs, purgeIntakeMedia, startIntakeMediaRetention };
