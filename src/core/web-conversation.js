@@ -1,0 +1,34 @@
+'use strict';
+
+// Web ConversationRef (epic #1365 PR3). A Web dialog IS its session: the
+// address is { channel:'web', endpointId:'web-app', conversationId:sessionId }.
+// No fake Telegram chat (chatId 0) and no per-profile "current session"
+// pointer — a Web run always names its exact session, so two tabs / ten
+// parallel Web sessions of one profile never collapse onto one history, and a
+// Web reply into a Telegram-born session never moves that chat's pointer.
+//
+// Canary: WEB_CONVREF_CANARY = '*' | comma-separated profile usernames.
+// Unset/empty → legacy Web path (unchanged behaviour).
+const { randomBytes } = require('crypto');
+const { makeConversationRef } = require('./conversation-ref');
+
+const WEB_ENDPOINT_ID = 'web-app';
+
+function webConversationRef(sessionId) {
+  return makeConversationRef({ channel: 'web', endpointId: WEB_ENDPOINT_ID, conversationId: sessionId });
+}
+
+// Minted by the host BEFORE the run starts, so the id the client navigates to
+// is known up front (no read-back of a shared pointer after the run).
+function newWebSessionId(now = Date.now()) {
+  return `s-web-${now}-${randomBytes(4).toString('hex')}`;
+}
+
+function webCanaryEnabled(username, env = process.env) {
+  const raw = String(env.WEB_CONVREF_CANARY || '').trim();
+  if (!raw || !username) return false;
+  if (raw === '*') return true;
+  return raw.split(',').map(s => s.trim()).filter(Boolean).includes(username);
+}
+
+module.exports = { webConversationRef, newWebSessionId, webCanaryEnabled, WEB_ENDPOINT_ID };

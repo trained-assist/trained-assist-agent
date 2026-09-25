@@ -678,7 +678,7 @@ function runTask(opts) {
     phase: 'queued', activitySessionId: opts.activitySessionId, taskId: opts.taskId, rootTaskId: opts.rootTaskId, requestId: opts.requestId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
     workDir: opts.user.workDir, task: opts.task, context: opts.context,
     sessionId: opts.sessionId, contextFromSession: opts.contextFromSession,
-    forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode, userMessageRecorded: opts.userMessageRecorded,
+    forceClaude: opts.forceClaude, forceNew: opts.forceNew, webExactSession: opts.webExactSession, mode: opts.mode, userMessageRecorded: opts.userMessageRecorded,
     projectId: opts.projectId, projectPicked: opts.projectPicked, newProjectName: opts.newProjectName, engine: opts.engine,
     initialMsgId: opts.initialMsgId, pinnedMsgId: opts.pinnedMsgId, fileRefs: opts.fileRefs,
     profileId: opts.user.profileId, telegramUserId: opts.user.telegramUserId, audience: opts.user.audience,
@@ -698,7 +698,7 @@ function runTask(opts) {
   // history). Never profile/project/workDir.
   const admissionScopes = legacyAdmissionScopes({
     chatId: opts.user.id, audience: opts.user.audience, threadId: runThreadId,
-    profileId: opts.user.username, sessionId: opts.forceNew ? null : (opts.sessionId || opts.activitySessionId),
+    profileId: opts.user.username, sessionId: opts.webExactSession ? opts.sessionId : opts.forceNew ? null : (opts.sessionId || opts.activitySessionId),
   });
   if (admission.isBusy(admissionScopes)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
@@ -1305,7 +1305,68 @@ function _recordFailureAttempt(executionId, { taskId, projectId, sessionId, engi
   }
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
+// Which session a run writes into, and whose history seeds its context.
+// Returns { activeSessionId, contextSessionId } — contextSessionId set only
+// when an existing session is continued. Side effect: claims an unattached
+// legacy session for the Telegram chat (#489).
+function resolveRunSession(sessions, getCurrent, { workDir, sessionId, chatId, audience, threadId, forceNew = false, webExactSession = false }) {
+  let activeSessionId = null;
+  let contextSessionId = null;
+  if (sessionId) {
+    // Explicit session ID from bot — honor it, but a session belonging to another chat
+    // of this profile is dropped rather than used (see the non-blocking fallback below).
+    // Sign-robust: the gateway's remembered id can diverge from disk (chatId
+    // sign-split — KV holds `s-1003…`, real content lives under `s--1003…`).
+    // resolveChatSession falls back to this chat's durable current-session
+    // pointer instead of spawning a blank session and orphaning the ТЗ.
+    // forceNew is the gateway's explicit "start a fresh session" intent (e.g.
+    // the /sessions "new" flow, or a NEW_SESSION_SIGNALS phrase) — that id is
+    // SUPPOSED to have no file on disk yet, so it must never heal back onto
+    // the chat's old pointer, or "start new session" would silently reattach
+    // to the stale one.
+    activeSessionId = (forceNew || webExactSession) ? sessionId : (sessions.resolveChatSession(workDir, sessionId, chatId, audience, threadId) || sessionId);
+    const existing = sessions.getSession(workDir, activeSessionId);
+    if (existing && webExactSession) {
+      // Web ConversationRef (#1365 PR3): the Web dialog IS this session. The
+      // authenticated profile owner writes into it exactly — never healed onto
+      // a chat-0 pointer, never dropped because a Telegram chat holds it, and
+      // its liveChatId is left untouched (no silent Telegram pointer movement).
+      contextSessionId = activeSessionId;
+    } else if (existing) {
+      // Chat isolation is NON-BLOCKING. A live session is attached to exactly one chat;
+      // if the gateway handed us one that belongs to a DIFFERENT chat of this profile
+      // (its remembered id can leak across a profile's chats), we must not reject the
+      // message — that stranded the user with an error and no answer. Instead treat the
+      // foreign session as unavailable here and fall through to THIS chat's own current
+      // session, or start fresh. The foreign session is left untouched so the other chat
+      // keeps its context. liveChatId (was ownerChatId): read-compat with pre-rename files.
+      const attachedChatId = existing.liveChatId ?? existing.ownerChatId;
+      if (attachedChatId && String(attachedChatId) !== String(chatId)) {
+        activeSessionId = null;
+      } else {
+        // Legacy / unattached session (#489): a null liveChatId would otherwise let ANY
+        // chat adopt it and mix contexts. Claim it for the current chat on first touch.
+        if (!attachedChatId && chatId) {
+          sessions.claimLiveChatId(workDir, sessionId, chatId);
+        }
+        contextSessionId = sessionId;
+      }
+    }
+  }
+
+  if (!activeSessionId && !((forceNew || webExactSession) && sessionId)) {
+    // No usable explicit session (none given, or a foreign one was dropped above) —
+    // continue the most recent one for THIS chat (within 4h), or start a fresh session.
+    const currentId = getCurrent(workDir, chatId, audience, threadId);
+    if (currentId && sessions.getSession(workDir, currentId)) {
+      activeSessionId = currentId;
+      contextSessionId = currentId;
+    }
+  }
+  return { activeSessionId, contextSessionId };
+}
+
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, webExactSession = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1330,7 +1391,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   savePendingTask(taskId, {
     phase: 'running', taskId, userId: user.id, username: user.username, workDir: user.workDir, audience,
     profileId: user.profileId, telegramUserId: user.telegramUserId, continuationCount, retryCount, internalGtd,
-    task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, projectId, projectPicked, newProjectName,
+    task, context, sessionId, contextFromSession, forceClaude, forceNew, webExactSession, mode, projectId, projectPicked, newProjectName,
     initialMsgId, pinnedMsgId, initiatedAt, threadId, resumedAfterRestart, resumeAttempts,
     startedAt: Date.now(),
   });
@@ -1362,54 +1423,12 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const ctxLimit = forceClaude ? 1500 : 500;
   const ctxMsgCount = forceClaude ? 8 : 6;
 
-  if (sessionId) {
-    // Explicit session ID from bot — honor it, but a session belonging to another chat
-    // of this profile is dropped rather than used (see the non-blocking fallback below).
-    // Sign-robust: the gateway's remembered id can diverge from disk (chatId
-    // sign-split — KV holds `s-1003…`, real content lives under `s--1003…`).
-    // resolveChatSession falls back to this chat's durable current-session
-    // pointer instead of spawning a blank session and orphaning the ТЗ.
-    // forceNew is the gateway's explicit "start a fresh session" intent (e.g.
-    // the /sessions "new" flow, or a NEW_SESSION_SIGNALS phrase) — that id is
-    // SUPPOSED to have no file on disk yet, so it must never heal back onto
-    // the chat's old pointer, or "start new session" would silently reattach
-    // to the stale one.
-    activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId, audience, threadId) || sessionId);
-    const existing = sessions.getSession(user.workDir, activeSessionId);
-    if (existing) {
-      // Chat isolation is NON-BLOCKING. A live session is attached to exactly one chat;
-      // if the gateway handed us one that belongs to a DIFFERENT chat of this profile
-      // (its remembered id can leak across a profile's chats), we must not reject the
-      // message — that stranded the user with an error and no answer. Instead treat the
-      // foreign session as unavailable here and fall through to THIS chat's own current
-      // session, or start fresh. The foreign session is left untouched so the other chat
-      // keeps its context. liveChatId (was ownerChatId): read-compat with pre-rename files.
-      const attachedChatId = existing.liveChatId ?? existing.ownerChatId;
-      if (attachedChatId && String(attachedChatId) !== String(chatId)) {
-        activeSessionId = null;
-      } else {
-        // Legacy / unattached session (#489): a null liveChatId would otherwise let ANY
-        // chat adopt it and mix contexts. Claim it for the current chat on first touch.
-        if (!attachedChatId && chatId) {
-          sessions.claimLiveChatId(user.workDir, sessionId, chatId);
-        }
-        sessionExists = true;
-        const fromSession = sessions.buildContext(user.workDir, sessionId, ctxLimit, ctxMsgCount);
-        if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
-      }
-    }
-  }
-
-  if (!activeSessionId && !(forceNew && sessionId)) {
-    // No usable explicit session (none given, or a foreign one was dropped above) —
-    // continue the most recent one for THIS chat (within 4h), or start a fresh session.
-    const currentId = getCurrentSessionId(user.workDir, chatId, audience, threadId);
-    if (currentId && sessions.getSession(user.workDir, currentId)) {
-      activeSessionId = currentId;
-      sessionExists = true;
-      const fromSession = sessions.buildContext(user.workDir, currentId, ctxLimit, ctxMsgCount);
-      if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
-    }
+  const picked = resolveRunSession(sessions, getCurrentSessionId, { workDir: user.workDir, sessionId, chatId, audience, threadId, forceNew, webExactSession });
+  activeSessionId = picked.activeSessionId;
+  if (picked.contextSessionId) {
+    sessionExists = true;
+    const fromSession = sessions.buildContext(user.workDir, picked.contextSessionId, ctxLimit, ctxMsgCount);
+    if (fromSession) sessionContext = context ? `${fromSession}\n\n${context}` : fromSession;
   }
 
   if (contextFromSession && !sessionExists) {
@@ -1880,7 +1899,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       else await tgSend(BOT_TOKEN, chatId, tgMsg, threadId);
 
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine,
         errorText: inactivityKill ? 'inactivity kill: silent 5min' : 'timeout: 40min budget',
         action: 'auto_continue',
       });
@@ -1892,7 +1911,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         user,
         task: continuationTask, initiatedAt, threadId,
         context: '',
-        sessionId: activeSessionId,
+        sessionId: activeSessionId, webExactSession,
         forceClaude: true,
         initialMsgId: msgId,
         pinnedMsgId,
@@ -1905,7 +1924,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, limitMsg, threadId);
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine,
         errorText: 'timeout: auto-continuation budget exhausted',
         action: null,
       });
@@ -1940,7 +1959,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       setCurrentSessionId(user.workDir, activeSessionId, chatId, audience, threadId);
     }
     executionHistory.recordAttempt(executionId, {
-      taskId, projectId, sessionId: activeSessionId, engine,
+      taskId, projectId, sessionId: activeSessionId, webExactSession, engine,
       errorText: 'user stopped', failureClass: 'USER_STOP', classificationSource: 'rule', action: null,
     });
     executionHistory.finalizeExecution(executionId, 'CANCELLED');
@@ -1971,7 +1990,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine, exitCode,
         errorText: codexErrorMsg || `exit ${exitCode}`, action: 'quick_crash_retry',
       });
       const queuedRetry = runTask({
@@ -1980,7 +1999,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         user,
         task,
         context,
-        sessionId: activeSessionId,
+        sessionId: activeSessionId, webExactSession,
         forceClaude,
         initialMsgId: msgId,
         pinnedMsgId,
@@ -2004,7 +2023,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg, threadId));
     else await tgSend(BOT_TOKEN, chatId, crashMsg, threadId);
     _recordFailureAttempt(executionId, {
-      taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+      taskId, projectId, sessionId: activeSessionId, webExactSession, engine, exitCode,
       errorText: codexErrorMsg || `exit ${exitCode}`, action: null,
     });
     executionHistory.finalizeExecution(executionId, 'FAILED');
@@ -2047,14 +2066,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine, exitCode,
         errorText: reason, action: 'native_resume_fallback',
       });
       const queuedRetry = runTask({
         initiatedAt, threadId,
         taskId: `${user.username}-resume-fb-${Date.now()}`,
         user, task, context,
-        sessionId: activeSessionId,
+        sessionId: activeSessionId, webExactSession,
         forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
         resumedAfterRestart, resumeAttempts,
         continuationCount, mode, projectId, internalGtd, engine,
@@ -2077,14 +2096,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine, exitCode,
         errorText: reason, action: 'resume_after_restart_retry',
       });
       const queuedRetry = runTask({
         initiatedAt, threadId,
         taskId: `${user.username}-resume-${Date.now()}`,
         user, task, context,
-        sessionId: activeSessionId,
+        sessionId: activeSessionId, webExactSession,
         forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
         resumedAfterRestart: true, resumeAttempts: resumeAttempts + 1,
         continuationCount, mode, projectId, internalGtd, engine,
@@ -2136,7 +2155,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       else await tgSend(BOT_TOKEN, chatId, switchMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: failedModel,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: failedModel,
         errorText: preLadderText, action: 'deepseek_go_toggle_flip',
       });
       const queuedRetry = runTask({
@@ -2145,7 +2164,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         user,
         task,
         context,
-        sessionId: activeSessionId,
+        sessionId: activeSessionId, webExactSession,
         forceClaude,
         initialMsgId: msgId,
         pinnedMsgId,
@@ -2177,7 +2196,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           else await tgSend(BOT_TOKEN, chatId, contextMsg, threadId);
           if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, contextMsg);
           _recordFailureAttempt(executionId, {
-            taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+            taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: verdict.model,
             errorText: preLadderText, action: 'context_ladder_next_rung',
           });
           const queuedRetry = runTask({
@@ -2186,7 +2205,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
             user,
             task,
             context,
-            sessionId: activeSessionId,
+            sessionId: activeSessionId, webExactSession,
             forceClaude,
             initialMsgId: msgId,
             pinnedMsgId,
@@ -2206,7 +2225,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         else await tgSend(BOT_TOKEN, chatId, tooBigMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, tooBigMsg);
         _recordFailureAttempt(executionId, {
-          taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+          taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: verdict.model,
           errorText: preLadderText, action: null,
         });
         executionHistory.finalizeExecution(executionId, 'FAILED');
@@ -2221,7 +2240,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         else await tgSend(BOT_TOKEN, chatId, configMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, configMsg);
         _recordFailureAttempt(executionId, {
-          taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+          taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: verdict.model,
           errorText: preLadderText, action: null,
         });
         executionHistory.finalizeExecution(executionId, 'BLOCKED');
@@ -2233,7 +2252,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         else await tgSend(BOT_TOKEN, chatId, degradeMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, degradeMsg);
         _recordFailureAttempt(executionId, {
-          taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+          taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: verdict.model,
           errorText: preLadderText, action: 'ladder_next_rung',
         });
         const queuedRetry = runTask({
@@ -2242,7 +2261,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           user,
           task,
           context,
-          sessionId: activeSessionId,
+          sessionId: activeSessionId, webExactSession,
           forceClaude,
           initialMsgId: msgId,
           pinnedMsgId,
@@ -2263,7 +2282,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       // QUOTA is a plan/usage limit, NOT a credential loss (spec §7): health degrades via
       // _recordFailureAttempt below; do NOT set the auth flag.
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: verdict.model,
         errorText: preLadderText, action: null,
       });
       executionHistory.finalizeExecution(executionId, 'BLOCKED');
@@ -2301,7 +2320,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
       _recordFailureAttempt(executionId, {
-        taskId, projectId, sessionId: activeSessionId, engine,
+        taskId, projectId, sessionId: activeSessionId, webExactSession, engine,
         errorText: authText, action: 'engine_fallback_to_opencode',
       });
       const queuedRetry = runTask({
@@ -2310,7 +2329,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         user,
         task,
         context,
-        sessionId: activeSessionId,
+        sessionId: activeSessionId, webExactSession,
         forceClaude,
         initialMsgId: msgId,
         pinnedMsgId,
@@ -2332,7 +2351,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, authMsg);
     _recordFailureAttempt(executionId, {
-      taskId, projectId, sessionId: activeSessionId, engine,
+      taskId, projectId, sessionId: activeSessionId, webExactSession, engine,
       errorText: authText, action: null,
     });
     executionHistory.finalizeExecution(executionId, 'BLOCKED');
@@ -2354,14 +2373,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
     _recordFailureAttempt(executionId, {
-      taskId, projectId, sessionId: activeSessionId, engine, exitCode,
+      taskId, projectId, sessionId: activeSessionId, webExactSession, engine, exitCode,
       errorText: incompleteReason, action: 'generic_incomplete_retry',
     });
     const fireRetry = () => runTask({
       initiatedAt, threadId,
       taskId: `${user.username}-retry-${Date.now()}`,
       user, task, context,
-      sessionId: activeSessionId,
+      sessionId: activeSessionId, webExactSession,
       forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
       incompleteRetryAttempts: nextAttempt,
       continuationCount, mode, projectId, internalGtd, engine,
@@ -2377,7 +2396,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Record token usage for billing
   if (engine === 'opencode' && opencodeUsage) {
     recordUsage(user.workDir, {
-      taskId, sessionId: activeSessionId,
+      taskId, sessionId: activeSessionId, webExactSession,
       engine: 'opencode', model: opencodeModel || 'opencode-config',
       input_tokens: opencodeUsage.input || 0,
       output_tokens: opencodeUsage.output || 0,
@@ -2389,7 +2408,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   } else if (claudeUsage) {
     recordUsage(user.workDir, {
       taskId,
-      sessionId: activeSessionId,
+      sessionId: activeSessionId, webExactSession,
       engine: engine || 'claude',
       model: claudeModel || process.env.ANTHROPIC_MODEL || 'claude',
       input_tokens: claudeUsage.input_tokens || 0,
@@ -2586,6 +2605,7 @@ function interruptForRestart() {
 module.exports = {
   interruptForRestart, MAX_RESUME_ATTEMPTS,
   runTask, getQuickAnswer, runQuickAnswer, shouldAttemptQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
+  resolveRunSession,
   isTaskRunning, isSessionRunning, stopSessionTask, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   reconcileSoftContinuations,
   // Exported for intent-coverage tests only

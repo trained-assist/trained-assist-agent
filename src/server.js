@@ -378,7 +378,7 @@ async function resumePendingTasks(secrets) {
         const running = runTask({
           taskId: `${p.username}-resume-${Date.now()}`,
           user, task: resumeTask, context: p.context || null,
-          engine, sessionId: p.sessionId || null,
+          engine, sessionId: p.sessionId || null, webExactSession: !!p.webExactSession,
           contextFromSession: p.contextFromSession || null,
           forceClaude: true, projectId: p.projectId || null, projectPicked: p.projectPicked === true,
           initialMsgId: p.initialMsgId || null, pinnedMsgId: p.pinnedMsgId || null,
