@@ -1373,16 +1373,18 @@ function resolveRunSession(sessions, getCurrent, { workDir, sessionId, chatId, a
       // foreign session as unavailable here and fall through to THIS chat's own current
       // session, or start fresh. The foreign session is left untouched so the other chat
       // keeps its context. liveChatId (was ownerChatId): read-compat with pre-rename files.
+      // Same for forum topics (#1409): the conversation is the pair (Telegram chat,
+      // message_thread_id) — a session of a sibling topic in the same group is foreign too.
       const attachedChatId = existing.liveChatId ?? existing.ownerChatId;
-      if (attachedChatId && String(attachedChatId) !== String(chatId)) {
+      if (!sessions.belongsToConversation(existing, chatId, threadId)) {
         activeSessionId = null;
       } else {
         // Legacy / unattached session (#489): a null liveChatId would otherwise let ANY
-        // chat adopt it and mix contexts. Claim it for the current chat on first touch.
-        if (!attachedChatId && chatId) {
-          sessions.claimLiveChatId(workDir, sessionId, chatId);
+        // chat adopt it and mix contexts. Claim it for the current chat (and topic) on first touch.
+        if (chatId && (!attachedChatId || sessions.threadOf(existing) === undefined)) {
+          sessions.claimLiveChatId(workDir, activeSessionId, chatId, sessions.normThreadId(threadId));
         }
-        contextSessionId = sessionId;
+        contextSessionId = activeSessionId;
       }
     }
   }
@@ -1391,7 +1393,11 @@ function resolveRunSession(sessions, getCurrent, { workDir, sessionId, chatId, a
     // No usable explicit session (none given, or a foreign one was dropped above) —
     // continue the most recent one for THIS chat (within 4h), or start a fresh session.
     const currentId = getCurrent(workDir, chatId, audience, threadId);
-    if (currentId && sessions.getSession(workDir, currentId)) {
+    const current = currentId && sessions.getSession(workDir, currentId);
+    if (current && (!chatId || sessions.belongsToConversation(current, chatId, threadId))) {
+      if (chatId && sessions.threadOf(current) === undefined) {
+        sessions.claimLiveChatId(workDir, currentId, chatId, sessions.normThreadId(threadId));
+      }
       activeSessionId = currentId;
       contextSessionId = currentId;
     }
@@ -1508,7 +1514,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (!sessionExists && !contextFromSession && chatId && !webExactSession) {
     try {
       const recentBlock = require('../chat-history').buildRecentChatBlock(
-        path.join(user.workDir, 'sessions'), chatId, { excludeSessionId: activeSessionId });
+        path.join(user.workDir, 'sessions'), chatId, { excludeSessionId: activeSessionId, threadId: sessions.normThreadId(threadId) });
       if (recentBlock) sessionContext = sessionContext ? `${recentBlock}\n\n${sessionContext}` : recentBlock;
     } catch (e) { console.warn('[runner] recent chat block:', e.message); }
   }

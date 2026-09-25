@@ -19,6 +19,12 @@
 ## В скоупе (сценарии)
 
 - `docs/user-scenarios/recruiter/*.md` — сценарии домена «рекрутер».
+- `docs/user-scenarios/engineering/*.md` — сценарии инженерной разработки через
+  Playbooks (#1372, `playbooks/development.json`).
+- `docs/user-scenarios/exhibition/*.md` — сценарии обработки участников выставок
+  (каталог → сайт продаж).
+- `docs/user-scenarios/freelance/*.md` — сценарии спецификации фриланс-проекта
+  (intake → GO/NO-GO).
 - Любой новый `docs/user-scenarios/<domain>/*.md`, добавленный по тому же формату
   (см. README.md в этой папке).
 
