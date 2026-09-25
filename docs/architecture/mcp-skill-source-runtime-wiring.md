@@ -255,7 +255,21 @@ Provider не должен daemonize descendants вне managed process group в
 
 **Осознанный trade-off v1:** recovery не живёт как отдельный host service после смерти adapter. Мы принимаем это ради меньшей инфраструктуры. Если реальные инциденты покажут необходимость always-on central supervisor, он становится v2 и использует те же journal/RunBinding/contracts.
 
-### 4.4 Deadlines по классам actions
+### 4.4 Кто владеет reaper/reconcile
+
+В v1 владелец фонового reconcile — **тот же trained-assist server process, который успешно держит `acquireExecutionOwner(SYSTEM_ROOT)`**. Второй server не может одновременно стать reaper owner.
+
+Порядок:
+1. после получения execution-owner lock и до обычного task recovery host делает startup scan provider lease journal;
+2. затем запускает low-frequency reconcile timer;
+3. adapter остаётся единственным normal writer своего live lease record;
+4. host-reaper может перевести orphan/finalize cleanup только после доказательства, что adapter/provider process identities не живы; для takeover journal используется новый reconcile generation/CAS;
+5. live/ambiguous/PID-reuse/unknown identity → retain + `needs_reconcile`, без signal/delete;
+6. reaper никогда не трогает workspace/code/user data и не пытается повторять action.
+
+Если server не смог получить execution-owner lock, он не запускает reaper. Отдельный daemon/reaper service в v1 не нужен.
+
+### 4.5 Deadlines по классам actions
 
 Начальные implementation defaults, не SLA:
 - MCP handshake/provider startup: 10 s;
@@ -301,7 +315,7 @@ Timeout после dispatch mutation → `unknown/OUTCOME_UNKNOWN`, без auto-
   core-bundles/<revision>/       # retained adapter code
 ```
 
-`MCP_SKILLS_ROOT` задаётся явно, вне live repo. `MCP_SKILL_SOURCES_CONFIG` — путь к active config, не enable-flag; execution/run roots тоже host config. V1 не требует Unix socket/custom IPC runtime.
+`MCP_SKILLS_ROOT` задаётся явно, вне live repo. `MCP_SKILL_SOURCES_CONFIG` — путь к active config, не enable-flag; execution/run roots тоже host config. V1 **не строит general SessionMcpRuntime IPC**, но использует один private local Unix socket для узкого ActionBroker callback в single-owner server.
 
 Незаполненный deployment path использует checked-in пустой config. Явно заданный, но недоступный path — ошибка, не молчаливый переход к sibling mounts. Релизы и runtime records не должны лежать в MCP execution-copy или workspace/code.
 
@@ -328,10 +342,10 @@ Rollback — публикация полной предыдущей конфиг
 ### 7.1 Три разных окружения
 
 - **Engine env:** текущая auth/session инфраструктура coding engine; исправление всей её least-privilege модели — A2/#1353, не обещание этого wiring.
-- **Stdio adapter env:** минимальный bootstrap: RunBinding path, generation/runtime roots и только необходимые core execution settings. Adapter не пересылает своё унаследованное env provider-у автоматически.
+- **Stdio adapter env:** минимальный bootstrap: RunBinding path, generation/runtime roots, ActionBroker endpoint + run/provider-scoped capability. Adapter не пересылает своё унаследованное env provider-у автоматически.
 - **Provider env:** core adapter формирует allowlisted env с нуля, не `{...process.env}` и не общий `mcpToolEnv`. Profile data paths и только необходимые secret bindings берутся host-side. Никаких `NODE_OPTIONS`, `NODE_PATH`, arbitrary preload или Git credential variables от модели.
 
-Legacy `USER_ID`, `WORK_DIR` и нужные пути совместимости задаются host policy. Credentials не попадают в engine MCP config, tool arguments, Task Packet или diagnostics. На HH/Freelance onboarding отдельно перечислить реально требуемые env/file accesses; существующий общий `mcpToolEnv` не считать готовой least-privilege политикой. Provider, которому нужны hardcoded HOME paths, не переключать до адаптации/проверки этих зависимостей. Runtime permissions/secret references задаются deploy-owned policy, а не редактируемым project manifest.
+Legacy `USER_ID`, `WORK_DIR` и нужные пути совместимости задаются host policy. Credentials не попадают в engine MCP config, tool arguments, Task Packet или diagnostics. На HH/Freelance onboarding отдельно перечислить реально требуемые env/file accesses; существующий общий `mcpToolEnv` не считать готовой least-privilege политикой. Provider, которому нужны hardcoded HOME paths, не переключать до адаптации/проверки этих зависимостей. Runtime permissions/secret references задаются deploy-owned policy, а не редактируемым project manifest. Retained adapter bundle **не содержит operational DB ownership/migrations и не открывает `durable-tasks/state.db`**; `better-sqlite3`/`ActionExecutions` остаются host-side.
 
 ### 7.2 Одна карта — три serializers
 
@@ -423,8 +437,8 @@ LLM/MCP client может повторить tool call новым JSON-RPC reque
 ### 10.2 Последовательность
 
 1. Реализовать wiring с пустым sources и fake provider tests; production не включать автоматически.
-2. На test profile подключить artifact-compatible read-only engineering action, доказать путь engine → adapter → invokeAction → child → history.
-3. Подготовить HH/Freelance parity, включая реальные local paths/credentials и отсутствие production write в smoke; проверить на staging всем трём движкам.
+2. На test profile подключить artifact-compatible read-only engineering action и первым реальным engine проверить **OpenCode**: `OpenCode → adapter → ActionBroker/invokeAction → provider child → history`.
+3. Затем доказать parity Claude/Codex на том же marker provider; только после этого готовить HH/Freelance parity с реальными paths/credentials и без production write в smoke.
 4. Перед cutover сохранить прежнюю managed конфигурацию и releases. Legacy runs доживают; новые получают managed config. На время перехода старые процессы не переписывают config новых runs.
 5. Удалить direct sibling launch/import и обновить все их callers/tests. Старые source checkouts не удалять в этом PR.
 
@@ -471,23 +485,37 @@ Core: pure generation compiler, reserved core names, `SessionMcpPlan`/`RunBindin
 
 Acceptance: empty config; invalid/disabled/ineligible; collisions/core precedence; G1/G2 snapshot; discovery без external JS; deterministic plan; B2 v1 fixture; RunBinding не принимает authority из model args; engineering #3/#4 не блокируется.
 
-### PR2 — Core adapter + provider child + journal + первый real milestone
+### PR2 — Core adapter + ActionBroker + provider child + journal + первый real milestone
 
-Реализовать один core-owned adapter-process: MCP server для engine и MCP client/supervisor для provider. Добавить single-writer lease journal, host-context bridge, bounded protocol, allowlisted provider env, post-copy verification, idempotency/unknown semantics.
+Реализовать core-owned adapter-process: MCP server для engine и MCP client/supervisor для provider. Host server добавляет narrow ActionBroker и **единолично** выполняет `invokeAction`/ActionExecutions; adapter не открывает operational SQLite. Добавить single-writer provider lease journal, bounded protocol, allowlisted provider env, post-copy verification, idempotency/unknown semantics.
 
-Сначала fake provider integration без LLM. Затем обязательный milestone **Claude + fake read-only marker provider** на test host:
+Сначала deterministic fake-provider E2E без LLM. Затем обязательный первый real-engine milestone — **OpenCode + fake read-only marker provider**:
+
 ```text
-Claude → adapter → invokeAction → provider child → action history
+OpenCode
+  → adapter
+  → ActionBroker
+  → host invokeAction / action_executions
+  → adapter transport callback
+  → provider child
+  → history/result
 ```
-Без HH/Freelance и без business mutation. Это первый end-to-end до паритета трёх движков.
 
-Acceptance: fake path/profile/approval/_meta; MCP handshake/ping/list/call; timeout/isError; journal lock/same-key race; adapter/provider crash; PID reuse; repeated calls не rehash; source swap before new spawn rejected; Claude real CLI smoke; no production provider activation.
+Почему OpenCode первый:
+- он уже first-class engine в текущем runner;
+- per-invocation `OPENCODE_CONFIG` уже есть;
+- проект уже имеет `free` ladder из OpenRouter `:free` моделей;
+- marker-tool prompt можно гонять без business mutation и без платной модели.
 
-### PR3 — Codex/OpenCode parity + engine-run callers
+Blocking unit/integration tests adapter/broker/provider остаются model-free. Реальный OpenCode smoke можно гонять в CI/staging при наличии `OPENROUTER_API_KEY`, используя bounded fallback по free ladder; внешнюю quota/provider недоступность отличать от wiring regression, чтобы бесплатный внешний endpoint не стал единственным доказательством корректности CI.
 
-Добавить тот же SessionMcpPlan/adapter descriptors в Codex/OpenCode, вынести generated configs из code cwd; обновить `runner/index.js`, `claude-runner.js`, `hermes-tools-run.js`; negative inherited-server tests. Claude path из PR2 не перепроектировать.
+Acceptance: fake path/profile/approval/_meta; full resolved generation pinned; broker capability/scope; MCP handshake/ping/list/call; ActionExecutions пишет только host owner; timeout/isError; journal lock/same-key race; adapter/provider crash; server reaper ownership; PID reuse; repeated calls не rehash; source swap before new spawn rejected; OpenCode real CLI marker smoke; no production provider activation.
 
-Acceptance: одинаковый marker provider на 3 движках; concurrent sessions не перетирают configs; correct cwd/native resume; global/project legacy config не resurrect server; launch/stop/resume cleanup; deadlines согласованы с установленными CLI versions. Read-only engineering canary — только после B2/B3-ready release.
+### PR3 — Claude/Codex parity + engine-run callers
+
+Добавить тот же SessionMcpPlan/adapter descriptor в Claude/Codex, сохранить OpenCode path из PR2; вынести generated configs из code cwd; обновить `runner/index.js`, `claude-runner.js`, `hermes-tools-run.js`; negative inherited-server tests.
+
+Acceptance: одинаковый marker provider на всех 3 engines; concurrent sessions не перетирают configs; correct cwd/native resume; global/project legacy config не resurrect server; launch/stop/resume cleanup; deadlines согласованы с установленными CLI versions. Read-only engineering canary — только после B2/B3-ready release.
 
 ### PR4 — HH/Freelance parity + quick-action cutover + rollout
 
@@ -523,7 +551,7 @@ Acceptance: preserved `hh-skills`/`freelance-skills` names/actions; profile isol
 | 2. Lease lifetime | §4, adapter-owned lease + single-writer journal + conservative recovery | Always-on supervisor/service отложен в v2; TTL deletion/release-after-call ломают live child. |
 | 3. Verification cost | §5, metadata snapshot + full verify на new child | mtime/path trust или hashing на каждом call. Private copy стоит disk/IO, измеряем. |
 | 4. Generations | §6, immutable snapshot, atomic pointer swap | mutable singleton registry: old/new policy mix. |
-| 5. Host context | §3, host-generated RunBinding + adapter-generated provider `_meta` | trusted roots/approval из arguments; same-UID hostile engine остаётся вне security boundary. |
+| 5. Host context | §3, full resolved generation + RunBinding; narrow ActionBroker keeps invokeAction/DB in host; adapter-generated provider `_meta` | multi-process operational DB writer rejected; same-UID hostile engine remains outside security boundary. |
 | 6. Controls | §11, enabled/profiles + explicit status | ещё один enable/approval framework, скрытая деградация. |
 | 7. Engines | §7, shared plan + version-tested serializers | три selector-а и только JSON unit tests; inherited configs требуют negative tests. |
 | 8. Migration | §10, staged cutover без fallback, preserved names | indefinite dual authority / mount по существованию папки. Реальные env зависимости ещё требуют parity tests. |
@@ -534,7 +562,7 @@ Acceptance: preserved `hh-skills`/`freelance-skills` names/actions; profile isol
 
 ### Что намеренно не строим
 
-HTTP MCP gateway для внешних клиентов, custom host-runtime IPC в v1, always-on provider supervisor service, общий OS sandbox, новый task scheduler/WIP gate, новые domain features, workspace/fast_verify реализацию, массовую чистку git/worktrees, новый approval UI и изменение branch protection. V1 сознательно выбирает один adapter-process + его provider child вместо нового сервисного стека.
+HTTP MCP gateway для внешних клиентов, **general** host-runtime/SessionMcpRuntime IPC в v1 (узкий ActionBroker callback остаётся), always-on provider supervisor service, общий OS sandbox, новый task scheduler/WIP gate, новые domain features, workspace/fast_verify реализацию, массовую чистку git/worktrees, новый approval UI и изменение branch protection. V1 сознательно выбирает один adapter-process + его provider child вместо нового сервисного стека.
 
 ## 14. Источники и проверка реализации
 
@@ -545,13 +573,15 @@ HTTP MCP gateway для внешних клиентов, custom host-runtime IPC
 - [Admin preparation/activation](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/scripts/prepare-mcp-skill-artifact.js), [source schema](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/contracts/mcp-skill-sources.schema.json)
 - [Browser/session config](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/browser.js), [engine adapters](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/runner/claude-runner.js), [Hermes caller](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/hermes-tools-run.js)
 - [Action invocation](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/action-invoke.js), [transport](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/action-transport.js), [single-call MCP path](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/mcp-action.js)
+- [Execution owner lock](https://github.com/trained-assist/trained-assist-agent/blob/main/src/execution-owner-lock.js), [ActionExecutions](https://github.com/trained-assist/trained-assist-agent/blob/main/src/action-executions.js), [operational DB path](https://github.com/trained-assist/trained-assist-agent/blob/main/src/data-paths.js)
+- Existing architectural precedent for child→core loopback capability transport: `docs/specs/domain-module-actions-cron-web-surface-v2.md`.
 - [Action registry](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/action-provider-registry.js), [action/provider schema](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/contracts/action-v1/contract.schema.json), [legacy handler ctx](https://github.com/trained-assist/trained-assist-agent/blob/3b31a0dc68ccd75da37a731787b9b233d7d21eca/src/mcp-skills/registry.js)
 - [Engineering manifest at reviewed main](https://github.com/trained-assist/trained-assist-engineering/blob/afa06896e30f101e272852b98b80e4524b06e43e/provider-manifest.json)
 
 ### Внешние ограничения: primary documentation
 
 - [MCP lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle): negotiation, initialization, transport shutdown и deadlines. В этом дизайне поддержанный subset версионируется отдельно.
-- [MCP transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports): JSON-RPC/stdout/stderr; внутренний IPC core является собственным adapter transport, не новым публичным стандартом.
+- [MCP transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports): JSON-RPC/stdout/stderr. ActionBroker — private internal callback transport between adapter and single-owner host; он не объявляется публичным MCP transport.
 - [MCP tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools): tools/list, CallToolResult, tool execution errors.
 - [Node 22 child processes](https://nodejs.org/download/release/v22.0.0/docs/api/child_process.html): signal delivery не равна exit; descendants и process group требуют отдельного управления.
 - [Linux proc](https://www.kernel.org/doc/html/v6.9/filesystems/proc.html): process identity/start_time; это сведения для conservative recovery, не атомарный fencing primitive.
