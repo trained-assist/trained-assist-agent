@@ -2,7 +2,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { webAuth } = require('./web-auth');
 const { listSessions, getSession, getCurrentSessionId } = require('./session-store');
-const { isSessionRunning, runTask, stopSessionTask } = require('./runner');
+const { isSessionRunning, isSessionQueuedFor, runTask, stopSessionTask } = require('./runner');
 const { userWorkDir, SYSTEM_ROOT } = require('./data-paths');
 const { newWebSessionId, webCanaryEnabled } = require('./core/web-conversation');
 
@@ -118,7 +118,10 @@ function getSessionFor(username, sessionId) {
 // Shared by both the cookie-authed /web/stop/:id route and the bearer-gated
 // /web/stop-bearer route (external frontends can't hold a WEB_JWT cookie).
 function stopSessionFor(username, sessionId) {
-  if (!sessionId || !getSession(userWorkDir(username), sessionId)) return false;
+  if (!sessionId) return false;
+  // A brand-new Web session has no file until the runner creates it, but its
+  // id is already known to the client (SSE 'session') — Stop must reach it.
+  if (!getSession(userWorkDir(username), sessionId) && !isSessionQueuedFor?.(username, sessionId)) return false;
   return stopSessionTask(username, sessionId);
 }
 
