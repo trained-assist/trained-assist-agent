@@ -87,11 +87,13 @@ function listSessionsFor(username, limit = 20) {
 function getSessionFor(username, sessionId) {
   if (!sessionId || !SESSION_ID_RE.test(sessionId)) return null;
   const workDir = userWorkDir(username);
-  const index = listSessions(workDir, 50);
-  const meta = index.find(s => s.id === sessionId);
-  if (!meta) return null;
+  // The file on disk is the source of truth, not the 50-entry recency index:
+  // gating on the index made every older dialog (e.g. a «📜 Журнал» link to it)
+  // fail with 404 → "Failed to load session". Audience scoping is kept — the
+  // web surface only shows default-audience sessions, as listSessions() does.
   const session = getSession(workDir, sessionId);
-  if (!session) return null;
+  if (!session || (session.audience || 'default') !== 'default') return null;
+  const meta = listSessions(workDir, Infinity, null).find(s => s.id === sessionId) || {};
   return {
     id: session.id,
     topic: session.topic,
