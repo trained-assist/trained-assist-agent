@@ -9,7 +9,7 @@ const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
 const { isAuthError, setAuthFailedFlag, clearAuthFailedFlag } = require('../auth-flag');
-const { isTerminalQuickCrash } = require('../engine-crash-policy');
+const { isTerminalQuickCrash, engineFallbackNotice, engineAuthNotice } = require('../engine-crash-policy');
 const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
 const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
@@ -2380,7 +2380,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const engineLabel = engine === 'codex' ? 'Codex' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
 
     if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
-      const fallbackMsg = `⚠️ ${engineLabel} потерял авторизацию — автоматически переключаюсь на OpenCode для этой задачи.`;
+      const fallbackMsg = engineFallbackNotice(engineLabel, authClass);
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
@@ -2408,7 +2408,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       return { queuedRetry };
     }
 
-    const authMsg = `⚠️ Авторизация ${engineLabel} истекла — оператор уже уведомлён, скоро починим.`;
+    const authMsg = engineAuthNotice(engineLabel, authClass);
     if (msgId) {
       await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg, threadId));
     } else {
