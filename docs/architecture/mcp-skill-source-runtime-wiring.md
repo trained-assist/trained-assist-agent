@@ -9,45 +9,45 @@
 
 ## 0. Решение в одном экране
 
-**В v1 в сессию монтируем один core-owned adapter-process, а не entrypoint внешнего репозитория.** Этот adapter одновременно:
-- говорит с Claude/Codex/OpenCode обычным MCP stdio как server;
-- держит закреплённую generation + host-issued RunBinding;
-- прогоняет action через существующий `invokeAction`;
-- приобретает private verified copy provider-а;
-- запускает provider child и говорит с ним **MCP stdio как client**;
-- владеет process lease/journal до завершения run/provider.
+**В v1 в сессию монтируем core-owned adapter-process, а не entrypoint внешнего репозитория.** Adapter владеет provider child и его lease, но **не пишет operational SQLite и не исполняет `invokeAction` локально**.
+
+Существующий server-процесс уже является единственным execution owner для operational data-root. Поэтому policy/idempotency/action history остаются внутри host через узкий private `ActionBroker`; adapter использует его как callback.
 
 ```text
-Claude / Codex / OpenCode
+OpenCode / Claude / Codex
   │ MCP stdio; прежнее имя mcpServerId
   ▼
 core-owned adapter process
-  ├─ pinned generation + host-issued RunBinding
-  ├─ invokeAction: schema/trigger/consent/history
-  ├─ provider lease journal
-  └─ Provider child
-       ▲
-       │ MCP stdio + negotiated trained-assist host-context extension
-       └─ private verified artifact copy
+  │
+  ├──── private ActionBroker IPC ────► trained-assist server (single execution owner)
+  │                                   └─ invokeAction → ActionExecutions / policy / history
+  │                                          │ transport dispatch/result
+  │◄─────────────────────────────────────────┘
+  │
+  └─ MCP stdio → provider child
+                  └─ private verified artifact copy
 ```
 
-**В v1 нет отдельного `SessionMcpRuntime` в host и нет custom IPC между adapter и host.** Это сознательное упрощение после review PR #1361: отдельный `adapter → IPC → host-runtime → supervisor → provider` добавлял новый transport, recovery component и capability lifecycle до появления доказанной необходимости.
+То есть v1 имеет **один узкий IPC только для вызова host-owned action boundary**. Это не прежний тяжёлый `SessionMcpRuntime`: host не владеет provider process, не ведёт его MCP lifecycle и не становится general proxy. Adapter всё ещё владеет provider child/journal; host остаётся единственным writer operational SQLite.
 
-Что теряем: централизованный runtime, живущий независимо от engine/adapter process. Для v1 принимаем conservative recovery через journal/process identity: неоднозначный orphan retain/reconcile, а не автоматическое восстановление. Если позже появится измеримая потребность в централизованном cross-run recovery, shared provider processes или удалённом execution host, custom host IPC можно добавить как **v2 transport**, не меняя provider/action contracts.
+Почему не другие варианты:
+- не открываем `durable-tasks/state.db` из adapter: это нарушает существующую whole-process single-owner модель и тащит `better-sqlite3`/migrations в retained adapter bundle;
+- не заводим отдельную history для adapter: это создаёт второй source of truth и ломает idempotency/history parity;
+- не делаем operational SQLite multi-writer contract только ради MCP: слишком большой blast radius;
+- не возвращаем полный host runtime/supervisor: narrow ActionBroker решает конкретно ownership DB/policy.
 
-Это не новый сетевой сервис, не новый scheduler и не второй approval framework. Отдельный coding workspace остаётся ответственностью engineering.
+Если позже появится измеримая потребность в shared provider processes или централизованном cross-run recovery, это отдельный v2.
 
 Ключевые решения:
-
-- Одно клиентское имя из `mcpServerId`; `providerId` остаётся внутренней идентичностью.
-- Один согласованный MCP plan для трёх движков; generated runtime configs — вне code checkout.
-- Provider version закреплена на engine run. Reload влияет на новые runs, не подменяет код работающего child.
-- Hash/copy оплачиваются при приобретении provider lease, не на каждом tool call.
-- Аргументы модели не могут назначить profile, trigger, approval, roots или владельца workspace внутри managed MCP path.
-- `enabled` и `profiles` — source controls; установка, rights/consent и credentials — разные состояния.
-- Любой mutation action, доступный автономному MCP-клиенту, обязан иметь **host-stable operation identity + provider-side idempotency**; unsafe mutation без этого через MCP v1 не экспонируется.
-- Workspace library/CLI из engineering #3 продолжают разрабатываться независимо от MCP wiring.
-- Same-UID engine не считается adversarial boundary: wiring предотвращает accidental/cross-run confusion, но не sandbox escape через shell.
+- `mcpServerId` — стабильное имя для engine; `providerId` — внутренняя identity.
+- Один resolved generation snapshot materialize-ится на run; adapter после старта **не перечитывает active config**.
+- Provider version закреплена на run; reload влияет на новые runs.
+- Hash/copy — при provider lease acquire, не per call.
+- `invokeAction`, consent/policy, idempotency и `action_executions` всегда выполняются host owner-процессом.
+- Mutation через autonomous MCP требует host-stable operation identity + provider-side idempotency; unsafe mutation без этого не экспонируется.
+- Same-UID engine не является adversarial security boundary.
+- Engineering capabilities остаются сервисами: unavailable возвращается как capability error; запрет продолжать работу определяется caller/user/project policy.
+- Первый реальный engine milestone — **OpenCode + fake read-only provider**: он уже first-class в runner, имеет per-invocation MCP config и `free` model profile.
 
 ## 1. Проверенная база и границы достоверности
 
@@ -63,6 +63,8 @@ core-owned adapter process
 | `src/mcp-action.js` | Ещё один прямой путь HH; `require` внешнего registry в host и single-call child. Читает первую stdout-строку, не полноценный MCP lifecycle; `isError` отдельно не проверяет. |
 | `src/action-provider-registry.js` | `validateCall` проверяет schema и trigger. Это НЕ проверка владельца ресурса и НЕ approval. |
 | `src/action-invoke.js` | `options.approved` — host-side, history/idempotency есть; transport пока не получает отдельный host context. Не считать этот код полной готовой авторизацией. |
+| `src/execution-owner-lock.js` + `src/server.js` | Server на старте держит whole-process exclusive execution ownership для `SYSTEM_ROOT`; второй server-owner получает отказ. Это архитектурный single-owner invariant, не просто SQLite tuning. |
+| `src/action-executions.js` | По умолчанию пишет `action_executions` в общий `durableTaskDbPath()` (`SYSTEM_ROOT/durable-tasks/state.db`, WAL). Adapter не должен становиться вторым writer в обход execution owner. |
 | `src/runner/claude-runner.js` | Три engine adapters уже есть; OpenCode config пишется в `cwd`. Деструктурированный `env` сам по себе не становится фактическим spawn env. |
 | `src/hermes-tools-run.js` | Ещё один caller `writeMcpConfig`/engine runner, который нельзя забыть при миграции. |
 | `config/mcp-skill-sources.json` | `sources: []`. |
@@ -72,7 +74,7 @@ core-owned adapter process
 
 ## 2. Состав компонентов и точное построение session config
 
-### 2.1 Три операции v1
+### 2.1 Generation и materialized run snapshot
 
 ```ts
 compileSourceGeneration(config, coreCatalog, deploymentPolicy): Generation
@@ -80,37 +82,47 @@ planSessionMcp(generation, hostRunBinding, coreServers): SessionMcpPlan
 materializeSessionMcp(plan, runtimeDir): SessionMcpFiles
 ```
 
-`compileSourceGeneration` строит новый `ActionProviderRegistry` со всеми core descriptors, затем `McpSkillSourceRegistry` этой же generation. Разные поколения external actions не регистрируются в один mutable global registry. Дополнительно резервируются core MCP names `playwright` и `trained-skills`: action-collision check сам по себе не покрывает конфликт server name с core.
+`compileSourceGeneration` строит immutable generation: core descriptors + `McpSkillSourceRegistry`, diagnostics и resolved external source metadata. Разные generations не смешиваются в одном mutable registry.
 
-`planSessionMcp` — детерминированное преобразование снимка metadata/availability + host binding. Оно не скачивает packages, не запускает provider и не проверяет credentials в сети. Строгий `availability()` не вызывается N раз из renderers каждого engine; generation loader готовит status snapshot. Snapshot — информация для plan, не spawn authority.
+`planSessionMcp` выбирает effective sources для конкретного profile/run. Оно не запускает provider и не ходит в сеть.
+
+**Критичный invariant G1/G2:** до запуска engine host materialize-ит **полный resolved generation snapshot**, а не только `generationId`/`providerId`.
+
+```text
+ResolvedGenerationSnapshot v1
+  generationId + configDigest + coreCatalogDigest + coreRevision
+  full source descriptors for this generation:
+    id/providerId/mcpServerId/repository/revision
+    manifestVersion/artifactDir/entrypoint/manifest/artifactDigest
+    approvedManifest/enabled/profiles
+  effective SessionMcpPlan / diagnostics
+```
+
+Snapshot хранится как immutable/content-digested per-run file (или эквивалентно embedded в RunBinding); RunBinding содержит его digest и точную ссылку. Adapter проверяет digest и использует этот snapshot весь lifetime. **После старта adapter никогда не перечитывает active `approved.json`**, поэтому config swap G1→G2 не может подмешать G2 source/policy в G1 run.
 
 Алгоритм:
-1. Зафиксировать `generationId`, `engineRunId`, `profileId`, `projectId`, task binding и host-generated runtime directory.
-2. Скопировать core server descriptors.
-3. В стабильном порядке по `mcpServerId` рассмотреть каждый source целиком. Invalid/conflicting source не монтировать; core выигрывает.
-4. `enabled !== true` или profile отсутствует в `profiles` → source не монтировать.
-5. Нет проверенной установки → diagnostic unavailable; другие sources/core продолжают работать.
-6. Для доступного source создать descriptor **core-owned adapter-process**. Ни source entrypoint, ни sibling checkout не появляются как command в engine config.
-7. Вернуть `{generationId, mcpServers, mounts, diagnostics}` без secrets.
+1. Host выбирает целую generation и формирует full resolved snapshot.
+2. Фиксирует run identity/profile/project/task/resource bindings.
+3. Резервирует core MCP names; invalid/conflicting/disabled/ineligible sources не монтируются.
+4. Для доступного source engine config получает command **core-owned adapter**, не source entrypoint/sibling path.
+5. Materialize RunBinding + generation snapshot + adapter config вне code cwd.
+6. Перед engine spawn host регистрирует run/provider capability в ActionBroker.
 
-`materializeSessionMcp` записывает versioned RunBinding + adapter config в host-selected runtime directory вне code checkout. Пример:
-
+Пример engine descriptor:
 ```json
 {
   "mcpServers": {
     "engineering": {
-      "command": "<absolute trusted node binary>",
-      "args": ["<retained core adapter bundle>/provider-adapter.js", "--binding-file", "<run-runtime>/engineering/run-binding.json"]
+      "command": "<trusted node>",
+      "args": ["<retained core bundle>/provider-adapter.js", "--binding-file", "<run-runtime>/engineering/run-binding.json"]
     }
   }
 }
 ```
 
-`run-binding.json` содержит pinned generation/source IDs и host-resolved opaque bindings; raw credentials в нём не нужны. Adapter использует этот snapshot весь lifetime.
+RunBinding не содержит raw credentials. Он содержит broker endpoint/capability, resolved opaque resource bindings и digest полного generation snapshot.
 
-**Это не security capability против самого engine.** Directory/file modes уменьшают случайное смешение, но same-UID shell способен читать/chmod/запустить тот же adapter вручную. V1 threat model доверяет coding engine на уровне Linux UID; для adversarial engine нужен separate UID/container/signed brokered context, а не усложнение MCP wiring.
-
-Provider приобретается лениво при первом `tools/call`; `initialize`/`tools/list` обслуживаются по approved static catalog. Optional source failure возвращает unavailable/degraded и не заставляет coding agent останавливаться. Обязательность конкретной capability определяет caller/project policy, не adapter.
+Provider приобретается adapter-ом лениво на первом `tools/call`; `initialize`/`tools/list` обслуживаются approved static catalog. Optional capability failure возвращается как unavailable/degraded и логируется; сам engineering tool не принимает глобальное решение «агенту запрещено работать».
 
 ### 2.2 Каталог tools без выполнения external JS
 
@@ -120,41 +132,47 @@ Provider приобретается лениво при первом `tools/call
 
 ## 3. Доверенный host-context и единый action path
 
-### 3.1 Источник полномочий
+### 3.1 Источник полномочий и ActionBroker
 
-Host создаёт binding из аутентифицированного запуска **до запуска engine**:
-
+Host создаёт RunBinding из аутентифицированного запуска **до engine spawn**:
 ```text
 RunBinding v1
   engineRunId, rootTaskId, attemptId, nativeSessionId?
   profileId, projectId, trigger, origin, channel
-  generationId, providerId, sourceRevision, artifactDigest
+  resolvedGenerationSnapshotDigest/path
+  providerId, sourceRevision, artifactDigest
   repositoryBindingId?, workspaceBindingId?, resourceBindingVersion
-  policyDecisionRefs / allowed action surface
+  brokerEndpoint + run/provider-scoped capability
 ```
 
-`profileId` использует текущую identity core; не вводить rename пользователя/профиля попутно. Absolute paths и credential references остаются host/deployment concerns; модель не получает authority из arguments.
+Adapter не открывает operational SQLite. В server-процессе появляется узкий `ActionBroker` (Unix socket на том же Linux host; loopback port только если platform заставит). При launch host регистрирует capability → immutable run/provider binding in-memory.
 
-В v1 нет отдельного host IPC. Core-owned adapter читает pinned RunBinding, обслуживает MCP connection движка и сам владеет provider child. Public MCP request содержит только tool name/arguments/protocol metadata. Adapter назначает profile/project/trigger/origin/channel и resolved resource binding из RunBinding, а не из payload.
+Capability payload не является security boundary против same-UID engine; он предотвращает accidental/cross-run confusion внутри managed path. Broker резолвит scope только из host registry, а profile/project/root из payload игнорирует.
 
-Это защищает от **случайной** подмены context внутри managed path, но не от намеренно adversarial same-UID engine: такой engine с shell может читать/изменять runtime files или вызвать core code в обход MCP. Это честная граница v1, не OS sandbox.
+**`invokeAction` остаётся in-process host function.** ActionBroker вызывает его с существующими `ActionExecutions`/policy objects. Adapter bundle поэтому не тянет `better-sqlite3`, operational DB migrations или execution-owner logic.
 
 ### 3.2 Путь `tools/call`
 
 ```text
-load + validate pinned RunBinding / adapter lease
-→ ensure run admits new calls
-→ resolve host resource binding + check current resource ownership
-→ validate action name/args/trigger against pinned registry
-→ resolve existing consent/org policy in host
-→ invokeAction(versioned envelope, host-only options)
-→ scoped transport using pinned provider + invocation context
-→ durable action result + MCP result
+engine tools/call
+→ adapter validates MCP framing + static mounted action
+→ adapter sends broker.invoke(action,args,clientCallIdentity)
+→ host authenticates run/provider capability
+→ host resolves RunBinding/current resource ownership/policy
+→ host calls invokeAction(...)
+     → ActionExecutions begin/idempotency in single-owner server
+     → transport callback = broker.dispatch(...) back to THIS adapter
+→ adapter dispatches to pinned provider child over MCP stdio
+→ adapter returns normalized provider result to host
+→ host finishes ActionExecutions and returns ActionResult
+→ adapter maps ActionResult to MCP CallToolResult
 ```
 
-`origin='mcp'`; `trigger` берётся из настоящего запуска: cron/durable task не превращаются автоматически в `user`. `requiresApproval` исполняется через имеющийся host-side `options.approved`; этот флаг не читается из MCP arguments или `_meta`. Доверенная org-policy может дать существующее policy decision, но принадлежность repo к организации не заменяет profile eligibility и владение ресурсом. Если нет доказуемого consent decision для требующего approval action — возвращать существующий `APPROVAL_REQUIRED`, не строить новую UI-систему.
+Broker channel поэтому bidirectional, но narrow: `invoke`, `dispatch`, `dispatchResult`, cancellation/close. Он не управляет provider process lifecycle и не становится general RPC surface.
 
-`invokeAction` сохраняет внешний v1 envelope. Добавить внутренний `transportContext` через host-only options/dependency injection: pinned generation/provider lease, resolved binding, call identity, deadline/cancellation. Эти данные не сохранять как аргументы модели в action history. Для аудита — только безопасные IDs/digests, без capability/credential values.
+`origin='mcp'`; trigger/profile/project/approval/roots назначает host. `approved:true` из model args/_meta не имеет эффекта. Consent/policy wording теперь буквально означает **host server**, не adapter.
+
+Timeout после provider dispatch сохраняется host-ом как unknown/outcome-unknown; adapter не делает самостоятельный retry mutation.
 
 ### 3.3 Как context доходит до provider handler
 
@@ -337,11 +355,15 @@ Acceptance сравнивает фактический effective каталог 
 
 ## 8. Protocol, ошибки и повторные вызовы
 
-Adapter реализует tools-only MCP subset на **обоих stdio hops**:
+V1 имеет два MCP stdio hops и один narrow host callback:
 
 ```text
-engine --MCP stdio--> core adapter --MCP stdio--> provider child
+engine --MCP stdio--> core adapter --private broker JSON-RPC--> host invokeAction
+                         |
+                         +--MCP stdio--> provider child
 ```
+
+ActionBroker — internal/private transport, не публичный MCP server и не provider protocol.
 
 Оба соединения имеют initialize/version negotiation → initialized, ping, tools/list, tools/call, bounded framing/output, cancellation и shutdown semantics. Unsupported sampling/elicitation/resources/tasks не объявляются и не проксируются автоматически.
 
