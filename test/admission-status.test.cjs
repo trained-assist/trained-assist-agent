@@ -29,6 +29,8 @@ function harness({ chatPending, run = async () => {}, taskOpts = opts, expectedT
     STOP_TASK_INTENT: /$^/, GTD_STOP_INTENT: /$^/, WAKEUP_INTENT: /$^/, SKIP_TASK_INTENT: /$^/, ACTIVE_CHECKLIST_INTENT: /$^/, CHECKLIST_EDIT_INTENT: /$^/,
     isPreQueueQuickIntent: () => false,
     queuedSessions: new Set(),
+    queuedByOwner: new Map(), pendingSessionStops: new Set(),
+    ownerKey: (u, id) => `${u}\0${id}`, consumePendingStop: () => false,
     legacyAdmissionScopes: () => ['lane:test'],
     fromLegacyTelegram: () => null, sessionShadow: { shadowCompare: () => null },
     admission: {

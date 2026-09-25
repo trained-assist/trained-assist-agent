@@ -371,7 +371,11 @@ async function handleWeb(req, url, res, ctx) {
     const refs = Array.isArray(fileRefs) ? fileRefs : [];
     const messageText = typeof message === 'string' ? message.trim() : '';
     if (!messageText && !refs.length) return json(res, 400, { error: 'message or attachment required' });
-    const { streamWebTask, prepareWebTaskFiles, claimWebMutation } = require('../web-routes');
+    const { streamWebTask, prepareWebTaskFiles, claimWebMutation, getSessionFor } = require('../web-routes');
+    // A reply targets an EXISTING dialog. An unknown id used to start a silent
+    // new session under a client-chosen name (exact-session runs never heal
+    // onto a pointer) — the UI then showed an answer in a dialog nobody opened.
+    if (!getSessionFor(username, id)) return json(res, 404, { error: 'session not found', id });
     let prepared;
     try { prepared = prepareWebTaskFiles(username, messageText, refs); }
     catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }

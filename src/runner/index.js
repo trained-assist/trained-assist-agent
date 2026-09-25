@@ -389,6 +389,17 @@ function isTaskRunning(username, audience = null) {
 // membership set, NOT a lock: it serializes nothing, so unlimited tasks per
 // session/profile may still run concurrently.
 const queuedSessions = new Set(); // Set<sessionId(string)>
+// Stop before spawn (web e2e 2026-09-25): a Stop for a session whose task is
+// accepted but has no process yet (admission wait, prompt build) used to 409
+// "not running" and the task then ran anyway. Owner-scoped: queued runs are
+// counted per `${username}\0${sessionId}`; a pending stop is honored at the
+// admission gate and again the moment the engine process registers.
+const queuedByOwner = new Map(); // key -> count of accepted-not-finished runs
+const pendingSessionStops = new Set(); // keys with a Stop waiting for the process
+const ownerKey = (username, sessionId) => `${username}\0${sessionId}`;
+function consumePendingStop(username, sessionId) {
+  return !!(username && sessionId) && pendingSessionStops.delete(ownerKey(username, sessionId));
+}
 
 function isSessionRunning(sessionId) {
   if (!sessionId) return false;
@@ -417,7 +428,16 @@ function stopSessionTask(username, sessionId) {
       console.warn('[runner] stopSessionTask SIGTERM:', e.message);
     }
   }
+  if (!stopped && queuedByOwner.get(ownerKey(username, sessionId))) {
+    pendingSessionStops.add(ownerKey(username, sessionId));
+    console.log(`[runner] stop queued for ${username} session ${sessionId} (no process yet)`);
+    stopped = true;
+  }
   return stopped;
+}
+
+function isSessionQueuedFor(username, sessionId) {
+  return !!queuedByOwner.get(ownerKey(username, sessionId));
 }
 
 /**
@@ -714,6 +734,8 @@ function runTask(opts) {
   // re-entrancy guard (isSessionRunning) relies on this window before the
   // process spawns. Read-only membership, not a lock.
   if (opts.sessionId) queuedSessions.add(opts.sessionId);
+  const qKey = opts.sessionId ? ownerKey(opts.user.username, opts.sessionId) : null;
+  if (qKey) queuedByOwner.set(qKey, (queuedByOwner.get(qKey) || 0) + 1);
   const current = admission.run(admissionScopes, async () => {
     try {
       // Global admission control: wait for a free slot + enough RAM before we
@@ -725,6 +747,11 @@ function runTask(opts) {
       await _acquireSlot();
       logStage('global_slot_wait', slotT0);
       try {
+        if (consumePendingStop(opts.user.username, opts.sessionId)) {
+          console.log(`[${opts.taskId}] stopped before start`);
+          await status.finish('⛔ Остановлено до начала выполнения.');
+          return '⛔ Остановлено до начала выполнения.';
+        }
         await status.finish('🧠 Начинаю работу…');
         const runT0 = Date.now();
         try {
@@ -747,6 +774,11 @@ function runTask(opts) {
     // A task cut off by a restart keeps its journal entry: the next process resumes it.
     if (!restartShutdown) clearPendingTask(opts.taskId);
     if (opts.sessionId) queuedSessions.delete(opts.sessionId);
+    if (qKey) {
+      const n = (queuedByOwner.get(qKey) || 1) - 1;
+      if (n > 0) queuedByOwner.set(qKey, n);
+      else { queuedByOwner.delete(qKey); pendingSessionStops.delete(qKey); }
+    }
   });
   // Await retries for callers, but never hold their predecessor lane/lease.
   return current.then(result => result?.queuedRetry || result);
@@ -1850,6 +1882,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
+    consumePendingStop: () => consumePendingStop(user.username, activeSessionId),
     engineBin, engineArgs, mcpConfig, ocProfileOverrides,
     cwd: codeCwd,
     // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
@@ -2606,7 +2639,7 @@ module.exports = {
   interruptForRestart, MAX_RESUME_ATTEMPTS,
   runTask, getQuickAnswer, runQuickAnswer, shouldAttemptQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   resolveRunSession,
-  isTaskRunning, isSessionRunning, stopSessionTask, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
+  isTaskRunning, isSessionRunning, isSessionQueuedFor, stopSessionTask, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
   reconcileSoftContinuations,
   // Exported for intent-coverage tests only
   _intents: { HH_MY_VACANCIES_INTENT, HH_FUNNEL_INTENT, HH_RESPONSES_INTENT, HH_ATS_EDITOR_INTENT, HH_REVIEW_PAGE_INTENT, ENGINE_SWITCH_INTENT },
@@ -2619,7 +2652,7 @@ module.exports = {
   // Exported for isSessionRunning tests only — the real Map backing activeTimers
   _activeTimers: activeTimers,
   // Exported for isSessionRunning tests only — the real Set of queued sessions
-  _queuedSessions: queuedSessions,
+  _queuedSessions: queuedSessions, _queuedByOwner: queuedByOwner, _consumePendingStop: consumePendingStop, _ownerKey: ownerKey,
   // Exported for provider-alternation wiring tests only (unified crash-retry, issue #1132 follow-up)
   _forceOpencodeAlternation: forceOpencodeAlternation,
   // Exported for failure-brain wiring tests only (issue #1175, PR #1179 follow-up)
