@@ -61,6 +61,13 @@ function inlineSchema(node, defs) {
 
 const AUTHORING_SCHEMA = inlineSchema(schema, schema.$defs || {});
 
+// Authoring output is inherently large: the prompt asks for 15-20 steps, each
+// carrying validation/executor/timing fields. The generic hermes-run default
+// (3000) fits a research answer but truncates a full Playbook v1 for verbose
+// models, and the whole JSON is invalid once cut — playbook_draft also accepts
+// a model override, so the budget must not depend on the chosen model.
+const AUTHORING_MAX_TOKENS = 6000;
+
 // House meta-patterns. This is the difference between a pile of steps and a
 // playbook the executor can actually run: machine-checkable validation on
 // every agent step, an executor profile instead of a concrete model, cheap
@@ -216,6 +223,7 @@ function createPlaybookAuthoring({
         context,
         outputSchema: AUTHORING_SCHEMA,
         model: model || undefined,
+        maxTokens: AUTHORING_MAX_TOKENS,
       });
     } catch (error) {
       throw playbookError('AUTHORING_INVALID', `Hermes не вернул валидный JSON: ${error.message}`);
@@ -352,6 +360,7 @@ function createPlaybookAuthoring({
 module.exports = {
   createPlaybookAuthoring,
   AUTHORING_PROMPT,
+  AUTHORING_MAX_TOKENS,
   AUTHORING_SCHEMA,
   summarizePlaybook,
   diffPlaybooks,

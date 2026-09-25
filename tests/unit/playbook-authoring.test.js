@@ -122,6 +122,22 @@ describe('draft', () => {
     expect(existsSync(savedFile('alice', 'sample'))).toBe(false);
   });
 
+  it('requests a larger output budget than the generic hermes-run default (a full playbook is 15-20 steps)', async () => {
+    // Regression: authoring inherited hermes-run's 3000 default, which fits a
+    // research answer but truncates a full Playbook v1 for verbose models —
+    // and playbook_draft accepts a model override, so the budget must not
+    // depend on the chosen model.
+    const run = fakeHermes([validPlaybook()]);
+    const { authoring } = load({ runHermes: run });
+    const { DEFAULT_MAX_TOKENS } = require('../../src/hermes-run');
+    const { AUTHORING_MAX_TOKENS } = require(AUTHORING);
+
+    await authoring.draft({ username: 'alice', description: 'Процесс' });
+    expect(run.calls[0].maxTokens).toBe(AUTHORING_MAX_TOKENS);
+    expect(AUTHORING_MAX_TOKENS).toBeGreaterThan(DEFAULT_MAX_TOKENS);
+    expect(run.calls[0].model).toBeUndefined(); // default model left unchanged
+  });
+
   it('repairs a schema-invalid answer once by feeding validation errors back', async () => {
     const bad = validPlaybook();
     delete bad.stages[0].steps[0].validation;

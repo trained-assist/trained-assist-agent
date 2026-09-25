@@ -60,4 +60,4 @@ async function hermesRun({ username, task, context = '', outputSchema, model = D
   return parseLlmJson(raw);
 }
 
-module.exports = { hermesRun, DEFAULT_MODEL };
+module.exports = { hermesRun, DEFAULT_MODEL, DEFAULT_MAX_TOKENS };
