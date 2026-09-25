@@ -97,6 +97,16 @@ function assertId(id, field) {
   return id;
 }
 
+// A missing username must fail loudly, never resolve to a literal "users/undefined"
+// profile — that is how a dropped ctx argument once leaked test artifacts into
+// ~/users/undefined/. Defense in depth on top of the MCP ctx-forwarding fix.
+function assertUser(username) {
+  if (typeof username !== 'string' || !username.trim()) {
+    throw playbookError('USER_REQUIRED', 'username (profile id) обязателен');
+  }
+  return username;
+}
+
 function draftsDir(username) {
   return path.join(userWorkDir(username), 'playbooks', '.drafts');
 }
@@ -244,6 +254,7 @@ function createPlaybookAuthoring({
   }
 
   function readDraft(username, id) {
+    assertUser(username);
     assertId(id, 'playbook_id');
     const file = draftPath(username, id);
     if (!fs.existsSync(file)) return null;
@@ -262,6 +273,7 @@ function createPlaybookAuthoring({
     readDraft,
 
     async draft({ username, description, based_on = null, model = null, vars = {} } = {}) {
+      assertUser(username);
       if (!description || !String(description).trim()) {
         throw playbookError('DESCRIPTION_REQUIRED', 'нужно описание процесса словами');
       }
@@ -285,6 +297,7 @@ function createPlaybookAuthoring({
     },
 
     async edit({ username, playbook_id, instruction, model = null, vars = {} } = {}) {
+      assertUser(username);
       assertId(playbook_id, 'playbook_id');
       if (!instruction || !String(instruction).trim()) {
         throw playbookError('INSTRUCTION_REQUIRED', 'нужна формулировка правки');
@@ -311,6 +324,7 @@ function createPlaybookAuthoring({
     },
 
     async save({ username, playbook_id, vars = {} } = {}) {
+      assertUser(username);
       assertId(playbook_id, 'playbook_id');
       const draft = readDraft(username, playbook_id);
       if (!draft) {
