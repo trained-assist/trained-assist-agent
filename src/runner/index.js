@@ -166,6 +166,10 @@ function savePendingTask(taskId, params) {
   try { previous = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (e) { if (e.code !== 'ENOENT') throw e; }
   atomicJson(file, { ...previous, ...params, threadId: params.threadId ?? previous?.threadId ?? null,
+    // Identity survives phase rewrites and restart-resume (epic #1365 CH-08): the first
+    // taskId/requestId of a request stay attached to every later attempt.
+    rootTaskId: previous?.rootTaskId ?? params.rootTaskId ?? taskId,
+    requestId: previous?.requestId ?? params.requestId ?? null,
     // Retries and transition to running must never refresh the original intent.
     initiatedAt: previous ? (Object.hasOwn(previous, 'initiatedAt') ? previous.initiatedAt : null) : (Object.hasOwn(params, 'initiatedAt') ? params.initiatedAt : null) });
 }
@@ -655,7 +659,7 @@ function runTask(opts) {
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
   savePendingTask(opts.taskId, {
-    phase: 'queued', activitySessionId: opts.activitySessionId, taskId: opts.taskId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
+    phase: 'queued', activitySessionId: opts.activitySessionId, taskId: opts.taskId, rootTaskId: opts.rootTaskId, requestId: opts.requestId, userId: opts.user.id, username: opts.user.username, threadId: opts.threadId,
     workDir: opts.user.workDir, task: opts.task, context: opts.context,
     sessionId: opts.sessionId, contextFromSession: opts.contextFromSession,
     forceClaude: opts.forceClaude, forceNew: opts.forceNew, mode: opts.mode, userMessageRecorded: opts.userMessageRecorded,
