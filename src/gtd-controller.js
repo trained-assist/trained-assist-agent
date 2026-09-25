@@ -132,18 +132,34 @@ function reconcileOrphanedRunning(store = durableStore(), { now = Date.now() } =
 // Profile ids that own runnable items right now, mapped to their claimable
 // items. Legacy GTD scans per-profile directories; the store is profile-keyed,
 // so we invert: claim globally, then resolve the profile per item.
-function claimNextDurableItem(store = durableStore()) {
-  reconcileOrphanedRunning(store);
+function claimNextDurableItem(store = durableStore(), { now = Date.now() } = {}) {
+  // Expired waiters must fail before reconcile/claim can hand them out again —
+  // otherwise a stuck 'waiting' step defers forever.
+  store.expireWaitingDeadlines(now);
+  reconcileOrphanedRunning(store, { now });
   return store.claimNextRunnable();
 }
 
 
 const FRESH_CLAIM_GRACE_MS = 30 * 1000; // just-claimed items: let the claiming tick run them
-const DURABLE_MAX_ATTEMPTS = 3;
+
+// A failed item retries until its declared max_attempts are spent (P3a: the
+// per-step budget the compiler writes into the item). Tier escalation still
+// happens on each retry until its own ceiling; once attempts are exhausted the
+// item stays 'failed' for the recovery slice — never re-pended forever.
+function retryFailedItem(store, item, profileId, { retryDelayMs = 0 } = {}) {
+  const attempts = item.attempt_count || 0;
+  const maxAttempts = item.max_attempts || 1;
+  if (attempts >= maxAttempts) return { retried: false, attempts, maxAttempts };
+  store.escalateItem(item.id, profileId);
+  store.updateTaskItem(item.id, { status: 'pending', due_at: Date.now() + retryDelayMs }, profileId);
+  return { retried: true, attempts, maxAttempts };
+}
 
 // Fire a claimed durable item through the same pipeline as legacy GTD fires.
-// Contract plans (draft, with acceptance_criteria) stay unclaimable by design —
-// activation is a later slice's decision, not this wiring's.
+// Contract plans are executable once explicitly activated (P3a: draft→active via
+// task_update); they stay unclaimable while draft. The step honors the item's
+// own max_attempts / execution_timeout_seconds / delay_after_sec / wait_deadline_at.
 async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK }) {
   const store = durableStore();
   let fired = 0;
