@@ -105,7 +105,7 @@ const NARROW_BOTS = {
 const VM_NAME = process.env.VM_NAME || 'unknown';
 let RUNTIME_REVISION = 'unknown';
 let GIT_COMMIT = 'unknown';
-try { RUNTIME_REVISION = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim(); GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
+try { RUNTIME_REVISION = require('./release-info').getReleaseSha(); if (RUNTIME_REVISION) GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
 
 const { classifyMessage, CLASSIFY_MAX_AGE_MS } = require('./classify-message');
 const { checkCompleteness } = require('./intake-gate');

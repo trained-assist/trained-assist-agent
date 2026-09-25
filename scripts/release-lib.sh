@@ -18,7 +18,11 @@ SUDO="${SUDO-sudo}"
 # atomically renames it into place so a half-built release is never activated.
 release_build() {
   local repo="$1" target="$2" releases="$3"
-  local dir="$releases/$target" staging="$releases/.staging-$target-$$"
+  local dir="$releases/$target"
+  # Stage in vova's home: npm/node live under vova (nvm), so deps must be
+  # installed as vova, not root; the finished release is then chowned to root
+  # and moved into the root-owned releases dir.
+  local staging="$HOME/.agent-release-staging-$target-$$"
 
   if [ -f "$dir/.release-complete" ]; then
     echo "release $dir already built" >&2
@@ -27,18 +31,27 @@ release_build() {
 
   echo "==> Building release $dir" >&2
   $SUDO rm -rf "$staging" "$dir"
-  $SUDO mkdir -p "$staging"
-  git -C "$repo" archive "$target" | $SUDO tar -x -C "$staging"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  git -C "$repo" archive "$target" | tar -x -C "$staging"
 
   if [ "${RELEASE_SKIP_DEPS:-}" = "1" ]; then
     echo "  RELEASE_SKIP_DEPS=1 — skipping npm ci" >&2
   else
-    $SUDO -H npm ci --prefix "$staging" --omit=dev >&2
+    npm ci --prefix "$staging" --omit=dev >&2
   fi
 
-  $SUDO touch "$staging/.release-complete"
+  touch "$staging/.release-complete"
+  # The release has no .git; expose the exact revision for /health and info cards.
+  printf '%s\n' "$target" > "$staging/.release-sha"
   $SUDO mkdir -p "$releases"
-  # `mv -T` is GNU; fall back to rm+mv where it is unsupported (BSD/macOS tests).
+  # Root-own the release so the session user cannot rewrite prod code, and make
+  # it world-readable/traversable for the vova-run service.
+  if [ -n "$SUDO" ]; then
+    $SUDO chown -R root:root "$staging"
+    $SUDO chmod -R a+rX "$staging"
+  fi
+  # `mv -T` is GNU; fall back to rm+mv where unsupported (BSD/macOS tests).
   $SUDO mv -T "$staging" "$dir" 2>/dev/null || { $SUDO rm -rf "$dir"; $SUDO mv "$staging" "$dir"; }
 }
 

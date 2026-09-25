@@ -76,7 +76,7 @@ RELEASE_DIR="$(readlink -f "$RELEASES_DIR/$TARGET")"
 # Install Playwright Chromium if not already present (idempotent, shared cache).
 if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; then
   echo "==> Installing Playwright Chromium..."
-  (cd "$RELEASE_DIR" && $SUDO -H npx playwright install chromium --with-deps 2>&1 | tail -5) || true
+  (cd "$RELEASE_DIR" && npx playwright install chromium --with-deps 2>&1 | tail -5) || true
 fi
 
 echo "==> Ensuring trained-assist-hh-skill sibling checkout exists (feeds the HH skill fallback)..."

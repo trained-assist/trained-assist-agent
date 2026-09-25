@@ -84,6 +84,7 @@ test('release_build materialises the committed revision, not the dirty worktree'
   const released = path.join(f.releases, f.c2, 'f');
   assert.equal(fs.readFileSync(released, 'utf8'), 'b', 'release must contain the commit, not the working tree');
   assert.ok(fs.existsSync(path.join(f.releases, f.c2, '.release-complete')));
+  assert.equal(fs.readFileSync(path.join(f.releases, f.c2, '.release-sha'), 'utf8').trim(), f.c2, 'release must expose its SHA for /health');
 });
 
 test('release_build is idempotent (reuses a completed release)', (t) => {
