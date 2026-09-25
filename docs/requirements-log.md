@@ -131,4 +131,9 @@
 | 🔵 планируется | #1302 | третий бот на общем контуре (A1+A2 merged; canary). |
 
 ## 2026-09-25 — forum topic isolation (#255)
-- Current-session and active-project pointer helpers accept an optional valid thread suffix while preserving legacy filenames without one.
+- Outbound delivery: `tgSend` (runner + claude-runner progress/warning sends) carries `message_thread_id` for a valid thread and omits it entirely when absent (hard guard — private/non-forum unchanged). Edits/pins stay thread-less (they target an existing message already in the topic).
+- Pin state `.pin_state.json` keyed by `chatId:threadId` (`pinStoreKey`), so topic A's context card never edits topic B's message; bare `chatId` key preserved without a thread.
+- Ownership: `stopUserTask`/`stopTask`/`taskOwnedBy` scope by `(username, audience, chatId, threadId)`; `POST /tasks/stop` and `POST /tasks/:taskId/stop` accept `threadId`. Stop in topic A cannot kill topic B.
+- Session/project pointers: `get/setCurrentSessionId`, `createSession`, `resolveChatSession`, `get/setActiveProjectId`, `get/setPinnedProjectId`, `decideNewSessionProject`, `resolveRunProject`, `logical pin line` accept an optional valid `threadId` — topic-scoped filenames, legacy names unchanged without one.
+- GTD: records persist `threadId`; `_tgNotify` sends into the originating topic; `clearGtdForChat(workDir, chatId, threadId)` and delayed fire/close notifications stay topic-scoped. Restart/resume already preserved `threadId` via the pending journal.
+- Tests: `test/forum-topics-isolation.test.cjs` (tgSend + ownership + session/project/pin pointer scoping). Existing deterministic suites green (`runner-index-contract`, `task-stop-ownership`, `audience-scope`, `pin-state`, `gtd-*`, `tg-stream`, `projects-*`, `session-store-recency`, `run-ingress` topic routing).

@@ -437,7 +437,7 @@ function computeMaxIterations(checklist) {
 // Вызывается на успешном завершении WORKRUN (гейт в runner). Если юзер просил
 // довести до конца — пишем durable-запись. Идемпотентно перезаписывает открытую
 // запись сессии (новый workrun с контролем → свежий отсчёт).
-async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKey, projectDir, audience }) {
+async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKey, projectDir, audience, threadId = null }) {
   if (!workDir || !sessionId) return null;
   const intent = await detectIntent(task, { apiKey });
   if (!intent.wanted) return null;
@@ -453,7 +453,9 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
   const checklist = readChecklist(projectDir);
   const maxIterations = computeMaxIterations(checklist);
   const rec = {
-    sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
+    sessionId, chatId: chatId != null ? String(chatId) : null,
+    threadId: Number.isInteger(threadId) && threadId > 0 ? threadId : null,
+    username: username || null,
     audience: audience || 'default',
     createdAt: now,
     dueAt: now + intent.etaMinutes * 60 * 1000,
@@ -478,7 +480,7 @@ async function maybeSchedule({ workDir, sessionId, chatId, username, task, apiKe
 // факт незакрытого checklist.md достаточен, чтобы довести дело до конца.
 // Используется как дефолт для PR-задач: «создал PR → checklist.md с 3 пунктами
 // (CI/merge/деплой) → трекается автоматически», без явной фразы «доведи до конца».
-async function scheduleFromChecklist({ workDir, sessionId, chatId, username, projectDir, audience }) {
+async function scheduleFromChecklist({ workDir, sessionId, chatId, username, projectDir, audience, threadId = null }) {
   if (!workDir || !sessionId || !projectDir) return null;
   const checklist = readChecklist(projectDir);
   if (!checklist || !checklist.items.length || !checklist.items.some(i => !i.done)) return null;
@@ -501,7 +503,9 @@ async function scheduleFromChecklist({ workDir, sessionId, chatId, username, pro
   const now = Date.now();
   const maxIterations = computeMaxIterations(checklist);
   const rec = {
-    sessionId, chatId: chatId != null ? String(chatId) : null, username: username || null,
+    sessionId, chatId: chatId != null ? String(chatId) : null,
+    threadId: Number.isInteger(threadId) && threadId > 0 ? threadId : null,
+    username: username || null,
     audience: audience || 'default',
     createdAt: now,
     dueAt: now + ETA_MIN_CLAMP * 60 * 1000, // чек-лист = обычно быстрые объективные проверки (CI/деплой)
@@ -597,14 +601,18 @@ function writeChecklistDone(projectDir, items) {
   catch (e) { console.error('[gtd] writeChecklistDone:', e.message); return false; }
 }
 
-async function _tgNotify(botToken, chatId, text) {
+// Forum topics (#255): a delayed GTD notification must return to the topic it was
+// created from. threadId omitted entirely when absent (private/non-forum unchanged).
+async function _tgNotify(botToken, chatId, text, threadId = null) {
   if (!botToken || !chatId) return;
   const base = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+  const body = { chat_id: chatId, text };
+  if (Number.isInteger(threadId) && threadId > 0) body.message_thread_id = threadId;
   try {
     await fetch(`${base}/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(10000),
     });
   } catch (e) { console.warn('[gtd] tgNotify:', e.message); }
@@ -684,13 +692,15 @@ function clearAllGtd(workDir) {
 // "all open records" from a single chat's /stop cancels проработка running in
 // other chats too. Resolve each record's owning session and only touch it if
 // that session is currently live in this chat. Returns count of cancelled records.
-function clearGtdForChat(workDir, chatId) {
+function clearGtdForChat(workDir, chatId, threadId = null) {
   if (!chatId) return 0;
   const { getSession } = require('./session-store');
   const recs = listGtd(workDir);
   let count = 0;
   for (const rec of recs) {
     if (rec.status !== 'open') continue;
+    // Forum topics (#255): a stop in topic A must not cancel topic B's tracking.
+    if (Number.isInteger(threadId) && threadId > 0 && rec.threadId != null && Number(rec.threadId) !== Number(threadId)) continue;
     const sess = getSession(workDir, rec.sessionId);
     const attachedChatId = sess ? (sess.liveChatId ?? sess.ownerChatId) : null;
     if (attachedChatId == null || String(attachedChatId) !== String(chatId)) continue;
@@ -785,7 +795,8 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
             console.log(`[gtd] closed ${rec.sessionId}: done-precheck (no Claude spent)`);
             const notifyChatId = rec.chatId || session.liveChatId || session.ownerChatId;
             _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, notifyChatId,
-              `✅ Чек-лист закрыт автопроверкой (CI/merge через GitHub API, без затрат на Claude):\n${pre.items.map(i => `✓ ${i.text}`).join('\n')}`
+              `✅ Чек-лист закрыт автопроверкой (CI/merge через GitHub API, без затрат на Claude):\n${pre.items.map(i => `✓ ${i.text}`).join('\n')}`,
+              rec.threadId
             ).catch(() => {});
             continue;
           }
@@ -813,7 +824,8 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
         writeGtd(workDir, rec);
         console.log(`[gtd] closed ${rec.sessionId}: max-iterations`);
         _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
-          `⚠️ GTD: авто-доведение остановлено — превышен лимит попыток. Задача: «${(rec.originalTask || '').slice(0, 100)}»`
+          `⚠️ GTD: авто-доведение остановлено — превышен лимит попыток. Задача: «${(rec.originalTask || '').slice(0, 100)}»`,
+          rec.threadId
         ).catch(() => {});
         continue;
       }
@@ -828,7 +840,8 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
 
       // GTD fire label — visible marker so the user knows this reply is a scheduled check.
       _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
-        `🔄 GTD — авто-проверка · итерация ${rec.iterations}/${rec.maxIterations}`
+        `🔄 GTD — авто-проверка · итерация ${rec.iterations}/${rec.maxIterations}`,
+        rec.threadId
       ).catch(() => {});
 
       // Snapshot done-count before run, for progress-check after.
@@ -841,7 +854,7 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
       runTask({
         taskId, user, task: buildReopenMessage(_recSnap),
         sessionId: _recSnap.sessionId, forceClaude: true, engine: 'claude',
-        secrets, internalGtd: true,
+        secrets, internalGtd: true, threadId: _recSnap.threadId || null,
       }).then(reply => {
         // backoff считаем от РЕАЛЬНОГО времени завершения, а не от stale-now момента
         // выстрела: run легитимно длится десятки минут, иначе следующая проверка
@@ -867,7 +880,8 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
           _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
             `⚠️ GTD остановлен — задача оказалась сложнее первоначальной оценки.\n`
             + `Агент остановил попытки (было ${fresh.iterations}), чтобы не усложнять.\n`
-            + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`
+            + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`,
+            _recSnap.threadId
           ).catch(() => {});
         } else if (fresh.iterations >= fresh.maxIterations) {
           fresh.status = 'closed'; fresh.closedReason = 'max-iterations';
@@ -888,7 +902,8 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
                 writeGtd(workDir, fresh);
                 console.log(`[gtd] closed ${_recSnap.sessionId}: no-progress (${fresh.consecutiveNoProgress} consecutive stalled iterations)`);
                 _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
-                  `⚠️ GTD: остановлен — нет прогресса за 2 итерации. Задача: «${(fresh.originalTask || '').slice(0, 100)}»`
+                  `⚠️ GTD: остановлен — нет прогресса за 2 итерации. Задача: «${(fresh.originalTask || '').slice(0, 100)}»`,
+                  _recSnap.threadId
                 ).catch(() => {});
                 return;
               }
