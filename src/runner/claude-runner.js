@@ -39,14 +39,24 @@ function controlKey(taskId) {
   if (Buffer.byteLength(LONGEST_CONTROL_PREFIX + id) <= TG_CALLBACK_DATA_MAX_BYTES) return id;
   return 'h' + require('crypto').createHash('sha256').update(id).digest('hex').slice(0, 24);
 }
-const inputInspectionRows = messageId => messageId ? [[
+// «📜 Журнал» carries the session id the agent ACTUALLY ran on. The gateway's
+// snapshot only knows the id it requested, and resolveChatSession may heal that
+// onto another one (foreign chat, sign-split, pointer fallback) — a journal link
+// built from the requested id opened a missing/wrong session in the web app.
+// Old two-part buttons still work: the gateway falls back to the snapshot id.
+function journalCallback(messageId, sessionId) {
+  const withSession = `input_journal|${messageId}|${sessionId}`;
+  return sessionId && /^[a-zA-Z0-9_.-]{1,128}$/.test(sessionId) && Buffer.byteLength(withSession) <= TG_CALLBACK_DATA_MAX_BYTES
+    ? withSession : `input_journal|${messageId}`;
+}
+const inputInspectionRows = (messageId, sessionId = null) => messageId ? [[
   { text: '📋 Посмотреть input', callback_data: `input_run|${messageId}` },
-  { text: '📜 Журнал', callback_data: `input_journal|${messageId}` },
+  { text: '📜 Журнал', callback_data: journalCallback(messageId, sessionId) },
 ]] : [];
-const runningControls = (taskId, inputMessageId = null) => ({ reply_markup: { inline_keyboard: [[
+const runningControls = (taskId, inputMessageId = null, sessionId = null) => ({ reply_markup: { inline_keyboard: [[
   { text: '⛔ Стоп', callback_data: `stop|${controlKey(taskId)}` },
   { text: '➕ Дополнить', callback_data: `sup|${controlKey(taskId)}` },
-], ...inputInspectionRows(inputMessageId)] } });
+], ...inputInspectionRows(inputMessageId, sessionId)] } });
 // progressEdit is best-effort+coalesced (see comment above `tgEdit` in
 // tg-stream.js) — a 429 drop returns {ok:false}, a coalesce-skip returns
 // {ok:true, skipped:true}. Either way the buttons did NOT reach the chat, so
@@ -400,7 +410,7 @@ async function runEngineProcess(opts) {
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
       if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-      const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } });
+      const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId, sessionId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId, sessionId) } });
       if (stopButtonShown && editLanded(result)) stopButtonShown = true;
       // Re-arm ONLY while the engine process is still alive AND stopProgress()
       // hasn't run. Two guards, two different zombie paths:
@@ -445,7 +455,7 @@ async function runEngineProcess(opts) {
         const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
         const secs = Math.round((Date.now() - thinkingStart) / 1000);
         if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-        const stopExtra = stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } };
+        const stopExtra = stopButtonShown ? runningControls(taskId, inputMessageId, sessionId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId, sessionId) } };
         if (snippet) {
           // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
           const silentMins = Math.round((Date.now() - lastOutputAt) / 60000);
@@ -523,7 +533,7 @@ async function runEngineProcess(opts) {
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
               if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } }).catch(() => {});
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId, sessionId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId, sessionId) } }).catch(() => {});
             }
             scheduleStream();
           } else if (event.type === 'step_start') {
@@ -579,7 +589,7 @@ async function runEngineProcess(opts) {
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
               if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } }).catch(() => {});
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId, sessionId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId, sessionId) } }).catch(() => {});
             }
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
@@ -632,7 +642,7 @@ async function runEngineProcess(opts) {
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
                 if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } }).catch(() => {});
+                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId, sessionId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId, sessionId) } }).catch(() => {});
               }
             }
           }
