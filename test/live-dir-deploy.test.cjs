@@ -77,6 +77,19 @@ test('preflight refuses a commit that is not an ancestor of origin/main', (t) =>
   assert.match(r.stderr, /origin\/main/);
 });
 
+test('preflight refreshes a stale origin/main before the ancestry check (#1406 RU)', (t) => {
+  const f = fixture(t);
+  f.checkout(f.c2);
+  fs.writeFileSync(path.join(f.work, 'f'), 'c');
+  git(f.work, ['commit', '-qam', 'c3']);
+  git(f.work, ['push', '-q', 'origin', 'HEAD:main']);
+  const c3 = f.head();
+  // The VM's remote-tracking ref lags behind the freshly merged target.
+  git(f.work, ['update-ref', 'refs/remotes/origin/main', f.c2]);
+  const r = f.preflight(c3);
+  assert.equal(r.status, 0, r.stderr);
+});
+
 test('guard passes when HEAD equals the deployed marker', (t) => {
   const f = fixture(t);
   fs.writeFileSync(f.marker, f.c2 + '\n');
