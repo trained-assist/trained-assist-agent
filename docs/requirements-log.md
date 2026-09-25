@@ -150,3 +150,13 @@
 | ✅ реализовано | `execution_timeout_seconds` в таймаут движка | `runDueDurable` прокидывает `stepTimeoutMs` → `_runTask` → `runEngineProcess` (clamp ≤ 40 мин; warn за 2 мин). Шаг с `stepTimeoutMs` не авто-продолжается (`MAX_CONTINUATIONS`): перерасход бюджета = провал шага, ретраит durable-слой. |
 | ✅ реализовано | Тесты | `durable-task-store` (expire/attempt/активация), `gtd-durable-wiring` (max_attempts исчерпан → failed; истёкший waiter не переиспользуется; stepTimeoutMs), `durable-plan-persistence` (draft→active, done gated), `claude-runner.smoke` (clamp бюджета). Legacy `gtd/*.json` не тронут. |
 | 🔵 планируется | P3b/P3c/P3d | Резолв движка/модели по `executor_role`/`minimum_model_level`/`context_budget`; recovery через `failure-classifier`→`recovery-policy`; `task_validation_results` + `evidence_json` и разблокировка финализации. |
+
+## 2026-09-26 — playbooks P3b: резолв шага в движок/модель (#1372)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | `src/playbook-executor.js` | Чистый `resolveStepExecution(item)`: `executor_role`+`minimum_model_level` (эскалированный `current_model_level` выигрывает) → `{engine, ocProfile, ocRole}`. Programmatic → без движка; legacy/без контракта → `defaultEngine` (claude). Карта `level→{engine,profile}` — данные, override через `PLAYBOOK_LEVEL_MAP`. |
+| ✅ реализовано | Проводка в `runDueDurable` | Contract-план резолвит шаг (bachelor→opencode/value, master→opencode/max, doctor→claude) и прокидывает `engine`/`ocProfile`/`contextSkipModels`; legacy durable — прежний claude. Рабочая директория шага = `userWorkDir(profile_id)` вместо `null` (последний ронял `writeMcpConfig` на `path.join(null)`). |
+| ✅ реализовано | `ocProfile` override в runner | `_runTask` принимает явный `ocProfile`, приоритет над `profiles.getOcProfile(workDir)` — durable-шаг может пинить лестницу. Без новых opts поведение прежнее. |
+| ✅ реализовано | Тесты | `tests/unit/playbook-executor.test.js` (9 кейсов); `gtd-durable-wiring` — contract-шаг несёт `opencode/value` + рабочую директорию, legacy остаётся `claude`. |
+| 🔵 планируется | P3c/P3d/P4 | `ocRole` пока возвращается, но per-role degradation/recovery — P3c; programmatic-шаги всё ещё идут промптом (P3d); хуки — P4; `context_budget`→`skipModels` — no-op до реестра контекстов. |

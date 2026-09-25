@@ -51,6 +51,10 @@ function activeContractTask(G, { goal, items, sessionId }) {
     ok(fired === 1, `durable: one item fired (got ${fired})`);
     ok(/step one/.test(prompted) && /DURABLE: done/.test(prompted), 'durable: prompt carries step + completion marker');
     ok(firedOpts.stepTimeoutMs === 600 * 1000, `durable: step carries execution_timeout_seconds as the engine budget (got ${firedOpts && firedOpts.stepTimeoutMs})`);
+    ok(firedOpts.engine === 'opencode' && firedOpts.ocProfile === 'value',
+      `durable: bachelor contract item resolves to opencode/value (got ${firedOpts && firedOpts.engine}/${firedOpts && firedOpts.ocProfile})`);
+    ok(firedOpts.user && /users[/\\]u1$/.test(firedOpts.user.workDir),
+      `durable: step carries the profile workspace, not null (got ${firedOpts.user && firedOpts.user.workDir})`);
     ok(item.status === 'done', `durable: item completed (got ${item.status})`);
     ok(store.getTask(taskId, 'u1').status === 'done', 'durable: task completes when all items done');
     ok(store.claimNextRunnable() === null, 'durable: drained task is not claimable');
@@ -165,6 +169,19 @@ function activeContractTask(G, { goal, items, sessionId }) {
     const after = store.listTaskItems(r.task.id, 'u1')[0];
     ok(fired === 0 && after.status === 'failed' && /deadline expired/.test(after.last_error || ''),
       `durable: expired waiter fails instead of being re-run (got fired=${fired}, status=${after.status})`);
+  }
+
+  // 8. legacy (non-contract) durable items keep the pre-P3b default engine
+  {
+    const G8 = freshStore('8');
+    const store = G8.durableStore();
+    store.createTask({ id: 'legacy-8', profile_id: 'u1', goal: 'legacy durable' });
+    store.createTaskItem({ id: 'legacy-item-8', task_id: 'legacy-8', title: 'legacy step' });
+    let firedOpts = null;
+    await G8.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      runTask: async (opts) => { firedOpts = opts; return 'DURABLE: done'; } });
+    ok(firedOpts && firedOpts.engine === 'claude' && !firedOpts.ocProfile,
+      `durable: legacy item still runs on claude with no oc profile (got ${firedOpts && firedOpts.engine}/${firedOpts && firedOpts.ocProfile})`);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
