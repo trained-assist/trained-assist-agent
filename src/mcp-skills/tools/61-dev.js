@@ -25,11 +25,6 @@ const { spawnSync } = require('child_process');
 
 const USER_ID = process.env.USER_ID || '';
 
-function getDevDir() {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  return path.join(dataDir, 'dev');
-}
-
 function getToken() {
   const tok = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
   if (tok) return tok;
