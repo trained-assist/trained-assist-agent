@@ -69,7 +69,7 @@ const {
 
 // Engine execution (spawn + stream-json + timeout/close) lives in claude-runner.js
 // (issue #942 P1.3) so the process machinery is a self-contained testable unit.
-const { runEngineProcess, buildEngineCommand } = require('./claude-runner');
+const { runEngineProcess, buildEngineCommand, inputInspectionRows } = require('./claude-runner');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -1525,7 +1525,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const expandMarkup = !isUtility && activeSessionId
       ? { inline_keyboard: [[{ text: '🔎 Разобраться подробнее', callback_data: `qa_more|${activeSessionId}` }]] }
       : null;
-    const quickExtra = expandMarkup ? { reply_markup: expandMarkup } : {};
+    const quickExtra = { reply_markup: { inline_keyboard: [
+      ...(expandMarkup?.inline_keyboard || []), ...inputInspectionRows(initialMsgId),
+    ] } };
     if (initialMsgId) {
       await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra, threadId));
     } else {
@@ -1841,7 +1843,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       const tgMsg = partialDisplay.length > 20
         ? `🧠 ${partialDisplay.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
         : statusLine;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, tgMsg, threadId);
 
       _recordFailureAttempt(executionId, {
@@ -1867,7 +1869,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       });
     } else {
       const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, limitMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine,
@@ -1894,7 +1896,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const stoppedMsg = partialDisplay
       ? `⛔ Остановлено\n\n${partialDisplay.slice(-MAX_MSG_LEN)}`
       : '⛔ Остановлено. Можешь задать новый вопрос.';
-    const clearMarkup = { reply_markup: { inline_keyboard: [] } };
+    const clearMarkup = { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } };
     if (msgId) {
       await tgEdit(BOT_TOKEN, chatId, msgId, stoppedMsg, clearMarkup).catch(() => tgSend(BOT_TOKEN, chatId, stoppedMsg, threadId));
     } else {
@@ -1923,7 +1925,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const isUsageLimit = codexErrorMsg && /usage limit|purchase more credits/i.test(codexErrorMsg);
     if (!isUsageLimit && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine, exitCode,
@@ -1956,7 +1958,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`
       : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
-    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg, threadId));
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg, threadId));
     else await tgSend(BOT_TOKEN, chatId, crashMsg, threadId);
     _recordFailureAttempt(executionId, {
       taskId, projectId, sessionId: activeSessionId, engine, exitCode,
@@ -1999,7 +2001,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (resumeSessionId && !resumeFallbackDone && !restartShutdown) {
       console.warn(`[${taskId}] resume: fallback reason=native_resume_failed engine=${engine} (${reason})`);
       const fallbackMsg = '↩️ Не удалось продолжить сессию движка — перезапускаю с восстановленным контекстом.';
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine, exitCode,
@@ -2029,7 +2031,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (resumedAfterRestart && resumeAttempts < MAX_RESUME_ATTEMPTS && !restartShutdown) {
       const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek });
       const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})${altNote ? `, ${altNote}` : ''}…`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine, exitCode,
@@ -2087,7 +2089,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (flipped && ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
       const newProfile = opencodeGoToggle.resolveProfileName();
       const switchMsg = `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, switchMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
       _recordFailureAttempt(executionId, {
@@ -2128,7 +2130,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         const nextSkip = [...contextSkipModels, verdict.model];
         if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
           const contextMsg = `⚠️ Запрос не поместился в контекст модели «${verdict.model}» — пробую следующую ступень лестницы профиля «${ocProfileName}» (это не блокирует модель для других задач).`;
-          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, contextMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, contextMsg, threadId));
+          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, contextMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, contextMsg, threadId));
           else await tgSend(BOT_TOKEN, chatId, contextMsg, threadId);
           if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, contextMsg);
           _recordFailureAttempt(executionId, {
@@ -2157,7 +2159,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           return { queuedRetry };
         }
         const tooBigMsg = `⛔ Запрос слишком большой для всех моделей лестницы профиля «${ocProfileName}» — разбей задачу на более мелкие части и отправь по шагам.`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tooBigMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tooBigMsg, threadId));
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tooBigMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, tooBigMsg, threadId));
         else await tgSend(BOT_TOKEN, chatId, tooBigMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, tooBigMsg);
         _recordFailureAttempt(executionId, {
@@ -2172,7 +2174,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         // health (recorded below via _recordFailureAttempt → markEngineFailure) but must never be
         // reported as auth-invalid (spec §7). The operator alert is the Telegram message below.
         const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg, threadId));
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg, threadId));
         else await tgSend(BOT_TOKEN, chatId, configMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, configMsg);
         _recordFailureAttempt(executionId, {
@@ -2184,7 +2186,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       }
       if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
         const degradeMsg = `⚠️ Модель «${verdict.model}» исчерпала лимит — пробую следующую ступень лестницы профиля «${ocProfileName}».`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, degradeMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, degradeMsg, threadId));
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, degradeMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, degradeMsg, threadId));
         else await tgSend(BOT_TOKEN, chatId, degradeMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, degradeMsg);
         _recordFailureAttempt(executionId, {
@@ -2212,7 +2214,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         return { queuedRetry };
       }
       const exhaustedMsg = `⛔ Вся лестница моделей профиля «${ocProfileName}» временно недоступна (лимиты) — оператор уведомлён.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, exhaustedMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, exhaustedMsg);
       // QUOTA is a plan/usage limit, NOT a credential loss (spec §7): health degrades via
@@ -2252,7 +2254,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
     if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
       const fallbackMsg = `⚠️ ${engineLabel} потерял авторизацию — автоматически переключаюсь на OpenCode для этой задачи.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
       _recordFailureAttempt(executionId, {
@@ -2281,7 +2283,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
     const authMsg = `⚠️ Авторизация ${engineLabel} истекла — оператор уже уведомлён, скоро починим.`;
     if (msgId) {
-      await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg, threadId));
+      await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg, threadId));
     } else {
       await tgSend(BOT_TOKEN, chatId, authMsg, threadId);
     }
@@ -2305,7 +2307,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const delayMs = getRetryDelayMs(nextAttempt) || 0;
     const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek });
     const retryMsg = `🔄 Работа прервана (${incompleteReason}) — пробую ещё раз (${nextAttempt}/${MAX_INCOMPLETE_RETRIES})${altNote ? `, ${altNote}` : ''}…`;
-    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId) } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
     else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
     _recordFailureAttempt(executionId, {
@@ -2418,6 +2420,10 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       finalMarkup = actionButtons(activeSessionId, { deep: finalDeep });
       buttonReason = 'no-session';
     }
+  }
+  if (initialMsgId && !internalGtd) {
+    finalMarkup ||= { inline_keyboard: [] };
+    finalMarkup.inline_keyboard.push(...inputInspectionRows(initialMsgId));
   }
   const finalExtra = { reply_markup: finalMarkup || { inline_keyboard: [] } };
 

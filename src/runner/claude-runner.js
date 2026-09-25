@@ -15,7 +15,7 @@ const os = require('os');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
-const STOP_BUTTON_AFTER_SECS = 5;
+const STOP_BUTTON_AFTER_SECS = 0; // Controls belong to the launch status from its first edit.
 const MAX_MSG_LEN = 3500;
 const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 
@@ -39,10 +39,14 @@ function controlKey(taskId) {
   if (Buffer.byteLength(LONGEST_CONTROL_PREFIX + id) <= TG_CALLBACK_DATA_MAX_BYTES) return id;
   return 'h' + require('crypto').createHash('sha256').update(id).digest('hex').slice(0, 24);
 }
-const runningControls = taskId => ({ reply_markup: { inline_keyboard: [[
+const inputInspectionRows = messageId => messageId ? [[
+  { text: '📋 Посмотреть input', callback_data: `input_run|${messageId}` },
+  { text: '📜 Журнал', callback_data: `input_journal|${messageId}` },
+]] : [];
+const runningControls = (taskId, inputMessageId = null) => ({ reply_markup: { inline_keyboard: [[
   { text: '⛔ Стоп', callback_data: `stop|${controlKey(taskId)}` },
   { text: '➕ Дополнить', callback_data: `sup|${controlKey(taskId)}` },
-]] } });
+], ...inputInspectionRows(inputMessageId)] } });
 // progressEdit is best-effort+coalesced (see comment above `tgEdit` in
 // tg-stream.js) — a 429 drop returns {ok:false}, a coalesce-skip returns
 // {ok:true, skipped:true}. Either way the buttons did NOT reach the chat, so
@@ -369,6 +373,7 @@ async function runEngineProcess(opts) {
   // editMessageText without reply_markup clears the keyboard, so sending markup
   // only on the first landing (and bare text afterwards) makes the buttons
   // visible for one tick and then vanish on the next — the reported bug.
+  const inputMessageId = msgId; // preserve snapshot identity if progress falls back to a fresh bubble
   let stopButtonShown = false;
   // Cadence of progress edits: burst at 1s/2s/5s/10s/15s so the counter feels
   // live, then settle to one edit every 15s. A fixed 3s tick hammered Telegram's
@@ -395,7 +400,7 @@ async function runEngineProcess(opts) {
       const secs = Math.round((Date.now() - thinkingStart) / 1000);
       const label = lastActivity || 'Думаю…';
       if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-      const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {});
+      const result = await progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ${label} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } });
       if (stopButtonShown && editLanded(result)) stopButtonShown = true;
       // Re-arm ONLY while the engine process is still alive AND stopProgress()
       // hasn't run. Two guards, two different zombie paths:
@@ -440,7 +445,7 @@ async function runEngineProcess(opts) {
         const snippet = fullOutput.text.slice(-MAX_MSG_LEN);
         const secs = Math.round((Date.now() - thinkingStart) / 1000);
         if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-        const stopExtra = stopButtonShown ? runningControls(taskId) : {};
+        const stopExtra = stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } };
         if (snippet) {
           // ⚡ suffix signals "actively writing" (distinct from ⏱ waiting or clean final message)
           const silentMins = Math.round((Date.now() - lastOutputAt) / 60000);
@@ -518,7 +523,7 @@ async function runEngineProcess(opts) {
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
               if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${ocLabel} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } }).catch(() => {});
             }
             scheduleStream();
           } else if (event.type === 'step_start') {
@@ -574,7 +579,7 @@ async function runEngineProcess(opts) {
             if (!outputStarted && msgId) {
               const secs = Math.round((Date.now() - thinkingStart) / 1000);
               if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
+              progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } }).catch(() => {});
             }
           } else if (event.type === 'turn.completed') {
             terminalSuccess = true;
@@ -627,7 +632,7 @@ async function runEngineProcess(opts) {
               if (!outputStarted && msgId) {
                 const secs = Math.round((Date.now() - thinkingStart) / 1000);
                 if (secs >= STOP_BUTTON_AFTER_SECS) stopButtonShown = true;
-                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId) : {}).catch(() => {});
+                progressEdit(BOT_TOKEN, chatId, msgId, `🧠 ⚡ ${lastActivity} (${secs}с)`, stopButtonShown ? runningControls(taskId, inputMessageId) : { reply_markup: { inline_keyboard: inputInspectionRows(inputMessageId) } }).catch(() => {});
               }
             }
           }
@@ -803,6 +808,7 @@ module.exports = {
   // 429/coalesce drop)
   editLanded,
   runningControls,
+  inputInspectionRows,
   controlKey,
   // constants exposed for tests
   _const: { STREAM_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, STOP_BUTTON_AFTER_SECS, MAX_MSG_LEN, CLAUDE_TIMEOUT_MS, WARN_TIMEOUT_MS, INACTIVITY_TIMEOUT_MS },

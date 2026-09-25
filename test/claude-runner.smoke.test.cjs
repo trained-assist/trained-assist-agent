@@ -141,6 +141,8 @@ const baseOpts = {
     ['stop|t-x', 'sup|t-x'],
     'runningControls pairs ⛔ Стоп with ➕ Дополнить on the same row'
   );
+  assert.deepEqual(runningControls('t-x', 123).reply_markup.inline_keyboard[1].map(b => b.callback_data),
+    ['input_run|123', 'input_journal|123'], 'input controls stay bound to the exact launch message');
   // Telegram rejects callback_data > 64 bytes (400 BUTTON_DATA_INVALID) and
   // with it the whole progress edit. Real tg taskIds are `<user>-tg-<64hex>`.
   {
@@ -279,7 +281,10 @@ echo '{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1
   let hardSendCalls = 0;
   let hardFellBackAt = -1;
   const hardEdit = async () => { hardEditCalls++; throw new Error('Bad Request: message to edit not found'); };
-  const hardSend = async () => { hardSendCalls++; if (hardFellBackAt < 0) hardFellBackAt = hardEditCalls; return { ok: true }; };
+  const hardSend = async (_token, _chat, _text, extra) => {
+    assert.deepEqual(extra.reply_markup.inline_keyboard[1].map(b => b.callback_data),
+      ['input_run|m-hf', 'input_journal|m-hf'], 'replacement status retains the original snapshot identity');
+    hardSendCalls++; if (hardFellBackAt < 0) hardFellBackAt = hardEditCalls; return { ok: true }; };
   const origErr = console.error;
   const errLines = [];
   console.error = (...a) => { errLines.push(a.join(' ')); };
