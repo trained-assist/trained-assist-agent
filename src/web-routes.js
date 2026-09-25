@@ -321,14 +321,14 @@ function prepareWebTaskFiles(username, task, fileRefs) {
   return { task: effectiveTask, fileRefs: normalized };
 }
 
-async function streamWebTask({ req, res, secrets, username, task, sessionId, projectId = null, fileRefs = [], requestId = null }) {
+async function streamWebTask({ req, res, secrets, username, task, sessionId, newSessionId = null, projectId = null, fileRefs = [], requestId = null }) {
   const workDir = userWorkDir(username);
   // Web ConversationRef canary (#1365 PR3): the run names its exact session.
   // A new Web task gets its id minted HERE (not read back from the shared
   // chat-0 pointer after the run), so parallel Web sessions never collapse.
   const webExactSession = webCanaryEnabled(username);
   const isNewWebSession = webExactSession && !sessionId;
-  if (isNewWebSession) sessionId = newWebSessionId();
+  if (isNewWebSession) sessionId = newSessionId || newWebSessionId();
   const taskId = requestId ? `${username}-web-${requestId}` : `${username}-web-${Date.now()}`;
 
   const emitter = new EventEmitter();

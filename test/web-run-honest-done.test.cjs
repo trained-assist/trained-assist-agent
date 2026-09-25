@@ -86,3 +86,12 @@ test('answer persisted to the session without streaming still counts as done', a
   const ev = await drive(streamWebTask);
   assert.equal(ev.at(-1).type, 'done');
 });
+
+test('pre-minted newSessionId (receipt written first) is the session the run uses', async () => {
+  let seen;
+  const { streamWebTask } = loadStream(async (o) => { seen = o.sessionId; return 'ok'; });
+  const ev = await drive(streamWebTask, { newSessionId: 's-web-1-premint' });
+  assert.equal(ev[0].sessionId, 's-web-1-premint');
+  assert.equal(seen, 's-web-1-premint');
+  assert.equal(ev.at(-1).sessionId, 's-web-1-premint');
+});
