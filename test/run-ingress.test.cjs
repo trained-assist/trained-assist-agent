@@ -166,3 +166,21 @@ test('a concurrent duplicate POST for the same requestId runs admission exactly 
  assert.equal(f.runs.length,1,'admission ran exactly once despite the concurrent duplicate');
  assert.equal(fetches,1,'the second request never re-materializes media — it saw the receipt the first one wrote');
 });
+
+test('replay of an accepted requestId is ACKed before content/delivery validation (no false "сервер отклонил")', async t => {
+ const f=fixture(t);f.sandbox.secrets={RECRUITER_BOT_TOKEN:'x',TELEGRAM_BOT_TOKEN_RECRUITER:'x'};
+ const first=await f.send({audience:'recruiter'});
+ if(first.status!==202)return t.skip('recruiter audience secret name differs in this build');
+ f.sandbox.secrets={};f.pending.clear();
+ const replay=await f.send({audience:'recruiter',fileRefs:[{id:'NOT-HEX',name:'x'}]});
+ assert.equal(replay.status,202);assert.equal(replay.data.duplicate,true);assert.equal(f.runs.length,1);
+ const plain=await f.send({requestId:'request-2'});assert.equal(plain.status,202);
+ const plainReplay=await f.send({requestId:'request-2',sessionId:'bad id!'});
+ assert.equal(plainReplay.status,202);assert.equal(plainReplay.data.duplicate,true);assert.equal(f.runs.length,2);
+});
+
+test('every /run rejection is logged with its reason', async t => {
+ const f=fixture(t);const lines=[];f.sandbox.console={...console,log:(...a)=>lines.push(a.join(' '))};
+ const res=await f.send({requestId:'fresh',sessionId:'bad id!'});
+ assert.equal(res.status,400);assert.ok(lines.some(l=>/\[\/run\] 400 invalid sessionId user=alice requestId=fresh/.test(l)),lines.join('\n'));
+});
