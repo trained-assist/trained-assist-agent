@@ -9,36 +9,45 @@
 
 ## 0. Решение в одном экране
 
-**В сессию монтируем core-owned MCP-адаптер, а не entrypoint внешнего репозитория.** Внешний provider выполняется отдельным процессом под управлением core. Он получает проверенную private execution-copy и доверенный контекст своего вызова.
+**В v1 в сессию монтируем один core-owned adapter-process, а не entrypoint внешнего репозитория.** Этот adapter одновременно:
+- говорит с Claude/Codex/OpenCode обычным MCP stdio как server;
+- держит закреплённую generation + host-issued RunBinding;
+- прогоняет action через существующий `invokeAction`;
+- приобретает private verified copy provider-а;
+- запускает provider child и говорит с ним **MCP stdio как client**;
+- владеет process lease/journal до завершения run/provider.
 
 ```text
 Claude / Codex / OpenCode
-  │ стандартный MCP stdio; прежнее имя сервера
+  │ MCP stdio; прежнее имя mcpServerId
   ▼
-core-managed stdio adapter, например mcpServerId=hh-skills
-  │ приватный локальный IPC; capability только данного run/provider
-  ▼
-SessionMcpRuntime в core
-  ├─ закреплённая registry generation
-  ├─ host-issued profile/project/task/repository binding
-  ├─ существующий invokeAction: schema/trigger/consent/history
-  └─ ProviderSupervisor
-       ├─ acquireProvider → private verified artifact copy
-       ├─ один provider process на run + provider + binding
-       └─ release только после доказанного завершения процессов
+core-owned adapter process
+  ├─ pinned generation + host-issued RunBinding
+  ├─ invokeAction: schema/trigger/consent/history
+  ├─ provider lease journal
+  └─ Provider child
+       ▲
+       │ MCP stdio + negotiated trained-assist host-context extension
+       └─ private verified artifact copy
 ```
 
-Это не новый сетевой сервис, не новый scheduler и не второй approval framework. `SessionMcpRuntime` — компонент существующего host-процесса; supervisor — его небольшой служебный child. Отдельный workspace остаётся ответственностью engineering.
+**В v1 нет отдельного `SessionMcpRuntime` в host и нет custom IPC между adapter и host.** Это сознательное упрощение после review PR #1361: отдельный `adapter → IPC → host-runtime → supervisor → provider` добавлял новый transport, recovery component и capability lifecycle до появления доказанной необходимости.
+
+Что теряем: централизованный runtime, живущий независимо от engine/adapter process. Для v1 принимаем conservative recovery через journal/process identity: неоднозначный orphan retain/reconcile, а не автоматическое восстановление. Если позже появится измеримая потребность в централизованном cross-run recovery, shared provider processes или удалённом execution host, custom host IPC можно добавить как **v2 transport**, не меняя provider/action contracts.
+
+Это не новый сетевой сервис, не новый scheduler и не второй approval framework. Отдельный coding workspace остаётся ответственностью engineering.
 
 Ключевые решения:
 
 - Одно клиентское имя из `mcpServerId`; `providerId` остаётся внутренней идентичностью.
-- Один согласованный MCP plan для трёх движков; файлы конфигурации — вне code checkout.
+- Один согласованный MCP plan для трёх движков; generated runtime configs — вне code checkout.
 - Provider version закреплена на engine run. Reload влияет на новые runs, не подменяет код работающего child.
-- Hash/copy оплачиваются при приобретении process lease, не на каждом tool call.
-- Аргументы модели не могут назначить profile, trigger, approval, roots или владельца workspace.
-- `enabled` и `profiles` — единственные переключатели подключения sources. Установка, права и credentials — разные состояния.
+- Hash/copy оплачиваются при приобретении provider lease, не на каждом tool call.
+- Аргументы модели не могут назначить profile, trigger, approval, roots или владельца workspace внутри managed MCP path.
+- `enabled` и `profiles` — source controls; установка, rights/consent и credentials — разные состояния.
+- Любой mutation action, доступный автономному MCP-клиенту, обязан иметь **host-stable operation identity + provider-side idempotency**; unsafe mutation без этого через MCP v1 не экспонируется.
 - Workspace library/CLI из engineering #3 продолжают разрабатываться независимо от MCP wiring.
+- Same-UID engine не считается adversarial boundary: wiring предотвращает accidental/cross-run confusion, но не sandbox escape через shell.
 
 ## 1. Проверенная база и границы достоверности
 
