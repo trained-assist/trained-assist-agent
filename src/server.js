@@ -510,55 +510,9 @@ async function main() {
       return json(res, ready ? 200 : 503, { ready, checks, vm: VM_NAME, commit: GIT_COMMIT, uptime: process.uptime() });
     }
 
-    // GET /p/:slug — serve a published page (no auth, public)
-    const pageServeMatch = url.pathname.match(/^\/p\/([a-z0-9][a-z0-9-]{0,79})$/);
-    if (req.method === 'GET' && pageServeMatch) {
-      const slug = pageServeMatch[1];
-      const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-      const pageDir = path.join(dataDir, 'pages', slug);
-      const metaFile = path.join(pageDir, 'meta.json');
-
-      if (!fs.existsSync(metaFile)) {
-        res.writeHead(404, { 'Content-Type': 'text/html' });
-        return res.end('<h1>404</h1><p>Page not found.</p>');
-      }
-
-      let meta;
-      try { meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')); } catch {
-        res.writeHead(500, { 'Content-Type': 'text/html' });
-        return res.end('<h1>500</h1><p>Corrupted page metadata.</p>');
-      }
-
-      // Serve raw source if ?raw requested (for AI agents reading markdown)
-      const wantsRaw = url.searchParams.has('raw');
-      if (wantsRaw) {
-        const rawFile = path.join(pageDir, 'source');
-        if (fs.existsSync(rawFile)) {
-          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-          return res.end(fs.readFileSync(rawFile));
-        }
-      }
-
-      // Password check
-      if (meta.passwordHash) {
-        const pw = url.searchParams.get('password') || '';
-        const { createHash } = require('crypto');
-        const pwHash = pw ? createHash('sha256').update(pw).digest('hex') : '';
-        if (!pw || pwHash !== meta.passwordHash) {
-          const errMsg = pw ? 'Неверный пароль, попробуйте ещё раз.' : '';
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          return res.end(publishPasswordForm(slug, errMsg));
-        }
-      }
-
-      const htmlFile = path.join(pageDir, 'index.html');
-      if (!fs.existsSync(htmlFile)) {
-        res.writeHead(404, { 'Content-Type': 'text/html' });
-        return res.end('<h1>404</h1><p>Content not found.</p>');
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(fs.readFileSync(htmlFile));
-    }
+    // GET /p/:slug — serve a published page (no auth, public; password-gated
+    // pages checked before ANY content incl. ?raw). See src/handlers/pages.js.
+    if (req.method === 'GET' && require('./handlers/pages').servePublishedPage(req, url, res, publishPasswordForm)) return;
 
 
     // POST /telegram/misha — @cmr_management_bot direct webhook (no AGENT_SECRET auth)
