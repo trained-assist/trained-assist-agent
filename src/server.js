@@ -387,6 +387,7 @@ async function resumePendingTasks(secrets) {
           secrets, internalGtd: !!p.internalGtd,
           mode: p.mode, continuationCount: p.continuationCount,
           initiatedAt: p.initiatedAt, threadId: p.threadId,
+          rootTaskId: p.rootTaskId || p.taskId, requestId: p.requestId || null,
         });
         clearPendingTask(p.taskId);
         const reply = await running;
@@ -1425,7 +1426,7 @@ ${recent || '(пока нет)'}
         }
 
         // runTask journals synchronously, before any await or acknowledgement.
-        const completion = runTask({ taskId, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, projectPicked: projectPicked === true, newProjectName: newProjectName || null });
+        const completion = runTask({ taskId, requestId: requestId || null, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, projectPicked: projectPicked === true, newProjectName: newProjectName || null });
         completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
         if (requestId) atomicJson(receipt, { taskId, audience: audience || 'default', acceptedAt: Date.now() });
         json(res, 202, { taskId, requestId, durable: true });
