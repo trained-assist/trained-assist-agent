@@ -399,6 +399,19 @@ function setPinnedProjectId(workDir, id, chatId, { now = Date.now(), audience, t
     console.warn('[projects] setPinnedProjectId:', e.message);
   }
 }
+// Explicit «сними закрепление» — the chat goes back to automatic project choice. Also drops
+// a legacy pinned:true flag in active-*.json, otherwise _readPin would read it through and
+// the pin would silently come back. Returns the id that was pinned (null if none).
+function clearPinnedProjectId(workDir, chatId, { audience, threadId = null } = {}) {
+  const had = getPinnedProjectId(workDir, chatId, audience, threadId);
+  try { fs.unlinkSync(_pinPath(workDir, chatId, audience, threadId)); } catch { /* no pin file */ }
+  const cur = _readActive(workDir, chatId, audience, threadId);
+  if (cur && cur.pinned) {
+    try { atomicWrite(_activePath(workDir, chatId, audience, threadId), JSON.stringify({ id: cur.id, at: cur.at })); }
+    catch (e) { console.warn('[projects] clearPinnedProjectId legacy:', e.message); }
+  }
+  return had;
+}
 // Every pin file of the profile that points at `fromId` → `toId` (projects reorg merged
 // the pinned project away). Returns [{ file, from, to }] for the reorg ledger.
 function repointPins(workDir, fromId, toId, { now = Date.now() } = {}) {
@@ -518,6 +531,7 @@ module.exports = {
   getActiveProjectId,
   getPinnedProjectId,
   setPinnedProjectId,
+  clearPinnedProjectId,
   repointPins,
   setActiveProjectId,
   decideNewSessionProject,

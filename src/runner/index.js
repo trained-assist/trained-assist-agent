@@ -52,6 +52,7 @@ const {
   CONTEXT_OFF_INTENT,
   CONTEXT_ON_INTENT,
   PERSONA_INTENT,
+  SETTINGS_INTENT,
   PROJECT_INTENT,
   AGENT_INFO_INTENT,
   MODEL_INFO_INTENT,
@@ -628,7 +629,7 @@ function runTask(opts) {
   // forceClaude means the user explicitly wants Claude (e.g. a "proработка" button tap on
   // one of these commands' replies) — respect that and fall through to the normal path.
   if (!opts.forceClaude && isPreQueueQuickIntent((opts.task || '').trim())) {
-    const quick = getQuickAnswer(opts.task, opts.user.username, opts.user.workDir, false, opts.user.id, opts.user.telegramUserId, opts.user.audience || 'default');
+    const quick = getQuickAnswer(opts.task, opts.user.username, opts.user.workDir, false, opts.user.id, opts.user.telegramUserId, opts.user.audience || 'default', runThreadId);
     if (quick) {
       const msg = `⚡ ${quick}`;
       const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
@@ -1486,7 +1487,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // forceClaude=true skips quick answers for ambiguous prose (user explicitly wants Claude /
   // restart-resume), but NOT for slash commands — a command is unambiguous and must never be
   // replayed to the LLM. See shouldAttemptQuickAnswer (intent-engine).
-  const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId, activeSessionId, audience);
+  const dispatchQuick = () => runQuickAnswer(task, user.username, user.workDir, secrets.OPENROUTER_API_KEY, sessionExists, chatId, user.telegramUserId, activeSessionId, audience, threadId);
   const quickReply = shouldAttemptQuickAnswer(forceClaude, task) ? await dispatchQuick() : null;
   if (quickReply) {
     console.log('[%s] quick-answer len=%d', taskId, quickReply.length);
@@ -1494,7 +1495,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       SESSIONS_INTENT.test(task) || SESSION_DETAIL_INTENT.test(task) || USAGE_INTENT.test(task) ||
       SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
       CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
-      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
+      PERSONA_INTENT.test(task) || PROJECT_INTENT.test(task) || SETTINGS_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
       MODEL_INFO_INTENT.test(task) || BUG_OR_FEATURE_INTENT.test(task);
 
     if (!isUtility) {
