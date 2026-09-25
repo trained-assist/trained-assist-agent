@@ -55,6 +55,9 @@ sudo -u "$USER" mkdir -p "/home/$USER/users"
 echo "==> Installing systemd service..."
 # Copy template and let operator fill in secrets
 cp "$REPO_DIR/systemd/ru-edge.service" "/etc/systemd/system/$SERVICE.service"
+# The service runs from the release symlink; point it at the repo until the
+# first release deploy repoints it (scripts/deploy-ru-edge.sh does this too).
+ln -sfn "$REPO_DIR" "/home/$USER/agent-master"
 systemctl daemon-reload
 systemctl enable "$SERVICE"
 

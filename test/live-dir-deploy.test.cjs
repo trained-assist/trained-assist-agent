@@ -5,8 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const RELEASE_LIB = path.resolve(__dirname, '../scripts/release-lib.sh');
 const PREFLIGHT = path.resolve(__dirname, '../scripts/deploy-preflight.sh');
-const GUARD = path.resolve(__dirname, '../scripts/live-dir-guard.sh');
 const WORKFLOWS = ['ci.yml', 'deploy-manual.yml'];
 
 function git(cwd, args) {
@@ -15,8 +15,12 @@ function git(cwd, args) {
   return r.stdout.trim();
 }
 
+function sh(script, env = {}) {
+  return spawnSync('bash', ['-c', script], { encoding: 'utf8', env: { ...process.env, ...env } });
+}
+
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-dir-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'release-dir-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const origin = path.join(dir, 'origin.git');
   const work = path.join(dir, 'work');
@@ -34,35 +38,23 @@ function fixture(t) {
   git(work, ['commit', '-qam', 'c2']);
   git(work, ['push', '-q', 'origin', 'main']);
   const c2 = git(work, ['rev-parse', 'HEAD']);
-  const marker = path.join(dir, 'deployed-sha');
+  const releases = path.join(dir, 'releases');
+  const link = path.join(dir, 'agent-master');
   return {
-    dir, work, c1, c2, marker,
+    dir, work, c1, c2, releases, link,
     checkout: (sha) => git(work, ['checkout', '-q', '--detach', sha]),
     head: () => git(work, ['rev-parse', 'HEAD']),
     preflight: (target) => spawnSync('bash', [PREFLIGHT, target], { cwd: work, encoding: 'utf8', env: { ...process.env, REPO_DIR: work } }),
-    guard: () => spawnSync('bash', [GUARD], { encoding: 'utf8', env: { ...process.env, REPO_DIR: work, LIVE_DIR_MARKER: marker } }),
+    build: (target) => sh(`source "${RELEASE_LIB}"; SUDO= RELEASE_SKIP_DEPS=1 release_build "${work}" "${target}" "${releases}"`),
+    setLink: (target) => sh(`source "${RELEASE_LIB}"; SUDO= release_set_link "${link}" "${target}"`),
+    gc: (keep) => sh(`source "${RELEASE_LIB}"; SUDO= release_gc "${releases}" ${keep}`),
   };
 }
 
-test('preflight accepts a clean checkout of an origin/main commit', (t) => {
+test('preflight accepts an origin/main commit', (t) => {
   const f = fixture(t);
   f.checkout(f.c2);
   assert.equal(f.preflight(f.c2).status, 0);
-});
-
-test('preflight refuses a dirty live checkout (no auto-stash)', (t) => {
-  const f = fixture(t);
-  f.checkout(f.c2);
-  fs.writeFileSync(path.join(f.work, 'dirty'), 'x');
-  const r = f.preflight(f.c2);
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /dirty/i);
-});
-
-test('preflight refuses when HEAD is not the target', (t) => {
-  const f = fixture(t);
-  f.checkout(f.c1);
-  assert.equal(f.preflight(f.c2).status, 1);
 });
 
 test('preflight refuses a commit that is not an ancestor of origin/main', (t) => {
@@ -71,68 +63,94 @@ test('preflight refuses a commit that is not an ancestor of origin/main', (t) =>
   fs.writeFileSync(path.join(f.work, 'f'), 'z');
   git(f.work, ['commit', '-qam', 'feat']);
   const feat = f.head();
-  f.checkout(feat);
   const r = f.preflight(feat);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /origin\/main/);
 });
 
-test('preflight refreshes a stale origin/main before the ancestry check (#1406 RU)', (t) => {
+test('a dirty session worktree no longer blocks a deploy (prod is a release, not the tree)', (t) => {
   const f = fixture(t);
   f.checkout(f.c2);
-  fs.writeFileSync(path.join(f.work, 'f'), 'c');
-  git(f.work, ['commit', '-qam', 'c3']);
-  git(f.work, ['push', '-q', 'origin', 'HEAD:main']);
-  const c3 = f.head();
-  // The VM's remote-tracking ref lags behind the freshly merged target.
-  git(f.work, ['update-ref', 'refs/remotes/origin/main', f.c2]);
-  const r = f.preflight(c3);
-  assert.equal(r.status, 0, r.stderr);
-});
-
-test('guard passes when HEAD equals the deployed marker', (t) => {
-  const f = fixture(t);
-  fs.writeFileSync(f.marker, f.c2 + '\n');
-  f.checkout(f.c2);
-  assert.equal(f.guard().status, 0);
-});
-
-test('guard restores the deployed revision on clean drift', (t) => {
-  const f = fixture(t);
-  fs.writeFileSync(f.marker, f.c2 + '\n');
-  f.checkout(f.c1);
-  const r = f.guard();
-  assert.equal(r.status, 0);
-  assert.equal(f.head(), f.c2);
-});
-
-test('guard refuses to start when drift is dirty', (t) => {
-  const f = fixture(t);
-  fs.writeFileSync(f.marker, f.c2 + '\n');
-  f.checkout(f.c1);
   fs.writeFileSync(path.join(f.work, 'dirty'), 'x');
-  const r = f.guard();
-  assert.equal(r.status, 1);
-  assert.equal(f.head(), f.c1);
-  assert.match(r.stderr, /DIRTY/);
+  assert.equal(f.preflight(f.c2).status, 0, 'preflight must not look at worktree dirt any more');
 });
 
-test('guard bootstraps when there is no marker yet', (t) => {
+test('release_build materialises the committed revision, not the dirty worktree', (t) => {
   const f = fixture(t);
-  assert.equal(fs.existsSync(f.marker), false);
-  f.checkout(f.c1);
-  assert.equal(f.guard().status, 0);
+  f.checkout(f.c2);
+  fs.writeFileSync(path.join(f.work, 'f'), 'DIRTY'); // uncommitted
+  const r = f.build(f.c2);
+  assert.equal(r.status, 0, r.stderr);
+  const released = path.join(f.releases, f.c2, 'f');
+  assert.equal(fs.readFileSync(released, 'utf8'), 'b', 'release must contain the commit, not the working tree');
+  assert.ok(fs.existsSync(path.join(f.releases, f.c2, '.release-complete')));
+  assert.equal(fs.readFileSync(path.join(f.releases, f.c2, '.release-sha'), 'utf8').trim(), f.c2, 'release must expose its SHA for /health');
 });
 
-test('deploy workflows no longer auto-stash the live checkout', () => {
-  for (const name of WORKFLOWS) {
-    const body = fs.readFileSync(path.resolve(__dirname, '../.github/workflows', name), 'utf8');
-    assert.doesNotMatch(body, /git stash/, `${name} must fail on a dirty tree, not stash`);
-    assert.match(body, /deploy-preflight\.sh/, `${name} must run the deploy preflight`);
+test('release_build is idempotent (reuses a completed release)', (t) => {
+  const f = fixture(t);
+  f.checkout(f.c2);
+  assert.equal(f.build(f.c2).status, 0);
+  const sentinel = path.join(f.releases, f.c2, '.keep-me');
+  fs.writeFileSync(sentinel, 'x');
+  const again = f.build(f.c2);
+  assert.equal(again.status, 0, again.stderr);
+  assert.ok(fs.existsSync(sentinel), 'a completed release must not be rebuilt');
+});
+
+test('release_set_link repoints the symlink atomically', (t) => {
+  const f = fixture(t);
+  fs.mkdirSync(path.join(f.releases, f.c1), { recursive: true });
+  fs.mkdirSync(path.join(f.releases, f.c2), { recursive: true });
+  assert.equal(f.setLink(path.join(f.releases, f.c1)).status, 0);
+  assert.equal(fs.realpathSync(f.link), fs.realpathSync(path.join(f.releases, f.c1)));
+  assert.equal(f.setLink(path.join(f.releases, f.c2)).status, 0);
+  assert.equal(fs.realpathSync(f.link), fs.realpathSync(path.join(f.releases, f.c2)));
+});
+
+test('release_gc keeps the newest releases and preserves the hh-skill sibling symlink', (t) => {
+  const f = fixture(t);
+  fs.mkdirSync(f.releases, { recursive: true });
+  for (let i = 1; i <= 4; i++) {
+    fs.mkdirSync(path.join(f.releases, `r${i}`));
+    fs.utimesSync(path.join(f.releases, `r${i}`), new Date(2026, 0, i), new Date(2026, 0, i));
+  }
+  const sibling = path.join(f.releases, 'trained-assist-hh-skill');
+  fs.mkdirSync(path.join(f.dir, 'hh-src'));
+  fs.symlinkSync(path.join(f.dir, 'hh-src'), sibling);
+  const r = f.gc(2);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(fs.existsSync(path.join(f.releases, 'r3')));
+  assert.ok(fs.existsSync(path.join(f.releases, 'r4')));
+  assert.ok(!fs.existsSync(path.join(f.releases, 'r1')));
+  assert.ok(!fs.existsSync(path.join(f.releases, 'r2')));
+  assert.ok(fs.lstatSync(sibling).isSymbolicLink(), 'must not GC the hh-skill sibling symlink');
+});
+
+test('units serve from agent-master and no longer run a live-tree guard', () => {
+  for (const name of ['assist-agent.service', 'ru-edge.service']) {
+    const unit = fs.readFileSync(path.resolve(__dirname, '../systemd', name), 'utf8');
+    assert.match(unit, /WorkingDirectory=\/home\/vova\/agent-master/, `${name} must serve the release symlink`);
+    assert.doesNotMatch(unit, /live-dir-guard/, `${name} must not carry the obsolete live-tree guard`);
   }
 });
 
-test('the live service declares the startup guard as ExecStartPre', () => {
-  const unit = fs.readFileSync(path.resolve(__dirname, '../systemd/assist-agent.service'), 'utf8');
-  assert.match(unit, /ExecStartPre=.*live-dir-guard\.sh/);
+test('deploy workflows build a release from the SHA instead of resetting the live tree', () => {
+  for (const name of WORKFLOWS) {
+    const body = fs.readFileSync(path.resolve(__dirname, '../.github/workflows', name), 'utf8');
+    assert.doesNotMatch(body, /git stash/, `${name} must not stash`);
+    assert.doesNotMatch(body, /git reset --hard/, `${name} must not reset a live working tree`);
+    assert.doesNotMatch(body, /git checkout --detach/, `${name} must not check out in a live working tree`);
+    assert.match(body, /git archive "\$DEPLOY_TARGET_COMMIT" scripts/, `${name} must run deploy code from the target SHA`);
+    assert.match(body, /deploy-preflight\.sh/, `${name} must run the ancestry preflight`);
+  }
+});
+
+test('deploy scripts use the release mechanics', () => {
+  for (const name of ['deploy.sh', 'deploy-ru-edge.sh']) {
+    const body = fs.readFileSync(path.resolve(__dirname, '../scripts', name), 'utf8');
+    assert.match(body, /source "\$SCRIPT_DIR\/release-lib\.sh"/, `${name} must source release-lib.sh`);
+    assert.match(body, /release_build /, `${name} must build a release`);
+    assert.match(body, /release_set_link /, `${name} must activate via symlink swap`);
+  }
 });

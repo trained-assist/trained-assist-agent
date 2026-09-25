@@ -554,11 +554,10 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   // /get_agent_info — show current engine, model, profile, VM, version
   // Also natural-language "what model/agent are you?" questions (MODEL_INFO_INTENT).
   if (AGENT_INFO_INTENT.test(task) || MODEL_INFO_INTENT.test(task)) {
-    const { execSync } = require('child_process');
     const eng = workDir ? profiles.getEngine(workDir, chatId) : 'claude';
     const vmName = process.env.VM_NAME || 'unknown';
     let commit = 'unknown';
-    try { commit = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch {}
+    try { const sha = require('../release-info').getReleaseSha(); if (sha) commit = sha.slice(0, 8); } catch {}
     let ocModel = process.env.OPENCODE_MODEL || '(из профиля)';
     let ocProfile = workDir ? profiles.getOcProfile(workDir) : 'не задан';
     try {

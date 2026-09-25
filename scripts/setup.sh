@@ -22,6 +22,9 @@ mkdir -p "$HOME/agent-data" "$HOME/users" "$HOME/agent-tokens"
 echo "==> Installing systemd service..."
 sudo cp "$REPO_DIR/systemd/assist-agent.service" "/etc/systemd/system/$SERVICE.service"
 sudo cp "$REPO_DIR/systemd/assist-agent-notify-failure.service" "/etc/systemd/system/assist-agent-notify-failure.service"
+# The service runs from the release symlink; point it at the repo until the
+# first release deploy repoints it (scripts/deploy.sh does this on the VM too).
+sudo ln -sfn "$REPO_DIR" /home/vova/agent-master
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE"
 sudo systemctl start "$SERVICE"

@@ -245,17 +245,15 @@ jobs:
             flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
             export ASSIST_DEPLOY_LOCKED=1
             cd /home/vova/trained-assist-agent
-            export PREV_COMMIT=$(git rev-parse HEAD)
             git fetch origin "${{ needs.merge.outputs.sha || github.sha }}"
             export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
-            if [ -n "$(git status --porcelain)" ]; then
-              echo "FATAL: live checkout is dirty — refusing to deploy (no auto-stash). A session was working in the deploy directory."
-              git status --porcelain | head -20
-              exit 1
-            fi
-            git checkout --detach "$DEPLOY_TARGET_COMMIT"
-            git reset --hard "$DEPLOY_TARGET_COMMIT"
-            bash scripts/deploy-preflight.sh "$DEPLOY_TARGET_COMMIT"
+            # Deploy code is taken from the target commit, not the (possibly dirty)
+            # session worktree: run it from a throwaway archive of the SHA. Prod is
+            # built into ~/agent-releases/<sha> and served via ~/agent-master, so
+            # this worktree is only a git source — no checkout/reset here (#1391).
+            DEPLOY_TMP=$(mktemp -d)
+            git archive "$DEPLOY_TARGET_COMMIT" scripts | tar -x -C "$DEPLOY_TMP"
+            REPO_DIR=/home/vova/trained-assist-agent bash "$DEPLOY_TMP/scripts/deploy-preflight.sh" "$DEPLOY_TARGET_COMMIT"
             printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nCHECKLIST_API_KEY=%s\nOPENCODE_MODEL=%s\nOPENCODE_PROFILE=%s\nOPENCODE_GO_API_KEY=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
@@ -274,11 +272,12 @@ jobs:
               '${{ secrets.OPENCODE_GO_API_KEY }}' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
-            node scripts/register-hook.js
-            DEPLOY_ENV=gcp bash scripts/deploy.sh
+            node "$DEPLOY_TMP/scripts/register-hook.js"
+            DEPLOY_ENV=gcp REPO_DIR=/home/vova/trained-assist-agent bash "$DEPLOY_TMP/scripts/deploy.sh"
             # Epic #1342: a bot whose token vanished from Secret Manager turns this deploy red
             # instead of freezing that bot's users silently (2026-09-24 RECRUITER_BOT_TOKEN).
-            node scripts/check-bot-secrets.js
+            node /home/vova/agent-master/scripts/check-bot-secrets.js
+            rm -rf "$DEPLOY_TMP"
 
   deploy-ru:
     needs: [ci, staging-gate, merge]
@@ -307,17 +306,11 @@ jobs:
             export ASSIST_DEPLOY_LOCKED=1
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
-            export PREV_COMMIT=$(git rev-parse HEAD)
             git fetch origin "${{ needs.merge.outputs.sha || github.sha }}"
             export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
-            if [ -n "$(git status --porcelain)" ]; then
-              echo "FATAL: live checkout is dirty — refusing to deploy (no auto-stash). A session was working in the deploy directory."
-              git status --porcelain | head -20
-              exit 1
-            fi
-            git checkout --detach "$DEPLOY_TARGET_COMMIT"
-            git reset --hard "$DEPLOY_TARGET_COMMIT"
-            bash scripts/deploy-preflight.sh "$DEPLOY_TARGET_COMMIT"
+            DEPLOY_TMP=$(mktemp -d)
+            git archive "$DEPLOY_TARGET_COMMIT" scripts | tar -x -C "$DEPLOY_TMP"
+            REPO_DIR=/home/vova/trained-assist-agent bash "$DEPLOY_TMP/scripts/deploy-preflight.sh" "$DEPLOY_TARGET_COMMIT"
             # ru-edge (src/ru-edge.js, issue #1288) has no Claude Code, no runner,
             # no MCP — only TELEGRAM_BOT_TOKEN (Telegram notifications) and
             # AGENT_SECRET (auth gate + calling GCP back) are required.
@@ -327,7 +320,8 @@ jobs:
               'https://platform.recruiter-assistant.ru' \
               > /home/vova/secrets.env
             chmod 600 /home/vova/secrets.env
-            AGENT_SECRET="${{ secrets.AGENT_SECRET }}" bash scripts/deploy-ru-edge.sh
+            AGENT_SECRET="${{ secrets.AGENT_SECRET }}" DEPLOY_ENV=ru REPO_DIR=/home/vova/trained-assist-agent bash "$DEPLOY_TMP/scripts/deploy-ru-edge.sh"
+            rm -rf "$DEPLOY_TMP"
 
   notify-merge-queue:
     needs: [deploy-gcp, deploy-ru]
