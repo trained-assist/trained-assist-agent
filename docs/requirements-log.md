@@ -160,3 +160,13 @@
 | ✅ реализовано | `ocProfile` override в runner | `_runTask` принимает явный `ocProfile`, приоритет над `profiles.getOcProfile(workDir)` — durable-шаг может пинить лестницу. Без новых opts поведение прежнее. |
 | ✅ реализовано | Тесты | `tests/unit/playbook-executor.test.js` (9 кейсов); `gtd-durable-wiring` — contract-шаг несёт `opencode/value` + рабочую директорию, legacy остаётся `claude`. |
 | 🔵 планируется | P3c/P3d/P4 | `ocRole` пока возвращается, но per-role degradation/recovery — P3c; programmatic-шаги всё ещё идут промптом (P3d); хуки — P4; `context_budget`→`skipModels` — no-op до реестра контекстов. |
+
+## 2026-09-26 — engineering-skills sibling mount + D1 dev_workspace_setup redirect (#1418)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | Sibling-mount `engineering-skills` | `src/browser.js` `writeMcpConfig()` регистрирует `engineering-skills` из sibling-чекаута `trained-assist-engineering` — тем же existence-gated паттерном, что `hh-skills`/`freelance-skills`. `mcpToolEnv` уже несёт `USER_ID`, который sibling читает как host-derived `principal` (сверено с engineering#6). |
+| ✅ реализовано | D1: `dev_workspace_setup` → per-task workspace | Тул делегирует в sibling `spawnWorkspaceForTask`: изолированный worktree + ветка `eng/<profile>-<task>` на `(profile, repo, task)`. Больше нет общего per-VM клона, `git fetch`/`pull`, и токена в persistent origin URL. |
+| ✅ реализовано | Токен без записи на диск | GitHub-токен прокидывается только на время синхронного spawn'а как эфемерный git credential helper (`GIT_CONFIG_*` env: сброс списка + helper) — в URL/конфиг не попадает. |
+| ✅ реализовано | Удалён legacy shared-dir путь | `dev_workspace_list` (читал только общий каталог, вызовов нет) удалён; `dev_new_repo` создаёт репо и форкает per-task workspace; `getDevDir()`/`AGENT_DATA_DIR/dev` удалены отдельным коммитом (redirect и удаление независимо ревертабельны). `installGitHooks` сохранён. |
+| ✅ реализовано | Тесты | `tests/browser.test.js` — gating `engineering-skills` (present/absent), зеркалит hh-skills; `tests/dev-workspace-setup.test.js` — redirect wiring (fake-lib через `ENGINEERING_WORKSPACE_LIB`), два разных task-лейбла → два отдельных worktree/ветки, passthrough full URL/local path, отсутствие `AGENT_DATA_DIR/dev`; реальный sibling-чекаут, два worktree. `npm run check` + новый lint зелёные. |
