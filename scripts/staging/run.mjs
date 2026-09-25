@@ -11,13 +11,26 @@ const output = resolve('staging-results');
 mkdirSync(output, { recursive: true });
 const temporary = mkdtempSync(join(tmpdir(), 'staging-gate-'));
 // Allowlist instead of forwarding a developer's or CI runner's secrets.
+// Every data root (incl. HOME — many paths derive from os.homedir()) lives in
+// the temp dir; isolation-guard.cjs is preloaded into every scenario process
+// and fails fast on a root outside it, prod credentials, or non-loopback
+// outbound (epic #1365 Phase 0 gate).
+const guard = resolve('scripts/staging/isolation-guard.cjs');
+const blockedLog = join(temporary, 'outbound-blocked.log');
+const realHome = process.env.HOME || '';
 const env = {
   PATH: process.env.PATH, CI: 'true', NODE_ENV: 'test',
+  STAGING_ROOT: temporary, STAGING_ISOLATION: '1', STAGING_RUNNER_PID: String(process.pid), STAGING_BLOCKED_LOG: blockedLog,
+  NODE_OPTIONS: `--require=${guard}`,
+  HOME: join(temporary, 'home'),
+  TMPDIR: join(temporary, 'tmp'),
+  USERS_DIR: join(temporary, 'home', 'users'),
   AGENT_DATA_DIR: join(temporary, 'data'),
   AGENT_TOKENS_ROOT: join(temporary, 'tokens'),
+  // Browser BINARIES only (read-only cache), never data.
+  PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || join(realHome, '.cache', 'ms-playwright'),
 };
-mkdirSync(env.AGENT_DATA_DIR, { recursive: true });
-mkdirSync(env.AGENT_TOKENS_ROOT, { recursive: true });
+for (const dir of [env.HOME, env.TMPDIR, env.USERS_DIR, env.AGENT_DATA_DIR, env.AGENT_TOKENS_ROOT]) mkdirSync(dir, { recursive: true });
 // Hash the actual checkout, including tracked edits and nonignored new files.
 const sourceFiles = [...new Set(execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { encoding: 'utf8' }).split('\0').filter(Boolean))].sort();
 const sourceHash = createHash('sha256');
@@ -44,6 +57,10 @@ function run(args) {
   if (result.status !== 0) throw new Error(`Scenario command failed (${result.status}): ${args.join(' ')}`);
 }
 try {
+  // The guard itself must refuse a non-isolated setup, or the gate proves nothing.
+  const probe = spawnSync(process.execPath, ['-e', '0'], { env: { ...env, HOME: realHome || '/' }, encoding: 'utf8' });
+  if (probe.status === 0) throw new Error('isolation guard did not reject a HOME outside STAGING_ROOT');
+  run(['-e', "require('os');"]);
   for (const file of [...suites.vitest, ...suites.node]) {
     if (!existsSync(file)) throw new Error(`Required scenario suite missing: ${file}`);
   }
@@ -61,6 +78,8 @@ try {
   console.error(error.message);
   process.exitCode = 1;
 } finally {
+  manifest.isolation = { guard: 'scripts/staging/isolation-guard.cjs', roots: ['HOME', 'TMPDIR', 'USERS_DIR', 'AGENT_DATA_DIR', 'AGENT_TOKENS_ROOT'] };
+  manifest.outboundBlocked = existsSync(blockedLog) ? readFileSync(blockedLog, 'utf8').split('\n').filter(Boolean) : [];
   manifest.finishedAt = new Date().toISOString();
   writeFileSync(join(output, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   rmSync(temporary, { recursive: true, force: true });

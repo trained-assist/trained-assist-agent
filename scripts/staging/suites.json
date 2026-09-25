@@ -22,6 +22,7 @@
     "test/admission-status.test.cjs",
     "test/core-admission.test.cjs",
     "test/conversation-session-index.test.cjs",
+    "test/staging-isolation-guard.test.cjs",
     "test/execution-owner-lock.test.cjs",
     "test/instant-restart.test.cjs",
     "test/intake-gate.test.cjs",
