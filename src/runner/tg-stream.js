@@ -202,7 +202,8 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
         _recordLanded(deliveryKey, messageId);
         return data;
       }
-      throw new Error(`Telegram editMessageText failed (${data.error_code || res.status})`);
+      // Keep Telegram's description: a bare "(400)" hid BUTTON_DATA_INVALID for days.
+      throw new Error(`Telegram editMessageText failed (${data.error_code || res.status})${data.description ? `: ${data.description}` : ''}`);
     }
     // A landed edit proves the chat is no longer flooded — drop any stale window.
     floodUntil.delete(deliveryKey);

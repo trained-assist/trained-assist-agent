@@ -23,9 +23,25 @@ const CLAUDE_TIMEOUT_MS = 40 * 60 * 1000; // 40 min hard limit
 // context without waiting for it to finish (➕). Mirrors the web UI's
 // Стоп/Дополнить pair (trained-assist-web#33) — the tg-bot's `sup|` callback
 // handler owns the actual restart-with-supplement flow.
+//
+// Telegram caps callback_data at 64 BYTES and rejects the whole edit with
+// 400 BUTTON_DATA_INVALID otherwise. Telegram taskIds are
+// `<username>-tg-<64 hex>` (90+ bytes), so `stop|${taskId}` killed EVERY
+// progress edit that carried these buttons — the "Думаю… (2с)" placeholder
+// froze for the whole run and the bot looked dead (2026-09-25, flexi-consult).
+// The tg-bot copies the key into stopok|/stopno|/supok|/supno| and stops by
+// username, so it only needs a stable id, not the literal taskId: short ids
+// pass through unchanged, long ones collapse to a deterministic hash.
+const TG_CALLBACK_DATA_MAX_BYTES = 64;
+const LONGEST_CONTROL_PREFIX = 'stopok|'; // longest prefix the tg-bot re-wraps the key in
+function controlKey(taskId) {
+  const id = String(taskId);
+  if (Buffer.byteLength(LONGEST_CONTROL_PREFIX + id) <= TG_CALLBACK_DATA_MAX_BYTES) return id;
+  return 'h' + require('crypto').createHash('sha256').update(id).digest('hex').slice(0, 24);
+}
 const runningControls = taskId => ({ reply_markup: { inline_keyboard: [[
-  { text: '⛔ Стоп', callback_data: `stop|${taskId}` },
-  { text: '➕ Дополнить', callback_data: `sup|${taskId}` },
+  { text: '⛔ Стоп', callback_data: `stop|${controlKey(taskId)}` },
+  { text: '➕ Дополнить', callback_data: `sup|${controlKey(taskId)}` },
 ]] } });
 // progressEdit is best-effort+coalesced (see comment above `tgEdit` in
 // tg-stream.js) — a 429 drop returns {ok:false}, a coalesce-skip returns
@@ -787,6 +803,7 @@ module.exports = {
   // 429/coalesce drop)
   editLanded,
   runningControls,
+  controlKey,
   // constants exposed for tests
   _const: { STREAM_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, STOP_BUTTON_AFTER_SECS, MAX_MSG_LEN, CLAUDE_TIMEOUT_MS, WARN_TIMEOUT_MS, INACTIVITY_TIMEOUT_MS },
 };
