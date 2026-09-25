@@ -26,6 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { readTokenValue } = require('./token-value');
 const { DurableTaskStore } = require('./durable-task-store');
 const { durableTaskDbPath } = require('./data-paths');
 
@@ -537,7 +538,7 @@ const PR_REF_RE = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/;
 function _ghToken(username) {
   try {
     const p = path.join(TOKENS_ROOT, String(username), 'github');
-    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+    if (fs.existsSync(p)) return readTokenValue(fs.readFileSync(p, 'utf8'));
   } catch { /* no token on disk */ }
   return null;
 }
