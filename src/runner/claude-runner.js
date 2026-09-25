@@ -84,14 +84,32 @@ function tomlInlineTable(obj) {
   return '{' + Object.entries(obj).map(([k, v]) => `${k}=${JSON.stringify(String(v))}`).join(',') + '}';
 }
 
-function codexMcpArgs(mcpConfig) {
+// Per-run identity the runner puts into the engine process env (see runEngineProcess).
+// claude and opencode MCP servers inherit the engine's env; codex does NOT — it spawns MCP
+// servers with only a fixed whitelist (HOME/PATH/USER/…) + the configured `env` (verified
+// live, codex-cli 0.154). Without forwarding, every codex session's MCP tools lost the chat
+// and user: get_chat_history → "AGENT_USER_ID not set", tg_send → "AGENT_CHAT_ID not set".
+// `env_vars` forwards by NAME (values never land in argv); absent names are skipped.
+const CODEX_MCP_FORWARD_ENV = [
+  'AGENT_USER_ID', 'AGENT_CHAT_ID', 'AGENT_SESSION_FILE', 'AGENT_TASK_ID', 'AGENT_BOT_TOKEN',
+  'AGENT_USER_NAME', 'AGENT_USER_HANDLE', 'AGENT_DATA_DIR', 'AGENT_TOKENS_DIR', 'USERS_DIR',
+  'DEEPGRAM_API_KEY', 'OPENAI_API_KEY', 'FAL_KEY', 'IDEOGRAM_API_KEY', 'RECRAFT_API_KEY',
+  'CLOUDFLARE_API_TOKEN',
+];
+
+// extraEnvNames: further names present in the engine env (the server env + per-user tokens),
+// so codex MCP servers see the same env claude/opencode ones do.
+function codexMcpArgs(mcpConfig, extraEnvNames = []) {
   const servers = loadMcpServers(mcpConfig);
+  const forward = [...new Set([...CODEX_MCP_FORWARD_ENV, ...extraEnvNames])]
+    .filter(n => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n));
   const args = [];
   for (const [name, srv] of Object.entries(servers)) {
     if (!srv.command) continue;
     args.push('-c', `mcp_servers.${name}.command=${JSON.stringify(srv.command)}`);
     if (srv.args) args.push('-c', `mcp_servers.${name}.args=${JSON.stringify(srv.args)}`);
     if (srv.env) args.push('-c', `mcp_servers.${name}.env=${tomlInlineTable(srv.env)}`);
+    args.push('-c', `mcp_servers.${name}.env_vars=${JSON.stringify(forward)}`);
   }
   return args;
 }
@@ -159,7 +177,7 @@ function readOcAgentModels() {
 
 // Build the argv for the selected engine (claude/codex/opencode).
 // Returns [bin, args].
-function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user = {}, cwd, resumeSessionId = null }) {
+function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user = {}, cwd, resumeSessionId = null, mcpEnvNames = [] }) {
   const opencodeModelResolved = opencodeModel || process.env.OPENCODE_MODEL || null;
   // `cwd` is the runner-resolved code dir (see resolveEngineCwd); falling back to
   // user.cwd/user.workDir keeps callers that don't pass it (hermes, tests) working.
@@ -184,7 +202,7 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
       '--dangerously-bypass-approvals-and-sandbox',
       ...(resumeSessionId ? [] : ['-C', codeCwd]),
       '-c', `tool_output_token_limit=${toolOutputTokenLimit}`,
-      ...codexMcpArgs(mcpConfig),
+      ...codexMcpArgs(mcpConfig, mcpEnvNames),
       systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
     ]];
   }
@@ -842,6 +860,7 @@ module.exports = {
   readOcAgentModels,
   // exposed for tests — MCP translation helpers (codex/opencode wiring)
   codexMcpArgs,
+  CODEX_MCP_FORWARD_ENV,
   writeOpencodeMcpConfig,
   // exposed for tests — ⛔/➕ button delivery gate (issue: flag used to flip
   // before confirming the edit landed, permanently hiding buttons after one
