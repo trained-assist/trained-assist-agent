@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { normThreadId, threadOf } = require('./session-store');
 
 function readJson(fp) {
   try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { return null; }
@@ -20,6 +21,18 @@ function readJson(fp) {
 function chatOf(session) {
   // liveChatId (was ownerChatId): read-compat with pre-rename files.
   return String(session.liveChatId ?? session.ownerChatId ?? '');
+}
+
+// Forum topic (#1409): the conversation is (Telegram chat, message_thread_id). With
+// opts.threadId === undefined no topic filter applies (caller doesn't know the topic).
+// Otherwise a session of another topic is foreign; a legacy record (no messageThreadId,
+// written before #1409) only counts for the topic-less conversation — in a topic we
+// can't prove it's ours, and mixing topics is the bug being fixed.
+function sameTopic(session, threadId) {
+  if (threadId === undefined) return true;
+  const want = normThreadId(threadId);
+  const has = threadOf(session);
+  return has === undefined ? want === null : has === want;
 }
 
 function clamp(n, lo, hi, dflt) {
@@ -32,7 +45,8 @@ function clamp(n, lo, hi, dflt) {
  * Sessions of `chatId`, most-recently-active first, each with its recent messages.
  * opts: sinceHours (only messages newer than now-sinceHours; sessions with none
  * are dropped), excludeSessionId, sessionsLimit (1..20, default 3),
- * msgLimit (1..100 per session, default 20), now (for tests).
+ * msgLimit (1..100 per session, default 20), threadId (forum topic; see sameTopic),
+ * now (for tests).
  */
 function chatSessions(sessionsDir, chatId, opts = {}) {
   const target = String(chatId ?? '');
@@ -52,6 +66,7 @@ function chatSessions(sessionsDir, chatId, opts = {}) {
     if (!s || !s.id || !Array.isArray(s.messages)) continue;
     if (opts.excludeSessionId && s.id === opts.excludeSessionId) continue;
     if (chatOf(s) !== target) continue;
+    if (!sameTopic(s, opts.threadId)) continue;
     let msgs = s.messages;
     if (since != null) msgs = msgs.filter(m => Number(m.at) >= since);
     if (since != null && msgs.length === 0) continue;
@@ -92,7 +107,7 @@ function buildRecentChatBlock(sessionsDir, chatId, opts = {}) {
   const maxMsgs = opts.maxMsgs ?? 6;
   const maxChars = opts.maxChars ?? 400;
   const msgs = recentChatMessages(sessionsDir, chatId, {
-    sinceHours, limit: maxMsgs, excludeSessionId: opts.excludeSessionId, now: opts.now,
+    sinceHours, limit: maxMsgs, excludeSessionId: opts.excludeSessionId, threadId: opts.threadId, now: opts.now,
   });
   if (!msgs.length) return '';
   const fmt = ts => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });

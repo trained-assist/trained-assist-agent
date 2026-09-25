@@ -1423,12 +1423,12 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
     if (!workDir) return null;
     try {
       const proj = projects.bugsProject(workDir, { audience });
-      projects.setActiveProjectId(workDir, proj.id, chatId, { audience });
+      projects.setActiveProjectId(workDir, proj.id, chatId, { audience, threadId });
       const firstMessage = task.trim() || '/bug_or_feature';
       // Only adopt the caller's sessionId when it's actually fresh (sessionExists=false) —
       // never overwrite a real, already-existing session file.
       const reuseId = (!sessionExists && sessionId) ? sessionId : undefined;
-      const sid = sessions.createSession(workDir, { task: firstMessage, chatId, projectId: proj.id, id: reuseId, audience });
+      const sid = sessions.createSession(workDir, { task: firstMessage, chatId, projectId: proj.id, id: reuseId, audience, threadId });
       const greeting = [
         '🐞✨ Проект «Bugs and Features».',
         'Кидай что случилось или что хочешь — можно несколько сообщений, голосом, скриншотами.',

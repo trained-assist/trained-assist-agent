@@ -3,6 +3,7 @@
 const fs = require('fs');
 const { sessionsDirPath } = require('../../data-paths');
 const chatHistory = require('../../chat-history');
+const { threadOf } = require('../../session-store');
 
 /**
  * get_chat_history — retrieve conversation history from previous sessions
@@ -38,6 +39,14 @@ function resolveCurrentChatId() {
   return session.liveChatId ?? session.ownerChatId ?? null;
 }
 
+// Forum topic of the current session (#1409): history stays inside this topic.
+// undefined = unknown (legacy session / no session file) → no topic filter.
+function resolveCurrentThreadId() {
+  const sessionFile = process.env.AGENT_SESSION_FILE;
+  if (!sessionFile) return undefined;
+  return threadOf(readSession(sessionFile));
+}
+
 function resolveCurrentSessionId() {
   const sessionFile = process.env.AGENT_SESSION_FILE;
   if (!sessionFile) return null;
@@ -54,7 +63,8 @@ module.exports = {
   tools: {
     get_chat_history: {
       description:
-        'Load conversation history from PREVIOUS sessions in the same Telegram chat. ' +
+        'Load conversation history from PREVIOUS sessions in the same Telegram chat ' +
+        '(and the same forum topic, when the chat is a forum group). ' +
         'Returns sessions and messages from earlier conversations with this user in this chat, ' +
         'excluding the current session. Use when the user references something from a past conversation ' +
         'or you need context that predates the current session. Sessions are returned most-recent first; ' +
@@ -109,6 +119,11 @@ module.exports = {
           };
         }
         const targetChatStr = String(targetChatId);
+        const currentChatId = resolveCurrentChatId();
+        // Topic filter only for the current conversation's own chat; an explicit other
+        // chat_id has no known topic.
+        const threadId = currentChatId != null && String(currentChatId) === targetChatStr
+          ? resolveCurrentThreadId() : undefined;
         if (!fs.existsSync(sessionsDir)) {
           return { sessions: [], total: 0, chat_id: targetChatStr, note: 'No sessions directory' };
         }
@@ -116,6 +131,7 @@ module.exports = {
         // Most-recently-active first; the limit applies AFTER sorting (see chat-history.js).
         const found = chatHistory.chatSessions(sessionsDir, targetChatStr, {
           sinceHours: Number(since_hours) > 0 ? Number(since_hours) : null,
+          threadId,
           excludeSessionId: include_current ? null : resolveCurrentSessionId(),
           sessionsLimit: Math.min(Math.max(1, Number(sessions_limit) || 3), 10),
           msgLimit: Math.min(Math.max(1, Number(msg_limit) || 20), 100),
