@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
-const { runEngineProcess, buildEngineCommand, editLanded, runningControls, _const } = require('../src/runner/claude-runner');
+const { runEngineProcess, buildEngineCommand, editLanded, runningControls, _const, computeEngineTimeoutMs } = require('../src/runner/claude-runner');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-'));
 const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-smoke-mcp-'));
@@ -56,6 +56,14 @@ const baseOpts = {
 };
 
 (async () => {
+  // (0) P3a: per-step engine budget clamping. No option keeps the fixed pair;
+  // a step budget shortens the hard cap with its warning 2 min before it, and
+  // can never extend past the global cap.
+  assert.deepEqual(computeEngineTimeoutMs(null), { hardTimeoutMs: _const.CLAUDE_TIMEOUT_MS, warnTimeoutMs: _const.WARN_TIMEOUT_MS });
+  assert.deepEqual(computeEngineTimeoutMs(600_000), { hardTimeoutMs: 600_000, warnTimeoutMs: 480_000 });
+  assert.equal(computeEngineTimeoutMs(99 * 60 * 1000).hardTimeoutMs, _const.CLAUDE_TIMEOUT_MS, 'step budget never extends past the cap');
+  assert.equal(computeEngineTimeoutMs(30_000).warnTimeoutMs, 30_000, 'very short budget floors the warning at 30s');
+
   // (1) happy path
   let streamed = '';
   const r1 = await runEngineProcess({ ...baseOpts, outputCallback: (t) => { streamed += t; } });

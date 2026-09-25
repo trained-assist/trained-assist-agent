@@ -65,6 +65,20 @@ const editLanded = result => !!(result && result.ok && !result.skipped);
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-restart (all engines)
 
+// Per-run hard timeout (P3a durable step budget, `execution_timeout_seconds`).
+// Clamped to the global cap so a step can only ever shorten, never extend, the
+// engine's wall-clock budget. The graceful warning fires 2 min before the kill,
+// floored at 30s so a very short budget still gets a warning beat. No option /
+// a non-positive value keeps the historical fixed 40-min / 38-min pair.
+function computeEngineTimeoutMs(timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return { hardTimeoutMs: CLAUDE_TIMEOUT_MS, warnTimeoutMs: WARN_TIMEOUT_MS };
+  }
+  const hardTimeoutMs = Math.min(timeoutMs, CLAUDE_TIMEOUT_MS);
+  const warnTimeoutMs = Math.max(30_000, hardTimeoutMs - 2 * 60 * 1000);
+  return { hardTimeoutMs, warnTimeoutMs };
+}
+
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
 // Reads the per-user .mcp.json (written by writeMcpConfig) and returns its mcpServers map.
@@ -297,8 +311,9 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers, consumePendingStop = null,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
-    ocProfileOverrides, onHeartbeat, onEngineSessionId,
+    ocProfileOverrides, onHeartbeat, onEngineSessionId, timeoutMs = null,
   } = opts;
+  const { hardTimeoutMs, warnTimeoutMs } = computeEngineTimeoutMs(timeoutMs);
   // Forum topics (#255): fresh progress/warning sends stay in the originating topic.
   // Only new messages need it; edits target an existing message already in the topic.
   const runThreadId = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
@@ -731,29 +746,31 @@ async function runEngineProcess(opts) {
   }
   try {
     await new Promise((resolve, reject) => {
-      // 38 min: graceful SIGTERM + warn user. Claude Code handles SIGTERM by finishing current step and exiting.
-      // timedOut is set here so that if Claude exits voluntarily after SIGTERM, the close handler still
-      // triggers auto-continuation (not just when SIGKILL fires at 40 min).
+      // warn fires 2 min before the hard cap (default 38 min; shorter for a P3a
+      // step budget): graceful SIGTERM + warn user. Claude Code handles SIGTERM by
+      // finishing current step and exiting. timedOut is set here so that if Claude
+      // exits voluntarily after SIGTERM, the close handler still triggers
+      // auto-continuation (not just when SIGKILL fires at the hard cap).
       const warnTimer = setTimeout(() => {
         timedOut = true;
         console.log(`[${taskId}] timeout warning — sending SIGTERM, 2 min left`);
         try { proc.kill('SIGTERM'); } catch {}
-        const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
+        const warnMin = Math.round(warnTimeoutMs / 60000);
         const engineLabel = engine === 'codex' ? 'Кодекс' : engine === 'opencode' ? 'OpenCode' : 'Клод';
         sendT(BOT_TOKEN, chatId,
           `⚠️ ${engineLabel} работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
           `Получил сигнал завершить текущий шаг и вывести итоги.`
         ).catch(() => {});
-      }, WARN_TIMEOUT_MS);
+      }, warnTimeoutMs);
 
-      // 40 min: hard kill (SIGTERM already sent at 38 min, SIGKILL now)
+      // Hard kill (SIGTERM already sent at warn, SIGKILL now)
       sessionState.killFn = () => {
         timedOut = true;
         clearTimeout(warnTimer);
         try { proc.kill('SIGKILL'); } catch (e) { console.warn('[runner] SIGKILL:', e.message); }
-        reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
+        reject(new Error(`claude timed out after ${hardTimeoutMs / 1000}s`));
       };
-      sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
+      sessionState.killTimer = setTimeout(sessionState.killFn, hardTimeoutMs);
 
       // Inactivity check: if no stdout for 5 min, kill + auto-restart (works for all engines).
       // Checked every 30s; lastOutputAt updated on any raw stdout chunk before JSON parsing.
@@ -858,6 +875,7 @@ module.exports = {
   resolveEngineCwd,
   formatToolActivity,
   readOcAgentModels,
+  computeEngineTimeoutMs,
   // exposed for tests — MCP translation helpers (codex/opencode wiring)
   codexMcpArgs,
   withCodexMcpEnvForwarding,
