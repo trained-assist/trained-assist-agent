@@ -157,7 +157,10 @@ module.exports = {
     },
 
     task_update: {
-      description: 'Update a durable task\'s goal/status/project_id.',
+      description:
+        'Update a durable task\'s goal/status/project_id. A contract plan (created by playbook_run/task_create with ' +
+        'acceptance_criteria) starts as a draft and is not executed until you set status="active" — that is the ' +
+        'explicit activation step. Finalizing a contract plan to "done" is still gated (it needs validated runtime).',
       inputSchema: {
         type: 'object',
         required: ['task_id'],

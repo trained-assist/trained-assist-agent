@@ -132,18 +132,42 @@ function reconcileOrphanedRunning(store = durableStore(), { now = Date.now() } =
 // Profile ids that own runnable items right now, mapped to their claimable
 // items. Legacy GTD scans per-profile directories; the store is profile-keyed,
 // so we invert: claim globally, then resolve the profile per item.
-function claimNextDurableItem(store = durableStore()) {
-  reconcileOrphanedRunning(store);
+function claimNextDurableItem(store = durableStore(), { now = Date.now() } = {}) {
+  // Expired waiters must fail BEFORE reconcile/claim can hand them out again —
+  // otherwise a 'waiting' step whose deadline passed defers forever.
+  store.expireWaitingDeadlines(now);
+  reconcileOrphanedRunning(store, { now });
   return store.claimNextRunnable();
 }
 
 
 const FRESH_CLAIM_GRACE_MS = 30 * 1000; // just-claimed items: let the claiming tick run them
-const DURABLE_MAX_ATTEMPTS = 3;
+
+// A failed item retries until its declared `max_attempts` are spent (P3a: the
+// per-step budget the compiler writes into the item). Tier escalation still
+// happens on each retry (legacy durable tasks); once attempts are exhausted the
+// item stays 'failed' — never re-pended forever. The recovery slice (P3c) owns
+// what happens after a step has genuinely exhausted its budget.
+// `itemId` is re-read fresh because startExecution already bumped attempt_count.
+// `escalate` is false for engine/env crashes: a crash is not an item-quality
+// signal, so it retries at the same tier until the attempt budget is spent.
+function retryFailedItem(store, itemId, profileId, { retryDelayMs = 0, escalate = true } = {}) {
+  const item = store.getTaskItem(itemId);
+  if (!item) return { retried: false, attempts: 0, maxAttempts: 0 };
+  const attempts = item.attempt_count || 0;
+  const maxAttempts = item.max_attempts || 1;
+  if (attempts >= maxAttempts) return { retried: false, attempts, maxAttempts };
+  if (escalate) store.escalateItem(itemId, profileId); // legacy tier ladder; also sets pending
+  store.updateTaskItem(itemId, { status: 'pending', due_at: Date.now() + retryDelayMs }, profileId);
+  return { retried: true, attempts, maxAttempts };
+}
 
 // Fire a claimed durable item through the same pipeline as legacy GTD fires.
-// Contract plans (draft, with acceptance_criteria) stay unclaimable by design —
-// activation is a later slice's decision, not this wiring's.
+// Contract plans are executable once explicitly activated (P3a: draft→active via
+// task_update); they stay unclaimable while draft. The step honors the item's
+// own max_attempts / execution_timeout_seconds. delay_after_sec / wait_deadline_at
+// shape when the store hands the item out (see durable-task-store.completeItem /
+// expireWaitingDeadlines).
 async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK }) {
   const store = durableStore();
   let fired = 0;
@@ -158,7 +182,7 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     const sessionRow = store.db.prepare(
       'SELECT session_id FROM task_sessions WHERE task_id = ? AND active = 1').get(task.id);
     if (sessionRow && isTaskRunning(null, sessionRow.session_id)) {
-      // release the claim — put back to pending with a short re-try delay
+      // release the claim — put back to waiting with a short re-try delay
       store.updateTaskItem(item.id, { status: 'waiting', due_at: now + FRESH_CLAIM_GRACE_MS }, task.profile_id);
       continue;
     }
@@ -181,10 +205,17 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
 
     const itemSnap = { ...item };
     const fireNow = now;
+    // P3a: the step's own wall-clock budget. `stepTimeoutMs` makes claude-runner
+    // hard-kill this run at that budget (clamped to the 40-min global cap) and
+    // suppresses auto-continuation — a step that overruns is a step failure to be
+    // retried per max_attempts, not vaguely continued 10×.
+    const stepTimeoutMs = Number.isFinite(item.execution_timeout_seconds) && item.execution_timeout_seconds > 0
+      ? item.execution_timeout_seconds * 1000 : null;
     runTask({
       taskId: `durable-${task.profile_id}-${item.id.slice(0, 8)}-${fireNow}`,
       user: { id: null, name: task.profile_id, username: task.profile_id, workDir: null },
       task: prompt, forceClaude: true, engine: 'claude', secrets, internalGtd: true,
+      stepTimeoutMs,
     }).then(reply => {
       const said = typeof reply === 'string' ? reply : '';
       if (/DURABLE:\s*done/i.test(said)) {
@@ -194,29 +225,22 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
       } else if (/DURABLE:\s*failed/i.test(said)) {
         store.failItem(itemSnap.id, task.profile_id, { executionId, error: said.slice(0, 500) });
         store.finishExecution(executionId, { status: 'failed', error_text: said.slice(0, 500) });
-        // tier escalation: retry at the next level until the ceiling
-        const esc = store.escalateItem(itemSnap.id, task.profile_id);
-        if (esc && esc.current_tier !== itemSnap.current_tier) {
-          store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() }, task.profile_id);
-          console.log(`[gtd-durable] escalated ${itemSnap.id.slice(0, 8)} → ${esc.current_tier}`);
-        } else {
-          console.log(`[gtd-durable] item failed at ceiling tier: ${itemSnap.id.slice(0, 8)}`);
-        }
+        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
+        if (r.retried) console.log(`[gtd-durable] retry ${itemSnap.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
+        else console.log(`[gtd-durable] item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
       } else {
-        // no terminal marker — treat as failure and escalate (bounded by DURABLE_MAX_ATTEMPTS via escalation ceiling)
+        // no terminal marker — treat as failure, bounded by the item's own max_attempts
         store.failItem(itemSnap.id, task.profile_id, { executionId, error: 'no DURABLE terminal marker in reply' });
         store.finishExecution(executionId, { status: 'failed', error_class: 'no-marker' });
-        const esc = store.escalateItem(itemSnap.id, task.profile_id);
-        if (esc && esc.current_tier !== itemSnap.current_tier) {
-          store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() }, task.profile_id);
-        }
+        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
+        if (!r.retried) console.log(`[gtd-durable] item failed (no marker), budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
       }
       // Keep the task row's revision ticking so projections/UI notice progress.
       const progress = store.progressSummary(task.id, task.profile_id);
       if (progress.total > 0 && progress.finished >= progress.total) {
-        // updateTask's activation gate blocks contract-plan finalization on
-        // purpose; the runtime gate for that is a later slice. Finalize via the
-        // same SQL the gate protects for legacy tasks only.
+        // updateTask's finalization gate blocks contract-plan completion until
+        // per-criterion validation lands (P3d); finalize via the same SQL the gate
+        // protects, for contract plans only, while legacy tasks go through the store.
         if (!task.acceptance_criteria_json) store.completeTask(task.id, task.profile_id, 'done');
         else store.db.prepare('UPDATE durable_tasks SET status=?, updated_at=? WHERE id=?').run('done', Date.now(), task.id);
         console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
@@ -225,9 +249,11 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
       console.error(`[gtd-durable] runTask ${itemSnap.id.slice(0, 8)}:`, e.message);
       store.failItem(itemSnap.id, task.profile_id, { executionId, error: e.message.slice(0, 500) });
       store.finishExecution(executionId, { status: 'failed', error_class: 'run-crash', error_text: e.message.slice(0, 500) });
-      // do NOT escalate on crash (engine/env problem, not item problem) — leave
-      // pending so the next tick retries the same tier (bounded by attempts?):
-      store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() + 5 * 60 * 1000 }, task.profile_id);
+      // Engine/env crash: same bounded retry as a marker failure, but without
+      // tier escalation (a crash is not an item-quality signal) — just re-pend up
+      // to the item's attempt budget; after it is spent the item stays failed.
+      const r = retryFailedItem(store, itemSnap.id, task.profile_id, { retryDelayMs: 5 * 60 * 1000, escalate: false });
+      if (!r.retried) console.log(`[gtd-durable] item crashed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
     });
   }
 }
@@ -930,7 +956,7 @@ module.exports = {
   readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE, checklistAutologinUrl,
-  durableStore, runDueDurable, reconcileOrphanedRunning, claimNextDurableItem,
+  durableStore, runDueDurable, reconcileOrphanedRunning, claimNextDurableItem, retryFailedItem,
   tickHeartbeat, countOpenLegacy, durableItemCounts,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
   CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS, MAX_FIRES_PER_TICK, FIRE_LEASE_MS,

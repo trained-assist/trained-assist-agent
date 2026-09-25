@@ -1431,7 +1431,7 @@ function scheduleGtdAfterRun({ internalGtd, activeSessionId, explicitMode, task,
     .catch(e => { console.warn('[gtd] schedule:', e.message); return null; });
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, webExactSession = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, webExactSession = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false, stepTimeoutMs = null }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1970,6 +1970,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
         savePendingTask(taskId, { engineSessionId: sid, engine });
       },
+      // P3a: a durable step's declared wall-clock budget. undefined/null keeps the
+      // historical fixed 40-min cap.
+      timeoutMs: stepTimeoutMs,
     });
   } finally {
     // The engine process has exited (or failed to start) by the time runEngineProcess
@@ -1998,6 +2001,21 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (activeSessionId && partialText) {
       sessions.appendReply(user.workDir, activeSessionId, `[${inactivityKill ? 'прервано: молчал 5 мин' : 'прервано таймаутом'}]\n${partialText}`);
       setCurrentSessionId(user.workDir, activeSessionId, chatId, audience, threadId);
+    }
+
+    // P3a durable step: a run carrying its own `stepTimeoutMs` is a single step
+    // with a declared budget + its own retry budget (max_attempts), owned by the
+    // durable executor. Never auto-continue it 10× — overrunning the step budget
+    // is a step failure. Returning no DURABLE marker lets runDueDurable's failure
+    // branch fail the item and retry per max_attempts.
+    if (stepTimeoutMs) {
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine,
+        errorText: `step timeout: ${Math.round(stepTimeoutMs / 1000)}s budget exhausted`,
+        action: 'step_failed',
+      });
+      executionHistory.finalizeExecution(executionId, 'FAILED');
+      return;
     }
 
     if (continuationCount < MAX_CONTINUATIONS) {

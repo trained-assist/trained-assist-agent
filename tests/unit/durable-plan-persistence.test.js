@@ -76,14 +76,19 @@ describe('engineering plan persistence', () => {
     } finally { store.close(); }
   });
 
-  it('draft cannot be claimed or bypass execution/finalization with legacy updates', () => {
+  it('draft is executable only after explicit activation; finalization stays gated', () => {
     const store = new DurableTaskStore(':memory:');
     try {
       store.createPlan(plan());
       expect(store.claimNextRunnable()).toBeNull();
-      for (const status of ['active', 'done']) expect(() => store.updateTask('plan', 'alice', { status })).toThrow(/runtime/);
-      expect(() => store.completeTask('plan', 'alice')).toThrow(/runtime/);
-      expect(store.listTaskItems('plan', 'alice')[0].status).toBe('pending');
+      // P3a: draft→active is the explicit activation path for a contract plan.
+      expect(store.updateTask('plan', 'alice', { status: 'active' }).status).toBe('active');
+      expect(store.claimNextRunnable().status).toBe('running');
+      // P3d will own 'done' — it needs per-criterion validation first.
+      for (const finalize of [
+        () => store.updateTask('plan', 'alice', { status: 'done' }),
+        () => store.completeTask('plan', 'alice'),
+      ]) expect(finalize).toThrow(/finalization/);
     } finally { store.close(); }
   });
 

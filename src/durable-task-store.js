@@ -158,8 +158,12 @@ class DurableTaskStore {
   updateTask(id, profileId, patch) {
     const task = this.getTask(id, profileId);
     if (!task) return null;
-    if (task.acceptance_criteria_json && ['active', 'done'].includes(patch.status)) {
-      throw new Error('Plan execution/finalization requires validated runtime (not enabled yet)');
+    // P3a: a contract plan may be ACTIVATED explicitly (draft→active) — that is
+    // what puts its items in front of the executor. Finalization to 'done' is
+    // still gated: it needs per-criterion validation (`task_validation_results`,
+    // P3d); until then the executor must not claim a plan is done by fiat.
+    if (task.acceptance_criteria_json && patch.status === 'done') {
+      throw new Error('Plan finalization requires validated runtime (not enabled yet)');
     }
     const allowed = ['goal', 'status', 'project_id'];
     const sets = [];
@@ -226,7 +230,7 @@ class DurableTaskStore {
   updateTaskItem(id, patch, profileId) {
     if (!this._itemOwnedBy(id, profileId)) return null;
     const allowed = ['title', 'status', 'current_tier', 'delay_after_sec', 'due_at',
-                     'last_execution_id', 'last_error'];
+                     'wait_deadline_at', 'last_execution_id', 'last_error'];
     const sets = [];
     const args = [];
     for (const k of allowed) {
@@ -298,6 +302,10 @@ class DurableTaskStore {
   /**
    * Mark an item done. If the next sibling exists, arm it: delay_after_sec <= 300
    * keeps it immediately runnable (due_at = now); longer delays set waiting+due_at.
+   * A waiting sibling also gets a `wait_deadline_at` — one full delay window past
+   * its due time. If it is still waiting beyond that (the run that should have
+   * claimed it never did), `expireWaitingDeadlines` fails it instead of letting a
+   * stuck waiter defer forever.
    */
   completeItem(id, profileId, { executionId = null } = {}) {
     return this.db.transaction(() => {
@@ -309,13 +317,38 @@ class DurableTaskStore {
       const next = this._prep(`SELECT * FROM task_items WHERE task_id = ? AND status = 'pending'
         ORDER BY position LIMIT 1`).get(item.task_id);
       if (next) {
-        const due = next.delay_after_sec > 300 ? now + next.delay_after_sec * 1000
+        const waiting = next.delay_after_sec > 300;
+        const due = waiting ? now + next.delay_after_sec * 1000
           : (next.delay_after_sec > 0 ? now : null);
-        this._prep(`UPDATE task_items SET status = ?, due_at = ?, updated_at = ? WHERE id = ?`)
-          .run(next.delay_after_sec > 300 ? 'waiting' : 'pending', due, now, next.id);
+        const waitDeadline = waiting ? due + next.delay_after_sec * 1000 : null;
+        this._prep(`UPDATE task_items SET status = ?, due_at = ?, wait_deadline_at = ?,
+            updated_at = ? WHERE id = ?`)
+          .run(waiting ? 'waiting' : 'pending', due, waitDeadline, now, next.id);
       }
       this._bump(item.task_id);
       return this.getTaskItem(id);
+    })();
+  }
+
+  /**
+   * Fail `waiting` items whose declared wait deadline has passed (P3a). Chosen
+   * outcome is `failed`, not `pending`: `wait_deadline_at` is an upper bound on
+   * an external wait (CI/deploy/re-entrancy backoff) — re-pending it would defer
+   * forever, which is exactly what the deadline exists to prevent. A failed item
+   * is terminal for the item budget and visible to the recovery slice (P3c).
+   * Returns the number of items expired.
+   */
+  expireWaitingDeadlines(now = nowMs()) {
+    return this.db.transaction(() => {
+      const rows = this._prep(`SELECT id, task_id FROM task_items
+        WHERE status = 'waiting' AND wait_deadline_at IS NOT NULL AND wait_deadline_at <= ?`)
+        .all(now);
+      for (const row of rows) {
+        this._prep(`UPDATE task_items SET status = 'failed', last_error = ?, updated_at = ?
+          WHERE id = ?`).run('wait deadline expired', now, row.id);
+        this._bump(row.task_id);
+      }
+      return rows.length;
     })();
   }
 
@@ -383,13 +416,25 @@ class DurableTaskStore {
   }
 
   // ── Executions (minimal history) ───────────────────────────────────────
+  /**
+   * Start an execution and count the attempt. attempt_count is bumped here (not
+   * in claimNextRunnable) on purpose: a claim that only defers to a busy session
+   * is not a real attempt — only a step that actually starts executing is. The
+   * per-step budget reads attempt_count against `max_attempts`.
+   */
   startExecution({ id, task_id, task_item_id = null, session_id = null,
                    engine = null, model = null, tier = null }) {
-    this._prep(`INSERT INTO executions
-        (id, task_id, task_item_id, session_id, engine, model, tier, status, started_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
-      .run(id, task_id, task_item_id, session_id, engine, model, tier, nowMs());
-    return this.getExecution(id);
+    return this.db.transaction(() => {
+      if (task_item_id) {
+        this._prep(`UPDATE task_items SET attempt_count = attempt_count + 1, updated_at = ?
+          WHERE id = ?`).run(nowMs(), task_item_id);
+      }
+      this._prep(`INSERT INTO executions
+          (id, task_id, task_item_id, session_id, engine, model, tier, status, started_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
+        .run(id, task_id, task_item_id, session_id, engine, model, tier, nowMs());
+      return this.getExecution(id);
+    })();
   }
 
   finishExecution(id, { status, error_class = null, error_text = null }) {

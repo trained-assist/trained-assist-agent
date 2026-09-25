@@ -137,3 +137,15 @@
 - Session/project pointers: `get/setCurrentSessionId`, `createSession`, `resolveChatSession`, `get/setActiveProjectId`, `get/setPinnedProjectId`, `decideNewSessionProject`, `resolveRunProject`, `logical pin line` accept an optional valid `threadId` — topic-scoped filenames, legacy names unchanged without one.
 - GTD: records persist `threadId`; `_tgNotify` sends into the originating topic; `clearGtdForChat(workDir, chatId, threadId)` and delayed fire/close notifications stay topic-scoped. Restart/resume already preserved `threadId` via the pending journal.
 - Tests: `test/forum-topics-isolation.test.cjs` (tgSend + ownership + session/project/pin pointer scoping). Existing deterministic suites green (`runner-index-contract`, `task-stop-ownership`, `audience-scope`, `pin-state`, `gtd-*`, `tg-stream`, `projects-*`, `session-store-recency`, `run-ingress` topic routing).
+
+## 2026-09-25 — playbooks P3a: activation + per-step budget (durable executor, #1372)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | Активация contract-плана | `DurableTaskStore.updateTask` больше не блокирует `draft→active`: гейт сужен до `done` (финализация остаётся на P3d — нужна per-criterion валидация). `task_update status=active` — явный шаг активации. |
+| ✅ реализовано | `attempt_count` на старте шага | Инкремент в `startExecution` (а не в `claimNextRunnable`): claim, который лишь уступил занятой сессии, — не попытка. `retryFailedItem` читает свежее значение против `max_attempts`. |
+| ✅ реализовано | Бюджет шага | Все failure-ветки `runDueDurable` (маркер failed / нет маркера / crash движка) идут через `retryFailedItem`: retry пока `attempt_count < max_attempts`, затем item остаётся `failed` — бесконечный pending исключён. Crash не эскалирует tier. |
+| ✅ реализовано | `expireWaitingDeadlines(now)` | Истёкшие `waiting` (по `wait_deadline_at`) → `failed`, не `pending`: дедлайн — верхняя граница внешнего ожидания; re-pending означал бы «откладывать вечно». Вызывается в `claimNextDurableItem` до reconcile/claim, поэтому истёкший waiter не выдаётся повторно. `completeItem` проставляет `wait_deadline_at` (due + один delay-окно) для долгих delay. |
+| ✅ реализовано | `execution_timeout_seconds` в таймаут движка | `runDueDurable` прокидывает `stepTimeoutMs` → `_runTask` → `runEngineProcess` (clamp ≤ 40 мин; warn за 2 мин). Шаг с `stepTimeoutMs` не авто-продолжается (`MAX_CONTINUATIONS`): перерасход бюджета = провал шага, ретраит durable-слой. |
+| ✅ реализовано | Тесты | `durable-task-store` (expire/attempt/активация), `gtd-durable-wiring` (max_attempts исчерпан → failed; истёкший waiter не переиспользуется; stepTimeoutMs), `durable-plan-persistence` (draft→active, done gated), `claude-runner.smoke` (clamp бюджета). Legacy `gtd/*.json` не тронут. |
+| 🔵 планируется | P3b/P3c/P3d | Резолв движка/модели по `executor_role`/`minimum_model_level`/`context_budget`; recovery через `failure-classifier`→`recovery-policy`; `task_validation_results` + `evidence_json` и разблокировка финализации. |
