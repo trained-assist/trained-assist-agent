@@ -1,0 +1,69 @@
+{
+ "_doc": "Epic #1365 ratchet: legacy direct-Telegram call sites outside a channel adapter. Counts may only go DOWN (lower them here in the same PR). New files/new occurrences fail CI. removeIn = slice that owns removal; adapter = transport layer, stays.",
+ "files": {
+  "src/drive-watcher.js": {
+   "telegram_api": 1,
+   "removeIn": "PR5"
+  },
+  "src/gtd-controller.js": {
+   "telegram_api": 1,
+   "removeIn": "PR5"
+  },
+  "src/handlers/connect.js": {
+   "telegram_api": 7,
+   "removeIn": "PR4"
+  },
+  "src/mcp-skills/tools/94-tg-send.js": {
+   "telegram_api": 1,
+   "env_chat_id": 3,
+   "env_bot_token": 3,
+   "removeIn": "PR5"
+  },
+  "src/mcp-skills/tools/95-illustrate.js": {
+   "telegram_api": 1,
+   "env_chat_id": 2,
+   "env_bot_token": 2,
+   "removeIn": "PR5"
+  },
+  "src/mcp-skills/tools/96-label.js": {
+   "telegram_api": 1,
+   "env_chat_id": 2,
+   "env_bot_token": 2,
+   "removeIn": "PR5"
+  },
+  "src/misha-bot.js": {
+   "telegram_api": 1,
+   "removeIn": "PR8"
+  },
+  "src/ru-edge.js": {
+   "telegram_api": 2,
+   "removeIn": "adapter"
+  },
+  "src/runner/claude-runner.js": {
+   "telegram_api": 1,
+   "env_chat_id": 1,
+   "env_bot_token": 1,
+   "removeIn": "PR5"
+  },
+  "src/runner/tg-stream.js": {
+   "telegram_api": 1,
+   "removeIn": "PR5"
+  },
+  "src/secrets.js": {
+   "telegram_api": 1,
+   "removeIn": "PR8"
+  },
+  "src/sent-messages.js": {
+   "telegram_api": 1,
+   "removeIn": "PR5"
+  },
+  "src/server.js": {
+   "telegram_api": 6,
+   "removeIn": "PR4"
+  },
+  "src/site-connector.js": {
+   "telegram_api": 1,
+   "removeIn": "PR5"
+  }
+ }
+}
