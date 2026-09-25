@@ -1813,7 +1813,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
 
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
-  const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username, sessionFilePath });
+  const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username });
 
   // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.

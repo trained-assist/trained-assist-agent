@@ -96,6 +96,20 @@ function codexMcpArgs(mcpConfig) {
   return args;
 }
 
+// claude and opencode MCP servers inherit the engine process env; codex does NOT — it spawns
+// them with only a fixed whitelist (HOME/PATH/USER/…) + the configured `env` (verified live,
+// codex-cli 0.154). So under codex every MCP tool lost the run identity the runner sets (user,
+// chat, session file, task, per-user tokens): get_chat_history answered "AGENT_USER_ID not set".
+// Forward exactly the engine env's names via `env_vars` (by NAME — values never hit argv),
+// inserted before the trailing prompt arg, so codex MCP sees what claude/opencode MCP see.
+function withCodexMcpEnvForwarding(engineArgs, mcpConfig, envNames) {
+  const names = [...new Set(envNames)].filter(n => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n));
+  const servers = Object.entries(loadMcpServers(mcpConfig)).filter(([, srv]) => srv.command);
+  if (!names.length || !servers.length || !engineArgs.length) return engineArgs;
+  const extra = servers.flatMap(([name]) => ['-c', `mcp_servers.${name}.env_vars=${JSON.stringify(names)}`]);
+  return [...engineArgs.slice(0, -1), ...extra, engineArgs[engineArgs.length - 1]];
+}
+
 // Single source of truth for the engine process working directory. runner/index.js
 // resolves this ONCE and passes the identical value to both buildEngineCommand()
 // (codex `-C` on the fresh path) and runEngineProcess() (spawn.cwd), so `-C` and
@@ -290,9 +304,7 @@ async function runEngineProcess(opts) {
   const runThreadId = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
   const sendT = (token, chat, text, extra = {}) => tgSend(token, chat, text, extra, runThreadId);
 
-  const proc = spawn(engineBin, engineArgs, {
-    cwd,
-    env: {
+  const engineEnv = {
       ...cleanEnv,
       ...userTokens,
       AGENT_USER_ID: String(user.username),
@@ -312,7 +324,13 @@ async function runEngineProcess(opts) {
       // opencode's config file goes to user.workDir (outside the code cwd) — see
       // writeOpencodeMcpConfig for why it must never land in the git worktree.
       ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(user.workDir || os.tmpdir(), mcpConfig, ocProfileOverrides) } : {}),
-    },
+  };
+  const spawnArgs = engine === 'codex' && mcpConfig
+    ? withCodexMcpEnvForwarding(engineArgs, mcpConfig, Object.keys(engineEnv))
+    : engineArgs;
+  const proc = spawn(engineBin, spawnArgs, {
+    cwd,
+    env: engineEnv,
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
     // opencode waits 3s for stdin data before proceeding — use 'pipe' + immediate .end()
@@ -842,6 +860,7 @@ module.exports = {
   readOcAgentModels,
   // exposed for tests — MCP translation helpers (codex/opencode wiring)
   codexMcpArgs,
+  withCodexMcpEnvForwarding,
   writeOpencodeMcpConfig,
   // exposed for tests — ⛔/➕ button delivery gate (issue: flag used to flip
   // before confirming the edit landed, permanently hiding buttons after one
