@@ -33,6 +33,10 @@ function loadStream(runTaskImpl) {
   process.env.WEB_CONVREF_CANARY = 'web-canary'; // exact-session path; CI env may set another value
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'web-honest-'));
   process.env.HOME = tmp;
+  // Never touch a real profile: data-paths prefers USERS_DIR/AGENT_DATA_DIR over HOME.
+  process.env.USERS_DIR = path.join(tmp, 'users');
+  process.env.AGENT_DATA_DIR = path.join(tmp, 'agent-data');
+  fs.mkdirSync(path.join(tmp, 'users', 'web-canary'), { recursive: true }); // prod profiles always have a workDir
   for (const key of Object.keys(require.cache)) {
     if (/\/src\/(data-paths|web-routes|session-store|runner(\/index)?)\.js$/.test(key)) delete require.cache[key];
   }
