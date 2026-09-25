@@ -1,11 +1,23 @@
+## АКТУАЛЬНО: параллелизм каналов — требование владельца 25.09.2026 (#1365)
 
-## Followup Controller — GTD «довести до конца» (2026-09-12, PR #502)
+Нормативный документ: [channel-execution-concurrency](docs/architecture/channel-execution-concurrency.md).
+Приёмка: [CH-01–CH-11](docs/user-scenarios/core/01-channel-concurrency.md).
+
+- **Telegram:** не более одного активного интерактивного execution на диалог конкретного бота (в форуме — на topic), ДАЖЕ если sessionId разные. Причина: один поток сообщений и управления; пользователь не должен гадать, куда попадает ввод и что остановит «Стоп».
+- **Session:** не более одного writer в один транскрипт из любых каналов. Это ДОПОЛНИТЕЛЬНАЯ проверка, а не замена Telegram conversation lane.
+- **Profile/project/workDir:** разные sessions могут работать параллельно — две, три, пять и более при доступных ресурсах. Web даёт раздельные рабочие области, разные TG-чаты тоже независимы. Нельзя «лечить» shared-file/temp-file collision блокировкой всей папки или профиля.
+- **Очередь/restart:** смена session/project/actor/engine не обходит lane; accepted target immutable; Stop/timeout/clearChat не освобождают ownership живого execution. Resume/GTD используют общий admission.
+- **Value обязателен:** для изменённого поведения указывать user story, зачем она нужна, что ограничение НЕ запрещает, и positive/negative tests. Документирование не равно пройденным tests или deployed fix.
+
+**Исторические записи ниже не являются актуальной concurrency policy.** Предложения `profileLanes`, «единственная граница = session» и profile-wide `isTaskRunning(username)` как запрет соседним sessions superseded данным решением. Исторические цифры resource caps не являются требованием менять текущие настройки. Ресурсное ожидание допустимо и должно быть явным; оно не превращается в продуктовое правило «одна задача на профиль».
+
+## Followup Controller — GTD «довести до конца» (2026-09-12, PR #502; история)
 - src/followup-controller.js: intent-gate (дешёвая gemini-2.5-flash + regex pre-gate CONTROL_HINT) на завершённой задаче → durable followups/<sessionId>.json {dueAt,iterations,maxIterations,status}. Хук в runner.js _runTask success-path (после appendReply), skip при internalFollowup. Tick в server.js scheduleFollowupController каждые 5 мин.
 - Гарды: re-entrancy=isTaskRunning(username) (не плодить дубль-claude на общем agent-data — старая ловушка); hard-cap maxIterations=3; persist ДО запуска (durable); reopen-промпт issue-first. Терминал: /FOLLOWUP:\s*done/i в ответе ИЛИ iterations>=max. Backoff: dueAt+=eta между проверками.
 - Дефолты: etaMinutes=60 (LLM оценивает, clamp 20..180), maxIter=3, MAX_FIRES_PER_TICK=3.
 - Осталось live: мерж #502 + рестарт assist-agent.service (рестарт убьёт текущую сессию — общий cgroup, только с подтверждения).
 
-## Staging repo создан (2026-09-13)
+## Staging repo создан (2026-09-13; историческая profile-lane идея superseded)
 - trained-assist-agent-staging СОЗДАН и запушен: github.com/trained-assist/trained-assist-agent-staging (private). Локально /home/vova/trained-assist-agent-staging.
 - Отдельный репо (спека §7.0). Код агента тянется submodule по SHA (F1). CLAUDE_BIN-индирекция подтверждена runner.js:2167 → mock Claude без правок агента.
 - Готово: 11 сценариев-фикстур S1–S11 (данные), mock-claude.mjs, mock-mcp.mjs (резолвер видимости public/grouped/private — S10/S11 зелёные, проверено node). S8a(R7)/S8b(R6)/S2/S3(R3) — красные мишени.
@@ -13,7 +25,10 @@
 - Осталось: Ф1 Harness A (шлюз Miniflare), Ф2 submodule+изолир.agent-data→красные S8 против реального runner, Ф3 env-индирекция MCP, Ф5 рефактор.
 - NB: vitest npm install флапает в песочнице из-за родительского workspace — в CI (чистый checkout) ок. Логику гонял напрямую node.
 
-## Гранулярность лейна сериализации — РЕШЕНО: по СЕССИИ (2026-09-13, отменяет §7.8 profile-lane)
+## Гранулярность лейна сериализации — история 2026-09-13 (уточнена 25.09.2026)
+
+> Ниже сохранена история отказа от profile/workDir lock. Её формулировка «единственная легитимная работа лейна» неполна: актуально ДВА guards — session writer и Telegram conversation lane, см. начало файла. Не переносить session-only правило обратно в runner.
+
 - Владелец (голосом, Intensity 3, повторил 3×): «в 1 workDir могут работать несколько сессий с разных чатов или с веба — нормально работает». → лейн НЕ по workDir и НЕ по профилю.
 - Единственная легитимная работа лейна: не дать двум claude писать ОДИН транскрипт → граница = СЕССИЯ. runner._laneKey(sessionId,chatId)=`session:<id>`, для новой сессии (нет id) fallback `chat:<id>` (свернуть два первых сообщения одного чата в одну сессию).
 - Откатил #546-behaviour (queueKey=resolveLaneKey=workDir): он сериализовал сёстры-сессии в одном проекте. Удалил src/lane-key.js + test/lane-key.test.cjs + docs/CONCURRENCY-LANE-GRANULARITY.md. Новый тест test/lane-granularity.test.cjs (7 зелёных) в test:cjs.
@@ -22,15 +37,16 @@
 - ⚠️ Для staging-спеки: §7.8 «profileLanes(laneFor(profileId))» ПРОТИВОРЕЧИТ этому решению. Супер-решение может объединять web-«0»+chatId, но ключ обязан оставаться пер-СЕССИОННЫМ, иначе убьёт нужный параллелизм. R6 (web+chat в одном проекте «дерутся») признан НЕ-багом владельцем.
 
 ## Codex CLI — device-code login is the right "personal account" flow (2026-09-15)
-- `codex login --device-auth` prints a URL (https://auth.openai.com/codex/device) + one-time code (~15 min TTL), no localhost callback needed — works fine on a headless remote VM, unlike browser-callback `codex login`. This is the exact analog of how Claude Code auth was done here: terminal command → link → user authorizes in their own browser → CLI process on the server picks it up automatically. No manual key copy-paste.
-- `codex login status` reporting "Logged in using an API key sk-proj-***" was misleading — codex reads OPENAI_API_KEY from env live, doesn't require a stored auth.json for that path. Once device-auth completes it writes ~/.codex/auth.json which takes priority over the env key — that's the actual "switch profile" mechanism the user wants (device-auth = personal ChatGPT account, `printenv OPENAI_API_KEY | codex login --with-api-key` = shared key, switch anytime).
+- `codex login --device-auth` prints a URL (https://auth.openai.com/device) + one-time code (~15 min TTL), no localhost callback needed — works fine on a headless remote VM, unlike browser-callback `codex login`. This is the exact analog of how Claude Code auth was done here: terminal command → link → user authorizes in their own browser → CLI process on the server picks it up automatically. No manual key copy-paste.
+- `codex login status` reporting "Logged in using an API key sk-proj-***" was misleading — codex reads OPENAI_API_KEY from env live, doesn't require a stored auth.json in that path. Once device-auth completes it writes ~/.codex/auth.json which takes priority over the env key — that's the actual "switch profile" mechanism the user wants (device-auth = personal ChatGPT account, `printenv OPENAI_API_KEY | codex login --with-api-key` = shared key, switch anytime).
 - NB: this VM's own agent-framework state (goals/queue/thread_history sqlite, sessions/, skills/) ALSO lives under ~/.codex — same dir as the real OpenAI Codex CLI's config. Coincidence of naming, not a conflict (different files), but worth knowing before assuming ~/.codex is "codex CLI's own dir" for cleanup purposes.
 - scripts/codex-login-device.sh added (PR trained-assist-agent#602, companion to setup-codex.sh from #601) — wraps the device-auth flow + auto test prompt after login completes.
+- Still open: this PR needs merge + a live systemd restart to take effect in prod (restart = shared cgroup, kills current session — only with explicit confirmation, per earlier codex-login note). Also still needed: actually flip a real profile's engine once the user names it.
 
 ## Codex engine switch — per-profile claude|codex (2026-09-15, PR #605)
 - Added `engine` field to profile.json (profiles.js, was dead code — now wired into runner.js `_runTask`). `scripts/set-engine.mjs <username> [claude|codex]` flips it; default stays claude.
-- CRITICAL bug found+fixed: `codex exec` BLOCKS reading stdin for EOF when stdin is an unclosed pipe — which is Node's `spawn()` default. My first manual terminal test (stdin=TTY) didn't hang, gave false confidence; a repro with `spawn(..., {cwd})` (no stdio override) hung for 20s+ every time. Fix: `stdio: ['ignore','pipe','pipe']` for the codex branch only (claude doesn't read stdin in --print mode, left untouched). Lesson: always test child_process spawns with default (pipe) stdio, not an interactive terminal — TTY vs pipe stdin behavior differs for CLIs that "optionally" read stdin.
-- codex exec --json event shapes (verified against real output): `item.completed` + `item.type==='agent_message'` → final/narration text (fires once per agent turn segment, last one wins as the real answer); `item.started`/`item.completed` + `item.type==='command_execution'` → shell tool use, `item.command`/`item.aggregated_output`/`exit_code`; `turn.completed` → usage (`input_tokens`/`cached_input_tokens`/`cache_write_input_tokens`/`output_tokens`/`reasoning_output_tokens` — field names differ from claude's `cache_read_input_tokens`/`cache_creation_input_tokens`).
+- CRITICAL bug found+fixed: `codex exec` BLOCKS reading stdin for EOF when stdin is an unclosed pipe — which is Node's `spawn()` default. My first manual terminal test (stdin=TTY) hung for 20s+ every time. Fix: `stdio: ['ignore','pipe','pipe']` for the codex branch only (claude doesn't read stdin in --print mode, left untouched). Lesson: always test child_process spawns with default (pipe) stdio, not an interactive terminal — TTY vs pipe stdin behavior differs for CLIs that "optionally" read stdin.
+- codex exec --json event shapes (verified against real output): `item.completed` + `item.type==='agent_message'` → final/narration text (fires once per agent turn segment, last one wins as the real answer); `item.started`/`item.completed` + `item.type==='command_execution'` → shell tool use, `item.command`/`item.aggregated_output`/`exit_code`; `turn.completed` → usage (`input_tokens`/`cached_input_tokens`/`output_tokens` — field names differ from claude's `cache_read_input_tokens`/`cache_creation_input_tokens`).
 - v1 has NO MCP tools for codex (its MCP config is TOML/`codex mcp add`-based, not wired) and no `--append-system-prompt-file` equivalent — persona/system prompt text gets concatenated into the exec prompt string instead. If the profile experiment goes well, next step is real MCP wiring for codex.
 - Still open: this PR needs merge + a live systemd restart to take effect in prod (restart = shared cgroup, kills current session — only with explicit confirmation, per earlier codex-login note). Also still needed: actually flip a real profile's engine once the user names it.
 
