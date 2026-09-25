@@ -70,7 +70,8 @@ release_set_link() {
 # release_gc <releases-dir> [keep]
 # Keeps the newest <keep> releases (default 3) so rollback and the current
 # version always survive; removes older ones. Staging dirs and the shared
-# trained-assist-hh-skill sibling symlink are never removed.
+# trained-assist-hh-skill / trained-assist-engineering sibling symlinks are
+# never removed.
 release_gc() {
   local releases="$1" keep="${2:-3}"
   local d
@@ -83,6 +84,7 @@ release_gc() {
   ls -1dt "$releases"/*/ 2>/dev/null \
     | grep -v '/\.staging-' \
     | grep -v '/trained-assist-hh-skill/$' \
+    | grep -v '/trained-assist-engineering/$' \
     | tail -n +"$((keep + 1))" \
     | while read -r d; do
         echo "==> GC old release $d" >&2

@@ -32,6 +32,7 @@ CURRENT_LINK="${CURRENT_LINK:-$AGENT_HOME/agent-master}"
 TARGET="${DEPLOY_TARGET_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}"
 RELEASE_DIR="$RELEASES_DIR/$TARGET"
 HH_SKILL_DIR="${HH_SKILL_DIR:-$AGENT_HOME/trained-assist-hh-skill}"
+ENGINEERING_DIR="${ENGINEERING_DIR:-$AGENT_HOME/trained-assist-engineering}"
 export REPO_DIR RELEASES_DIR CURRENT_LINK SERVICE
 
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
@@ -97,6 +98,22 @@ fi
 # <releases>/trained-assist-hh-skill — link that to the canonical checkout.
 $SUDO mkdir -p "$RELEASES_DIR"
 $SUDO ln -sfn "$HH_SKILL_DIR" "$RELEASES_DIR/trained-assist-hh-skill"
+
+echo "==> Ensuring trained-assist-engineering sibling checkout exists (feeds engineering_spawn_workspace, #1418)..."
+if [ ! -d "$ENGINEERING_DIR/.git" ]; then
+  ENGINEERING_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's#/trained-assist-agent\(\.git\)\?$#/trained-assist-engineering.git#')
+  echo "  Cloning $ENGINEERING_DIR..."
+  git clone --quiet "$ENGINEERING_URL" "$ENGINEERING_DIR" || echo "  ⚠️  clone failed — engineering_spawn_workspace will be unavailable until fixed"
+else
+  git -C "$ENGINEERING_DIR" fetch --quiet origin main 2>/dev/null &&
+    git -C "$ENGINEERING_DIR" reset --quiet --hard origin/main 2>/dev/null ||
+    echo "  ⚠️  update failed — keeping existing checkout"
+fi
+# Same resolution depth as trained-assist-hh-skill above: both browser.js's
+# sibling mount (2 levels up from src/) and 61-dev.js's engineeringLibPath()
+# (4 levels up from src/mcp-skills/tools/) land on <releases>/, since a release
+# dir itself is one path segment (<releases>/<sha>/src/...).
+$SUDO ln -sfn "$ENGINEERING_DIR" "$RELEASES_DIR/trained-assist-engineering"
 
 echo "==> Validating and applying nginx config ($DEPLOY_ENV)..."
 REPO_DIR="$RELEASE_DIR" bash "$RELEASE_DIR/scripts/deploy-nginx.sh"
