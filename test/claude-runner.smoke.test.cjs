@@ -141,6 +141,20 @@ const baseOpts = {
     ['stop|t-x', 'sup|t-x'],
     'runningControls pairs ⛔ Стоп with ➕ Дополнить on the same row'
   );
+  // Telegram rejects callback_data > 64 bytes (400 BUTTON_DATA_INVALID) and
+  // with it the whole progress edit. Real tg taskIds are `<user>-tg-<64hex>`.
+  {
+    const longId = 'trained-assist-product-owner-tg-' + 'a'.repeat(64);
+    const keys = runningControls(longId).reply_markup.inline_keyboard[0].map(b => b.callback_data);
+    for (const k of keys) {
+      const key = k.slice(k.indexOf('|') + 1);
+      for (const prefix of ['stop|', 'sup|', 'stopok|', 'stopno|', 'supok|', 'supno|']) {
+        assert.ok(Buffer.byteLength(prefix + key) <= 64, `${prefix}<key> fits Telegram's 64-byte callback_data (${Buffer.byteLength(prefix + key)})`);
+      }
+    }
+    assert.deepEqual(runningControls(longId), runningControls(longId), 'long-id key is deterministic across ticks');
+    assert.notEqual(runningControls(longId + 'b').reply_markup.inline_keyboard[0][0].callback_data, keys[0], 'distinct tasks get distinct keys');
+  }
 
   // (7) Regression for the bug this fixes: a heartbeat tick that hits STOP_BUTTON_
   // AFTER_SECS but gets its edit dropped (429/coalesce) used to still mark the
