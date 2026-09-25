@@ -2,6 +2,9 @@
 
 | File | Description |
 |------|-------------|
+| [architecture/channel-execution-concurrency.md](architecture/channel-execution-concurrency.md) | Owner requirement: one Telegram conversation run + one session writer; parallel sessions in one profile/project/workDir; migration gates (#1365) |
+| [user-scenarios/core/01-channel-concurrency.md](user-scenarios/core/01-channel-concurrency.md) | CH-01–CH-11: user value, allowed/forbidden concurrency, restart/Stop/cross-channel acceptance and evidence checklist |
+| [user-scenarios/README.md](user-scenarios/README.md) | Scenario format: User story + User value + concrete Validation and test evidence |
 | [credential-store-migration.md](credential-store-migration.md) | Plan for migrating credential storage (connect-pending tokens, agent-tokens layout) |
 | [how-to-add-skill.md](how-to-add-skill.md) | Step-by-step guide: create a new MCP skill `.js` file in `src/mcp-skills/tools/` |
 | [narrow-wide-bot-architecture-spec.md](narrow-wide-bot-architecture-spec.md) | Architecture sketch: agent-assistant + specialized bot pattern (narrow vs wide scope) |
