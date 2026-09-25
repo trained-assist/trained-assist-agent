@@ -43,6 +43,23 @@ const MAX_DOC_CHARS = 1200;
 const MAX_DOC_TOTAL_CHARS = 8000;
 const DOC_ROOTS = ['.', 'docs', 'docs/user-scenarios', 'user-scenarios', 'requirements'];
 
+// ── fast-pass escape (P3d-1c) ───────────────────────────────────────────────
+// The loosest mode carries one extra affordance: the step may SKIP its
+// validations. It does so explicitly, by writing a final line
+//   VALIDATION: fastpass-skip: <reason>
+// in its reply. The skip is only honoured when the step's effective mode is
+// `programmatic+llm-fastpass`, and it is always recorded in the audit trail
+// (status 'pass' + evidence {skipped:true, reason, mode}) — never a silent pass.
+const FASTPASS_SKIP_MODE = 'programmatic+llm-fastpass';
+const FASTPASS_SKIP_RE = /VALIDATION:\s*fastpass-skip:\s*([^\n\r]+)/i;
+
+function parseFastpassSkip(reply) {
+  const m = String(reply || '').match(FASTPASS_SKIP_RE);
+  if (!m) return null;
+  const reason = m[1].trim();
+  return reason || 'unspecified';
+}
+
 function inconclusive(reason, extra = {}) {
   return { status: 'inconclusive', subject: null, evidence: { reason, ...extra } };
 }
@@ -180,11 +197,14 @@ async function commandExitZero(ctx) {
   return runCommand(String(command), cwd, timeoutMs);
 }
 
-// ── mode resolution (P3d-1b) ────────────────────────────────────────────────
-// Precedence: per-plan durable_tasks.execution_policy_json.validation_mode >
-// env PLAYBOOK_VALIDATION_MODE > default 'programmatic+llm'. An unknown value at
-// any level is ignored (falls through) rather than silently accepted.
-function resolveValidationMode({ task = null, env = process.env } = {}) {
+// ── mode resolution (P3d-1b, per-step P3d-1c) ───────────────────────────────
+// Precedence: per-step task_items.validation_mode > per-plan
+// durable_tasks.execution_policy_json.validation_mode > env PLAYBOOK_VALIDATION_MODE
+// > default 'programmatic+llm'. An unknown value at any level is ignored (falls
+// through) rather than silently accepted.
+function resolveValidationMode({ task = null, item = null, env = process.env } = {}) {
+  const fromStep = item && item.validation_mode;
+  if (VALIDATION_MODES.includes(fromStep)) return fromStep;
   let fromPlan = null;
   if (task && task.execution_policy_json) {
     try {
@@ -450,4 +470,5 @@ module.exports = {
   parseValidation, collectDocExcerpts, buildLlmValidatorPrompt, makeLlmValidate, getDefaultLlmValidate,
   PR_REF_RE, DEFAULT_COMMAND_TIMEOUT_MS,
   VALIDATION_MODES, DEFAULT_VALIDATION_MODE, DEFAULT_VALIDATION_MODEL, LLM_VALIDATOR_TIMEOUT_MS,
+  FASTPASS_SKIP_MODE, FASTPASS_SKIP_RE, parseFastpassSkip,
 };

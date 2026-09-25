@@ -329,6 +329,129 @@ function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
     ok(item.status === 'pending', `programmatic: step does not pass (got ${item.status})`);
   }
 
+  // 14. fast-pass escape (P3d-1c): under programmatic+llm-fastpass an agent step
+  // may skip its validation with a final `VALIDATION: fastpass-skip: <reason>`
+  // line. The skip is recorded (status pass + evidence {skipped,reason,mode}) and
+  // neither the deterministic registry nor the LLM is consulted — never silent.
+  {
+    const G14 = freshStore('14');
+    const store = G14.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'fastpass skip smoke', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic+llm-fastpass' },
+      items: [{ title: 'urgent fix', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { ci_green: true } }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    let llmCalls = 0;
+    let registryCalls = 0;
+    await G14.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      registry: { ci_green: async () => { registryCalls++; return { status: 'fail', subject: null, evidence: { reason: 'red' } }; } },
+      llmValidate: async () => { llmCalls++; return { status: 'pass', reason: 'should not run' }; },
+      runTask: async () => 'patched prod.\nVALIDATION: fastpass-skip: CI too heavy, urgent prod fix\nDURABLE: done',
+    });
+    await drain();
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    const validations = store.listValidations(r.task.id, 'u1');
+    ok(item.status === 'done' && validations.length === 1 && validations[0].status === 'pass',
+      `fastpass: step completes via a recorded skip (got status=${item.status}, rows=${validations.length})`);
+    const ev = JSON.parse(validations[0].evidence_json || '{}');
+    ok(ev.skipped === true && /urgent prod fix/.test(ev.reason || '') && ev.mode === 'programmatic+llm-fastpass',
+      `fastpass: skip evidence carries reason + mode (got ${validations[0].evidence_json})`);
+    ok(registryCalls === 0 && llmCalls === 0,
+      `fastpass: skip bypasses registry + LLM (registry=${registryCalls}, llm=${llmCalls})`);
+  }
+
+  // 15. per-step mode beats plan/env (P3d-1c): the agent sets a looser per-step
+  // mode mid-run; the completion callback re-reads the item and honours it, so a
+  // skip marker is accepted even though the plan default is stricter.
+  {
+    const G15 = freshStore('15');
+    const store = G15.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'per-step override', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'override step', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { ci_green: true } }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    let llmCalls = 0;
+    await G15.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, registry: {},
+      llmValidate: async () => { llmCalls++; return { status: 'pass', reason: 'ok' }; },
+      runTask: async () => {
+        store.updateTaskItem(item.id, { validation_mode: 'programmatic+llm-fastpass' }, 'u1');
+        return 'did it.\nVALIDATION: fastpass-skip: too heavy right now\nDURABLE: done';
+      },
+    });
+    await drain();
+    const after = store.listTaskItems(r.task.id, 'u1')[0];
+    const validations = store.listValidations(r.task.id, 'u1');
+    ok(after.validation_mode === 'programmatic+llm-fastpass',
+      `override: per-step column updated by the agent (got ${after.validation_mode})`);
+    ok(after.status === 'done' && validations.length === 1 && /"skipped":true/.test(validations[0].evidence_json || ''),
+      `override: per-step fastpass beats the stricter plan mode (got status=${after.status}, ${validations[0] && validations[0].evidence_json})`);
+    ok(llmCalls === 0, `override: no LLM for a recorded skip (llm=${llmCalls})`);
+  }
+
+  // 16. normal verdicts are unaffected (P3d-1c): without the skip marker the
+  // mode-aware pipeline still records deterministic + LLM verdicts, and fastpass
+  // alone is NOT an auto-skip — it only permits the explicit escape.
+  {
+    const G16 = freshStore('16');
+    const store = G16.durableStore();
+    const normalPlan = mode => store.createPlan({
+      profile_id: 'u1', goal: `normal ${mode}`, user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: mode },
+      items: [{ title: 'normal', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small',
+        validation: { ci_green: true, user_value_written: true } }],
+    });
+    const r = normalPlan('programmatic+llm');
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const llmCalls = [];
+    await G16.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      registry: { ci_green: async () => ({ status: 'pass', subject: null, evidence: { checks: [] } }) },
+      llmValidate: async (ctx) => { llmCalls.push(ctx.key); return { status: 'inconclusive', reason: 'cannot tell' }; },
+      runTask: async () => 'did the work. DURABLE: done',
+    });
+    await drain();
+    const validations = store.listValidations(r.task.id, 'u1');
+    const byKey = Object.fromEntries(validations.map(v => [v.validator, v]));
+    ok(validations.length === 2 && byKey.ci_green.status === 'pass' && byKey.user_value_written.status === 'inconclusive',
+      `normal: deterministic pass + LLM inconclusive recorded as before (got ${JSON.stringify(validations.map(v => [v.validator, v.status]))})`);
+    ok(llmCalls.length === 1 && llmCalls[0] === 'user_value_written',
+      `normal: LLM consulted once for the unregistered key (llm=${JSON.stringify(llmCalls)})`);
+    ok(!JSON.stringify(byKey).includes('"skipped":true'), 'normal: no skip recorded without the marker');
+
+    // fastpass mode, marker absent → LLM judge runs (forgiving), still no skip
+    const r2 = store.createPlan({
+      profile_id: 'u1', goal: 'fastpass no marker', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic+llm-fastpass' },
+      items: [{ title: 'fastpass normal', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { user_value_written: true } }],
+    });
+    store.updateTask(r2.task.id, 'u1', { status: 'active' });
+    let fastpassLlm = 0;
+    await G16.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, registry: {},
+      llmValidate: async () => { fastpassLlm++; return { status: 'pass', reason: 'looks fine' }; },
+      runTask: async () => 'done, no escape used. DURABLE: done',
+    });
+    await drain();
+    const v2 = store.listValidations(r2.task.id, 'u1');
+    ok(fastpassLlm === 1 && v2.length === 1 && v2[0].status === 'pass'
+      && /"source":"llm"/.test(v2[0].evidence_json || '') && !/"skipped":true/.test(v2[0].evidence_json || ''),
+      `fastpass: mode alone is not an auto-skip — LLM judge still decides (llm=${fastpassLlm}, ${v2[0] && v2[0].evidence_json})`);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -32,6 +32,7 @@ const { durableTaskDbPath, userWorkDir, projectDir: projectDirPath } = require('
 const { resolveStepExecution } = require('./playbook-executor');
 const {
   evaluateItemValidationsModeAware, resolveValidationMode, getDefaultRegistry, DEFAULT_VALIDATION_MODE,
+  parseValidation, FASTPASS_SKIP_MODE, parseFastpassSkip,
 } = require('./playbook-validators');
 
 // ── Разумные дефолты (небольшие, но осмысленные) ────────────────────────────
@@ -222,6 +223,37 @@ async function recordItemValidations(store, { task, item, executionId, registry,
   return results;
 }
 
+// P3d-1c: the explicit fast-pass escape. Under `programmatic+llm-fastpass` a step
+// may bypass its validations when the full check is too heavy / is breaking
+// something / an urgent fix is needed. The bypass is never silent: every declared
+// validation is still written to `task_validation_results` — status 'pass' but
+// evidence carrying {skipped:true, reason, mode} — so the audit trail shows the
+// skipped check. A step with no declared validation still gets one row so the
+// bypass itself is recorded. Deterministic validators ARE skippable here: the
+// point of the escape is to unblock, and the recorded reason (not a hidden fail)
+// is what keeps it honest. Only the agent (non-programmatic) path can skip — a
+// programmatic step has no model to decide.
+function recordFastpassSkip(store, { task, item, executionId, reason }) {
+  const raw = item && item.validation_json != null ? item.validation_json : item && item.validation;
+  const keys = Object.keys(parseValidation(raw));
+  const validators = keys.length ? keys : ['fastpass-skip'];
+  for (const key of validators) {
+    try {
+      store.recordValidation({
+        task_id: task.id, profile_id: task.profile_id, task_item_id: item.id, execution_id: executionId,
+        criterion_id: criterionIdForItem(task, item, key),
+        contract_revision: task.contract_revision || 1,
+        validator: key, status: 'pass',
+        subject_json: JSON.stringify({ key }),
+        evidence_json: JSON.stringify({ skipped: true, reason, mode: FASTPASS_SKIP_MODE }),
+      });
+    } catch (e) {
+      console.error(`[gtd-durable] recordFastpassSkip ${item.id.slice(0, 8)} ${key}:`, e.message);
+    }
+  }
+  return validators;
+}
+
 // All items finished → close the task. Contract plans still finalize through the
 // raw SQL the P3d-2 gate will replace (this slice must not touch the gate).
 function settleTaskCompletion(store, task) {
@@ -254,8 +286,8 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     if (!item) return fired;
     const task = store.db.prepare('SELECT * FROM durable_tasks WHERE id = ?').get(item.task_id);
     if (!task) { store.failItem(item.id, '__system__', { error: 'task vanished' }); continue; }
-    // P3d-1b: per-plan policy > env > default programmatic+llm.
-    const validationMode = resolveValidationMode({ task });
+    // P3d-1b/1c: per-step > per-plan policy > env > default programmatic+llm.
+    const validationMode = resolveValidationMode({ task, item });
     if (claimedThisPass.has(item.id)) {
       store.updateTaskItem(item.id, { status: 'waiting', due_at: Date.now() + FRESH_CLAIM_GRACE_MS }, task.profile_id);
       continue;
@@ -323,10 +355,16 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
       '[DURABLE TASK — auto-execution]',
       `Task: ${task.goal}`,
       `Step (${item.position + 1}/${store.progressSummary(task.id, task.profile_id).total}): ${item.title}`,
+      `Step id: ${item.id}`,
       item.instructions ? `\nInstructions: ${item.instructions}` : '',
       item.validation_json
         ? `\nValidation (must pass before completion): ${item.validation_json}` : '',
-      '\nВыполни этот шаг. Если шаг выполнен и проверка прошла — ответь финальной строкой: DURABLE: done.',
+      '\nПроверка шага (validation_mode). Текущий режим шага: ' + validationMode + '.',
+      'Ты можешь выбрать режим для этого шага через task_item_update(item_id: "<Step id>", validation_mode: "...").',
+      'Режимы: "programmatic" — только детерминированные проверки; "programmatic+llm" — детерминированные + дешёвый LLM-судья; "programmatic+llm-fastpass" — самый мягкий.',
+      'Настоятельно рекомендуется "programmatic+llm" (полная проверка) — особенно на дешёвых моделях: не пропускай проверку молча.',
+      'Fast-pass — это ЗАПИСЫВАЕМЫЙ escape hatch, а не тихий обход. Только в режиме "programmatic+llm-fastpass" ты можешь пропустить проверку, если она слишком тяжёлая, ломает работу или нужен срочный фикс — добавь финальной строкой: VALIDATION: fastpass-skip: <причина>. Пропуск попадёт в audit trail с причиной.',
+      'Выполни этот шаг. Если шаг выполнен и проверка прошла — ответь финальной строкой: DURABLE: done.',
       'Если шаг не удался — опиши ошибку и ответь финальной строкой: DURABLE: failed: <причина>.',
     ].filter(Boolean).join('\n');
 
@@ -352,10 +390,21 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
         // finalizer that reads rows (P3d-2) never sees a completed step with no
         // verdict. The tick is fire-and-forget: this runs in the run's completion
         // callback, not on the tick's critical path.
+        // P3d-1c: re-read the item so a per-step validation_mode the agent set
+        // during the run is honoured, and allow the fast-pass escape under that mode.
         try {
-          await recordItemValidations(store, {
-            task, item: itemSnap, executionId, registry: validators, projectDir: itemProjectDir, validationMode, llmValidate,
-          });
+          const freshItem = store.getTaskItem(itemSnap.id) || itemSnap;
+          const mode = resolveValidationMode({ task, item: freshItem });
+          const skipReason = mode === FASTPASS_SKIP_MODE ? parseFastpassSkip(said) : null;
+          if (skipReason) {
+            recordFastpassSkip(store, { task, item: freshItem, executionId, reason: skipReason });
+            console.log(`[gtd-durable] fastpass skip ${itemSnap.id.slice(0, 8)}: ${skipReason}`);
+          } else {
+            await recordItemValidations(store, {
+              task, item: itemSnap, executionId, registry: validators, projectDir: itemProjectDir,
+              validationMode: mode, llmValidate,
+            });
+          }
           store.setItemEvidence(itemSnap.id, task.profile_id, {
             evidence_json: JSON.stringify({ reply: said.slice(0, 4000) }), completed_at: Date.now(),
           });

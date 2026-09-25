@@ -23,6 +23,9 @@ module.exports = function migratePlan(db) {
           minimum_model_level: "TEXT CHECK(minimum_model_level IN ('bachelor','master','doctor'))",
           current_model_level: "TEXT CHECK(current_model_level IN ('bachelor','master','doctor'))",
           context_budget: "TEXT CHECK(context_budget IN ('small','medium','large'))", validation_json: 'TEXT',
+          // P3d-1c: per-step validation_mode override (nullable). NULL → inherit
+          // the plan's execution_policy_json.validation_mode; a set value beats it.
+          validation_mode: "TEXT CHECK(validation_mode IN ('programmatic','programmatic+llm','programmatic+llm-fastpass'))",
           attempt_count: 'INTEGER NOT NULL DEFAULT 0', max_attempts: 'INTEGER NOT NULL DEFAULT 3',
           execution_timeout_seconds: 'INTEGER NOT NULL DEFAULT 600', wait_deadline_at: 'INTEGER', evidence_json: 'TEXT', completed_at: 'INTEGER',
         },

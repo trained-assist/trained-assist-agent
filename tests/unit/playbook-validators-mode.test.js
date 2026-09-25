@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const {
   resolveValidationMode, evaluateItemValidationsModeAware,
   makeLlmValidate, buildLlmValidatorPrompt, collectDocExcerpts,
+  parseFastpassSkip, FASTPASS_SKIP_MODE,
   VALIDATION_MODES, DEFAULT_VALIDATION_MODE,
 } = require('../../src/playbook-validators');
 
@@ -40,6 +41,28 @@ describe('resolveValidationMode', () => {
 
   it('exposes the selectable enum', () => {
     expect(VALIDATION_MODES).toEqual(['programmatic', 'programmatic+llm', 'programmatic+llm-fastpass']);
+  });
+
+  it('per-step override beats plan and env (P3d-1c)', () => {
+    const task = { execution_policy_json: JSON.stringify({ validation_mode: 'programmatic' }) };
+    const env = { PLAYBOOK_VALIDATION_MODE: 'programmatic+llm' };
+    expect(resolveValidationMode({ task, item: { validation_mode: 'programmatic+llm-fastpass' }, env }))
+      .toBe('programmatic+llm-fastpass');
+    // a null/unknown per-step value falls through to the plan
+    expect(resolveValidationMode({ task, item: { validation_mode: null }, env })).toBe('programmatic');
+    expect(resolveValidationMode({ task, item: { validation_mode: 'bogus' }, env })).toBe('programmatic');
+    // no item at all keeps the P3d-1b behaviour
+    expect(resolveValidationMode({ task, env })).toBe('programmatic');
+  });
+});
+
+describe('fastpass-skip marker (P3d-1c)', () => {
+  it('parses the reason from a final marker line', () => {
+    expect(parseFastpassSkip('did it.\nVALIDATION: fastpass-skip: urgent prod fix\nDURABLE: done'))
+      .toBe('urgent prod fix');
+    expect(parseFastpassSkip('DURABLE: done')).toBeNull();
+    expect(parseFastpassSkip('VALIDATION: fastpass-skip:   ')).toBe('unspecified');
+    expect(FASTPASS_SKIP_MODE).toBe('programmatic+llm-fastpass');
   });
 });
 

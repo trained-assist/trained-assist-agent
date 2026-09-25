@@ -230,7 +230,9 @@ class DurableTaskStore {
   updateTaskItem(id, patch, profileId) {
     if (!this._itemOwnedBy(id, profileId)) return null;
     const allowed = ['title', 'status', 'current_tier', 'delay_after_sec', 'due_at',
-                     'wait_deadline_at', 'last_execution_id', 'last_error'];
+                     'wait_deadline_at', 'last_execution_id', 'last_error',
+                     // P3d-1c: per-step validation_mode override (nullable; DB CHECK enforces the enum)
+                     'validation_mode'];
     const sets = [];
     const args = [];
     for (const k of allowed) {
