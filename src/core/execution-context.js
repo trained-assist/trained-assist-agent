@@ -8,7 +8,7 @@
 //              even across different sessions);
 //   web      → no shared lane; only the per-session writer guard applies.
 // Neither policy ever serializes a whole profile / project / workDir.
-const { makeConversationRef, conversationKey } = require('./conversation-ref');
+const { makeConversationRef, conversationKey, fromLegacyTelegram } = require('./conversation-ref');
 
 const TRIGGERS = Object.freeze(['user', 'cron', 'durable_task', 'webhook', 'system']);
 
@@ -70,11 +70,28 @@ function createExecutionContext(input = {}) {
 
 // Admission scopes this execution must hold for its whole run (§2.3).
 // Never includes profile/project/workDir — those are not mutexes.
+const laneScope = ref => `lane:${conversationKey(ref)}`;
+const sessionScope = (profileId, sessionId) => `session:${profileId}:${sessionId}`;
+
 function admissionScopes(ctx) {
   const scopes = [];
-  if (ctx.interactionPolicy.conversationLaneRequired && ctx.sourceRef) scopes.push(`lane:${conversationKey(ctx.sourceRef)}`);
-  if (ctx.sessionId) scopes.push(`session:${ctx.principal.profileId}:${ctx.sessionId}`);
+  if (ctx.interactionPolicy.conversationLaneRequired && ctx.sourceRef) scopes.push(laneScope(ctx.sourceRef));
+  if (ctx.sessionId) scopes.push(sessionScope(ctx.principal.profileId, ctx.sessionId));
   return scopes;
 }
 
-module.exports = { createExecutionContext, interactionPolicyFor, admissionScopes, TRIGGERS, CHANNEL_POLICIES };
+// Same scopes for a legacy /run request (chatId/audience/threadId) until the
+// runner is driven by a real ExecutionContext (PR3/PR4). chatId 0 (Web /
+// internal) has no dialog → session writer guard only. An audience missing
+// from the bot registry still gets a lane (never silently unserialized).
+function legacyAdmissionScopes({ chatId, audience, threadId, profileId, sessionId } = {}) {
+  const scopes = [];
+  let ref = null;
+  try { ref = fromLegacyTelegram({ chatId, audience, threadId }); }
+  catch { scopes.push(`lane:legacy:${encodeURIComponent(audience || 'default')}|${chatId}|${threadId || ''}`); }
+  if (ref) scopes.push(laneScope(ref));
+  if (sessionId && profileId) scopes.push(sessionScope(profileId, sessionId));
+  return scopes;
+}
+
+module.exports = { createExecutionContext, interactionPolicyFor, admissionScopes, legacyAdmissionScopes, laneScope, sessionScope, TRIGGERS, CHANNEL_POLICIES };

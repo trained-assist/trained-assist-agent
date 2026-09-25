@@ -236,11 +236,12 @@ async function reconcileSoftContinuations(secrets) {
 // semaphore (layer 2) live in src/runner/task-queue.js so admission logic is
 // unit-testable without pulling in the whole runner.
 const {
-  chatQueue,
+  admission,
   _acquireSlot,
   _releaseSlot,
   _waitForRam,
 } = require('./task-queue');
+const { legacyAdmissionScopes } = require('../core/execution-context');
 
 // Active task timer state — allows Claude to extend its own session via MCP tool.
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
@@ -592,8 +593,14 @@ function runTask(opts) {
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
     const stopped = stopUserTask(username, chatId, opts.user.audience, runThreadId);
-    // Clear this chat's queue so the next task doesn't wait behind a stuck one.
-    chatQueue.clearChat(chatId);
+    // A killed owner releases its lane itself once the process exits. Only a
+    // lane with NO live process (stale holder) is force-released here —
+    // otherwise the next task would become a second writer next to it.
+    if (!stopped) {
+      for (const scope of legacyAdmissionScopes({ chatId, audience: opts.user.audience, threadId: runThreadId })) {
+        admission.forceRelease(scope);
+      }
+    }
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     const msg = stopped
       ? '🔄 Зависший процесс убит, очередь очищена. Можешь писать снова.'
@@ -671,13 +678,20 @@ function runTask(opts) {
     startedAt: opts.acceptedAt || Date.now(), initiatedAt: opts.initiatedAt,
   });
   const status = require('../admission-status').createAdmissionStatus(opts, { edit: tgEdit, send: tgSend });
-  // One task at a time per chat — the per-chat lock, kept deliberately. There are
-  // no per-session / per-profile / per-workDir locks: those were removed because a
-  // stale promise in them left chats saying "waiting for previous work" with nothing
-  // running. Any number of tasks may run concurrently across chats and sessions of
-  // one profile — context is rebuilt from the session store (no `claude --resume`),
-  // so parallel claudes never share a transcript file.
-  if (chatQueue.hasPending(opts.user.id)) status.waiting(
+  // No per-profile / per-project / per-workDir locks: a stale promise in those
+  // left chats saying "waiting for previous work" with nothing running. Tasks of
+  // one profile run concurrently across dialogs and sessions — context is rebuilt
+  // from the session store (no `claude --resume`), so parallel claudes never
+  // share a transcript file.
+  // Scopes held for the whole run (epic #1365 §2.3): the Telegram dialog lane
+  // (endpoint+chat+topic — different sessions in one dialog wait for each other)
+  // and the session writer guard (every channel, incl. Web: one writer per
+  // history). Never profile/project/workDir.
+  const admissionScopes = legacyAdmissionScopes({
+    chatId: opts.user.id, audience: opts.user.audience, threadId: runThreadId,
+    profileId: opts.user.username, sessionId: opts.forceNew ? null : (opts.sessionId || opts.activitySessionId),
+  });
+  if (admission.isBusy(admissionScopes)) status.waiting(
     '↪️ Ожидаю завершения предыдущей работы. В этом диалоге выполняю задачи по очереди. Начну автоматически; повторно отправлять не нужно.'
   );
 
@@ -691,7 +705,7 @@ function runTask(opts) {
   // re-entrancy guard (isSessionRunning) relies on this window before the
   // process spawns. Read-only membership, not a lock.
   if (opts.sessionId) queuedSessions.add(opts.sessionId);
-  const current = chatQueue.enqueue(opts.user.id, async () => {
+  const current = admission.run(admissionScopes, async () => {
     try {
       // Global admission control: wait for a free slot + enough RAM before we
       // actually spawn `claude`. This is the OOM guard — the only remaining gate.
