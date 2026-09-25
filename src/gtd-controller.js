@@ -30,7 +30,9 @@ const { readTokenValue } = require('./token-value');
 const { DurableTaskStore } = require('./durable-task-store');
 const { durableTaskDbPath, userWorkDir, projectDir: projectDirPath } = require('./data-paths');
 const { resolveStepExecution } = require('./playbook-executor');
-const { evaluateItemValidations, getDefaultRegistry } = require('./playbook-validators');
+const {
+  evaluateItemValidationsModeAware, resolveValidationMode, getDefaultRegistry, DEFAULT_VALIDATION_MODE,
+} = require('./playbook-validators');
 
 // ── Разумные дефолты (небольшие, но осмысленные) ────────────────────────────
 const DEFAULT_ETA_MIN = 60;   // через сколько минут после завершения проверить
@@ -192,11 +194,13 @@ function criterionIdForItem(task, item, validatorKey) {
 // verdict as a task_validation_results row (profile-scoped). Returns the raw
 // results so the caller can decide complete vs fail. A validator that throws is
 // recorded as inconclusive — a broken check must not look like a pass.
-async function recordItemValidations(store, { task, item, executionId, registry, projectDir }) {
+// `validationMode` (P3d-1b) selects whether an inconclusive deterministic verdict
+// may be decided by the injectable cheap LLM validator.
+async function recordItemValidations(store, { task, item, executionId, registry, projectDir, validationMode = DEFAULT_VALIDATION_MODE, llmValidate = null }) {
   let results;
   try {
-    results = await evaluateItemValidations(item, {
-      task, profileId: task.profile_id, projectDir, registry,
+    results = await evaluateItemValidationsModeAware(item, {
+      task, profileId: task.profile_id, projectDir, registry, mode: validationMode, llmValidate,
     });
   } catch (e) {
     results = [{ key: '*', status: 'inconclusive', subject: null, evidence: { reason: 'evaluator-error', error: e.message } }];
@@ -235,7 +239,7 @@ function settleTaskCompletion(store, task) {
 // own max_attempts / execution_timeout_seconds. delay_after_sec / wait_deadline_at
 // shape when the store hands the item out (see durable-task-store.completeItem /
 // expireWaitingDeadlines).
-async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null }) {
+async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null, llmValidate = null }) {
   const store = durableStore();
   const validators = registry || getDefaultRegistry();
   // A programmatic step that fails is retried synchronously inside this pass
@@ -250,6 +254,8 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     if (!item) return fired;
     const task = store.db.prepare('SELECT * FROM durable_tasks WHERE id = ?').get(item.task_id);
     if (!task) { store.failItem(item.id, '__system__', { error: 'task vanished' }); continue; }
+    // P3d-1b: per-plan policy > env > default programmatic+llm.
+    const validationMode = resolveValidationMode({ task });
     if (claimedThisPass.has(item.id)) {
       store.updateTaskItem(item.id, { status: 'waiting', due_at: Date.now() + FRESH_CLAIM_GRACE_MS }, task.profile_id);
       continue;
@@ -288,7 +294,7 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     // verdict recorded, and the step completes only when every check passes.
     if (step.executionKind === 'programmatic') {
       const results = await recordItemValidations(store, {
-        task, item, executionId, registry: validators, projectDir: itemProjectDir,
+        task, item, executionId, registry: validators, projectDir: itemProjectDir, validationMode, llmValidate,
       });
       const allPass = results.length > 0 && results.every(r => r.status === 'pass');
       store.setItemEvidence(item.id, task.profile_id, {
@@ -348,7 +354,7 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
         // callback, not on the tick's critical path.
         try {
           await recordItemValidations(store, {
-            task, item: itemSnap, executionId, registry: validators, projectDir: itemProjectDir,
+            task, item: itemSnap, executionId, registry: validators, projectDir: itemProjectDir, validationMode, llmValidate,
           });
           store.setItemEvidence(itemSnap.id, task.profile_id, {
             evidence_json: JSON.stringify({ reply: said.slice(0, 4000) }), completed_at: Date.now(),
