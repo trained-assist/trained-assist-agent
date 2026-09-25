@@ -34,6 +34,16 @@ function hhInterviewConfigAllowsTime(username) {
 // Excludes 'discard' (rejected) and 'hired' (done) — only actionable/in-progress candidates.
 const HH_REVIEW_STATES = ['response', 'consider', 'phone_interview', 'assessment', 'interview', 'offer'];
 
+// HH exposes negotiation collections named after the ACTION that produced them.
+// There is no generic `/negotiations/discard` — real HH returns 404 for it; the
+// rejections live in the collection of the action that was applied. A rejection
+// can be produced by two actions, so fetch both and union by id:
+//   - discard_by_employer    → normal rejection on a still-open vacancy (REJECT_REASON_ACTION)
+//   - discard_vacancy_closed → legacy rejections and hh_bulk_reject when a vacancy is closed
+// Both are needed: covering only the new action would hide replies on the older
+// rejections that started this bug report.
+const HH_DISCARD_ACTIONS = ['discard_by_employer', 'discard_vacancy_closed'];
+
 // HH negotiations/messages/background-scoring (moved from server.js, see issue #942 Phase 0).
 // Uses the shared HH HTTP client from hh-utils (single implementation, issue #942 P0.4).
 // refreshHhToken is still defined inline in server.js (it is not an HTTP client — OAuth
@@ -63,16 +73,18 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
 // scorer; used only to sync post-rejection replies and surface them on the page.
 async function fetchDiscardedNegotiations(vacancyId, accessToken) {
   const token = { access_token: accessToken };
-  let items = [];
-  let page = 0, totalPages = 1;
-  do {
-    const data = await hhFetch(`/negotiations/discard?vacancy_id=${vacancyId}&per_page=50&page=${page}`, token);
-    items = items.concat(data.items || []);
-    totalPages = data.pages ?? 1;
-    page++;
-    if (page >= 20) { console.warn('[hh] fetchDiscardedNegotiations: hit 20-page cap'); break; }
-  } while (page < totalPages);
-  return items.map(item => ({ ...item, _state: 'discard' }));
+  const byId = new Map();
+  for (const action of HH_DISCARD_ACTIONS) {
+    let page = 0, totalPages = 1;
+    do {
+      const data = await hhFetch(`/negotiations/${action}?vacancy_id=${vacancyId}&per_page=50&page=${page}`, token);
+      for (const item of (data.items || [])) byId.set(item.id, { ...item, _state: 'discard' });
+      totalPages = data.pages ?? 1;
+      page++;
+      if (page >= 20) { console.warn(`[hh] fetchDiscardedNegotiations: hit 20-page cap for ${action}`); break; }
+    } while (page < totalPages);
+  }
+  return [...byId.values()];
 }
 
   // Keyed by vacancy_id — profiles tracking several vacancies (readActiveVacancies)
@@ -386,4 +398,4 @@ async function fetchDiscardedNegotiations(vacancyId, accessToken) {
   };
 }
 
-module.exports = { createHhNegotiations, HH_REVIEW_STATES, hhInterviewConfigAllowsTime };
+module.exports = { createHhNegotiations, HH_REVIEW_STATES, HH_DISCARD_ACTIONS, hhInterviewConfigAllowsTime };
