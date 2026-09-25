@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trained-assist/contracts/playbook.schema.json",
+  "title": "Playbook v1",
+  "description": "Versioned, machine-checkable workflow template. A playbook compiles into a durable plan; it never carries concrete provider/model names — only a step contract (executor_role + minimum_model_level + context_budget) resolved by the runtime ladder. See issue #1372.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "scope", "title", "goal_template", "stages"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "scope": { "enum": ["system", "profile"] },
+    "title": { "type": "string", "minLength": 1 },
+    "goal_template": { "type": "string", "minLength": 1 },
+    "user_value_template": { "type": "string" },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "stages": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/stage" } },
+    "hooks": { "$ref": "#/$defs/hooks" }
+  },
+  "$defs": {
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "execution_timeout_seconds": { "type": "integer", "minimum": 1 },
+        "recovery_policy": { "type": "string", "minLength": 1 }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "execution_kind", "validation"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "instructions": { "type": "string" },
+        "execution_kind": { "enum": ["agent", "programmatic"] },
+        "executor_role": { "type": ["string", "null"], "enum": ["researcher", "developer", "reviewer", "verifier", null] },
+        "minimum_model_level": { "type": ["string", "null"], "enum": ["bachelor", "master", "doctor", null] },
+        "context_budget": { "type": ["string", "null"], "enum": ["small", "medium", "large", null] },
+        "validation": { "type": "object", "minProperties": 1 },
+        "delay_after_sec": { "type": "integer", "minimum": 0 },
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "execution_timeout_seconds": { "type": "integer", "minimum": 1 },
+        "on_complete": { "$ref": "#/$defs/hookList" },
+        "on_fail": { "$ref": "#/$defs/hookList" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "steps"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "on_enter": { "$ref": "#/$defs/hookList" },
+        "on_exit": { "$ref": "#/$defs/hookList" },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+      }
+    },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["notify", "check", "create_issue", "publish"] },
+        "to": { "type": "string" },
+        "text": { "type": "string" }
+      }
+    },
+    "hookList": { "type": "array", "items": { "$ref": "#/$defs/hook" } },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_done": { "$ref": "#/$defs/hookList" },
+        "task_failed": { "$ref": "#/$defs/hookList" }
+      }
+    }
+  }
+}
