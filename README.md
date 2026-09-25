@@ -306,6 +306,15 @@ Set in repo **Settings → Secrets and variables → Actions**:
 
 **Normal flow:** PR → CI → auto squash-merge → deploy to both VMs.
 
+**How deploy selects the running code (release model, #1391):** CI never resets a
+live working tree. It builds the merged SHA into an immutable, root-owned
+`~/agent-releases/<sha>/` (`git archive` + `npm ci`) and atomically repoints the
+`~/agent-master` symlink at it; both services run with
+`WorkingDirectory=~/agent-master`. The repo checkout is only a git source — sessions
+may work in it (checkout/commit) without affecting prod. Rollback = repoint the
+symlink to a previous release. Old releases are garbage-collected (3 kept).
+Deploy code itself is run from the target SHA, not from the worktree.
+
 **Emergency / manual deploy** (no PR needed):
 1. Merge your change to main first (or it's already there)
 2. GitHub → Actions → **Manual Deploy** → Run workflow → choose target (`gcp` / `ru` / `both`)
@@ -325,7 +334,9 @@ sudo journalctl -u assist-agent --no-pager -n 50
 # Common causes:
 # - "Required secret missing: TELEGRAM_BOT_TOKEN" → secret not in GCP SM or secrets.env
 # - Port 8080 already in use → sudo fuser -k 8080/tcp && sudo systemctl restart assist-agent
-# - git reset --hard failed → git stash && git reset --hard origin/main
+# - bad release deployed → repoint the symlink to the previous release, then restart:
+#   ls -1dt ~/agent-releases/*/ ; sudo ln -sfn ~/agent-releases/<prev-sha> ~/agent-master.new
+#   sudo mv -T ~/agent-master.new ~/agent-master && sudo systemctl restart assist-agent
 ```
 
 ## Setup

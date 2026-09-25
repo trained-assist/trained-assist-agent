@@ -6,7 +6,7 @@ OnFailure=assist-agent-notify-failure.service
 [Service]
 Type=simple
 User=vova
-WorkingDirectory=/home/vova/trained-assist-agent
+WorkingDirectory=/home/vova/agent-master
 ExecStartPre=/bin/bash -c 'pids=$(lsof -ti tcp:8080 2>/dev/null); [ -n "$pids" ] && { echo "[pre-start] killing PIDs on :8080: $pids"; kill -9 $pids 2>/dev/null; sleep 1; }; true'
 ExecStart=/usr/bin/node src/ru-edge.js
 KillMode=mixed

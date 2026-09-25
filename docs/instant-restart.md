@@ -19,10 +19,10 @@ preserving the last 30–60 seconds of a running session.
    - Older than 20 min but younger than 2 h: user is told the task was interrupted.
    - Older: dropped quietly. Internal GTD runs never notify.
    - A re-run that fails to start tells the user.
-4. **Deploy.** `scripts/deploy.sh` does everything slow (nginx, `npm ci` only when
-   `package-lock.json` changed, unit files) while the old process keeps serving. Downtime is
-   `stop → (swap deps) → start → /health poll`. If the new process never gets healthy the script
-   rolls back to the previous commit.
+4. **Deploy.** `scripts/deploy.sh` builds `~/agent-releases/<sha>` (`git archive` +
+   `npm ci`) and atomically repoints the `~/agent-master` symlink while the old process keeps
+   serving. Downtime is `stop → start → /health poll`. If the new process never gets healthy
+   the script repoints the symlink to the previous release and restarts.
 
 ## What must not come back
 
