@@ -4,6 +4,7 @@
     "tests/quick-answers.test.js",
     "tests/unit/intake-files-endpoint.test.js",
     "tests/unit/durable-plan-persistence.test.js",
+    "tests/unit/playbook-run.test.js",
     "tests/unit/hh-disconnect-safety.test.js",
     "tests/action-provider-registry.test.js",
     "tests/mcp-action-routing.test.js",

@@ -60,3 +60,31 @@ burden.
 
 This is a local deterministic subprocess acceptance test, not a claim that the
 long-running autonomous pilot has passed.
+
+## P2 — `playbook_run` compiles a Playbook v1 into that plan (issue #1372)
+
+Iteration 1 above was still hand-expanded: a caller turned `ba_development_playbook`
+into items itself. `playbook_run` closes that gap: it resolves a saved Playbook v1
+(profile custom → sibling → system), renders `goal_template`/step titles and
+instructions with `{goal}`/`{input}`/vars, applies the playbook's `defaults`, and
+compiles stages/steps into the concrete item contract. It then persists the plan
+through the **same** `task_create` path — one atomic SQLite transaction, the same
+reference checks and the same `checklist.md` projection — pinning
+`{playbook_id, playbook_version}`. The compiler (`src/playbook-compiler.js`) is
+pure and never touches the store, so a playbook compiles for many goals and a
+plan already pinned to a version is immune to later edits.
+
+`acceptance_criteria` may be supplied per run (goal-specific); when omitted, one
+criterion is derived from the playbook's own step validations, so the draft always
+carries a machine-checkable task contract. Agent steps must declare
+`executor_role`/`minimum_model_level`/`context_budget` — the JSON schema allows
+null, the plan contract does not, so a missing one fails as `COMPILE_INVALID`
+rather than a silently invented default. New plans remain **drafts**; execution is
+still a later slice.
+
+`tests/unit/playbook-run.test.js` (mandatory staging) proves: contract carry-over
+and defaults, goal rendering, derived vs explicit acceptance criteria, version-pin
+immutability (a later profile override never mutates an already-run plan), coded
+errors for unknown/invalid playbooks with nothing written, profile isolation, the
+projection on a non-legacy plan, and a real two-process restart where `task_get`
+returns the same contract.
