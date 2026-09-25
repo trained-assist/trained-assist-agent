@@ -1500,6 +1500,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
+  // Fresh session in a chat with recent history (4h window expired / new topic):
+  // session-scoped context is empty, so without this the model has no idea what
+  // the user said an hour ago in the SAME chat ("с той задачей разобрались…").
+  // Compact reference block of the chat's last 24h across its other sessions.
+  if (!sessionExists && !contextFromSession && chatId && !webExactSession) {
+    try {
+      const recentBlock = require('../chat-history').buildRecentChatBlock(
+        path.join(user.workDir, 'sessions'), chatId, { excludeSessionId: activeSessionId });
+      if (recentBlock) sessionContext = sessionContext ? `${recentBlock}\n\n${sessionContext}` : recentBlock;
+    } catch (e) { console.warn('[runner] recent chat block:', e.message); }
+  }
+
   // ── Project binding (always on — no opt-in gate) ────────────────────────────
   // Every session lives inside a typed PROJECT (see projects.js): its cwd is the
   // project folder and the project's PROFILE.md domain rules fold into the system
