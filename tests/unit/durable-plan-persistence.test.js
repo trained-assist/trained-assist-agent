@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 const { DurableTaskStore } = require('../../src/durable-task-store');
 const Database = require('better-sqlite3');
 const valid = () => ({ title: 'Implement atomic persistence', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'master', context_budget: 'medium', validation: { validator: 'tests', expected: 'pass' } });
-const plan = () => ({ id: 'plan', profile_id: 'alice', goal: 'Persist plans', user_value: 'Resume work after restart', acceptance_criteria: [{ id: 'restart', description: 'Same plan after process restart' }], items: [valid()] });
+const plan = () => ({ id: 'plan', profile_id: 'alice', goal: 'Persist plans', user_value: 'Resume work after restart', acceptance_criteria: [{ id: 'restart', description: 'Same plan after process restart', validations: [{ step: valid().title, validation: valid().validation }] }], items: [valid()] });
 
 function fixture(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'plan-persistence-'));

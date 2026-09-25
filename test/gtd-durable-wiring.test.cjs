@@ -452,6 +452,48 @@ function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
       `fastpass: mode alone is not an auto-skip — LLM judge still decides (llm=${fastpassLlm}, ${v2[0] && v2[0].evidence_json})`);
   }
 
+  // 17. finalization gate (P3d-2): runDueDurable closes a contract plan only via
+  // finalizePlan. All items done + every declared validation pass → done; all
+  // items done but a declared validation has no pass row → task stays active.
+  {
+    const G17 = freshStore('17');
+    const store = G17.durableStore();
+    const passPlan = store.createPlan({
+      profile_id: 'u1', goal: 'gate pass', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c', validations: [{ step: 'checks', validation: { command_exit_zero: 'true' } }] }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'checks', execution_kind: 'programmatic', validation: { command_exit_zero: 'true' } }],
+    });
+    store.updateTask(passPlan.task.id, 'u1', { status: 'active' });
+    await G17.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      registry: { command_exit_zero: async () => ({ status: 'pass', subject: {}, evidence: {} }) },
+      runTask: async () => { throw new Error('programmatic step must not run an engine'); },
+    });
+    ok(store.getTask(passPlan.task.id, 'u1').status === 'done',
+      'gate: task finalized when every declared validation passes');
+
+    const blockedPlan = store.createPlan({
+      profile_id: 'u1', goal: 'gate blocked', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit2', description: 'c', validations: [
+        { step: 'checks', validation: { command_exit_zero: 'true' } },
+        { step: 'merge', validation: { merged: true } },
+      ] }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'checks', execution_kind: 'programmatic', validation: { command_exit_zero: 'true' } }],
+    });
+    store.updateTask(blockedPlan.task.id, 'u1', { status: 'active' });
+    await G17.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      registry: { command_exit_zero: async () => ({ status: 'pass', subject: {}, evidence: {} }) },
+      runTask: async () => { throw new Error('programmatic step must not run an engine'); },
+    });
+    const blocked = store.getTask(blockedPlan.task.id, 'u1');
+    const item = store.listTaskItems(blockedPlan.task.id, 'u1')[0];
+    ok(item.status === 'done' && blocked.status === 'active',
+      `gate: items done but unmet validation keeps the task active (item=${item.status}, task=${blocked.status})`);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
