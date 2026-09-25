@@ -27,6 +27,12 @@
 set -e
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=$(CDPATH= cd -- "$DIR/../.." && pwd)
+# Crons run the deployed code through the STABLE agent-master symlink, not the
+# per-release path: they then survive release GC and always execute whatever is
+# currently deployed. Absolute (not $HOME) — the deploy user is not the service
+# user on the shared RU box.
+AGENT_HOME=${AGENT_HOME:-/home/vova}
+CRON_BASE=${AGENT_CURRENT:-$AGENT_HOME/agent-master}
 BEGIN="# >>> trained-assist disk-hygiene (managed by ops/cron/install.sh) >>>"
 END="# <<< trained-assist disk-hygiene <<<"
 
@@ -36,10 +42,10 @@ chmod +x "$DIR/disk-guard.sh" "$DIR/dead-tenant-sweep.sh" "$REPO_DIR/scripts/bug
 
 block() {
   echo "$BEGIN"
-  echo "0 * * * * $DIR/disk-guard.sh"
-  echo "30 6 * * 1 $DIR/dead-tenant-sweep.sh"
-  echo "*/2 * * * * $REPO_DIR/scripts/bugs-collector-cron.sh"
-  echo "5 * * * * $REPO_DIR/scripts/issue-fixer-cron.sh"
+  echo "0 * * * * $CRON_BASE/ops/cron/disk-guard.sh"
+  echo "30 6 * * 1 $CRON_BASE/ops/cron/dead-tenant-sweep.sh"
+  echo "*/2 * * * * $CRON_BASE/scripts/bugs-collector-cron.sh"
+  echo "5 * * * * $CRON_BASE/scripts/issue-fixer-cron.sh"
   echo "$END"
 }
 
