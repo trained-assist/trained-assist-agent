@@ -283,4 +283,28 @@ describe('MCP surface: playbook_draft / playbook_edit / playbook_save', () => {
     expect((await tools.playbook_save.handler({ playbook_id: 'ghost' }, ctx)).code).toBe('DRAFT_NOT_FOUND');
     expect((await tools.playbook_get.handler({ id: 'ghost', draft: true }, ctx)).error).toMatch(/draft not found/);
   });
+
+  // Regression (live smoke caught it): the safe() wrapper dropped ctx, so the
+  // authoring layer saw username=undefined and wrote into users/undefined/.
+  it('forwards ctx.userId through the handler so save lands in the right profile', async () => {
+    const tools = loadTools();
+    writeDraft('alice', validPlaybook({ id: 'sample', scope: 'profile' }));
+
+    const out = await tools.playbook_save.handler({ playbook_id: 'sample' }, { userId: 'alice' });
+    expect(out.saved.path).toBe(savedFile('alice', 'sample'));
+    expect(existsSync(savedFile('alice', 'sample'))).toBe(true);
+    expect(existsSync(join(root, 'users', 'undefined'))).toBe(false);
+  });
+});
+
+describe('username guard (class fix: never resolve to users/undefined)', () => {
+  it('refuses authoring without a username instead of writing to users/undefined', async () => {
+    const run = fakeHermes([]);
+    const { authoring } = load({ runHermes: run });
+    await expect(authoring.draft({ description: 'x' })).rejects.toThrow(/USER_REQUIRED/);
+    await expect(authoring.save({ playbook_id: 'sample' })).rejects.toThrow(/USER_REQUIRED/);
+    await expect(authoring.edit({ playbook_id: 'sample', instruction: 'x' })).rejects.toThrow(/USER_REQUIRED/);
+    expect(run.calls).toHaveLength(0);
+    expect(existsSync(join(root, 'users', 'undefined'))).toBe(false);
+  });
 });
