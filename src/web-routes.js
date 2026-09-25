@@ -367,6 +367,21 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId, pro
     try { res.end(); } catch {}
   };
 
+  // 'done' must mean the user got an answer. runTask swallows admission/queue
+  // failures (it resolves undefined after logging), and some answers never pass
+  // through outputCallback (quick answers, early-return notices are returned as
+  // the resolved string). So: forward a returned string that wasn't streamed,
+  // and if nothing was streamed, returned or persisted → report an error.
+  const startedAt = Date.now();
+  let streamed = false;
+  const answerPersisted = (id) => {
+    if (!id) return false;
+    try {
+      const last = (getSession(workDir, id)?.messages || []).at(-1);
+      return !!last && last.role === 'assistant' && (last.at || 0) >= startedAt;
+    } catch { return false; }
+  };
+
   // runTask returns a Promise that resolves when Claude exits
   runTask({
     taskId,
@@ -380,14 +395,23 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId, pro
     pinnedMsgId: null,
     projectId: projectId || null,
     fileRefs,
-    outputCallback: (text) => emitter.emit('chunk', text),
-  }).then(() => {
+    outputCallback: (text) => { streamed = true; emitter.emit('chunk', text); },
+  }).then((result) => {
+    if (!streamed && typeof result === 'string' && result.trim()) {
+      streamed = true;
+      emitter.emit('chunk', result);
+    }
     // sessionId may have been created inside _runTask. The runner persists the
     // active session id per-workDir, so read it back to tell the client which
     // session to navigate to (critical for brand-new tasks where sessionId was null).
     let realId = sessionId || null;
     if (!realId && !webExactSession) {
       try { realId = getCurrentSessionId(workDir) || null; } catch {}
+    }
+    if (!streamed && !answerPersisted(realId)) {
+      const error = 'Задача завершилась без ответа — попробуй отправить ещё раз.';
+      completeWebMutation(username, requestId, { state: 'error', error, sessionId: realId || null, taskId });
+      return finish('error', error);
     }
     completeWebMutation(username, requestId, { state: 'done', sessionId: realId || null, taskId });
     finish('done', realId);
