@@ -116,4 +116,19 @@ function createSourceRuntime(options = {}) {
   return { enabled: true, generation, config, prepareRun, close, broker, socketPath };
 }
 
-module.exports = { createSourceRuntime, loadConfig, hasEnabledSources, mergeAdapterServers, DEFAULT_CONFIG_PATH, DEFAULT_RUNTIME_ROOT };
+// Process-wide singleton (PR2b): runner/index.js and hermes-tools-run.js both
+// need to prepareRun() against the SAME generation/broker for the life of the
+// process — re-creating createSourceRuntime() per call would recompile the
+// generation and spin up a new broker socket on every task. Lazy: the config
+// (and therefore the enabled/disabled decision) is only read on first use.
+let defaultRuntime = null;
+function getDefaultSourceRuntime() {
+  if (!defaultRuntime) defaultRuntime = createSourceRuntime();
+  return defaultRuntime;
+}
+
+module.exports = {
+  createSourceRuntime, getDefaultSourceRuntime,
+  loadConfig, hasEnabledSources, mergeAdapterServers,
+  DEFAULT_CONFIG_PATH, DEFAULT_RUNTIME_ROOT,
+};
