@@ -5,6 +5,7 @@ import path from 'path';
 import { buildNalogOrigins, writeMcpConfig } from '../src/browser.js';
 
 const HH_SKILL_SUFFIX = path.join('trained-assist-hh-skill', 'src', 'mcp-skills', 'index.js');
+const ENGINEERING_SKILL_SUFFIX = path.join('trained-assist-engineering', 'src', 'mcp-skills', 'index.js');
 
 let tmpDir;
 let tokenFile;
@@ -98,6 +99,40 @@ describe('writeMcpConfig hh-skills registration', () => {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
     expect(config.mcpServers).not.toHaveProperty('hh-skills');
+    expect(config.mcpServers).toHaveProperty('trained-skills');
+  });
+});
+
+// Issue #1418: mount the sibling trained-assist-engineering MCP server exactly
+// like hh-skills/freelance-skills — present only when its checkout exists.
+describe('writeMcpConfig engineering-skills registration', () => {
+  const realExistsSync = fs.existsSync;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('registers engineering-skills when the sibling checkout is present', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) =>
+      String(p).endsWith(ENGINEERING_SKILL_SUFFIX) ? true : realExistsSync(p));
+
+    const configPath = writeMcpConfig(tmpDir, null, {});
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+    expect(config.mcpServers).toHaveProperty('engineering-skills');
+    expect(config.mcpServers['engineering-skills'].command).toBe('node');
+    expect(config.mcpServers['engineering-skills'].args[0]).toMatch(/trained-assist-engineering.*mcp-skills.*index\.js$/);
+    expect(config.mcpServers).toHaveProperty('trained-skills');
+  });
+
+  it('omits engineering-skills when the sibling checkout is absent', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) =>
+      String(p).endsWith(ENGINEERING_SKILL_SUFFIX) ? false : realExistsSync(p));
+
+    const configPath = writeMcpConfig(tmpDir, null, {});
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+    expect(config.mcpServers).not.toHaveProperty('engineering-skills');
     expect(config.mcpServers).toHaveProperty('trained-skills');
   });
 });
