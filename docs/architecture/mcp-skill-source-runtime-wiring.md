@@ -441,31 +441,37 @@ Library/CLI engineering вызываются непосредственно из
 
 ## 12. Четыре implementation-PR и приёмка
 
-Это **план будущих PR**, не утверждение, что они уже созданы. Design PR не включает runtime changes. Все четыре остаются раздельными; source packaging в engineering — отдельная зависимость B2/B3.
+Это план будущих PR. Design PR не включает runtime changes. Source packaging engineering (B2/B3) остаётся отдельной dependency.
 
-### PR1 — Generation / session plan / binding contracts
+### PR1 — Generation / session plan / RunBinding contracts
 
-Core: pure generation compiler, reserved core names, SessionMcpPlan/RunBinding schemas, status snapshot, exact config generation; process-level `acquireProvider` API с существующей integrity semantics. Никакого production mount.
+Core: pure generation compiler, reserved core names, `SessionMcpPlan`/`RunBinding` schemas, adapter descriptor/materialization, status snapshot, exact config generation, process-level acquireProvider integrity API. Никакого production mount.
 
-Acceptance: default empty config; invalid/disabled/ineligible source; все collisions; core names не shadowed; G1/G2 atomic snapshot; static discovery не выполняет external JS; одинаковый план при одинаковом input; required provider failure явно возвращён. Документированный B2 v1 choice отражён в contract fixtures. Engineering #3/#4 не блокировать.
+Acceptance: empty config; invalid/disabled/ineligible; collisions/core precedence; G1/G2 snapshot; discovery без external JS; deterministic plan; B2 v1 fixture; RunBinding не принимает authority из model args; engineering #3/#4 не блокируется.
 
-### PR2 — Managed invocation, provider lifetime и recovery
+### PR2 — Core adapter + provider child + journal + первый real milestone
 
-Core: scoped IPC endpoint/stdio adapter, host context bridge, supervisor/lease journal, pinned transport integration с invokeAction, bounded MCP client, allowlisted provider env, post-copy verification, in-progress/unknown handling. До этого PR внешний source в реальную coding session не включать.
+Реализовать один core-owned adapter-process: MCP server для engine и MCP client/supervisor для provider. Добавить single-writer lease journal, host-context bridge, bounded protocol, allowlisted provider env, post-copy verification, idempotency/unknown semantics.
 
-Acceptance: fake provider end-to-end без LLM; fake path/profile/approval/_meta; timeout и `isError`; same-key race; crash before/after copy/spawn; shutdown escalation; supervisor/host death; живой orphan не удалён; PID reuse; generation retained; repeated calls не перехешируют release; source swap перед новым spawn блокирован. Проверить и отсутствие effect при отказе, и запись верного outcome в history.
+Сначала fake provider integration без LLM. Затем обязательный milestone **Claude + fake read-only marker provider** на test host:
+```text
+Claude → adapter → invokeAction → provider child → action history
+```
+Без HH/Freelance и без business mutation. Это первый end-to-end до паритета трёх движков.
 
-### PR3 — Три движка и все engine-run callers
+Acceptance: fake path/profile/approval/_meta; MCP handshake/ping/list/call; timeout/isError; journal lock/same-key race; adapter/provider crash; PID reuse; repeated calls не rehash; source swap before new spawn rejected; Claude real CLI smoke; no production provider activation.
 
-Core: интеграция handle до argv/spawn и cleanup в finally; per-run files вне cwd; serializers + negative inherited-server rules; `runner/index.js`, `claude-runner.js`, `hermes-tools-run.js`; minimal coding bootstrap binding seam без реализации workspace manager.
+### PR3 — Codex/OpenCode parity + engine-run callers
 
-Acceptance: Claude/Codex/OpenCode с одинаковым marker provider; две одновременные сессии одного profile не перетирают конфиги; правильные effective tools и cwd; native resume ID сохранён; global/project legacy config не обходит plan; launch failure/stop/retry cleanup. Реальные CLI smoke запускаются на согласованном test host с закреплёнными версиями и без business mutations, а не предполагаются по unit tests. Read-only engineering canary требует B2/B3-ready release.
+Добавить тот же SessionMcpPlan/adapter descriptors в Codex/OpenCode, вынести generated configs из code cwd; обновить `runner/index.js`, `claude-runner.js`, `hermes-tools-run.js`; negative inherited-server tests. Claude path из PR2 не перепроектировать.
 
-### PR4 — HH/Freelance parity, migration и rollout runbook
+Acceptance: одинаковый marker provider на 3 движках; concurrent sessions не перетирают configs; correct cwd/native resume; global/project legacy config не resurrect server; launch/stop/resume cleanup; deadlines согласованы с установленными CLI versions. Read-only engineering canary — только после B2/B3-ready release.
 
-Core: quick-action transport и catalog используют registry; убрать sibling mounts/imports; env/path compatibility, state diagnostics, serialized activation/reload/rollback runbook. Полное соответствие providers проверяется отдельно на их exact revisions.
+### PR4 — HH/Freelance parity + quick-action cutover + rollout
 
-Acceptance: `hh-skills`/`freelance-skills` и action names сохранены; setup/readiness/parity на обоих providers; three-engine smoke; profile A не видит/не вызывает source B; artifact unavailable не оживляет sibling; no direct external require/spawn; old/new runs не смешивают generations; rollback не удаляет release/native ID/workspace. Full CI/staging required checks не меняются.
+Только здесь переводить production quick actions/catalog на registry managed transport; убрать sibling mounts/imports после parity. Env/path compatibility, setup/readiness, serialized activation/reload/rollback runbook.
+
+Acceptance: preserved `hh-skills`/`freelance-skills` names/actions; profile isolation; 3-engine smoke; artifact unavailable не resurrect sibling; no direct external require/spawn after cutover; old/new runs не mix generations; rollback не удаляет release/native ID/workspace; full CI/staging unchanged.
 
 ### Дополнительные сквозные тесты
 
@@ -492,21 +498,21 @@ Acceptance: `hh-skills`/`freelance-skills` и action names сохранены; s
 | № из #1358 | Решение | Отклонённая альтернатива / оставшийся риск |
 |---|---|---|
 | 1. Source → server | §2, explicit mcpServerId + core precedence | prefix-based routing / direct entrypoint: bypass и смена client names. |
-| 2. Lease lifetime | §4, run-owned process lease + durable recovery | release after call или TTL deletion: ломает живой child. Orphan identity ambiguity → retain. |
+| 2. Lease lifetime | §4, adapter-owned lease + single-writer journal + conservative recovery | Always-on supervisor/service отложен в v2; TTL deletion/release-after-call ломают live child. |
 | 3. Verification cost | §5, metadata snapshot + full verify на new child | mtime/path trust или hashing на каждом call. Private copy стоит disk/IO, измеряем. |
 | 4. Generations | §6, immutable snapshot, atomic pointer swap | mutable singleton registry: old/new policy mix. |
-| 5. Host context | §3, core-resolved binding + private context extension | trusted roots/approval из arguments; env mutation per call. Same-UID hostile shell не защищён. |
+| 5. Host context | §3, host-generated RunBinding + adapter-generated provider `_meta` | trusted roots/approval из arguments; same-UID hostile engine остаётся вне security boundary. |
 | 6. Controls | §11, enabled/profiles + explicit status | ещё один enable/approval framework, скрытая деградация. |
 | 7. Engines | §7, shared plan + version-tested serializers | три selector-а и только JSON unit tests; inherited configs требуют negative tests. |
 | 8. Migration | §10, staged cutover без fallback, preserved names | indefinite dual authority / mount по существованию папки. Реальные env зависимости ещё требуют parity tests. |
-| 9. Non-MCP | §10.3, library/CLI и invocation-scoped transport | MCP-only architecture; import user-scoped handlers в shared host. |
+| 9. Non-MCP | §10.3, library/CLI first-class; quick-action cutover только PR4 | MCP-only architecture; ранний blast radius на production HH/Freelance. |
 | 10. B2 | §9, engineering v1 до появления настоящих domain fields | фиктивное contextField или ослабление v2 schema. Packaging ещё не сделан этим PR. |
 | 11. Storage/deploy | §6.1–6.2, persistent roots, single writer, retained helpers | runtime state в git checkout; два admin writers без CAS. |
 | 12. Rollback | §6.3/§10, whole-config activate и retention | deletion/reinstall/native-session reset; in-flight force upgrade. |
 
 ### Что намеренно не строим
 
-HTTP MCP gateway для внешних клиентов, общий OS sandbox, новый task scheduler/WIP gate, новые domain features, workspace/fast_verify реализацию, массовую чистку git/worktrees, новый approval UI и изменение branch protection. Нормальное следствие дизайна — несколько небольших служебных процессов, а не новый сервисный стек.
+HTTP MCP gateway для внешних клиентов, custom host-runtime IPC в v1, always-on provider supervisor service, общий OS sandbox, новый task scheduler/WIP gate, новые domain features, workspace/fast_verify реализацию, массовую чистку git/worktrees, новый approval UI и изменение branch protection. V1 сознательно выбирает один adapter-process + его provider child вместо нового сервисного стека.
 
 ## 14. Источники и проверка реализации
 
