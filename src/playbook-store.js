@@ -179,6 +179,22 @@ class PlaybookStore {
     return playbook;
   }
 
+  // Highest version declared for `id` across ALL levels (not just the winning
+  // one), so a profile override can be numbered above the system playbook it
+  // shadows. Returns 0 when the id is unknown everywhere. A malformed file at
+  // any level throws (same strictness as resolve — never mask a broken file).
+  maxVersion(id) {
+    if (typeof id !== 'string' || !PLAYBOOK_ID_RE.test(id)) return 0;
+    let max = 0;
+    for (const level of this._levels()) {
+      const file = path.join(level.dir, `${id}.json`);
+      if (!fs.existsSync(file)) continue;
+      const pb = this._load(file, level);
+      if (pb.version > max) max = pb.version;
+    }
+    return max;
+  }
+
   // List every playbook id visible to the profile, each at its winning level.
   // A malformed file is reported in `diagnostics` and does not crash the list
   // (the id may then resolve to a lower level, which the diagnostic makes visible).

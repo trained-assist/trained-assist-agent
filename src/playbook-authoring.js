@@ -1,0 +1,345 @@
+'use strict';
+
+// Playbook authoring — turns a natural-language process description into a
+// valid Playbook v1 via Hermes (issue #1372, slice P1).
+//
+// The user never writes JSON: they describe the process, Hermes rewrites it
+// into the Playbook v1 contract (contracts/playbook.schema.json) following the
+// house meta-patterns baked into AUTHORING_PROMPT, the validator enforces the
+// contract, and the result is saved into the profile as a custom playbook.
+//
+// Flow:
+//   playbook_draft  description        → Hermes → draft (profile scope) on disk
+//   playbook_edit   id + instruction   → Hermes → updated draft on disk
+//   playbook_save   id                 → validator → ~/users/<profile>/playbooks/<id>.json
+//
+// Drafts are durable: stored under the profile's playbooks/.drafts/ dir, so an
+// edit/save can resume after a restart without replaying the conversation.
+// Drafts never shadow a live playbook until save() promotes them, and a save
+// pins a monotonically increasing version (v = max version across all levels
+// + 1) so an already-running plan pinned to an older version is never mutated.
+// A declared scope of "system" cannot be saved here — repo playbooks change
+// only through a PR.
+
+const fs = require('fs');
+const path = require('path');
+const {
+  PlaybookStore,
+  validatePlaybook,
+  renderPlaybook,
+  playbookError,
+  PLAYBOOK_ID_RE,
+} = require('./playbook-store');
+const { userWorkDir } = require('./data-paths');
+const { hermesRun } = require('./hermes-run');
+
+const schema = require('../contracts/playbook.schema.json');
+
+// Resolve local "#/$defs/X" refs into a self-contained schema. Hermes is a
+// text-in/JSON-out worker: a flattened schema is far more reliable for the
+// model than $ref indirection, while server-side validation still uses the
+// authoritative schema file.
+function inlineSchema(node, defs) {
+  if (Array.isArray(node)) return node.map(n => inlineSchema(n, defs));
+  if (node && typeof node === 'object') {
+    if (typeof node.$ref === 'string' && node.$ref.startsWith('#/$defs/')) {
+      const key = node.$ref.slice('#/$defs/'.length);
+      if (!Object.prototype.hasOwnProperty.call(defs, key)) {
+        throw new Error(`inlineSchema: unknown ref ${node.$ref}`);
+      }
+      return inlineSchema(defs[key], defs);
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(node)) {
+      if (k === '$defs' || k === '$id') continue;
+      out[k] = inlineSchema(v, defs);
+    }
+    return out;
+  }
+  return node;
+}
+
+const AUTHORING_SCHEMA = inlineSchema(schema, schema.$defs || {});
+
+// House meta-patterns. This is the difference between a pile of steps and a
+// playbook the executor can actually run: machine-checkable validation on
+// every agent step, an executor profile instead of a concrete model, cheap
+// programmatic steps for objective checks, and hooks only on boundaries.
+const AUTHORING_PROMPT = [
+  'Ты — редактор плейбуков внутри trained-assist. Пользователь описывает рабочий процесс своими словами,',
+  'а ты превращаешь его в Playbook v1 — валидный JSON строго по переданной схеме. Верни ТОЛЬКО JSON.',
+  '',
+  'Обязательные мета-паттерны:',
+  '1. Плейбук — версионированный артефакт, не промпт. id — латиница, kebab-case, по смыслу процесса (например "finance-intake");',
+  '   version — 1; scope — "profile".',
+  '2. У каждого agent-шага ДОЛЖЕН быть машинно-проверяемый validation — непустой объект с конкретными проверяемыми',
+  '   условиями ({"facts_file_exists": true}, {"explicit_go_no_go": true}), а не проза. По нему исполнитель решает «готово?».',
+  '3. Шаг объявляет профиль исполнителя, а не конкретную модель: executor_role (researcher|developer|reviewer|verifier),',
+  '   minimum_model_level (bachelor|master|doctor), context_budget (small|medium|large). Имён моделей/провайдеров быть НЕ должно.',
+  '4. Объективные проверки (CI зелёный, merge, файл существует, ответ API) — это execution_kind "programmatic",',
+  '   без executor_role/minimum_model_level/context_budget. Не тратим модель на то, что отвечает API.',
+  '5. Режь процесс на мелкие шаги, всего 15-20 пунктов. Для шагов, которые могут падать или идти долго,',
+  '   задавай max_attempts (2-3) и execution_timeout_seconds (обычно 300-900). Для ожидания CI/деплоя — delay_after_sec.',
+  '6. defaults: max_attempts 3, execution_timeout_seconds 600, recovery_policy "default".',
+  '7. Хуки — только на границах (stage.on_enter/on_exit, step.on_complete/on_fail, hooks.task_done/task_failed).',
+  '   Закрытый словарь type: notify|check|create_issue|publish. notify наружу (боссу/клиенту) — редко и по делу:',
+  '   это внешнее сообщение, оно требует согласия.',
+  '8. goal_template — как запускается плейбук; может содержать {input} (подставится цель запуска).',
+  '9. Тексты title/instructions — короткие и конкретные, повелительные. Язык — русский.',
+  '10. Не выдумывай фазы вне описанного процесса. Чего не хватает — сделай разумное допущение внутри шага,',
+  '    но не добавляй целые этапы от себя.',
+].join('\n');
+
+function assertId(id, field) {
+  if (typeof id !== 'string' || !PLAYBOOK_ID_RE.test(id)) {
+    throw playbookError('INVALID_ID', `${field} должен быть latin kebab-case: ${JSON.stringify(id)}`);
+  }
+  return id;
+}
+
+function draftsDir(username) {
+  return path.join(userWorkDir(username), 'playbooks', '.drafts');
+}
+
+function draftPath(username, id) {
+  return path.join(draftsDir(username), `${id}.json`);
+}
+
+function profilePlaybookPath(username, id) {
+  return path.join(userWorkDir(username), 'playbooks', `${id}.json`);
+}
+
+function writeJsonAtomic(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`);
+  fs.renameSync(tmp, file);
+}
+
+function buildDraftContext(description, seed) {
+  const parts = ['Описание процесса от пользователя:', String(description).trim()];
+  if (seed) {
+    parts.push('');
+    parts.push('Возьми за основу существующий плейбук (сохрани смысл, структуру можно менять):');
+    parts.push(JSON.stringify(seed, null, 2));
+  }
+  return parts.join('\n');
+}
+
+function buildEditContext(current, instruction) {
+  return [
+    'Текущий плейбук (JSON):',
+    JSON.stringify(current, null, 2),
+    '',
+    'Правка от пользователя:',
+    String(instruction).trim(),
+    '',
+    'Верни ЦЕЛИКОМ обновлённый плейбук (не патч). Сохрани id и всё, чего правка не касается.',
+  ].join('\n');
+}
+
+function buildRepairContext(raw, error) {
+  return [
+    'Предыдущий ответ не прошёл валидацию схемы Playbook v1.',
+    `Ошибка: ${error && error.message ? error.message : String(error)}`,
+    'Предыдущий ответ (JSON):',
+    JSON.stringify(raw, null, 2),
+    '',
+    'Исправь строго по схеме. Верни ТОЛЬКО валидный JSON-объект Playbook v1.',
+  ].join('\n');
+}
+
+// Drafts are always profile-scope candidates; version is (re)computed at save.
+function normalizeDraft(raw, { fallbackId = null } = {}) {
+  const out = { ...raw };
+  out.scope = 'profile';
+  out.version = 1;
+  if (typeof out.id !== 'string' || !PLAYBOOK_ID_RE.test(out.id)) {
+    if (fallbackId && PLAYBOOK_ID_RE.test(fallbackId)) out.id = fallbackId;
+    else {
+      throw playbookError('AUTHORING_INVALID',
+        `Hermes вернул некорректный id ${JSON.stringify(raw.id)} — нужен latin kebab-case`);
+    }
+  }
+  return out;
+}
+
+function summarizePlaybook(pb) {
+  return {
+    id: pb.id,
+    title: pb.title,
+    version: pb.version,
+    stages: (pb.stages || []).length,
+    steps: (pb.stages || []).reduce((n, s) => n + (s.steps || []).length, 0),
+  };
+}
+
+// Structural diff between two playbooks (what an edit changed), by title/id.
+function diffPlaybooks(before, after) {
+  const stageMap = pb => new Map((pb.stages || []).map(s => [s.id, s]));
+  const bStages = stageMap(before);
+  const aStages = stageMap(after);
+  const stagesAdded = [...aStages.keys()].filter(k => !bStages.has(k)).map(k => aStages.get(k).title);
+  const stagesRemoved = [...bStages.keys()].filter(k => !aStages.has(k)).map(k => bStages.get(k).title);
+
+  const stepTitles = pb => new Set((pb.stages || []).flatMap(s => (s.steps || []).map(st => st.title)));
+  const bSteps = stepTitles(before);
+  const aSteps = stepTitles(after);
+  return {
+    stages_added: stagesAdded,
+    stages_removed: stagesRemoved,
+    steps_added: [...aSteps].filter(t => !bSteps.has(t)),
+    steps_removed: [...bSteps].filter(t => !aSteps.has(t)),
+  };
+}
+
+function createPlaybookAuthoring({
+  runHermes = hermesRun,
+  storeFor = username => new PlaybookStore({ profileId: username }),
+} = {}) {
+  async function callHermes({ username, task, context, model }) {
+    let raw;
+    try {
+      raw = await runHermes({
+        username,
+        task: `${AUTHORING_PROMPT}\n\n---\n\n${task}`,
+        context,
+        outputSchema: AUTHORING_SCHEMA,
+        model: model || undefined,
+      });
+    } catch (error) {
+      throw playbookError('AUTHORING_INVALID', `Hermes не вернул валидный JSON: ${error.message}`);
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw playbookError('AUTHORING_INVALID', 'Hermes вернул не JSON-объект Playbook v1');
+    }
+    return raw;
+  }
+
+  // One authoring call + schema validation, with a single repair attempt that
+  // feeds the validator errors back to Hermes. On a second failure the caller
+  // gets a clear error and nothing is written to disk.
+  async function authorAndValidate({ username, task, context, model, fallbackId = null }) {
+    const raw = await callHermes({ username, task, context, model });
+    try {
+      const playbook = normalizeDraft(raw, { fallbackId });
+      validatePlaybook(playbook);
+      return playbook;
+    } catch (first) {
+      const repaired = await callHermes({
+        username,
+        task,
+        model,
+        context: buildRepairContext(raw, first),
+      });
+      try {
+        const playbook = normalizeDraft(repaired, { fallbackId });
+        validatePlaybook(playbook);
+        return playbook;
+      } catch (second) {
+        throw playbookError('AUTHORING_INVALID',
+          `Hermes дважды вернул невалидный Playbook v1: ${second.message}`);
+      }
+    }
+  }
+
+  function readDraft(username, id) {
+    assertId(id, 'playbook_id');
+    const file = draftPath(username, id);
+    if (!fs.existsSync(file)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (error) {
+      throw playbookError('INVALID_JSON', `${file}: ${error.message}`);
+    }
+  }
+
+  function writeDraft(username, playbook) {
+    writeJsonAtomic(draftPath(username, playbook.id), playbook);
+  }
+
+  return {
+    readDraft,
+
+    async draft({ username, description, based_on = null, model = null, vars = {} } = {}) {
+      if (!description || !String(description).trim()) {
+        throw playbookError('DESCRIPTION_REQUIRED', 'нужно описание процесса словами');
+      }
+      let seed = null;
+      if (based_on) {
+        assertId(based_on, 'based_on');
+        seed = storeFor(username).resolve(based_on);
+        if (!seed) throw playbookError('BASE_NOT_FOUND', `плейбук-основа «${based_on}» не найден`);
+      }
+      const playbook = await authorAndValidate({
+        username,
+        model,
+        fallbackId: based_on,
+        task: seed
+          ? 'Составь Playbook v1 по описанию процесса, взяв за основу плейбук из контекста.'
+          : 'Составь Playbook v1 по описанию процесса из контекста.',
+        context: buildDraftContext(description, seed),
+      });
+      writeDraft(username, playbook);
+      return { draft: playbook, render: renderPlaybook(playbook, vars), summary: summarizePlaybook(playbook) };
+    },
+
+    async edit({ username, playbook_id, instruction, model = null, vars = {} } = {}) {
+      assertId(playbook_id, 'playbook_id');
+      if (!instruction || !String(instruction).trim()) {
+        throw playbookError('INSTRUCTION_REQUIRED', 'нужна формулировка правки');
+      }
+      const before = readDraft(username, playbook_id) || storeFor(username).resolve(playbook_id);
+      if (!before) {
+        throw playbookError('DRAFT_NOT_FOUND', `нет ни черновика, ни плейбука «${playbook_id}»`);
+      }
+      const playbook = await authorAndValidate({
+        username,
+        model,
+        fallbackId: playbook_id,
+        task: 'Отредактируй Playbook v1 по правке пользователя из контекста. Верни плейбук целиком.',
+        context: buildEditContext(before, instruction),
+      });
+      playbook.id = playbook_id; // editing a playbook never changes its identity
+      writeDraft(username, playbook);
+      return {
+        draft: playbook,
+        render: renderPlaybook(playbook, vars),
+        diff: diffPlaybooks(before, playbook),
+        summary: summarizePlaybook(playbook),
+      };
+    },
+
+    async save({ username, playbook_id, vars = {} } = {}) {
+      assertId(playbook_id, 'playbook_id');
+      const draft = readDraft(username, playbook_id);
+      if (!draft) {
+        throw playbookError('DRAFT_NOT_FOUND', `нет черновика «${playbook_id}» — сначала playbook_draft или playbook_edit`);
+      }
+      if (draft.scope !== 'profile') {
+        throw playbookError('SAVE_SYSTEM_SCOPE',
+          'системный (scope "system") плейбук меняется только через PR в репозиторий; сохранить можно только profile-scope черновик');
+      }
+      const version = storeFor(username).maxVersion(playbook_id) + 1;
+      const playbook = { ...draft, scope: 'profile', version };
+      validatePlaybook(playbook);
+      const file = profilePlaybookPath(username, playbook_id);
+      writeJsonAtomic(file, playbook);
+      fs.rmSync(draftPath(username, playbook_id), { force: true });
+      return {
+        saved: { id: playbook.id, version, scope: 'profile', source: 'profile', path: file },
+        render: renderPlaybook(playbook, vars),
+        summary: summarizePlaybook(playbook),
+      };
+    },
+  };
+}
+
+module.exports = {
+  createPlaybookAuthoring,
+  AUTHORING_PROMPT,
+  AUTHORING_SCHEMA,
+  summarizePlaybook,
+  diffPlaybooks,
+  _internal: { inlineSchema, normalizeDraft, draftPath, profilePlaybookPath },
+};
