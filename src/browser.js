@@ -74,7 +74,7 @@ function buildStorageState(tokensDir) {
  * Writes per-user .mcp.json with Playwright MCP scoped to this user's Chrome profile.
  * If the user has captured service cookies (via Chrome extension), injects them via --storage-state.
  */
-function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath } = {}) {
+function writeMcpConfig(workDir, userId, { userName, userHandle } = {}) {
   // Note: --user-data-dir creates a persistent context, which is incompatible
   // with --storage-state (Playwright limitation). We rely on --storage-state
   // for both cookie injection and session persistence. Per-user isolation is
@@ -143,7 +143,11 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath
     ...(process.env.GCP_REGION      ? { GCP_REGION:      process.env.GCP_REGION }      : {}),
     ...(userName       ? { AGENT_USER_NAME:    userName }       : {}),
     ...(userHandle     ? { AGENT_USER_HANDLE: userHandle }     : {}),
-    ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
+    // NO AGENT_SESSION_FILE here: .mcp.json is ONE file per profile, rewritten by every run,
+    // and config env overrides the engine's env — parallel sessions of a profile (different
+    // chats) would read each other's session file and get_chat_history would answer for the
+    // wrong chat. Per-run identity travels in the engine process env only (runEngineProcess;
+    // codex via env_vars in codexMcpArgs).
   };
 
   const config = {
