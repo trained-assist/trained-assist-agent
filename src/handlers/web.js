@@ -339,6 +339,14 @@ async function handleWeb(req, url, res, ctx) {
       error: 'duplicate request already accepted', duplicate: true,
       requestId, state: claim.receipt?.state || 'accepted', sessionId: claim.receipt?.sessionId || null,
     });
+    if (prepared.fileRefs.length) {
+      const { USERS_ROOT } = require('../data-paths');
+      const released = require('../intake-media-retention').releaseIntakeRefs(
+        USERS_ROOT, username, prepared.fileRefs.map(ref => ref.id),
+        { releaseSource: 'web', requestId: requestId || null }
+      );
+      if (released.failed) console.warn('[web-media] failed to release %d original ref(s)', released.failed);
+    }
     return streamWebTask({
       req, res, secrets, username, task: prepared.task, sessionId: sid,
       projectId: projectId || null, fileRefs: prepared.fileRefs, requestId: requestId || null,
@@ -375,6 +383,14 @@ async function handleWeb(req, url, res, ctx) {
       error: 'duplicate request already accepted', duplicate: true,
       requestId, state: claim.receipt?.state || 'accepted', sessionId: claim.receipt?.sessionId || id,
     });
+    if (prepared.fileRefs.length) {
+      const { USERS_ROOT } = require('../data-paths');
+      const released = require('../intake-media-retention').releaseIntakeRefs(
+        USERS_ROOT, username, prepared.fileRefs.map(ref => ref.id),
+        { releaseSource: 'web', requestId: requestId || null }
+      );
+      if (released.failed) console.warn('[web-media] failed to release %d original ref(s)', released.failed);
+    }
     return streamWebTask({
       req, res, secrets, username, task: prepared.task, sessionId: id,
       fileRefs: prepared.fileRefs, requestId: requestId || null,

@@ -740,12 +740,10 @@ ${recent || '(пока нет)'}
     if (req.method === 'POST' && url.pathname === '/intake-files/release') {
       const p = JSON.parse(await readBody(req));
       if (!/^[a-zA-Z0-9_-]{1,64}$/.test(p.username || '') || !Array.isArray(p.ids) || p.ids.length > 100 || p.ids.some(id=>!/^[a-f0-9]{64}$/.test(id))) return json(res,400,{error:'invalid refs'});
-      for (const id of p.ids) {
-        const file = path.join(BASE_USERS_DIR,p.username,'media','intake-store',id,'meta.json');
-        try { const meta=JSON.parse(fs.readFileSync(file,'utf8'));atomicJson(file,{...meta,buffered:false}); }
-        catch(error){if(error.code!=='ENOENT')throw error;}
-      }
-      return json(res,200,{ok:true});
+      const result = require('./intake-media-retention').releaseIntakeRefs(
+        BASE_USERS_DIR, p.username, p.ids, { releaseSource: 'gateway' }
+      );
+      return json(res,200,{ok:true,...result});
     }
 
     // Authenticated release probe: exercises the same verified reader as /run,
