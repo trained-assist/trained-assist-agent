@@ -1,5 +1,6 @@
 #!/bin/bash
-# Deploy script — run on the VM after the checkout was reset to the target commit.
+# Deploy script — run on the VM after the live checkout was checked out (detached)
+# at the exact target commit and validated by scripts/deploy-preflight.sh (#1391).
 #
 # Restart is instant: no drain, no admission gate, no waiting for active work. Everything
 # slow (nginx, npm ci, unit files) happens BEFORE the service is touched; the downtime is
@@ -15,6 +16,11 @@ esac
 
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
+# Marker read by scripts/live-dir-guard.sh (systemd ExecStartPre): the exact
+# revision deploy put in the live directory. Kept outside the repo tree so it
+# never dirties the checkout. See issue #1391.
+MARKER="${LIVE_DIR_MARKER:-${AGENT_DATA_DIR:-/home/vova/agent-data}/deployed-sha}"
+export MARKER
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
   exec 9>"${ASSIST_DEPLOY_LOCK_FILE:-$HOME/.assist-deploy.lock}"
   flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
@@ -35,7 +41,9 @@ rollback() {
   fi
   echo "==> Rolling back to $PREV_COMMIT..."
   sudo systemctl stop "$SERVICE" || return 1
+  git -C "$REPO_DIR" checkout --detach "$PREV_COMMIT" || return 1
   git -C "$REPO_DIR" reset --hard "$PREV_COMMIT" || return 1
+  printf '%s\n' "$PREV_COMMIT" > "$MARKER" 2>/dev/null || true
   if [ "$DEPS_SWAPPED" = "1" ]; then
     rm -rf "$REPO_DIR/node_modules" || return 1
     mv "$OLD_DEPS" "$REPO_DIR/node_modules" || return 1
@@ -197,6 +205,11 @@ USERS_DIR="${USERS_DIR:-$HOME/users}" AGENT_DATA_DIR="${AGENT_DATA_DIR:-$HOME/ag
   || echo "  ⚠️  workspace migration reported issues — re-run scripts/migrate-workspaces.mjs (see ledger)"
 
 echo "==> Starting service..."
+# Record the exact revision now in the live directory. scripts/live-dir-guard.sh
+# (systemd ExecStartPre) reads this to detect a session that switched or committed
+# in the deploy directory, and repairs clean drift / refuses dirty code (#1391).
+mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
+printf '%s\n' "$(git -C "$REPO_DIR" rev-parse HEAD)" > "$MARKER"
 # Clear any failed state (e.g. StartLimitBurst exhausted from crash loops) so
 # systemd accepts the start request even if the previous run ended badly.
 sudo systemctl reset-failed "$SERVICE" 2>/dev/null || true
