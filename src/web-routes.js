@@ -89,10 +89,13 @@ function getSessionFor(username, sessionId) {
   const workDir = userWorkDir(username);
   // The file on disk is the source of truth, not the 50-entry recency index:
   // gating on the index made every older dialog (e.g. a «📜 Журнал» link to it)
-  // fail with 404 → "Failed to load session". Audience scoping is kept — the
-  // web surface only shows default-audience sessions, as listSessions() does.
+  // fail with 404 → "Failed to load session". Open-by-id is audience-agnostic
+  // (like resolveChatSession): every audience's session belongs to this same
+  // profile, and a «📜 Журнал» tap in a recruiter/freelance bot chat links to
+  // that bot's session — scoping here 404'd every such link. Only the list stays
+  // scoped to the default audience (listSessionsFor).
   const session = getSession(workDir, sessionId);
-  if (!session || (session.audience || 'default') !== 'default') return null;
+  if (!session) return null;
   const meta = listSessions(workDir, Infinity, null).find(s => s.id === sessionId) || {};
   return {
     id: session.id,
@@ -102,6 +105,7 @@ function getSessionFor(username, sessionId) {
     messageCount: session.messageCount,
     summary: session.summary || meta.summary || null,
     projectId: session.projectId || meta.projectId || null,
+    audience: session.audience || 'default',
     status: isSessionRunning(sessionId) ? 'running' : (session.status || 'completed'),
     messages: session.messages || [],
   };
