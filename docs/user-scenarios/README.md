@@ -17,6 +17,13 @@ docs/user-scenarios/
     04-cold-search.md           ← холодный поиск (проактивный)
     05-vacancy-switch.md        ← смена активной вакансии
     06-hh-reconnect.md          ← переподключение HH после истечения токена
+  engineering/       ← домен: инженерная разработка через Playbooks (#1372)
+    01-development-playbook.md  ← playbook `development`: от запроса до проверенной поставки
+  exhibition/        ← домен: участники выставок → сайт продаж
+    01-exhibition-catalog-to-sales-site.md ← каталог → обогащение → классификация → деплой
+                                             (+ 🔵 новое: проверка реестров перед классификацией)
+  freelance/         ← домен: спецификация фриланс-проекта
+    01-freelance-project-spec.md ← intake → факты/требования/решение → GO/NO-GO
 ```
 
 ## Цели и скоуп
