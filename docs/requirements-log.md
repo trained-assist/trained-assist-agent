@@ -171,6 +171,14 @@
 | ✅ реализовано | Удалён legacy shared-dir путь | `dev_workspace_list` (читал только общий каталог, вызовов нет) удалён; `dev_new_repo` создаёт репо и форкает per-task workspace; `getDevDir()`/`AGENT_DATA_DIR/dev` удалены отдельным коммитом (redirect и удаление независимо ревертабельны). `installGitHooks` сохранён. |
 | ✅ реализовано | Тесты | `tests/browser.test.js` — gating `engineering-skills` (present/absent), зеркалит hh-skills; `tests/dev-workspace-setup.test.js` — redirect wiring (fake-lib через `ENGINEERING_WORKSPACE_LIB`), два разных task-лейбла → два отдельных worktree/ветки, passthrough full URL/local path, отсутствие `AGENT_DATA_DIR/dev`; реальный sibling-чекаут, два worktree. `npm run check` + новый lint зелёные. |
 
+## 2026-09-26 — правила тестов и CI для доменных skill-репо
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | **Единые правила тестов доменных репо** (`docs/domain-skill-repo-test-rules.md`) | Обязательный контракт для `trained-assist-<domain>-skill`: 3 слоя CI (contract/behavior/guards), детерминированный replay-гейт на модели `scripts/staging/*`, mock'ать ровно 2 рубежа (LLM + внешняя сеть), никогда — регистратор/сервис. CI = replay, staging = живой прогон + LLM-судья (настоящий control plane через `MCP_SKILL_SOURCES_CONFIG`, не мок). DoD-чеклист. Ссылки на test-kit кирпичи. |
+| 🔵 планируется | **`@trained-assist/mcp-skill-testkit`** | Извлечь `scripts/staging/*` + `tests/helpers/mcp.js` + `fake-provider-mcp.js` в общий пакет (Phase 2; Phase 1 — вендоринг в доменных репо). |
+| 🔵 планируется | **Issue во всех репо** | Завести issue со ссылкой на правила в каждом репо (agent, tg-bot, web, recruiting/hh, engineering, freelance, exhibition, sales, checklist). |
+
 ## 2026-09-26 — playbooks P3d-1b: `validation_mode` + LLM-валидатор + softening (#1372, PR #1431)
 
 | Статус | Требование | Описание |
