@@ -14,6 +14,7 @@ const { userWorkDir, sessionFilePath } = require('../../data-paths');
 const { getProject } = require('../../projects');
 const { DurableTaskStore } = require('../../durable-task-store');
 const { durableTaskDbPath } = require('../../data-paths');
+const { VALIDATION_MODES } = require('../../playbook-validators');
 
 let _store = null;
 function store() {
@@ -177,6 +178,29 @@ module.exports = {
         const task = store().updateTask(task_id, profileId, patch);
         if (!task) return { error: 'task not found (or not owned by this profile)' };
         return { task };
+      },
+    },
+
+    task_item_update: {
+      description:
+        'Update a step (item). Use validation_mode to choose how strictly this step is ' +
+        'validated: "programmatic" (deterministic only), "programmatic+llm" (deterministic + ' +
+        'cheap LLM judge — strongly recommended, especially on cheap models), or ' +
+        '"programmatic+llm-fastpass" (loosest; a recorded escape hatch, never a silent bypass). ' +
+        'Omit to inherit the plan default.',
+      inputSchema: {
+        type: 'object',
+        required: ['item_id'],
+        properties: {
+          item_id: { type: 'string' },
+          validation_mode: { type: 'string', enum: [...VALIDATION_MODES] },
+        },
+      },
+      handler: async ({ item_id, ...patch }, ctx) => {
+        const profileId = requireProfile(ctx);
+        const item = store().updateTaskItem(item_id, patch, profileId);
+        if (!item) return { error: 'item not found (or not owned by this profile)' };
+        return { item };
       },
     },
 

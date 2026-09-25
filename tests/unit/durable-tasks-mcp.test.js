@@ -109,6 +109,29 @@ describe('task_item_complete', () => {
   });
 });
 
+describe('task_item_update', () => {
+  it('sets a per-step validation_mode (P3d-1c)', async () => {
+    const { task_create, task_item_add, task_item_update, task_get } = tools();
+    const { task } = await task_create.handler({ goal: 'g' }, ctx);
+    const { item } = await task_item_add.handler({ task_id: task.id, title: 'step' }, ctx);
+
+    const res = await task_item_update.handler(
+      { item_id: item.id, validation_mode: 'programmatic+llm-fastpass' }, ctx);
+    expect(res.item.validation_mode).toBe('programmatic+llm-fastpass');
+
+    const { items } = await task_get.handler({ task_id: task.id }, ctx);
+    expect(items[0].validation_mode).toBe('programmatic+llm-fastpass');
+  });
+
+  it('bob cannot update alice\'s item', async () => {
+    const { task_create, task_item_add, task_item_update } = tools();
+    const { task } = await task_create.handler({ goal: 'g' }, ctx);
+    const { item } = await task_item_add.handler({ task_id: task.id, title: 'x' }, ctx);
+    const res = await task_item_update.handler({ item_id: item.id, validation_mode: 'programmatic' }, otherCtx);
+    expect(res.error).toMatch(/not found/);
+  });
+});
+
 describe('task_update', () => {
   it('updates status and bumps revision', async () => {
     const { task_create, task_update } = tools();
