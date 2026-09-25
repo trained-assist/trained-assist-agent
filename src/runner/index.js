@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { writeMcpConfig } = require('../browser');
+const { getDefaultSourceRuntime } = require('../mcp-source-runtime');
 const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
@@ -1812,8 +1813,32 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // the system prompt is folded into the prompt text instead.
   const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
 
+  // Host MCP source runtime (PR2b, issue #1358): inert unless MCP_SKILL_SOURCES_CONFIG
+  // names an enabled source — prepareRun() is then a no-op returning null, so
+  // production behaviour is unchanged until an admin activates a source. When active,
+  // it materializes per-run adapter server descriptors (a revocable broker capability
+  // scoped to this one run) that get merged into the engine's .mcp.json below.
+  const sourceRuntime = getDefaultSourceRuntime();
+  let sourceRun = null;
+  if (sourceRuntime.enabled) {
+    try {
+      sourceRun = await sourceRuntime.prepareRun({
+        hostRunBinding: {
+          engineRunId: taskId, rootTaskId: taskId, profileId: user.username,
+          projectId: boundProjectId || null, trigger: 'user',
+          origin: (!user.id || user.id === 0) ? 'web' : 'telegram',
+          resourceBindingVersion: 'v1',
+        },
+        runtimeDir: path.join(user.workDir, '.mcp-runs', taskId),
+      });
+    } catch (e) { console.warn('[runner] mcp source runtime prepareRun:', e.message); }
+  }
+
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
-  const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username });
+  // (plus any per-run adapter servers materialized above).
+  const mcpConfig = writeMcpConfig(user.workDir, user.username, {
+    userName: user.name, userHandle: user.username, extraServers: sourceRun?.servers,
+  });
 
   // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
@@ -1921,29 +1946,39 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // and the progress edits; this block interprets its result: on timeout →
   // auto-continuation (needs runTask recursion, so it stays in the runner),
   // otherwise the post-processing below (retry, incomplete detection, usage).
-  const engineResult = await runEngineProcess({
-    engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
-    cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
-    restartShutdown: () => restartShutdown,
-    activeTimers, tgEdit, tgSend, outputCallback,
-    consumePendingStop: () => consumePendingStop(user.username, activeSessionId),
-    engineBin, engineArgs, mcpConfig, ocProfileOverrides,
-    cwd: codeCwd,
-    // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
-    // same 30s tick claude-runner.js already runs for the inactivity check, so a
-    // future watchdog (step 2+) can tell "still alive, just slow" apart from "the
-    // OS process died and nobody ever wrote a terminal state". savePendingTask does
-    // a partial merge ({...previous, ...params}) so this only touches the one field.
-    onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
-    // Persist the engine's native session id the moment it appears (#1234): to the durable
-    // session record (source of truth for resume) AND the pending journal (read by
-    // resumePendingTasks before the session is loaded). Written mid-run so a deploy SIGKILL
-    // can't lose it — that is exactly the restart case resume exists for.
-    onEngineSessionId: (sid) => {
-      if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
-      savePendingTask(taskId, { engineSessionId: sid, engine });
-    },
-  });
+  let engineResult;
+  try {
+    engineResult = await runEngineProcess({
+      engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
+      cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
+      restartShutdown: () => restartShutdown,
+      activeTimers, tgEdit, tgSend, outputCallback,
+      consumePendingStop: () => consumePendingStop(user.username, activeSessionId),
+      engineBin, engineArgs, mcpConfig, ocProfileOverrides,
+      cwd: codeCwd,
+      // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
+      // same 30s tick claude-runner.js already runs for the inactivity check, so a
+      // future watchdog (step 2+) can tell "still alive, just slow" apart from "the
+      // OS process died and nobody ever wrote a terminal state". savePendingTask does
+      // a partial merge ({...previous, ...params}) so this only touches the one field.
+      onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
+      // Persist the engine's native session id the moment it appears (#1234): to the durable
+      // session record (source of truth for resume) AND the pending journal (read by
+      // resumePendingTasks before the session is loaded). Written mid-run so a deploy SIGKILL
+      // can't lose it — that is exactly the restart case resume exists for.
+      onEngineSessionId: (sid) => {
+        if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
+        savePendingTask(taskId, { engineSessionId: sid, engine });
+      },
+    });
+  } finally {
+    // The engine process has exited (or failed to start) by the time runEngineProcess
+    // settles — release the run's broker capability + materialized adapter files right
+    // away rather than holding them until _runTask's (many) later return points. A
+    // timeout continuation re-runs runTask with a new taskId, so it gets its own
+    // prepareRun/release cycle — this one's job ends here regardless of outcome.
+    if (sourceRun) sourceRun.release();
+  }
   const {
     fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, engineSessionId, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
