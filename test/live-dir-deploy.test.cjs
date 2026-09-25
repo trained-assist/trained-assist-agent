@@ -108,23 +108,33 @@ test('release_set_link repoints the symlink atomically', (t) => {
   assert.equal(fs.realpathSync(f.link), fs.realpathSync(path.join(f.releases, f.c2)));
 });
 
-test('release_gc keeps the newest releases and preserves the hh-skill sibling symlink', (t) => {
+test('release_gc keeps the newest releases and preserves the hh-skill and engineering sibling symlinks', (t) => {
   const f = fixture(t);
   fs.mkdirSync(f.releases, { recursive: true });
   for (let i = 1; i <= 4; i++) {
     fs.mkdirSync(path.join(f.releases, `r${i}`));
     fs.utimesSync(path.join(f.releases, `r${i}`), new Date(2026, 0, i), new Date(2026, 0, i));
   }
-  const sibling = path.join(f.releases, 'trained-assist-hh-skill');
+  const hhSibling = path.join(f.releases, 'trained-assist-hh-skill');
   fs.mkdirSync(path.join(f.dir, 'hh-src'));
-  fs.symlinkSync(path.join(f.dir, 'hh-src'), sibling);
+  fs.symlinkSync(path.join(f.dir, 'hh-src'), hhSibling);
+  const engSibling = path.join(f.releases, 'trained-assist-engineering');
+  fs.mkdirSync(path.join(f.dir, 'eng-src'));
+  fs.symlinkSync(path.join(f.dir, 'eng-src'), engSibling);
   const r = f.gc(2);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(fs.existsSync(path.join(f.releases, 'r3')));
   assert.ok(fs.existsSync(path.join(f.releases, 'r4')));
   assert.ok(!fs.existsSync(path.join(f.releases, 'r1')));
   assert.ok(!fs.existsSync(path.join(f.releases, 'r2')));
-  assert.ok(fs.lstatSync(sibling).isSymbolicLink(), 'must not GC the hh-skill sibling symlink');
+  assert.ok(fs.lstatSync(hhSibling).isSymbolicLink(), 'must not GC the hh-skill sibling symlink');
+  assert.ok(fs.lstatSync(engSibling).isSymbolicLink(), 'must not GC the engineering sibling symlink');
+});
+
+test('deploy.sh provisions the trained-assist-engineering sibling checkout + releases symlink (#1418)', () => {
+  const body = fs.readFileSync(path.resolve(__dirname, '../scripts/deploy.sh'), 'utf8');
+  assert.match(body, /ENGINEERING_DIR="\$\{ENGINEERING_DIR:-\$AGENT_HOME\/trained-assist-engineering\}"/);
+  assert.match(body, /ln -sfn "\$ENGINEERING_DIR" "\$RELEASES_DIR\/trained-assist-engineering"/);
 });
 
 test('units serve from agent-master and no longer run a live-tree guard', () => {
