@@ -9,6 +9,7 @@ const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
 const { isAuthError, setAuthFailedFlag, clearAuthFailedFlag } = require('../auth-flag');
+const { isTerminalQuickCrash } = require('../engine-crash-policy');
 const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
 const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
@@ -1925,7 +1926,17 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // retry before bothering the user. Capped at MAX_QUICK_RETRIES so a genuinely broken task
   // doesn't loop; a crash after the process has been running longer is treated as real and
   // surfaced immediately (a slow failure is much more likely to be about the task itself).
-  if (exitCode !== 0 && !timedOut && fullOutput.text.trim().length < 50 && !claudeResult) {
+  // Whether this near-empty non-zero-exit run is a TERMINAL quick crash is decided by
+  // engine-crash-policy: an auth/quota/usage-limit error on an engine that can still fall back
+  // returns false here, so the run falls through to the engine-fallback branch below instead of
+  // dead-ending with "Переключись на другой движок". See that module for the 2026-09-25 bug.
+  if (isTerminalQuickCrash({
+    exitCode, timedOut,
+    outputLength: fullOutput.text.trim().length,
+    hasResult: !!claudeResult,
+    engine, engineFallbackDone,
+    errorText: codexErrorMsg || claudeErrorText,
+  })) {
     const crashDurationMs = Date.now() - thinkingStart;
     const isUsageLimit = codexErrorMsg && /usage limit|purchase more credits/i.test(codexErrorMsg);
     if (!isUsageLimit && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
