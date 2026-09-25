@@ -34,6 +34,7 @@ const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
 const { atomicJson } = require('./atomic-json');
+const { resolveGithubToken } = require('./github-token');
 
 const REPO = process.env.ISSUE_FIXER_REPO || 'trained-assist/trained-assist-agent';
 const AGENT_DATA_DIR = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
@@ -108,15 +109,10 @@ function selectCandidates(issues, state) {
 }
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
+// Env first (GITHUB_ISSUES_TOKEN/GH_TOKEN), then the credential file — never the
+// token embedded in the git remote URL (see src/github-token.js).
 function resolveToken() {
-  if (process.env.GITHUB_ISSUES_TOKEN) return process.env.GITHUB_ISSUES_TOKEN;
-  if (process.env.GH_TOKEN) return process.env.GH_TOKEN;
-  try {
-    const url = execSync('git config --get remote.origin.url', { cwd: path.join(__dirname, '..') }).toString().trim();
-    const m = url.match(/:\/\/[^:@/]+:([^@]+)@/) || url.match(/x-access-token:([^@]+)@/);
-    if (m) return m[1];
-  } catch { /* no token available */ }
-  return null;
+  return resolveGithubToken();
 }
 
 async function ghListOpenIssues(token, repo = REPO) {
