@@ -242,6 +242,9 @@ const {
   _waitForRam,
 } = require('./task-queue');
 const { legacyAdmissionScopes } = require('../core/execution-context');
+const { fromLegacyTelegram } = require('../core/conversation-ref');
+// Shadow-only (epic #1365 PR2b): compares, logs, never decides.
+const sessionShadow = require('../core/conversation-session-index').createConversationSessionIndex({ store: sessions });
 
 // Active task timer state — allows Claude to extend its own session via MCP tool.
 // Map<taskId, { killFn, killTimer, extendCount, proc }>
@@ -662,6 +665,12 @@ function runTask(opts) {
   }
 
   if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id, opts.user.audience, runThreadId) || null;
+  if (opts.sessionId && !opts.forceNew && opts.user.id) {
+    try {
+      const ref = fromLegacyTelegram({ chatId: opts.user.id, audience: opts.user.audience, threadId: runThreadId });
+      if (ref) sessionShadow.shadowCompare({ workDir: opts.user.workDir, ref, authoritySessionId: opts.sessionId, taskId: opts.taskId });
+    } catch (e) { console.warn(`[${opts.taskId}] session-shadow:`, e.message); }
+  }
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
