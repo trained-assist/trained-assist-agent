@@ -55,7 +55,7 @@ function saveIndex(workDir, sessions) {
  *  `audience` scopes the session to a bot/surface (e.g. 'recruiter') sharing the same
  *  username+chatId (see AUDIENCE-SCOPE-SPEC). Defaults to 'default' — omitting it, or
  *  passing 'default' explicitly, is byte-for-byte identical to the pre-audience behavior. */
-function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience }) {
+function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience, threadId = null }) {
   const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
@@ -84,7 +84,7 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
   // freshly-created session orphaned: getCurrentSessionId returns null, the next
   // message spawns a brand-new context-blind session, and the accumulated ТЗ is lost
   // (issue #531). setCurrentSessionId is idempotent with the later runner calls.
-  if (chatId) setCurrentSessionId(workDir, id, chatId, audience);
+  if (chatId) setCurrentSessionId(workDir, id, chatId, audience, threadId);
 
   return id;
 }
@@ -199,9 +199,9 @@ function _currentSessionFile(chatId, audience, threadId = null) {
   return chatId ? `current-session-${audience}-${chatId}${suffix}.json` : `current-session-${audience}.json`;
 }
 
-function getCurrentSessionId(workDir, chatId, audience) {
+function getCurrentSessionId(workDir, chatId, audience, threadId = null) {
   try {
-    const fp = path.join(workDir, SESSIONS_DIR, _currentSessionFile(chatId, audience));
+    const fp = path.join(workDir, SESSIONS_DIR, _currentSessionFile(chatId, audience, threadId));
     if (!fs.existsSync(fp)) return null;
     const { id, lastAt } = JSON.parse(fs.readFileSync(fp, 'utf8'));
     if (Date.now() - lastAt > CURRENT_SESSION_TTL_MS) return null;
@@ -209,11 +209,11 @@ function getCurrentSessionId(workDir, chatId, audience) {
   } catch (e) { console.warn('[session-store] getCurrentSessionId:', e.message); return null; }
 }
 
-function setCurrentSessionId(workDir, id, chatId, audience) {
+function setCurrentSessionId(workDir, id, chatId, audience, threadId = null) {
   try {
     const dir = path.join(workDir, SESSIONS_DIR);
     fs.mkdirSync(dir, { recursive: true });
-    atomicWrite(path.join(dir, _currentSessionFile(chatId, audience)), JSON.stringify({ id, lastAt: Date.now() }));
+    atomicWrite(path.join(dir, _currentSessionFile(chatId, audience, threadId)), JSON.stringify({ id, lastAt: Date.now() }));
     // Update liveChatId in the session file so it knows which chat it's attached to
     if (id && chatId) {
       const fp = sessionFilePath(workDir, id);
@@ -275,10 +275,10 @@ function claimLiveChatId(workDir, id, chatId) {
  *   3. otherwise null — caller creates a fresh session.
  * Returns the id to use, or null.
  */
-function resolveChatSession(workDir, sessionId, chatId, audience) {
+function resolveChatSession(workDir, sessionId, chatId, audience, threadId = null) {
   if (sessionId && getSession(workDir, sessionId)) return sessionId;
   if (chatId) {
-    const pointerId = getCurrentSessionId(workDir, chatId, audience);
+    const pointerId = getCurrentSessionId(workDir, chatId, audience, threadId);
     if (pointerId && getSession(workDir, pointerId)) return pointerId;
   }
   return null;

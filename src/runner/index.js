@@ -252,6 +252,10 @@ function taskOwnedBy(state, owner) {
   if (state.username !== owner.username) return false;
   if ((state.audience || 'default') !== (owner.audience || 'default')) return false;
   if (owner.chatId != null && state.chatId != null && String(state.chatId) !== String(owner.chatId)) return false;
+  // Forum topics (#255): when the caller scopes to a topic, only a task started in
+  // that same topic matches — stop in topic A must never kill a task in topic B.
+  // A threadId-less caller (owner.threadId == null) keeps the legacy chat-wide scope.
+  if (owner.threadId != null && state.threadId != null && Number(state.threadId) !== Number(owner.threadId)) return false;
   return true;
 }
 
@@ -288,7 +292,7 @@ function stopTask(taskId, owner = null) {
 // chat that actually started the task; omit chatId only for genuinely
 // profile-wide callers (e.g. /gtd_stop's explicit hard-stop) within that audience.
 // Omitting audience scopes to 'default' — never "every audience" (#1302 §3.2/§2).
-function stopUserTask(username, chatId = null, audience = null) {
+function stopUserTask(username, chatId = null, audience = null, threadId = null) {
   const scopedAudience = audience || 'default';
   let stopped = false;
   for (const [taskId, s] of activeTimers.entries()) {
@@ -296,7 +300,7 @@ function stopUserTask(username, chatId = null, audience = null) {
     // Single shared ownership rule (#1303) — exact username + audience (+ chatId
     // when both sides carry one), never a taskId prefix. Keeps this path and
     // stopTask(taskId, owner) from drifting apart.
-    if (!taskOwnedBy(s, { username, audience: scopedAudience, chatId })) continue;
+    if (!taskOwnedBy(s, { username, audience: scopedAudience, chatId, threadId })) continue;
     s.userStopped = true;
     try { s.proc.kill('SIGTERM'); } catch (e) { console.warn('[runner] stopUserTask SIGTERM:', e.message); }
     console.log(`[${taskId}] stopped by user command`);
@@ -449,6 +453,12 @@ function killTaskByUsername(username, audience = null) {
  */
 function runTask(opts) {
   opts = taskDelivery(opts);
+  // Forum topic identity for every outbound on this run (#255). Null for private
+  // chats and non-forum groups — nothing thread-related is then emitted.
+  const runThreadId = Number.isInteger(opts.threadId) && opts.threadId > 0 ? opts.threadId : null;
+  // Topic-aware new-message send: edit targets an existing message (already in the
+  // right topic) so it stays thread-less; only a fresh send carries the thread.
+  const sendTo = (token, chatId, text, extra = {}) => tgSend(token, chatId, text, extra, runThreadId);
   // Stop commands bypass the queue — kill the running task immediately.
   if (STOP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
@@ -457,10 +467,10 @@ function runTask(opts) {
     // Chat- and audience-scoped: a plain "стоп" typed in one chat must only touch
     // this chat's task/GTD tracking, not a profile-mate's or another bot's —
     // workDir is shared across chats AND audiences (#1302 §3.2).
-    const stopped = stopUserTask(username, chatId, opts.user.audience);
+    const stopped = stopUserTask(username, chatId, opts.user.audience, runThreadId);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
+      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId, runThreadId); }
       catch (e) { console.warn('[runner] stop gtd clear:', e.message); }
     }
     const parts = [];
@@ -472,8 +482,8 @@ function runTask(opts) {
     if (botToken) {
       const markup = { reply_markup: { inline_keyboard: [] } };
       const im = opts.initialMsgId;
-      if (im) tgEdit(botToken, chatId, im, msg, markup).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-      else     tgSend(botToken, chatId, msg).catch(() => {});
+      if (im) tgEdit(botToken, chatId, im, msg, markup).catch(() => sendTo(botToken, chatId, msg).catch(() => {}));
+      else     sendTo(botToken, chatId, msg).catch(() => {});
     }
     return Promise.resolve(msg);
   }
@@ -484,10 +494,10 @@ function runTask(opts) {
     const username = opts.user.username;
     const workDir = opts.user.workDir;
     const chatId = opts.user.id;
-    stopUserTask(username, chatId, opts.user.audience);
+    stopUserTask(username, chatId, opts.user.audience, runThreadId);
     let gtdCancelled = 0;
     if (workDir) {
-      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId); }
+      try { gtdCancelled = require('../gtd-controller').clearGtdForChat(workDir, chatId, runThreadId); }
       catch (e) { console.warn('[runner] gtd_stop clear:', e.message); }
     }
     const msg = gtdCancelled > 0
@@ -496,8 +506,8 @@ function runTask(opts) {
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     if (botToken) {
       const im = opts.initialMsgId;
-      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-      else     tgSend(botToken, chatId, msg).catch(() => {});
+      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => sendTo(botToken, chatId, msg).catch(() => {}));
+      else     sendTo(botToken, chatId, msg).catch(() => {});
     }
     return Promise.resolve(msg);
   }
@@ -529,8 +539,8 @@ function runTask(opts) {
       if (link) msg += `\n\n✏️ Править: ${link}`;
       if (botToken) {
         const im = opts.initialMsgId;
-        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-        else     await tgSend(botToken, chatId, msg).catch(() => {});
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => sendTo(botToken, chatId, msg).catch(() => {}));
+        else     await sendTo(botToken, chatId, msg).catch(() => {});
       }
       return msg;
     })();
@@ -548,8 +558,8 @@ function runTask(opts) {
         : '⚠️ Не смог получить ссылку на чек-лист (сервис недоступен или не настроен пароль). Попробуй чуть позже.';
       if (botToken) {
         const im = opts.initialMsgId;
-        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-        else     await tgSend(botToken, chatId, msg).catch(() => {});
+        if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => sendTo(botToken, chatId, msg).catch(() => {}));
+        else     await sendTo(botToken, chatId, msg).catch(() => {});
       }
       return msg;
     })();
@@ -562,7 +572,7 @@ function runTask(opts) {
     const msg = '🔄 Перезапускаюсь.';
     opts.outputCallback?.(msg);
     const token = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
-    const ack = token && opts.user.id !== 0 ? tgSend(token, opts.user.id, msg).catch(() => {}) : Promise.resolve();
+    const ack = token && opts.user.id !== 0 ? sendTo(token, opts.user.id, msg).catch(() => {}) : Promise.resolve();
     return ack.then(() => {
       interruptForRestart();
       setTimeout(() => process.exit(0), 100).unref?.();
@@ -575,7 +585,7 @@ function runTask(opts) {
     const username = opts.user.username;
     const chatId = opts.user.id;
     const hadActive = activeTimers.size > 0;
-    const stopped = stopUserTask(username, chatId, opts.user.audience);
+    const stopped = stopUserTask(username, chatId, opts.user.audience, runThreadId);
     // Clear this chat's queue so the next task doesn't wait behind a stuck one.
     chatQueue.clearChat(chatId);
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
@@ -586,8 +596,8 @@ function runTask(opts) {
         : '✅ Всё чисто, активных задач нет.';
     if (botToken) {
       const im = opts.initialMsgId;
-      if (im) tgEdit(botToken, chatId, im, msg).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-      else     tgSend(botToken, chatId, msg).catch(() => {});
+      if (im) tgEdit(botToken, chatId, im, msg).catch(() => sendTo(botToken, chatId, msg).catch(() => {}));
+      else     sendTo(botToken, chatId, msg).catch(() => {});
     }
     return Promise.resolve(msg);
   }
@@ -597,15 +607,15 @@ function runTask(opts) {
   if (SKIP_TASK_INTENT.test((opts.task || '').trim())) {
     const username = opts.user.username;
     const chatId = opts.user.id;
-    const stopped = stopUserTask(username, chatId, opts.user.audience);
+    const stopped = stopUserTask(username, chatId, opts.user.audience, runThreadId);
     const msg = stopped
       ? '⏭ Текущая задача пропущена. Следующая начнётся автоматически.'
       : '✅ Нет активной задачи для пропуска.';
     const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN;
     if (botToken) {
       const im = opts.initialMsgId;
-      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg).catch(() => {}));
-      else     tgSend(botToken, chatId, msg).catch(() => {});
+      if (im) tgEdit(botToken, chatId, im, msg, {}).catch(() => sendTo(botToken, chatId, msg).catch(() => {}));
+      else     sendTo(botToken, chatId, msg).catch(() => {});
     }
     return Promise.resolve(msg);
   }
@@ -627,8 +637,8 @@ function runTask(opts) {
         if (botToken) {
           const im = opts.initialMsgId;
           try {
-            if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => tgSend(botToken, chatId, msg));
-            else     await tgSend(botToken, chatId, msg);
+            if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => sendTo(botToken, chatId, msg));
+            else     await sendTo(botToken, chatId, msg);
           } catch (e) { console.warn('[runner] pre-queue quick-answer send:', e.message); }
         }
         return quick;
@@ -638,7 +648,7 @@ function runTask(opts) {
     // this fixed set of intents) — fall through to the normal queued path as a safety net.
   }
 
-  if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id, opts.user.audience) || null;
+  if (!Object.hasOwn(opts, 'activitySessionId')) opts.activitySessionId = opts.sessionId || getCurrentSessionId(opts.user.workDir, opts.user.id, opts.user.audience, runThreadId) || null;
   if (!Object.hasOwn(opts, 'initiatedAt')) opts.initiatedAt = opts.acceptedAt || Date.now();
   if (Number.isFinite(opts.initiatedAt)) recordTaskActivity(opts, opts.initiatedAt);
   // Journal BEFORE waiting: a restart must not silently lose accepted work.
@@ -743,7 +753,7 @@ function _hasProactiveResults(dataDir, username, vacancyId) {
 // stay opt-in via connected services, never fire unconditionally on every task completion.
 // actualModel: the model the just-finished run really used (claudeModel from the engine
 // stream). Optional — callers that don't have it (tests, older paths) fall back to env.
-function buildContextCard(username, workDir, chatId, actualModel = null) {
+function buildContextCard(username, workDir, chatId, actualModel = null, threadId = null) {
   const services = username ? listConnectedServices(username) : [];
   if (!services || !services.length) return null;
 
@@ -771,7 +781,7 @@ function buildContextCard(username, workDir, chatId, actualModel = null) {
     // Show the line ONLY when a new session really goes there without asking (#1318):
     // pinned, or the profile's single project. ≥2 projects and no pin → the bot will ask,
     // so a «📁 Проект» line would be a lie.
-    const d = chatId ? projects.decideNewSessionProject(workDir, chatId) : null;
+    const d = chatId ? projects.decideNewSessionProject(workDir, chatId, undefined, undefined, threadId) : null;
     const pmeta = d && d.action === 'auto' ? d.project : null;
     if (pmeta) lines.push(`📁 Проект: ${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''} · сменить: /project`);
   } catch (e) { console.warn('[runner] project pin line:', e.message); }
@@ -891,9 +901,14 @@ function buildContextCard(username, workDir, chatId, actualModel = null) {
 
 const NO_PIN_HINT = '\n\n💡 Дай мне права Admin в группе — буду обновлять без спама. Или /context_off чтобы скрыть.';
 
-// Reads the pin store, keyed per-chat: { chats: { "<chatId>": { msgId, lastCard, noPin } } }.
+// Reads the pin store, keyed per conversation: { chats: { "<chatId>": {...} } }.
 // One profile can serve many Telegram chats, so each chat keeps its own pinned card.
+// Forum topics (#255): a topic keys as "<chatId>:<threadId>" so card A never edits
+// card B's message id; no valid threadId keeps the bare "<chatId>" key exactly.
 // Migrates the legacy flat format ({ msgId, chatId, lastCard, noPin }) transparently.
+function pinStoreKey(chatId, threadId = null) {
+  return Number.isInteger(threadId) && threadId > 0 ? `${chatId}:${threadId}` : String(chatId);
+}
 function readPinStore(pinFile) {
   let raw = null;
   try { raw = JSON.parse(fs.readFileSync(pinFile, 'utf8')); } catch (e) {
@@ -912,10 +927,10 @@ function readPinStore(pinFile) {
 // Creates or silently updates the context pin after task completion.
 // State is stored per-chat in workDir/.pin_state.json (see readPinStore).
 // botPinnedMsgId: the pinned message ID known to the bot — used to seed state when we have none.
-async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null) {
+async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = null, threadId = null) {
   const pinFile = path.join(workDir, '.pin_state.json');
   const store = readPinStore(pinFile);
-  const key = String(chatId);
+  const key = pinStoreKey(chatId, threadId);
   let entry = store.chats[key] || null;
   const save = (next) => {
     store.chats[key] = next;
@@ -939,7 +954,7 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
       }
     }
     // Previous message was deleted — send a new one (still no pin attempt).
-    const msg = await tgSend(token, chatId, cardWithHint);
+    const msg = await tgSend(token, chatId, cardWithHint, {}, threadId);
     const newId = msg?.result?.message_id;
     if (newId) save({ msgId: newId, lastCard: cardWithHint, noPin: true });
     return;
@@ -955,7 +970,7 @@ async function updateContextPin(token, chatId, workDir, card, botPinnedMsgId = n
   }
 
   // No existing pin (or edit failed) — send new card message and try to pin it.
-  const msg = await tgSend(token, chatId, card);
+  const msg = await tgSend(token, chatId, card, {}, threadId);
   const newId = msg?.result?.message_id;
   if (!newId) return;
 
@@ -1330,7 +1345,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // SUPPOSED to have no file on disk yet, so it must never heal back onto
     // the chat's old pointer, or "start new session" would silently reattach
     // to the stale one.
-    activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId, audience) || sessionId);
+    activeSessionId = forceNew ? sessionId : (sessions.resolveChatSession(user.workDir, sessionId, chatId, audience, threadId) || sessionId);
     const existing = sessions.getSession(user.workDir, activeSessionId);
     if (existing) {
       // Chat isolation is NON-BLOCKING. A live session is attached to exactly one chat;
@@ -1359,7 +1374,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (!activeSessionId && !(forceNew && sessionId)) {
     // No usable explicit session (none given, or a foreign one was dropped above) —
     // continue the most recent one for THIS chat (within 4h), or start a fresh session.
-    const currentId = getCurrentSessionId(user.workDir, chatId, audience);
+    const currentId = getCurrentSessionId(user.workDir, chatId, audience, threadId);
     if (currentId && sessions.getSession(user.workDir, currentId)) {
       activeSessionId = currentId;
       sessionExists = true;
@@ -1392,14 +1407,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const s = continuing ? sessions.getSession(user.workDir, activeSessionId) : null;
     const r = projects.resolveRunProject(user.workDir, {
       chatId, audience, continuing, continuingProjectId: s && s.projectId,
-      projectId, projectPicked, newProjectName,
+      projectId, projectPicked, newProjectName, threadId,
     });
     boundProjectId = r.projectId;
     pinProject = r.pin;
     if (boundProjectId) {
       const dir = projects.resolveProjectDir(user.workDir, boundProjectId);
       if (dir) {
-        projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience, pinned: pinProject });
+        projects.setActiveProjectId(user.workDir, boundProjectId, chatId, { audience, pinned: pinProject, threadId });
         user.cwd = dir; // session runs inside its project
       } else {
         // Project folder is gone — e.g. archived/merged by a projects reorg since this
@@ -1488,11 +1503,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       } else {
         // New conversation — create session with first exchange
-        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience });
+        activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience, threadId });
         sessions.appendReply(user.workDir, activeSessionId, quickReply);
       }
       bindTaskActivity(taskId, user, activeSessionId);
-      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience, threadId);
     }
     // Escalate-button (requirements-log [062], 2026-09-15): §9.2 killed the generic
     // one-shot action markup (oneshotActionMarkup — see answer-router.js), but a quick
@@ -1511,9 +1526,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : null;
     const quickExtra = expandMarkup ? { reply_markup: expandMarkup } : {};
     if (initialMsgId) {
-      await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra));
+      await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra, threadId));
     } else {
-      await tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra);
+      await tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra, threadId);
     }
     return quickReply;
   }
@@ -1522,7 +1537,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   if (sessionExists) {
     if (!userMessageRecorded) sessions.appendUserMessage(user.workDir, activeSessionId, task);
   } else {
-    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience });
+    activeSessionId = sessions.createSession(user.workDir, { task, id: activeSessionId || undefined, chatId, projectId: boundProjectId, audience, threadId });
   }
 
   bindTaskActivity(taskId, user, activeSessionId);
@@ -1539,7 +1554,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Use bot's pinned placeholder if provided; otherwise send our own
   let msgId = initialMsgId || null;
   if (!msgId) {
-    const thinkMsg = await tgSend(BOT_TOKEN, chatId, '🧠 Думаю…');
+    const thinkMsg = await tgSend(BOT_TOKEN, chatId, '🧠 Думаю…', threadId);
     msgId = thinkMsg?.result?.message_id;
   }
   const thinkingStart = Date.now();
@@ -1558,8 +1573,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       '',
       'После этого повтори запрос.',
     ].join('\n');
-    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, expiredMsg).catch(() => tgSend(BOT_TOKEN, chatId, expiredMsg));
-    else await tgSend(BOT_TOKEN, chatId, expiredMsg);
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, expiredMsg).catch(() => tgSend(BOT_TOKEN, chatId, expiredMsg, threadId));
+    else await tgSend(BOT_TOKEN, chatId, expiredMsg, threadId);
     return expiredMsg;
   }
 
@@ -1762,7 +1777,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         const prevModel = sessions.getLastOcModel(user.workDir, activeSessionId, 'build');
         if (prevModel && prevModel !== ocProfileOverrides.model) {
           const switchMsg = `ℹ️ Модель сменилась: ${prevModel} → ${ocProfileOverrides.model} (лестница профиля «${ocProfileName}» деградировала между сообщениями).`;
-          await tgSend(BOT_TOKEN, chatId, switchMsg).catch(() => {});
+          await tgSend(BOT_TOKEN, chatId, switchMsg, threadId).catch(() => {});
           sessions.appendReply(user.workDir, activeSessionId, switchMsg);
         }
         sessions.setLastOcModel(user.workDir, activeSessionId, 'build', ocProfileOverrides.model);
@@ -1776,7 +1791,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // auto-continuation (needs runTask recursion, so it stays in the runner),
   // otherwise the post-processing below (retry, incomplete detection, usage).
   const engineResult = await runEngineProcess({
-    engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
+    engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
     cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
@@ -1815,7 +1830,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // Save partial progress so the next run sees what was done
     if (activeSessionId && partialText) {
       sessions.appendReply(user.workDir, activeSessionId, `[${inactivityKill ? 'прервано: молчал 5 мин' : 'прервано таймаутом'}]\n${partialText}`);
-      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience, threadId);
     }
 
     if (continuationCount < MAX_CONTINUATIONS) {
@@ -1825,8 +1840,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       const tgMsg = partialDisplay.length > 20
         ? `🧠 ${partialDisplay.slice(-MAX_MSG_LEN)}\n\n${statusLine}`
         : statusLine;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg));
-      else await tgSend(BOT_TOKEN, chatId, tgMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tgMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tgMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, tgMsg, threadId);
 
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine,
@@ -1851,8 +1866,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       });
     } else {
       const limitMsg = `⏱ Задача прервана по таймауту. Лимит автопродолжений (${MAX_CONTINUATIONS}) достигнут. Отправь задачу ещё раз чтобы продолжить.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg));
-      else await tgSend(BOT_TOKEN, chatId, limitMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, limitMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, limitMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, limitMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine,
         errorText: 'timeout: auto-continuation budget exhausted',
@@ -1880,13 +1895,13 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : '⛔ Остановлено. Можешь задать новый вопрос.';
     const clearMarkup = { reply_markup: { inline_keyboard: [] } };
     if (msgId) {
-      await tgEdit(BOT_TOKEN, chatId, msgId, stoppedMsg, clearMarkup).catch(() => tgSend(BOT_TOKEN, chatId, stoppedMsg));
+      await tgEdit(BOT_TOKEN, chatId, msgId, stoppedMsg, clearMarkup).catch(() => tgSend(BOT_TOKEN, chatId, stoppedMsg, threadId));
     } else {
-      await tgSend(BOT_TOKEN, chatId, stoppedMsg);
+      await tgSend(BOT_TOKEN, chatId, stoppedMsg, threadId);
     }
     if (activeSessionId && partial) {
       sessions.appendReply(user.workDir, activeSessionId, `[остановлено пользователем]\n${partial}`);
-      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
+      setCurrentSessionId(user.workDir, activeSessionId, chatId, audience, threadId);
     }
     executionHistory.recordAttempt(executionId, {
       taskId, projectId, sessionId: activeSessionId, engine,
@@ -1907,8 +1922,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const isUsageLimit = codexErrorMsg && /usage limit|purchase more credits/i.test(codexErrorMsg);
     if (!isUsageLimit && !restartShutdown && crashDurationMs < QUICK_CRASH_MS && retryCount < MAX_QUICK_RETRIES) {
       const retryMsg = `⚡ Быстрый сбой (код ${exitCode} через ${Math.round(crashDurationMs / 1000)}с) — пробую ещё раз...`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
-      else await tgSend(BOT_TOKEN, chatId, retryMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine, exitCode,
         errorText: codexErrorMsg || `exit ${exitCode}`, action: 'quick_crash_retry',
@@ -1940,8 +1955,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       : retryCount > 0
       ? `⚠️ Процесс снова завершился с ошибкой (код ${exitCode}) сразу после запуска. Похоже на реальный сбой, а не случайность — попробуй ещё раз позже или измени формулировку.`
       : `⚠️ Процесс завершился с ошибкой (код ${exitCode}). Попробуй ещё раз.`;
-    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg));
-    else await tgSend(BOT_TOKEN, chatId, crashMsg);
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, crashMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, crashMsg, threadId));
+    else await tgSend(BOT_TOKEN, chatId, crashMsg, threadId);
     _recordFailureAttempt(executionId, {
       taskId, projectId, sessionId: activeSessionId, engine, exitCode,
       errorText: codexErrorMsg || `exit ${exitCode}`, action: null,
@@ -1983,8 +1998,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (resumeSessionId && !resumeFallbackDone && !restartShutdown) {
       console.warn(`[${taskId}] resume: fallback reason=native_resume_failed engine=${engine} (${reason})`);
       const fallbackMsg = '↩️ Не удалось продолжить сессию движка — перезапускаю с восстановленным контекстом.';
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg));
-      else await tgSend(BOT_TOKEN, chatId, fallbackMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine, exitCode,
         errorText: reason, action: 'native_resume_fallback',
@@ -2013,8 +2028,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (resumedAfterRestart && resumeAttempts < MAX_RESUME_ATTEMPTS && !restartShutdown) {
       const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek });
       const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})${altNote ? `, ${altNote}` : ''}…`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
-      else await tgSend(BOT_TOKEN, chatId, retryMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine, exitCode,
         errorText: reason, action: 'resume_after_restart_retry',
@@ -2071,8 +2086,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (flipped && ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
       const newProfile = opencodeGoToggle.resolveProfileName();
       const switchMsg = `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg));
-      else await tgSend(BOT_TOKEN, chatId, switchMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, switchMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: failedModel,
@@ -2112,8 +2127,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         const nextSkip = [...contextSkipModels, verdict.model];
         if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
           const contextMsg = `⚠️ Запрос не поместился в контекст модели «${verdict.model}» — пробую следующую ступень лестницы профиля «${ocProfileName}» (это не блокирует модель для других задач).`;
-          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, contextMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, contextMsg));
-          else await tgSend(BOT_TOKEN, chatId, contextMsg);
+          if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, contextMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, contextMsg, threadId));
+          else await tgSend(BOT_TOKEN, chatId, contextMsg, threadId);
           if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, contextMsg);
           _recordFailureAttempt(executionId, {
             taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
@@ -2141,8 +2156,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
           return { queuedRetry };
         }
         const tooBigMsg = `⛔ Запрос слишком большой для всех моделей лестницы профиля «${ocProfileName}» — разбей задачу на более мелкие части и отправь по шагам.`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tooBigMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tooBigMsg));
-        else await tgSend(BOT_TOKEN, chatId, tooBigMsg);
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, tooBigMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, tooBigMsg, threadId));
+        else await tgSend(BOT_TOKEN, chatId, tooBigMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, tooBigMsg);
         _recordFailureAttempt(executionId, {
           taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
@@ -2156,8 +2171,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         // health (recorded below via _recordFailureAttempt → markEngineFailure) but must never be
         // reported as auth-invalid (spec §7). The operator alert is the Telegram message below.
         const configMsg = `⚠️ OpenCode-модель «${verdict.model}» требует ручной настройки аккаунта (не квота — оператор уже уведомлён, автопереключением на другую модель это не чинится).`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg));
-        else await tgSend(BOT_TOKEN, chatId, configMsg);
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, configMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, configMsg, threadId));
+        else await tgSend(BOT_TOKEN, chatId, configMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, configMsg);
         _recordFailureAttempt(executionId, {
           taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
@@ -2168,8 +2183,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       }
       if (ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
         const degradeMsg = `⚠️ Модель «${verdict.model}» исчерпала лимит — пробую следующую ступень лестницы профиля «${ocProfileName}».`;
-        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, degradeMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, degradeMsg));
-        else await tgSend(BOT_TOKEN, chatId, degradeMsg);
+        if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, degradeMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, degradeMsg, threadId));
+        else await tgSend(BOT_TOKEN, chatId, degradeMsg, threadId);
         if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, degradeMsg);
         _recordFailureAttempt(executionId, {
           taskId, projectId, sessionId: activeSessionId, engine: 'opencode', model: verdict.model,
@@ -2196,8 +2211,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         return { queuedRetry };
       }
       const exhaustedMsg = `⛔ Вся лестница моделей профиля «${ocProfileName}» временно недоступна (лимиты) — оператор уведомлён.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg));
-      else await tgSend(BOT_TOKEN, chatId, exhaustedMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, exhaustedMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, exhaustedMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, exhaustedMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, exhaustedMsg);
       // QUOTA is a plan/usage limit, NOT a credential loss (spec §7): health degrades via
       // _recordFailureAttempt below; do NOT set the auth flag.
@@ -2236,8 +2251,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
     if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
       const fallbackMsg = `⚠️ ${engineLabel} потерял авторизацию — автоматически переключаюсь на OpenCode для этой задачи.`;
-      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg));
-      else await tgSend(BOT_TOKEN, chatId, fallbackMsg);
+      if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
+      else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, engine,
@@ -2265,9 +2280,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
     const authMsg = `⚠️ Авторизация ${engineLabel} истекла — оператор уже уведомлён, скоро починим.`;
     if (msgId) {
-      await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg));
+      await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg, threadId));
     } else {
-      await tgSend(BOT_TOKEN, chatId, authMsg);
+      await tgSend(BOT_TOKEN, chatId, authMsg, threadId);
     }
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, authMsg);
     _recordFailureAttempt(executionId, {
@@ -2289,8 +2304,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const delayMs = getRetryDelayMs(nextAttempt) || 0;
     const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek });
     const retryMsg = `🔄 Работа прервана (${incompleteReason}) — пробую ещё раз (${nextAttempt}/${MAX_INCOMPLETE_RETRIES})${altNote ? `, ${altNote}` : ''}…`;
-    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg));
-    else await tgSend(BOT_TOKEN, chatId, retryMsg);
+    if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: [] } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
+    else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
     _recordFailureAttempt(executionId, {
       taskId, projectId, sessionId: activeSessionId, engine, exitCode,
@@ -2419,17 +2434,17 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Append assistant reply to session history
   if (activeSessionId) {
     sessions.appendReply(user.workDir, activeSessionId, result);
-    setCurrentSessionId(user.workDir, activeSessionId, chatId, audience);
+    setCurrentSessionId(user.workDir, activeSessionId, chatId, audience, threadId);
 
   }
 
   // Send result (clear stop button; attach action buttons unless suppressed)
   if (msgId) {
     await tgEdit(BOT_TOKEN, chatId, msgId, `🧠 ${final}`, finalExtra).catch(() =>
-      tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra)
+      tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra, threadId)
     );
   } else {
-    await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra);
+    await tgSend(BOT_TOKEN, chatId, `🧠 ${final}`, finalExtra, threadId);
   }
 
   // A completed answer is terminal. Do not classify prose to schedule another
@@ -2441,8 +2456,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Update context pin after task (skipped when user ran /context_off)
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
-    const card = buildContextCard(user.username, user.workDir, chatId, claudeModel);
-    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId).catch(() => {});
+    const card = buildContextCard(user.username, user.workDir, chatId, claudeModel, threadId);
+    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
   }
 
   if (activeSessionId) {
@@ -2454,6 +2469,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         const checklistArgs = {
           workDir: user.workDir, sessionId: activeSessionId, chatId,
           username: user.username, projectDir: user.cwd || null, audience: user.audience || 'default',
+          threadId: runThreadId,
         };
         if (explicitMode === 'deep') {
           // Осознанный launch — «⏻ Запустить проработку» (workrun). Свободный текст

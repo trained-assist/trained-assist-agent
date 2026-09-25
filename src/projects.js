@@ -361,11 +361,11 @@ function _activePath(workDir, chatId, audience, threadId = null) {
   }
   return path.join(projectsRoot(workDir), `active-${audience}-${chatId || 'default'}${suffix}.json`);
 }
-function _readActive(workDir, chatId, audience) {
-  try { return JSON.parse(fs.readFileSync(_activePath(workDir, chatId, audience), 'utf8')); } catch { return null; }
+function _readActive(workDir, chatId, audience, threadId = null) {
+  try { return JSON.parse(fs.readFileSync(_activePath(workDir, chatId, audience, threadId), 'utf8')); } catch { return null; }
 }
-function getActiveProjectId(workDir, chatId, audience) {
-  const rec = _readActive(workDir, chatId, audience);
+function getActiveProjectId(workDir, chatId, audience, threadId = null) {
+  const rec = _readActive(workDir, chatId, audience, threadId);
   return rec && rec.id && getProject(workDir, rec.id) ? rec.id : null; // ignore stale pointer
 }
 
@@ -373,27 +373,28 @@ function getActiveProjectId(workDir, chatId, audience) {
 // from the "last used" pointer above (#1318): the runner rewrites active-*.json on every
 // run, so sharing one file made the pin depend on read-modify-write ordering. pin-*.json
 // is written ONLY by an explicit user choice (menu pick, «➕ Новый проект», /project).
-function _pinPath(workDir, chatId, audience) {
+function _pinPath(workDir, chatId, audience, threadId = null) {
+  const suffix = Number.isInteger(threadId) && threadId > 0 ? `-${threadId}` : '';
   if (!audience || audience === 'default') {
-    return path.join(projectsRoot(workDir), `pin-${chatId || 'default'}.json`);
+    return path.join(projectsRoot(workDir), `pin-${chatId || 'default'}${suffix}.json`);
   }
-  return path.join(projectsRoot(workDir), `pin-${audience}-${chatId || 'default'}.json`);
+  return path.join(projectsRoot(workDir), `pin-${audience}-${chatId || 'default'}${suffix}.json`);
 }
-function _readPin(workDir, chatId, audience) {
-  try { return JSON.parse(fs.readFileSync(_pinPath(workDir, chatId, audience), 'utf8')); } catch { /* fall through */ }
+function _readPin(workDir, chatId, audience, threadId = null) {
+  try { return JSON.parse(fs.readFileSync(_pinPath(workDir, chatId, audience, threadId), 'utf8')); } catch { /* fall through */ }
   // Legacy (#1316 shipped the pin as pinned:true inside active-*.json) — read-through.
-  const rec = _readActive(workDir, chatId, audience);
+  const rec = _readActive(workDir, chatId, audience, threadId);
   return rec && rec.pinned ? { id: rec.id, at: rec.at } : null;
 }
 // null if none / archived (a dead pin is ignored, never bound to).
-function getPinnedProjectId(workDir, chatId, audience) {
-  const rec = _readPin(workDir, chatId, audience);
+function getPinnedProjectId(workDir, chatId, audience, threadId = null) {
+  const rec = _readPin(workDir, chatId, audience, threadId);
   return rec && rec.id && getProject(workDir, rec.id) ? rec.id : null;
 }
-function setPinnedProjectId(workDir, id, chatId, { now = Date.now(), audience } = {}) {
+function setPinnedProjectId(workDir, id, chatId, { now = Date.now(), audience, threadId = null } = {}) {
   try {
     fs.mkdirSync(projectsRoot(workDir), { recursive: true });
-    atomicWrite(_pinPath(workDir, chatId, audience), JSON.stringify({ id, at: now }));
+    atomicWrite(_pinPath(workDir, chatId, audience, threadId), JSON.stringify({ id, at: now }));
   } catch (e) {
     console.warn('[projects] setPinnedProjectId:', e.message);
   }
@@ -422,17 +423,17 @@ function repointPins(workDir, fromId, toId, { now = Date.now() } = {}) {
 // "Last used" bookkeeping (runner binding on every run). `pinned:true` = explicit user
 // choice → ALSO pins the chat. Bookkeeping never touches the pin file, so continuing an
 // old session from another project can't re-pin the chat.
-function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience, pinned = false } = {}) {
+function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience, pinned = false, threadId = null } = {}) {
   try {
     fs.mkdirSync(projectsRoot(workDir), { recursive: true });
     // Legacy pin (pinned:true inside active-*.json) → move it to its own file before this
     // write drops the flag.
-    if (!fs.existsSync(_pinPath(workDir, chatId, audience))) {
-      const cur = _readActive(workDir, chatId, audience);
-      if (cur && cur.pinned && cur.id) atomicWrite(_pinPath(workDir, chatId, audience), JSON.stringify({ id: cur.id, at: cur.at || now }));
+    if (!fs.existsSync(_pinPath(workDir, chatId, audience, threadId))) {
+      const cur = _readActive(workDir, chatId, audience, threadId);
+      if (cur && cur.pinned && cur.id) atomicWrite(_pinPath(workDir, chatId, audience, threadId), JSON.stringify({ id: cur.id, at: cur.at || now }));
     }
-    atomicWrite(_activePath(workDir, chatId, audience), JSON.stringify({ id, at: now }));
-    if (pinned) setPinnedProjectId(workDir, id, chatId, { now, audience });
+    atomicWrite(_activePath(workDir, chatId, audience, threadId), JSON.stringify({ id, at: now }));
+    if (pinned) setPinnedProjectId(workDir, id, chatId, { now, audience, threadId });
     touchProject(workDir, id, { now });
   } catch (e) {
     console.warn('[projects] setActiveProjectId:', e.message);
@@ -445,14 +446,14 @@ function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience, p
 //   { action:'ask',    choices, active }      several projects, nothing pinned -> ask which / offer new
 //   { action:'create', suggestType }          no projects yet    -> create the first one
 // A CONTINUING session never calls this — it keeps the project stored on the session.
-function decideNewSessionProject(workDir, chatId, countByProject, audience = 'default') {
+function decideNewSessionProject(workDir, chatId, countByProject, audience = 'default', threadId = null) {
   const projects = sortByUsage(listProjects(workDir, audience), countByProject);
   if (projects.length === 0) return { action: 'create', suggestType: 'generic' };
-  const pinnedId = getPinnedProjectId(workDir, chatId, audience);
+  const pinnedId = getPinnedProjectId(workDir, chatId, audience, threadId);
   const pinned = pinnedId && projects.find(p => p.id === pinnedId);
   if (pinned) return { action: 'auto', project: pinned, pinned: true };
   if (projects.length === 1) return { action: 'auto', project: projects[0] };
-  return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId, audience) };
+  return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId, audience, threadId) };
 }
 
 // Which project a run binds to + whether that pins the chat — the runner's decision,
@@ -464,11 +465,11 @@ function decideNewSessionProject(workDir, chatId, countByProject, audience = 'de
 //   newProjectName            → «➕ Новый проект» → creates + pins
 //   otherwise                 → decideNewSessionProject (auto / create / ask-fallback)
 function resolveRunProject(workDir, { chatId, audience = 'default', continuing = false, continuingProjectId = null,
-  projectId = null, projectPicked = false, newProjectName = null } = {}) {
-  if (continuing) return { projectId: continuingProjectId || getActiveProjectId(workDir, chatId, audience), pin: false };
+  projectId = null, projectPicked = false, newProjectName = null, threadId = null } = {}) {
+  if (continuing) return { projectId: continuingProjectId || getActiveProjectId(workDir, chatId, audience, threadId), pin: false };
   if (projectId && getProject(workDir, projectId)) return { projectId, pin: projectPicked === true };
   if (newProjectName) return { projectId: createProject(workDir, newProjectName, { audience }).id, pin: true };
-  const d = decideNewSessionProject(workDir, chatId, undefined, audience);
+  const d = decideNewSessionProject(workDir, chatId, undefined, audience, threadId);
   if (d.action === 'auto') return { projectId: d.project.id, pin: false };
   if (d.action === 'create') return { projectId: createProject(workDir, { type: 'generic', name: 'Основной' }, { audience }).id, pin: false };
   // 'ask' — gateway didn't pass a choice; fall back so we never block silently

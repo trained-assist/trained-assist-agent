@@ -228,11 +228,15 @@ function formatToolActivity(name, input = {}) {
  */
 async function runEngineProcess(opts) {
   const {
-    engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user,
+    engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
     ocProfileOverrides, onHeartbeat, onEngineSessionId,
   } = opts;
+  // Forum topics (#255): fresh progress/warning sends stay in the originating topic.
+  // Only new messages need it; edits target an existing message already in the topic.
+  const runThreadId = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
+  const sendT = (token, chat, text, extra = {}) => tgSend(token, chat, text, extra, runThreadId);
 
   const proc = spawn(engineBin, engineArgs, {
     cwd,
@@ -323,7 +327,7 @@ async function runEngineProcess(opts) {
           // args = (token, chatId, messageId, text, extra) — repost the same text
           // as a fresh message so progress stays visible. Best-effort: the next
           // heartbeat tick keeps editing the placeholder if this also fails.
-          tgSend(args[0], args[1], String(args[3] || '🧠 Думаю…'), args[4] || {}).catch(() => {});
+          sendT(args[0], args[1], String(args[3] || '🧠 Думаю…'), args[4] || {}).catch(() => {});
         }
       },
     );
@@ -658,7 +662,7 @@ async function runEngineProcess(opts) {
         try { proc.kill('SIGTERM'); } catch {}
         const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
         const engineLabel = engine === 'codex' ? 'Кодекс' : engine === 'opencode' ? 'OpenCode' : 'Клод';
-        tgSend(BOT_TOKEN, chatId,
+        sendT(BOT_TOKEN, chatId,
           `⚠️ ${engineLabel} работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
           `Получил сигнал завершить текущий шаг и вывести итоги.`
         ).catch(() => {});

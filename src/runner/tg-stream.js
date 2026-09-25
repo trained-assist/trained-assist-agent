@@ -51,12 +51,19 @@ async function tgFormat(text, extra) {
   return { text: out, extra: parse_mode ? { ...extra, parse_mode } : extra };
 }
 
-async function tgSend(token, chatId, text, extra = {}) {
+// Forum topics (#255): a NEW message must carry message_thread_id, else it lands in
+// the group's General topic. `threadId` is only ever a valid positive integer, and
+// when absent the request omits the field entirely — private/non-forum behavior is
+// byte-for-byte unchanged (hard guard). Edit/pin need no thread: they target an
+// existing message_id that already lives in the right topic.
+async function tgSend(token, chatId, text, extra = {}, threadId = null) {
   const f = await tgFormat(text, extra);
+  const body = { chat_id: chatId, text: f.text, ...f.extra };
+  if (Number.isInteger(threadId) && threadId > 0) body.message_thread_id = threadId;
   const res = await fetch(`${TG_API}/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text: f.text, ...f.extra }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
   const data = await res.json();
