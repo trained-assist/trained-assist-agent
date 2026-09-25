@@ -96,10 +96,27 @@ function codexMcpArgs(mcpConfig) {
   return args;
 }
 
+// Single source of truth for the engine process working directory. runner/index.js
+// resolves this ONCE and passes the identical value to both buildEngineCommand()
+// (codex `-C` on the fresh path) and runEngineProcess() (spawn.cwd), so `-C` and
+// the actual process cwd can never silently drift apart — including the resume
+// path, where codex emits no `-C` and the process cwd is authoritative. Non-project
+// (conversational/recruiter) tasks leave user.cwd unset, so this is the profile
+// workDir — unchanged from before.
+function resolveEngineCwd(user = {}) {
+  return user.cwd || user.workDir;
+}
+
 // opencode has no per-invocation MCP flag either, but does merge config from the file at
 // $OPENCODE_CONFIG on top of the global ~/.config/opencode/opencode.json (verified against
 // opencode's own config docs), so a per-user file set via env var is the isolation-safe
 // equivalent of claude's --mcp-config — no shared-file mutation, no cross-user race.
+//
+// configDir (NOT the code cwd): where the per-invocation config file is written. claude/codex
+// keep their MCP wiring in user.workDir already; writing this file into the code cwd would leave
+// an untracked runtime artifact (with env/secrets) inside the git worktree that becomes the
+// task's cwd — it could leak into a diff/commit or fast_verify. Callers pass user.workDir, and
+// the absolute path goes to opencode via OPENCODE_CONFIG.
 //
 // ocProfileOverrides (optional): the {model, agent: {build|plan|explore|general|review: {model}}}
 // shape from .opencode/profiles/<name>.json (see profiles.getOcProfile). Folding it in here —
@@ -107,7 +124,7 @@ function codexMcpArgs(mcpConfig) {
 // opencode-switch-profile.sh, which overwrote the one shared ~/.config/opencode/opencode.json
 // for every profile on the VM. Deep merge means agent.review's base fields (prompt/permission/
 // etc., only present in the global file) survive; only .model gets overridden per profile.
-function writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) {
+function writeOpencodeMcpConfig(configDir, mcpConfig, ocProfileOverrides) {
   const servers = loadMcpServers(mcpConfig);
   const mcp = {};
   for (const [name, srv] of Object.entries(servers)) {
@@ -118,7 +135,8 @@ function writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) {
       ...(srv.env ? { environment: srv.env } : {}),
     };
   }
-  const configPath = path.join(cwd, '.opencode-mcp.json');
+  fs.mkdirSync(configDir, { recursive: true });
+  const configPath = path.join(configDir, '.opencode-mcp.json');
   fs.writeFileSync(configPath, JSON.stringify({ mcp, ...ocProfileOverrides }, null, 2));
   return configPath;
 }
@@ -141,8 +159,11 @@ function readOcAgentModels() {
 
 // Build the argv for the selected engine (claude/codex/opencode).
 // Returns [bin, args].
-function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user, resumeSessionId = null }) {
+function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user = {}, cwd, resumeSessionId = null }) {
   const opencodeModelResolved = opencodeModel || process.env.OPENCODE_MODEL || null;
+  // `cwd` is the runner-resolved code dir (see resolveEngineCwd); falling back to
+  // user.cwd/user.workDir keeps callers that don't pass it (hermes, tests) working.
+  const codeCwd = cwd || resolveEngineCwd(user);
   if (engine === 'codex') {
     // Validated 2026-09-23: capping raw tool-output tokens cuts the *uncached* input
     // tokens a cat/grep/diff-heavy turn needs by ~40% (measured 18.7k -> 10.7k avg
@@ -161,7 +182,7 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
       '--json',
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
-      ...(resumeSessionId ? [] : ['-C', user.cwd || user.workDir]),
+      ...(resumeSessionId ? [] : ['-C', codeCwd]),
       '-c', `tool_output_token_limit=${toolOutputTokenLimit}`,
       ...codexMcpArgs(mcpConfig),
       systemPromptText ? `${systemPromptText}\n\n${prompt}` : prompt,
@@ -241,9 +262,10 @@ function formatToolActivity(name, input = {}) {
  *   restartShutdown: () => boolean,
  *   activeTimers: Map (register sessionState so /stop and /restart can reach the proc),
  *   tgEdit, tgSend, outputCallback,
- *   engineBin, engineArgs (already built), cwd, env, mcpConfig (path to the per-user .mcp.json;
- *   used to derive OPENCODE_CONFIG for opencode — codex gets its MCP wiring baked into
- *   engineArgs already, via codexMcpArgs in buildEngineCommand),
+ *   engineBin, engineArgs (already built), cwd (the runner-resolved code dir — the SAME
+ *   value passed to buildEngineCommand, see resolveEngineCwd), env, mcpConfig (path to the
+ *   per-user .mcp.json; used to derive OPENCODE_CONFIG for opencode — codex gets its MCP
+ *   wiring baked into engineArgs already, via codexMcpArgs in buildEngineCommand),
  *   ocProfileOverrides (optional, opencode only — {model, agent} from profiles.getOcProfile,
  *   folded into the same per-invocation OPENCODE_CONFIG file),
  *   formatToolActivity, readOcAgentModels
@@ -287,7 +309,9 @@ async function runEngineProcess(opts) {
       ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
       AGENT_TASK_ID: taskId,
       CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0', // disable 600s background-task kill
-      ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(cwd, mcpConfig, ocProfileOverrides) } : {}),
+      // opencode's config file goes to user.workDir (outside the code cwd) — see
+      // writeOpencodeMcpConfig for why it must never land in the git worktree.
+      ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(user.workDir || os.tmpdir(), mcpConfig, ocProfileOverrides) } : {}),
     },
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
@@ -808,6 +832,7 @@ async function runEngineProcess(opts) {
 module.exports = {
   runEngineProcess,
   buildEngineCommand,
+  resolveEngineCwd,
   formatToolActivity,
   readOcAgentModels,
   // exposed for tests — MCP translation helpers (codex/opencode wiring)

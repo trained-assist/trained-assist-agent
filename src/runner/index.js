@@ -69,7 +69,7 @@ const {
 
 // Engine execution (spawn + stream-json + timeout/close) lives in claude-runner.js
 // (issue #942 P1.3) so the process machinery is a self-contained testable unit.
-const { runEngineProcess, buildEngineCommand, inputInspectionRows } = require('./claude-runner');
+const { runEngineProcess, buildEngineCommand, inputInspectionRows, resolveEngineCwd } = require('./claude-runner');
 
 const STREAM_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 3000;
@@ -1748,9 +1748,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     : systemPromptText;
 
   const opencodeModel = process.env.OPENCODE_MODEL || null;
+  // Resolve the code cwd ONCE and hand the identical value to the argv builder
+  // (codex `-C` on the fresh path) and the process spawner (spawn.cwd) — see
+  // resolveEngineCwd. This is what keeps `-C` and the actual process cwd from
+  // silently diverging once a distinct per-run code cwd (workspace/A2) exists.
+  const codeCwd = resolveEngineCwd(user);
   const [engineBin, engineArgs] = buildEngineCommand({
     engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel,
-    mcpConfig, systemPromptFile, user, resumeSessionId,
+    mcpConfig, systemPromptFile, user, cwd: codeCwd, resumeSessionId,
   });
 
   // Per-profile OpenCode model ladder (max|value|free|russian), resolved to the flat
@@ -1799,7 +1804,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     restartShutdown: () => restartShutdown,
     activeTimers, tgEdit, tgSend, outputCallback,
     engineBin, engineArgs, mcpConfig, ocProfileOverrides,
-    cwd: user.cwd || user.workDir,
+    cwd: codeCwd,
     // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
     // same 30s tick claude-runner.js already runs for the inactivity check, so a
     // future watchdog (step 2+) can tell "still alive, just slow" apart from "the
