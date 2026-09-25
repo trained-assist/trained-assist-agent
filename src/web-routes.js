@@ -4,6 +4,7 @@ const { webAuth } = require('./web-auth');
 const { listSessions, getSession, getCurrentSessionId } = require('./session-store');
 const { isSessionRunning, runTask, stopSessionTask } = require('./runner');
 const { userWorkDir, SYSTEM_ROOT } = require('./data-paths');
+const { newWebSessionId, webCanaryEnabled } = require('./core/web-conversation');
 
 // Per-task SSE emitters: taskId → EventEmitter
 const taskEmitters = new Map();
@@ -319,6 +320,12 @@ function prepareWebTaskFiles(username, task, fileRefs) {
 
 async function streamWebTask({ req, res, secrets, username, task, sessionId, projectId = null, fileRefs = [], requestId = null }) {
   const workDir = userWorkDir(username);
+  // Web ConversationRef canary (#1365 PR3): the run names its exact session.
+  // A new Web task gets its id minted HERE (not read back from the shared
+  // chat-0 pointer after the run), so parallel Web sessions never collapse.
+  const webExactSession = webCanaryEnabled(username);
+  const isNewWebSession = webExactSession && !sessionId;
+  if (isNewWebSession) sessionId = newWebSessionId();
   const taskId = requestId ? `${username}-web-${requestId}` : `${username}-web-${Date.now()}`;
 
   const emitter = new EventEmitter();
@@ -349,6 +356,10 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId, pro
     taskEmitters.delete(taskId);
   });
 
+  // Exact session known up front → the client can Stop / navigate a brand-new
+  // run before it finishes (legacy path only learns the id on 'done').
+  if (webExactSession) send({ type: 'session', sessionId });
+
   const finish = (eventName, payload) => {
     emitter.emit(eventName, payload);
     clearInterval(ping);
@@ -363,6 +374,7 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId, pro
     task,
     context: '',
     sessionId: sessionId || undefined,
+    ...(webExactSession && { webExactSession: true, forceNew: isNewWebSession }),
     secrets: { TELEGRAM_BOT_TOKEN: secrets.BOT_TOKEN, ...secrets },
     initialMsgId: null,
     pinnedMsgId: null,
@@ -374,7 +386,7 @@ async function streamWebTask({ req, res, secrets, username, task, sessionId, pro
     // active session id per-workDir, so read it back to tell the client which
     // session to navigate to (critical for brand-new tasks where sessionId was null).
     let realId = sessionId || null;
-    if (!realId) {
+    if (!realId && !webExactSession) {
       try { realId = getCurrentSessionId(workDir) || null; } catch {}
     }
     completeWebMutation(username, requestId, { state: 'done', sessionId: realId || null, taskId });
