@@ -504,19 +504,39 @@ function listGtd(workDir) {
 // Живёт в корне ПРОЕКТА (projectDir, см. projects.js), не в user.workDir —
 // это артефакт конкретной задачи, а не профиля. Читается ЗАНОВО на каждой
 // итерации (не кэшируется в gtd-записи), чтобы видеть отмеченные пункты.
+//
+// Файл — это ЖУРНАЛ: каждая новая задача дописывается новой `Goal:`-секцией в
+// конец. Поэтому активна ровно одна секция — последняя по порядку в файле, у
+// которой есть пункты; только её goal и items и возвращаются. Раньше пункты
+// ВСЕХ секций склеивались в один список, а goal брался из ПЕРВОЙ секции: GTD
+// вёл давно закрытую цель и вкидывал агенту весь бэклог проекта (инцидент
+// PR #1422 — агент трижды ответил «это не входит», GTD закрылся
+// complexity-escalated). Append-only порядок — надёжный признак «текущей»
+// секции; старые (в т.ч. отложенные) секции больше не воскрешаются.
+//
+// Каждый пункт несёт `line` (0-based номер строки в файле) — writeChecklistDone
+// правит чекбоксы ровно по этим строкам; иначе отметка активной секции
+// наложилась бы на первые N чекбоксов более старой секции.
 function readChecklist(projectDir) {
   if (!projectDir) return null;
   let raw;
   try { raw = fs.readFileSync(path.join(projectDir, CHECKLIST_FILE), 'utf8'); } catch { return null; }
-  const items = [];
-  let goal = null;
-  for (const line of raw.split('\n')) {
-    const item = line.match(/^\s*-\s*\[([ xX])\]\s*(.+)$/);
-    if (item) { items.push({ text: item[2].trim(), done: item[1].toLowerCase() === 'x' }); continue; }
-    const g = line.match(/^\s*#*\s*goal:\s*(.+)$/i);
-    if (g && !goal) goal = g[1].trim();
+  const lines = raw.split('\n');
+  const sections = [];
+  let cur = { goal: null, items: [] };
+  sections.push(cur);
+  for (let i = 0; i < lines.length; i++) {
+    const g = lines[i].match(/^\s*#*\s*goal:\s*(.+)$/i);
+    if (g) { cur = { goal: g[1].trim(), items: [] }; sections.push(cur); continue; }
+    const item = lines[i].match(/^\s*-\s*\[([ xX])\]\s*(.+)$/);
+    if (item) cur.items.push({ text: item[2].trim(), done: item[1].toLowerCase() === 'x', line: i });
   }
-  return { goal, items };
+  for (let s = sections.length - 1; s >= 0; s--) {
+    if (sections[s].items.length) return { goal: sections[s].goal, items: sections[s].items };
+  }
+  // Ни одного чекбокса — отдаём последний объявленный goal (fallback для
+  // originalTask) с пустыми items.
+  return { goal: sections[sections.length - 1].goal, items: [] };
 }
 
 // Незакрытые пункты + цель, для инъекции в reopen-промпт вместо усечённого task.
@@ -739,20 +759,34 @@ async function checklistCheapPrecheck(checklist, { username } = {}) {
   return { changed, items };
 }
 
-// Флипает только чекбоксы (по порядку встречи в файле), не трогая остальной текст —
-// безопасно для произвольного содержимого checklist.md (заголовки, Goal:, заметки).
+// Флипает только чекбоксы, не трогая остальной текст — безопасно для
+// произвольного содержимого checklist.md (заголовки, Goal:, заметки).
+// Пункты из readChecklist несут `line` — правим ровно эти строки. Порядковый
+// проход по всему файлу наложил бы активную секцию на первые её чекбоксы в
+// начале файла, т.е. затёр бы чужую (старшую) секцию. Для items без линии
+// (легаси-вызовы, тесты) остаётся прежний порядковый фолбэк.
 function writeChecklistDone(projectDir, items) {
   const fp = path.join(projectDir, CHECKLIST_FILE);
   let raw;
   try { raw = fs.readFileSync(fp, 'utf8'); } catch { return false; }
-  let idx = 0;
-  const lines = raw.split('\n').map(line => {
-    const m = line.match(/^(\s*-\s*\[)([ xX])(\]\s*)(.+)$/);
-    if (!m) return line;
-    const upd = items[idx]; idx++;
-    if (!upd) return line;
-    return `${m[1]}${upd.done ? 'x' : ' '}${m[3]}${m[4]}`;
-  });
+  const doneRe = /^(\s*-\s*\[)([ xX])(\]\s*)(.+)$/;
+  const lines = raw.split('\n');
+  if (items.length && items.every(it => Number.isInteger(it.line))) {
+    for (const it of items) {
+      const m = lines[it.line] && lines[it.line].match(doneRe);
+      if (!m) continue;
+      lines[it.line] = `${m[1]}${it.done ? 'x' : ' '}${m[3]}${m[4]}`;
+    }
+  } else {
+    let idx = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(doneRe);
+      if (!m) continue;
+      const upd = items[idx]; idx++;
+      if (!upd) continue;
+      lines[i] = `${m[1]}${upd.done ? 'x' : ' '}${m[3]}${m[4]}`;
+    }
+  }
   try { _atomicWrite(fp, lines.join('\n')); return true; }
   catch (e) { console.error('[gtd] writeChecklistDone:', e.message); return false; }
 }
@@ -801,6 +835,7 @@ function buildReopenMessage(rec) {
       : '• Если нет — сделай ещё одну попытку (можно другим путём, чем прошлая). ПЕРЕД работой создай GitHub issue на то, что собираешься сделать'
         + '\n  (или подними уже открытый issue с прошлого шага и двигай его), потом выполни. В конце напиши строкой: GTD: continue',
     '• Если задача оказалась существенно сложнее первоначальной оценки (нужно намного больше кода, затрагивает много новых компонентов) — не усложняй. Напиши строкой: GTD: escalated',
+    '• Если всё оставшееся — шаг, который может сделать ТОЛЬКО человек (живая проверка в чате, ручное решение), НЕ эскалируй и не выдумывай себе работу. Напиши строкой: GTD: blocked-on-human',
     '',
     summary || `Исходная задача: ${rec.originalTask || '(см. историю сессии)'}`,
   ].join('\n');
@@ -808,6 +843,10 @@ function buildReopenMessage(rec) {
 
 const DONE_RE      = /GTD:\s*done/i;
 const ESCALATED_RE = /GTD:\s*escalated/i;
+// Последний шаг — за человеком (живая проверка/ручное решение): GTD не может его
+// доделать и НЕ должен закрывать это как «задача сложнее, чем думали» — иначе
+// авто-цикл вхолостую жжёт попытки и врёт про сложность.
+const BLOCKED_RE   = /GTD:\s*blocked[-_ ]?on[-_ ]?human|GTD:\s*жд[её]т\s+человека/i;
 
 // Итог GTD-итерации, перезапущенной после рестарта (resumePendingTasks): исходный
 // .then() из runDue умер вместе с процессом, поэтому «GTD: done» некому разобрать —
@@ -818,6 +857,7 @@ function settleResumedGtd(workDir, sessionId, reply, { now = Date.now() } = {}) 
   const said = typeof reply === 'string' ? reply : '';
   if (DONE_RE.test(said)) rec.closedReason = 'done';
   else if (ESCALATED_RE.test(said)) rec.closedReason = 'complexity-escalated';
+  else if (BLOCKED_RE.test(said)) rec.closedReason = 'awaiting-human';
   else { rec.dueAt = now + rec.etaMinutes * 60 * 1000; writeGtd(workDir, rec); return rec; }
   rec.status = 'closed';
   writeGtd(workDir, rec);
@@ -1020,6 +1060,7 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
         const said = typeof reply === 'string' ? reply : '';
         const doneNow      = DONE_RE.test(said);
         const escalatedNow = ESCALATED_RE.test(said);
+        const blockedNow   = BLOCKED_RE.test(said);
         // Запись исчезла (сессия удалена / user-stop → clearGtd) — НЕ воскрешаем её
         // записью in-memory снапшота: намеренно закрытое должно остаться закрытым.
         const fresh = readGtd(workDir, _recSnap.sessionId);
@@ -1037,6 +1078,16 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
             `⚠️ GTD остановлен — задача оказалась сложнее первоначальной оценки.\n`
             + `Агент остановил попытки (было ${fresh.iterations}), чтобы не усложнять.\n`
             + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`,
+            _recSnap.threadId
+          ).catch(() => {});
+        } else if (blockedNow) {
+          fresh.status = 'closed'; fresh.closedReason = 'awaiting-human';
+          writeGtd(workDir, fresh);
+          console.log(`[gtd] closed ${_recSnap.sessionId}: awaiting-human`);
+          _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
+            `⏳ GTD остановлен — дальше только шаг за тобой (живая проверка/ручное действие).\n`
+            + `Задача: «${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}»\n`
+            + `Авто-доведение выключено, чтобы не гонять попытки вхолостую.`,
             _recSnap.threadId
           ).catch(() => {});
         } else if (fresh.iterations >= fresh.maxIterations) {
