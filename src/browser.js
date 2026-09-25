@@ -192,6 +192,19 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, extraServers } 
     };
   }
 
+  // Engineering skill lives in the sibling trained-assist-engineering checkout
+  // (issue #1418), same existence-gated pattern as hh-skills/freelance-skills.
+  // Its tools read host-derived `principal` from USER_ID (already in mcpToolEnv),
+  // never from the tool-call arguments.
+  const engineeringSkillIndex = path.join(__dirname, '..', '..', 'trained-assist-engineering', 'src', 'mcp-skills', 'index.js');
+  if (fs.existsSync(engineeringSkillIndex)) {
+    config.mcpServers['engineering-skills'] = {
+      command: 'node',
+      args: [engineeringSkillIndex],
+      env: mcpToolEnv,
+    };
+  }
+
   if (extraServers && Object.keys(extraServers).length > 0) {
     const { merged, skipped } = mergeAdapterServers(config.mcpServers, extraServers);
     config.mcpServers = merged;
