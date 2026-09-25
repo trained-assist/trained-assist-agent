@@ -1308,41 +1308,58 @@ ${recent || '(пока нет)'}
       // (still `invalid userId`/`missing fields`) so this is not a client-visible
       // behavior change, only an internal rename.
       const chatId = payload.chatId ?? payload.userId;
-      if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))) return json(res, 400, { error: 'invalid audience' });
-      if (initiatedAt != null && (!Number.isSafeInteger(initiatedAt) || initiatedAt < 0 || initiatedAt > Date.now() + 30000)) return json(res, 400, { error: 'invalid initiatedAt' });
-      if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return json(res, 400, { error: 'invalid threadId' });
-      if (!chatId || !username) return json(res, 400, { error: 'missing fields' });
+      // Every /run rejection is logged with its reason: the tg-bot outbox turns a 4xx into
+      // "⚠️ сервер отклонил (HTTP 400)" for the user, and an unlogged 400 is undiagnosable.
+      const reject = (status, body) => {
+        console.log(`[/run] ${status} ${body.error} user=${String(username).slice(0, 40)} requestId=${String(requestId || '-').slice(0, 140)}`);
+        return json(res, status, body);
+      };
+      if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience))) return reject(400, { error: 'invalid audience' });
+      if (initiatedAt != null && (!Number.isSafeInteger(initiatedAt) || initiatedAt < 0 || initiatedAt > Date.now() + 30000)) return reject(400, { error: 'invalid initiatedAt' });
+      if (threadId != null && (!Number.isSafeInteger(threadId) || threadId < 1)) return reject(400, { error: 'invalid threadId' });
+      if (!chatId || !username) return reject(400, { error: 'missing fields' });
       // task is optional when forceClaude=true (agent derives it from session's lastUserMessage)
-      if (!task && !forceClaude && !fileBase64 && !(fileRefs && fileRefs.length)) return json(res, 400, { error: 'missing fields' });
+      if (!task && !forceClaude && !fileBase64 && !(fileRefs && fileRefs.length)) return reject(400, { error: 'missing fields' });
       if (requestId && !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))
-        return json(res, 400, { error: 'invalid requestId' });
+        return reject(400, { error: 'invalid requestId' });
       if (!/^-?\d{1,20}$/.test(String(chatId))) {
         console.log('[/run] 400 invalid chatId (legacy field name userId):', chatId);
-        return json(res, 400, { error: 'invalid userId' });
+        return reject(400, { error: 'invalid userId' });
       }
       if (telegramUserId && !/^\d{1,20}$/.test(String(telegramUserId))) {
         console.log('[/run] 400 invalid telegramUserId:', telegramUserId);
-        return json(res, 400, { error: 'invalid telegramUserId' });
+        return reject(400, { error: 'invalid telegramUserId' });
       }
       if (!/^[a-zA-Z0-9_-]+$/.test(username) || username.length > 32) {
         console.log('[/run] 400 invalid username:', username);
-        return json(res, 400, { error: 'invalid username' });
+        return reject(400, { error: 'invalid username' });
+      }
+      // Replay of an already-accepted request (lost ACK, outbox retry across a restart) is
+      // acknowledged BEFORE content/delivery validation: the work already ran, so a stateful
+      // check that fails now must not surface a false "сервер отклонил" to the user.
+      if (requestId && typeof requestId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) {
+        const owner = audience && audience !== 'default' ? `${username}-${audience}` : username;
+        const seenId = `${owner}-${requestId}`;
+        const seenReceipt = path.join(process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data'), 'accepted-requests', `${seenId}.json`);
+        if (fs.existsSync(seenReceipt) || getPendingTasks().some(p => p.taskId === seenId)) {
+          return json(res, 202, { taskId: seenId, requestId, durable: true, duplicate: true });
+        }
       }
       if (sessionId && !/^[a-zA-Z0-9_-]+$/.test(sessionId))
-        return json(res, 400, { error: 'invalid sessionId' });
+        return reject(400, { error: 'invalid sessionId' });
       if (contextFromSession && !/^[a-zA-Z0-9_-]+$/.test(contextFromSession))
-        return json(res, 400, { error: 'invalid contextFromSession' });
+        return reject(400, { error: 'invalid contextFromSession' });
       if (projectId && !isValidProjectId(projectId)) {
         console.log('[/run] 400 invalid projectId:', projectId);
-        return json(res, 400, { error: 'invalid projectId' });
+        return reject(400, { error: 'invalid projectId' });
       }
       if (newProjectName && (typeof newProjectName !== 'string' || newProjectName.length > 200))
-        return json(res, 400, { error: 'invalid newProjectName' });
+        return reject(400, { error: 'invalid newProjectName' });
 
-      if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return json(res, 400, { error: 'invalid requestId' });
+      if (requestId && (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId))) return reject(400, { error: 'invalid requestId' });
       // Validate delivery before accepting durable work; never leak replies to the default bot.
       try { deliverySecrets(secrets, audience); }
-      catch (e) { return json(res, /not configured/.test(e.message) ? 503 : 400, { error: e.message }); }
+      catch (e) { return reject(/not configured/.test(e.message) ? 503 : 400, { error: e.message }); }
       const requestOwner = audience && audience !== 'default' ? `${username}-${audience}` : username;
       const dedupKey = requestId ? JSON.stringify([audience || 'default', username, String(chatId), requestId]) : null;
       // Per-key in-process mutex around check -> media -> journal -> receipt (#1302 §3.4):
@@ -1428,7 +1445,7 @@ ${recent || '(пока нет)'}
         if (Array.isArray(fileRefs)) {
           const uploadsDir = path.join(workDir, 'media', 'intake');
           for (const ref of fileRefs) {
-            if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) return json(res, 400, { error: 'invalid fileRef' });
+            if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) return reject(400, { error: 'invalid fileRef' });
             const src = path.join(BASE_USERS_DIR, username, 'media', 'intake-store', ref.id, 'data');
             try {
               const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
