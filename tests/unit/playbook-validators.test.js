@@ -1,0 +1,150 @@
+// Playbook validator registry (issue #1372 P3d-1): key → verdict. Unknown keys
+// must be inconclusive (never a silent pass); GitHub checks reuse the checklist
+// pre-check shape and are driven by injected fakes.
+import { describe, it, expect } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const {
+  createDefaultRegistry, evaluateValidation, evaluateItemValidations, parseValidation,
+} = require('../../src/playbook-validators');
+
+const item = (over = {}) => ({
+  id: 'item-1', title: 'Open PR', instructions: 'see https://github.com/acme/widgets/pull/7',
+  evidence_json: null, validation: {}, ...over,
+});
+
+describe('playbook-validators', () => {
+  it('unknown key → inconclusive with reason no-validator', async () => {
+    const r = await evaluateValidation('mystery_check', { item: item(), validation: true }, {});
+    expect(r).toMatchObject({ status: 'inconclusive' });
+    expect(r.evidence.reason).toBe('no-validator');
+  });
+
+  it('an empty registry makes every key inconclusive', async () => {
+    const results = await evaluateItemValidations(
+      item({ validation: { user_value_written: true } }), { registry: {} });
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ key: 'user_value_written', status: 'inconclusive' });
+  });
+
+  it('parseValidation accepts a JSON string (as stored in the DB) and rejects junk', () => {
+    expect(parseValidation('{"file_exists":"a.txt"}')).toEqual({ file_exists: 'a.txt' });
+    expect(parseValidation('not json')).toEqual({});
+    expect(parseValidation(null)).toEqual({});
+  });
+
+  it('file_exists passes for an existing file and fails for a missing one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pv-'));
+    try {
+      writeFileSync(join(dir, 'dist.js'), 'x');
+      const pass = await evaluateValidation('file_exists', { validation: 'dist.js', projectDir: dir }, createDefaultRegistry());
+      expect(pass.status).toBe('pass');
+      expect(pass.subject.relative).toBe('dist.js');
+
+      const fail = await evaluateValidation('file_exists', { validation: 'missing.js', projectDir: dir }, createDefaultRegistry());
+      expect(fail.status).toBe('fail');
+      expect(fail.evidence.reason).toBe('missing');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('file_exists without a project dir is inconclusive, not a pass', async () => {
+    const r = await evaluateValidation('file_exists', { validation: 'a.txt', projectDir: null }, createDefaultRegistry());
+    expect(r.status).toBe('inconclusive');
+    expect(r.evidence.reason).toBe('no-project-dir');
+  });
+
+  it('command_exit_zero reflects the exit code', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pv-'));
+    try {
+      const registry = createDefaultRegistry();
+      const pass = await evaluateValidation('command_exit_zero',
+        { validation: 'node -e "process.exit(0)"', projectDir: dir }, registry);
+      expect(pass.status).toBe('pass');
+      expect(pass.evidence.exit_code).toBe(0);
+
+      const fail = await evaluateValidation('command_exit_zero',
+        { validation: 'node -e "process.exit(3)"', projectDir: dir }, registry);
+      expect(fail.status).toBe('fail');
+      expect(fail.evidence.exit_code).toBe(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ci_green passes only when every check-run is completed+success', async () => {
+    const registry = createDefaultRegistry({
+      ghToken: () => 'token',
+      ghFetch: async (url) => {
+        if (url.endsWith('/pulls/7')) return { head: { sha: 'abc' } };
+        if (url.endsWith('/commits/abc/check-runs')) {
+          return { check_runs: [
+            { name: 'ci', status: 'completed', conclusion: 'success' },
+            { name: 'lint', status: 'completed', conclusion: 'success' },
+          ] };
+        }
+        return null;
+      },
+    });
+    const r = await evaluateValidation('ci_green', { item: item(), profileId: 'u1', validation: true }, registry);
+    expect(r.status).toBe('pass');
+    expect(r.subject.sha).toBe('abc');
+  });
+
+  it('ci_green fails when a check-run is red and is inconclusive with no runs', async () => {
+    const red = createDefaultRegistry({
+      ghToken: () => 'token',
+      ghFetch: async (url) => url.endsWith('/pulls/7')
+        ? { head: { sha: 'abc' } }
+        : { check_runs: [{ name: 'ci', status: 'completed', conclusion: 'failure' }] },
+    });
+    const fail = await evaluateValidation('ci_green', { item: item(), profileId: 'u1' }, red);
+    expect(fail.status).toBe('fail');
+    expect(fail.evidence.failing).toContain('ci');
+
+    const empty = createDefaultRegistry({
+      ghToken: () => 'token',
+      ghFetch: async (url) => url.endsWith('/pulls/7') ? { head: { sha: 'abc' } } : { check_runs: [] },
+    });
+    const inconclusive = await evaluateValidation('ci_green', { item: item(), profileId: 'u1' }, empty);
+    expect(inconclusive.status).toBe('inconclusive');
+    expect(inconclusive.evidence.reason).toBe('no-check-runs');
+  });
+
+  it('ci_green is inconclusive without a PR url or without a github token', async () => {
+    const registry = createDefaultRegistry({ ghToken: () => null, ghFetch: async () => null });
+    const noPr = await evaluateValidation('ci_green', { item: item({ instructions: 'no link' }), profileId: 'u1' }, registry);
+    expect(noPr.evidence.reason).toBe('no-pr-url');
+    const noToken = await evaluateValidation('ci_green', { item: item(), profileId: null }, registry);
+    expect(noToken.evidence.reason).toBe('no-github-token');
+  });
+
+  it('merged passes on merged:true, fails on an open PR', async () => {
+    const merged = createDefaultRegistry({
+      ghToken: () => 'token',
+      ghFetch: async () => ({ merged: true, merged_at: '2026-09-26T00:00:00Z', merge_commit_sha: 'deadbeef' }),
+    });
+    const pass = await evaluateValidation('merged', { item: item(), profileId: 'u1' }, merged);
+    expect(pass.status).toBe('pass');
+
+    const open = createDefaultRegistry({
+      ghToken: () => 'token', ghFetch: async () => ({ merged: false, state: 'open' }),
+    });
+    const fail = await evaluateValidation('merged', { item: item(), profileId: 'u1' }, open);
+    expect(fail.status).toBe('fail');
+  });
+
+  it('merged_and_deployed passes the merge but stays inconclusive on deploy', async () => {
+    const registry = createDefaultRegistry({
+      ghToken: () => 'token', ghFetch: async () => ({ merged: true }),
+    });
+    const r = await evaluateValidation('merged_and_deployed', { item: item(), profileId: 'u1' }, registry);
+    expect(r.status).toBe('inconclusive');
+    expect(r.evidence.reason).toBe('deploy-unverified');
+  });
+});

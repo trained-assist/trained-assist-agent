@@ -10,6 +10,10 @@ const G = require('../src/gtd-controller.js');
 const os = require('os'), fs = require('fs'), path = require('path');
 let pass = 0, fail = 0;
 function ok(c, m) { c ? (pass++) : (fail++, console.log('FAIL:', m)); }
+// A completed agent step records its validation rows + evidence before flipping
+// the item to done, inside runTask's async completion callback. `runDueDurable`
+// itself stays fire-and-forget, so drain pending callbacks before asserting.
+const drain = () => new Promise(r => setTimeout(r, 0));
 
 function freshStore(tag) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `gtd-durable-${tag}-`));
@@ -46,6 +50,7 @@ function activeContractTask(G, { goal, items, sessionId }) {
       secrets: {}, now: Date.now(), isTaskRunning: () => false,
       runTask: async (opts) => { prompted = opts.task; firedOpts = opts; return 'ok. DURABLE: done'; },
     });
+    await drain();
     const store = G1.durableStore();
     const item = store.listTaskItems(taskId, 'u1')[0];
     ok(fired === 1, `durable: one item fired (got ${fired})`);
@@ -72,6 +77,7 @@ function activeContractTask(G, { goal, items, sessionId }) {
       `durable: failure escalates free→standard and re-pends (got ${item.status}/${item.current_tier})`);
     await G2.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
       runTask: async () => 'fixed. DURABLE: done' });
+    await drain();
     item = store.listTaskItems(taskId, 'u1')[0];
     ok(item.status === 'done' && item.current_tier === 'standard', 'durable: retried item completes at escalated tier');
   }
@@ -182,6 +188,83 @@ function activeContractTask(G, { goal, items, sessionId }) {
       runTask: async (opts) => { firedOpts = opts; return 'DURABLE: done'; } });
     ok(firedOpts && firedOpts.engine === 'claude' && !firedOpts.ocProfile,
       `durable: legacy item still runs on claude with no oc profile (got ${firedOpts && firedOpts.engine}/${firedOpts && firedOpts.ocProfile})`);
+  }
+
+  // 9. programmatic item executes deterministically: NO runTask, verdicts recorded (P3d-1)
+  {
+    const G9 = freshStore('9');
+    const store = G9.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'programmatic smoke', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      items: [{ title: 'deterministic check', execution_kind: 'programmatic', validation: { command_exit_zero: 'true' } }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    let fired = 0;
+    const registry = {
+      command_exit_zero: async () => ({ status: 'pass', subject: { command: 'true' }, evidence: { exit_code: 0 } }),
+    };
+    const n = await G9.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, registry,
+      runTask: async () => { fired++; return 'DURABLE: done'; },
+    });
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    const validations = store.listValidations(r.task.id, 'u1');
+    ok(n === 1 && fired === 0, `programmatic: one item handled with no engine run (fired=${n}, runTask=${fired})`);
+    ok(item.status === 'done', `programmatic: item completed (got ${item.status})`);
+    ok(validations.length === 1 && validations[0].validator === 'command_exit_zero'
+      && validations[0].status === 'pass' && validations[0].criterion_id === 'crit',
+      `programmatic: validation row recorded (got ${JSON.stringify(validations.map(v => [v.validator, v.status, v.criterion_id]))})`);
+    ok(item.evidence_json && /command_exit_zero/.test(item.evidence_json) && item.completed_at > 0,
+      `programmatic: evidence + completed_at attached (got ${item.evidence_json})`);
+    ok(store.getTask(r.task.id, 'u1').status === 'done', 'programmatic: task completes when all items done');
+  }
+
+  // 10. an unregistered validation key is inconclusive and does NOT pass the step (P3d-1)
+  {
+    const G10 = freshStore('10');
+    const store = G10.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'inconclusive smoke', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      items: [{ title: 'self reported', execution_kind: 'programmatic', validation: { user_value_written: true } }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    let fired = 0;
+    await G10.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, registry: {},
+      runTask: async () => { fired++; return 'DURABLE: done'; },
+    });
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    const validations = store.listValidations(r.task.id, 'u1');
+    ok(fired === 0, `inconclusive: no engine run for programmatic step (runTask=${fired})`);
+    ok(validations.length === 1 && validations[0].status === 'inconclusive'
+      && validations[0].evidence_json && /no-validator/.test(validations[0].evidence_json),
+      `inconclusive: unregistered key recorded as inconclusive (got ${validations[0] && validations[0].status})`);
+    ok(item.status === 'pending' && item.attempt_count === 1,
+      `inconclusive: step does not pass and retries within budget (got ${item.status}/attempts=${item.attempt_count})`);
+    ok(store.getTask(r.task.id, 'u1').status === 'active', 'inconclusive: task is not marked done');
+  }
+
+  // 11. agent item records its validations + reply evidence on DURABLE: done (P3d-1)
+  {
+    const G11 = freshStore('11');
+    const taskId = activeContractTask(G11, { goal: 'agent evidence', items: ['self report'] });
+    const store = G11.durableStore();
+    await G11.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, registry: {},
+      runTask: async () => 'made the change. DURABLE: done',
+    });
+    // Validation recording for a completed agent step is async (the tick is
+    // fire-and-forget); drain microtasks before asserting the persisted rows.
+    await new Promise(r => setTimeout(r, 0));
+    const item = store.listTaskItems(taskId, 'u1')[0];
+    const validations = store.listValidations(taskId, 'u1');
+    ok(item.status === 'done', `agent: item completes on DURABLE done (got ${item.status})`);
+    ok(validations.length === 1 && validations[0].status === 'inconclusive',
+      `agent: self-reported validation recorded inconclusive (got ${JSON.stringify(validations.map(v => [v.validator, v.status]))})`);
+    ok(item.evidence_json && /made the change/.test(item.evidence_json) && item.completed_at > 0,
+      `agent: reply evidence attached (got ${item.evidence_json})`);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
