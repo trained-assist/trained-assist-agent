@@ -1,5 +1,5 @@
-Goal: PR2b — wire the host MCP source runtime (prepareRun/release) into runner/index.js, hermes-tools-run.js and every engine's .mcp.json, inert by default (issue #1358, #1374).
+Goal: #1372 P3a — activate contract plans + durable step budget (attempt_count/max_attempts, expireWaitingDeadlines, execution_timeout_seconds).
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1411
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1416
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live
