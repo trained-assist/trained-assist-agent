@@ -13,7 +13,7 @@ const os = require('os');
 const fs = require('fs');
 const { userWorkDir } = require('../data-paths');
 
-const { sendRejection } = require('../hh-rejection');
+const { sendRejection, REJECT_REASON_ACTION } = require('../hh-rejection');
 const { hydrateResume, buildResumeText, resumeNotice } = require('../hh-resume');
 const { hhFetch, hhPut, hhPostForm, readHhToken, refreshHhToken, readActiveVacancies } = require('../hh-utils');
 const { bullshitGuard } = require('../hh-bullshit-guard');
@@ -285,7 +285,7 @@ async function doSend(force) {
  */
 async function handleHhPublic(req, url, res, ctx) {
   const { readChatId, secrets, getSecretsCache, BASE_USERS_DIR, PORT,
-          getHhNegotiationsWithCache, syncHhMessagesToHistory, fetchAllHhNegotiations, hhCacheFile } = ctx;
+          getHhNegotiationsWithCache, syncHhMessagesToHistory, fetchAllHhNegotiations, getHhDiscardedWithCache, hhCacheFile } = ctx;
   const _secretsCache = getSecretsCache();
 
   function proactiveErrPage(msg) {
@@ -383,6 +383,19 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
     console.error('[hh/review] message sync error:', e.message);
   });
 
+  // Rejected candidates are not part of the review list, but a candidate can reply
+  // after being rejected. Fetch discard-stage negotiations and sync their threads so
+  // such replies surface as "ответил после отказа" instead of silently going unread.
+  let discarded = [];
+  try {
+    discarded = await getHhDiscardedWithCache(dataDir, username, vacancy.id, tokenData.access_token);
+    await syncHhMessagesToHistory(dataDir, username, discarded, tokenData.access_token, { incremental: true, cap: 30 }).catch(e => {
+      console.error('[hh/review] discard sync error:', e.message);
+    });
+  } catch (e) {
+    console.error('[hh/review] discard fetch error:', e.message);
+  }
+
   let lastScoredAt = null;
   try {
     const logPath = path.join(dataDir, 'hh', String(username), 'last-scoring.json');
@@ -395,6 +408,7 @@ if (req.method === 'GET' && url.pathname === '/hh/review') {
     vacancyId: vacancy.id,
     lastScoredAt,
     vacancies: activeVacancies,
+    discarded,
   });
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
@@ -794,7 +808,7 @@ if (req.method === 'POST' && url.pathname === '/hh/reject') {
   const results = [];
   for (const negId of negotiation_ids) {
     try {
-      await hhPut(`/negotiations/discard_vacancy_closed/${negId}`, tokenData2);
+      await hhPut(`/negotiations/${REJECT_REASON_ACTION}/${negId}`, tokenData2);
       results.push({ negotiation_id: negId, ok: true });
     } catch (e) { results.push({ negotiation_id: negId, ok: false, error: e.message }); }
   }
@@ -806,7 +820,8 @@ if (req.method === 'POST' && url.pathname === '/hh/reject') {
 if (req.method === 'POST' && url.pathname === '/hh/send-and-reject') {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const body = JSON.parse(await readBody(req));
-  const { username, negotiation_id, message, force } = body || {};
+  const { username, negotiation_id, force } = body || {};
+  const message = typeof body?.message === 'string' ? body.message.trim() : '';
   if (!username || !negotiation_id || !message) return json(res, 400, { error: 'missing fields' });
 
   const hhTokensBase = process.env.AGENT_TOKENS_DIR || path.join(os.homedir(), 'agent-tokens');
@@ -848,7 +863,7 @@ if (req.method === 'POST' && url.pathname === '/hh/send-and-reject') {
       historyFile: histFile2,
       message,
       send: text => hhPostForm(`/negotiations/${negotiation_id}/messages`, tokenData, { message: text }),
-      discard: () => hhPut(`/negotiations/discard_vacancy_closed/${negotiation_id}`, tokenData),
+      discard: () => hhPut(`/negotiations/${REJECT_REASON_ACTION}/${negotiation_id}`, tokenData),
     });
     console.log(`[hh/send-and-reject] user=${username} neg=${negotiation_id} ok=${result.ok}`);
     return json(res, 200, result);

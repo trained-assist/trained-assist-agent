@@ -58,6 +58,23 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     return hydrateResumes(results.flat(), { access_token: accessToken });
   }
 
+// Fetch discarded (rejected) negotiations for a vacancy. Kept out of
+// HH_REVIEW_STATES so rejected candidates never re-enter the review list or the
+// scorer; used only to sync post-rejection replies and surface them on the page.
+async function fetchDiscardedNegotiations(vacancyId, accessToken) {
+  const token = { access_token: accessToken };
+  let items = [];
+  let page = 0, totalPages = 1;
+  do {
+    const data = await hhFetch(`/negotiations/discard?vacancy_id=${vacancyId}&per_page=50&page=${page}`, token);
+    items = items.concat(data.items || []);
+    totalPages = data.pages ?? 1;
+    page++;
+    if (page >= 20) { console.warn('[hh] fetchDiscardedNegotiations: hit 20-page cap'); break; }
+  } while (page < totalPages);
+  return items.map(item => ({ ...item, _state: 'discard' }));
+}
+
   // Keyed by vacancy_id — profiles tracking several vacancies (readActiveVacancies)
   // switch between them via /hh/review tabs, and a single shared cache file would
   // thrash on every switch (always a miss against whichever vacancy was cached last),
@@ -96,6 +113,32 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
       fs.renameSync(tmp, cacheFile);
     } catch (e) { console.error('[hh-cache] write error:', e.message); }
     return { negotiations, synced_at };
+  }
+
+  function hhDiscardCacheFile(dataDir, username, vacancyId) {
+    return path.join(dataDir, 'hh', String(username), `negotiations-cache:${vacancyId}:discard.json`);
+  }
+
+  // Same 5-min TTL as the active-negotiations cache: a review-page reload (e.g. after
+  // archiving) must not hit HH again just to re-list discarded candidates.
+  async function getHhDiscardedWithCache(dataDir, username, vacancyId, accessToken, options = {}) {
+    const cacheFile = hhDiscardCacheFile(dataDir, username, vacancyId);
+    const CACHE_TTL_MS = 5 * 60 * 1000;
+    try {
+      const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      const ageMs = Date.now() - (cached.synced_at || 0);
+      if (!options.force && String(cached.vacancy_id) === String(vacancyId) && ageMs < CACHE_TTL_MS) {
+        return cached.negotiations;
+      }
+    } catch {}
+    const negotiations = await fetchDiscardedNegotiations(vacancyId, accessToken);
+    try {
+      fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+      const tmp = `${cacheFile}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ synced_at: Date.now(), vacancy_id: String(vacancyId), negotiations }), { mode: 0o600 });
+      fs.renameSync(tmp, cacheFile);
+    } catch (e) { console.error('[hh-discard-cache] write error:', e.message); }
+    return negotiations;
   }
 
   // Sync HH thread messages to local candidate history.
@@ -209,6 +252,18 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
     }).catch(e => { console.error(`[hh-bg] msg-sync error for ${username}/${vacancy.id}:`, e.message); return { synced: 0, newMessages: 0 }; });
     if (msgSync.newMessages > 0) console.log(`[hh-bg] msg-sync ${username}/${vacancy.id}: +${msgSync.newMessages} new messages across ${msgSync.synced} candidates`);
 
+    // Rejected candidates: sync their threads too, so a reply after rejection is
+    // stored locally (and shown on the review page) instead of waiting unread.
+    try {
+      const discarded = await fetchDiscardedNegotiations(vacancy.id, accessToken);
+      if (discarded.length) {
+        const dSync = await syncHhMessagesToHistory(dataDir, username, discarded, accessToken, { incremental: true, maxConcurrent: 4 });
+        if (dSync.newMessages > 0) console.log(`[hh-bg] discard msg-sync ${username}/${vacancy.id}: +${dSync.newMessages} new messages`);
+      }
+    } catch (e) {
+      console.error(`[hh-bg] discard msg-sync error for ${username}/${vacancy.id}:`, e.message);
+    }
+
     // Sync is independent of scoring setup. No LLM calls without an ATS config.
     if (!readAtsConfig(workDir, vacancy.id)) return accessToken;
 
@@ -319,6 +374,8 @@ function createHhNegotiations({ refreshHhToken, readChatId, getSecretsCache }) {
 
   return {
     fetchAllHhNegotiations,
+    fetchDiscardedNegotiations,
+    getHhDiscardedWithCache,
     hhCacheFile,
     getHhNegotiationsWithCache,
     syncHhMessagesToHistory,

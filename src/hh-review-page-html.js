@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { buildResumeText, resumeNotice } = require('./hh-resume');
+const { standardRejectionText, REJECTION_GREETING } = require('./hh-rejection');
 
 const BASE_USERS_DIR = process.env.USERS_DIR ||
   path.join(process.env.HOME || '/home/vova', 'users');
@@ -34,7 +35,11 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   } catch {}
 
 
-  const candidates = negotiations.map(neg => {
+  const candidates = negotiations.map(mapNeg);
+  // Rejected candidates are surfaced separately ("ответил после отказа") — never in
+  // the active/starred/archived lists and never scored.
+  const discardedCandidates = (opts.discarded || []).map(neg => ({ ...mapNeg(neg), is_discarded: true }));
+  function mapNeg(neg) {
     const r = neg.resume || {};
     const history = readHistory(neg.id);
     const ats = history.ats_result || null;
@@ -86,7 +91,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
         return msgs.length > 0 ? msgs[msgs.length - 1].role : null;
       })(),
     };
-  });
+  }
 
   function sortCandidates(list) {
     return [...list].sort((a, b) => {
@@ -112,6 +117,9 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   const dialogCandidates = sortCandidates(visibleCandidates.filter(c =>
     c.msg_from_us > 0 && c.msg_from_candidate > 0 && c.last_msg_role === 'employer' && !c.needs_reply
   ));
+  // Rejected candidates who wrote back after our rejection — the ones whose
+  // "почему?" would otherwise sit unread forever.
+  const repliedAfterReject = sortCandidates(discardedCandidates.filter(c => c.needs_reply));
 
   const colorMap = { 'ПРОПУСТИТЬ': '#16a34a', 'УТОЧНИТЬ': '#d97706', 'ОТКЛОНИТЬ': '#dc2626' };
   const bgMap = { 'ПРОПУСТИТЬ': '#f0fdf4', 'УТОЧНИТЬ': '#fffbeb', 'ОТКЛОНИТЬ': '#fef2f2' };
@@ -157,7 +165,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       : '';
 
     const isActionable = c.verdict && c.verdict !== 'ОТКЛОНИТЬ';
-    const isReject = c.verdict === 'ОТКЛОНИТЬ';
+    const isReject = c.verdict === 'ОТКЛОНИТЬ' && !c.is_discarded;
 
     const checkboxHtml = (isReject ? '' : `<label><input type="checkbox" class="card-cb" id="cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" ${isActionable && c.response_status !== 'archived' ? 'checked' : ''} onchange="onCheck()"> Отправить</label>`)
       + `<label><input type="checkbox" class="reject-cb" id="reject-cb-${i}" data-idx="${i}" data-score="${(c.score || 0).toFixed(1)}" onchange="onCheck()"> Отказать</label>`;
@@ -177,7 +185,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
       ? require('crypto').createHmac('sha256', agentSecret).update(username).digest('hex').slice(0, 16)
       : '';
     const profileBtn = ` <a href="candidate?neg_id=${esc(c.negotiation_id)}&username=${esc(username)}&token=${profileToken}&vacancy_id=${esc(vacancyId || '')}" target="_blank" class="hh-link-btn" title="Открыть профиль кандидата">👤 Профиль</a>`;
-    const nameHtml = `${esc(c.name)}${hhBtn}${profileBtn}`;
+    const nameHtml = `${esc(c.name)}${hhBtn}${profileBtn}${c.is_discarded ? ' <span class="verdict-badge" style="background:#7c3aed">↩️ ответил после отказа</span>' : ''}`;
 
     const hasDraft = !!c.draft_message;
     const msgLabel = c.already_sent ? 'Follow-up (уже писали)' : hasDraft ? 'Черновик сообщения' : 'Сообщение';
@@ -192,7 +200,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
              <label class="msg-label" style="color:#dc2626">Сообщение об отказе</label>
              <button class="btn btn-gen" id="gen-${i}" onclick="generateRejection(${i},'${esc(c.negotiation_id)}','${esc(c.name)}')" title="Сгенерировать отказное сообщение">✦ Сгенерировать отказ</button>
            </div>
-           <textarea class="msg-area" id="msg-${i}" rows="4">${hasDraft ? esc(c.draft_message) : ''}</textarea>
+           <textarea class="msg-area" id="msg-${i}" rows="4">${esc(standardRejectionText(c.first_name))}</textarea>
            <div class="btns">
              <button class="btn btn-send-reject" onclick="rejectWithMessage(${i},'${esc(c.negotiation_id)}')">✗ Отправить отказ</button>
              <button class="btn-copy" onclick="copyMsg(${i})">📋 Копировать</button>
@@ -245,6 +253,7 @@ function generateReviewPageHtml(negotiations, vacancyTitle, username, callbackBa
   const silentCardsHtml = buildCardsHtml(silentCandidates);
   const noContactCardsHtml = buildCardsHtml(noContactCandidates);
   const dialogCardsHtml = buildCardsHtml(dialogCandidates);
+  const postRejectCardsHtml = buildCardsHtml(repliedAfterReject);
   const allCardsHtml = buildCardsHtml(sorted);
 
   return `<!DOCTYPE html>
@@ -391,6 +400,7 @@ ${syncError ? `<p role="alert">${esc(syncError)}</p>` : ''}
   <button class="tab-btn" onclick="switchTab('silent',this)">😴 Молчат (${silentCandidates.length})</button>
   <button class="tab-btn" onclick="switchTab('nocontact',this)">📭 Ещё не писали (${noContactCandidates.length})</button>
   <button class="tab-btn" onclick="switchTab('dialog',this)">💬 Диалог (${dialogCandidates.length})</button>
+  ${repliedAfterReject.length ? `<button class="tab-btn" onclick="switchTab('postreject',this)">↩️ Ответили после отказа (${repliedAfterReject.length})</button>` : ''}
   <button class="tab-btn active" onclick="switchTab('all',this)">📨 Все (${sorted.length})</button>
 </div>
 <div id="tab-waiting" class="tab-panel">
@@ -405,6 +415,9 @@ ${syncError ? `<p role="alert">${esc(syncError)}</p>` : ''}
 <div id="tab-dialog" class="tab-panel">
   ${dialogCardsHtml.length === 0 ? '<p style="color:#94a3b8;padding:24px;text-align:center">Нет активных диалогов без ожидающих ответов.</p>' : dialogCardsHtml.join('')}
 </div>
+${repliedAfterReject.length ? `<div id="tab-postreject" class="tab-panel">
+  ${postRejectCardsHtml.join('')}
+</div>` : ''}
 <div id="tab-all" class="tab-panel active">
   ${allCardsHtml.join('')}
 </div>
@@ -419,6 +432,7 @@ const CALLBACK_BASE = '${callbackBase}';
 const HH_USER = '${esc(username)}';
 const HH_VACANCY_ID = '${esc(String(vacancyId || ''))}';
 const HH_PAGE_TOKEN = '${pageToken}';
+const REJECTION_GREETING = ${JSON.stringify(REJECTION_GREETING)};
 const done = new Set();
 async function checkResponseUpdates() {
   if (document.hidden) return;
@@ -716,8 +730,7 @@ async function sendAll() {
 
 function standardRejection(i) {
   const name = document.getElementById('card-' + i)?.dataset.firstName?.trim();
-  return (name ? name + ', здравствуйте! ' : 'Здравствуйте! ') +
-    'Спасибо за отклик и уделённое время. Мы изучили ваше резюме и решили продолжить с другими кандидатами. Желаем успехов в поиске работы!';
+  return (name ? name + ', здравствуйте! ' : 'Здравствуйте! ') + REJECTION_GREETING;
 }
 
 async function rejectWithMessage(i, negId) {
@@ -731,24 +744,40 @@ async function rejectWithMessage(i, negId) {
 
 async function rejectAll() {
   const cbs = [...document.querySelectorAll('.tab-panel.active .reject-cb:checked')];
-  const negIds = cbs.map(cb => document.getElementById('card-'+parseInt(cb.dataset.idx))?.dataset.neg || '').filter(Boolean);
-  if (!negIds.length || !confirm('Отказать на HH без сообщения: ' + negIds.length + ' кандидатов?')) return;
+  const targets = cbs.map(cb => {
+    const i = parseInt(cb.dataset.idx);
+    return { i, negId: document.getElementById('card-' + i)?.dataset.neg || '' };
+  }).filter(t => t.negId);
+  if (!targets.length) return;
+  if (!confirm('Отказать ' + targets.length + ' кандидатам? Каждому уйдёт стандартное сообщение об отказе со статусом «Не подходит».')) return;
   const rb = document.getElementById('rejectAllBtn');
-  rb.disabled = true; rb.textContent = '⏳ Отклоняю...';
-  try {
-    const res = await hhAction('/hh/reject', { negotiation_ids: negIds });
-    const succeeded = new Set((res.results || []).filter(r => r.ok).map(r => r.negotiation_id));
-    cbs.forEach(cb => {
-      const i = parseInt(cb.dataset.idx);
-      if (succeeded.has(document.getElementById('card-'+i)?.dataset.neg)) markDone(i);
-    });
-    onCheck();
-    const failed = negIds.filter(id => !succeeded.has(id)).length;
-    showToast(failed ? '⚠️ ' + failed + ' ошибок из ' + negIds.length : '✅ Отклонено ' + negIds.length + ' кандидатов');
-  } catch(e) {
-    showToast('❌ ' + e.message, true);
-    rb.disabled = false; rb.textContent = 'Отказать (' + negIds.length + ')';
+  rb.disabled = true;
+  let ok = 0, fail = 0;
+  // Sequential on purpose: /hh/send-and-reject is a two-step, persisted operation,
+  // and a burst of parallel two-step calls risks HH rate-limits mid-batch.
+  for (let k = 0; k < targets.length; k++) {
+    const t = targets[k];
+    const msg = standardRejection(t.i);
+    const ta = document.getElementById('msg-' + t.i);
+    if (ta) ta.value = msg;
+    rb.textContent = '⏳ ' + (k + 1) + '/' + targets.length + '…';
+    rejectionStatus(t.negId, '⏳ Отправляем отказ…', true);
+    try {
+      const d = await hhAction('/hh/send-and-reject', { negotiation_id: t.negId, message: msg });
+      if (d.blocked) { fail++; rejectionStatus(t.negId, 'Отказ не отправлен: ' + (d.reason || 'заблокировано'), false); continue; }
+      if (!d.ok) { fail++; rejectionStatus(t.negId, '⚠️ ' + (d.error || 'не подтверждено'), false); continue; }
+      ok++;
+      markDone(t.i);
+      rejectionStatus(t.negId, '✅ Отказ отправлен, кандидат переведён в «Не подходит».', true);
+    } catch(e) {
+      fail++;
+      rejectionStatus(t.negId, '⚠️ ' + e.message, false);
+    }
   }
+  onCheck();
+  rb.disabled = false;
+  rb.textContent = 'Отказать (' + document.querySelectorAll('.tab-panel.active .reject-cb:checked').length + ')';
+  showToast(fail ? '⚠️ ' + ok + ' ок / ' + fail + ' ошибок' : '✅ Отказано с сообщением: ' + ok, fail > 0);
 }
 
 onCheck();
