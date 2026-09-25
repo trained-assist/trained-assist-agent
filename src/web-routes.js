@@ -2,7 +2,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { webAuth } = require('./web-auth');
 const { listSessions, getSession, getCurrentSessionId } = require('./session-store');
-const { isSessionRunning, isSessionQueuedFor, runTask, stopSessionTask } = require('./runner');
+const { isTaskRunning, isSessionRunning, isSessionQueuedFor, runTask, stopSessionTask } = require('./runner');
 const { userWorkDir, SYSTEM_ROOT } = require('./data-paths');
 const { newWebSessionId, webCanaryEnabled } = require('./core/web-conversation');
 
