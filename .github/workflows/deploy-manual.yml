@@ -62,14 +62,17 @@ jobs:
             export ASSIST_DEPLOY_LOCKED=1
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             cd /home/vova/trained-assist-agent
-            git fetch origin "${{ github.sha }}"
-            if [ -n "$(git status --porcelain)" ]; then
-              echo "Live checkout has local changes; stashing before deploy..."
-              git stash --include-untracked
-            fi
-            export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
             export PREV_COMMIT=$(git rev-parse HEAD)
-            git reset --hard FETCH_HEAD
+            git fetch origin "${{ github.sha }}"
+            export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "FATAL: live checkout is dirty — refusing to deploy (no auto-stash). A session was working in the deploy directory."
+              git status --porcelain | head -20
+              exit 1
+            fi
+            git checkout --detach "$DEPLOY_TARGET_COMMIT"
+            git reset --hard "$DEPLOY_TARGET_COMMIT"
+            bash scripts/deploy-preflight.sh "$DEPLOY_TARGET_COMMIT"
             printf 'AGENT_SECRET=%s\nINN_DADATA_TOKEN=%s\nINN_DADATA_SECRET=%s\nINN_CHECKO_KEY=%s\nOPENAI_API_KEY=%s\nFAL_KEY=%s\nIDEOGRAM_API_KEY=%s\nRECRAFT_API_KEY=%s\nOPENROUTER_API_KEY=%s\nZEROCREDS_ADMIN_TOKEN=%s\nGITHUB_ISSUES_TOKEN=%s\nOPENCODE_MODEL=%s\nOPENCODE_PROFILE=%s\n' \
               '${{ secrets.AGENT_SECRET }}' \
               '${{ secrets.INN_DADATA_TOKEN }}' \
@@ -109,14 +112,17 @@ jobs:
             echo "==> Manual deploy triggered by ${{ github.actor }}. Reason: ${{ inputs.reason || 'not specified' }}"
             git config --global --add safe.directory /home/vova/trained-assist-agent
             cd /home/vova/trained-assist-agent
-            git fetch origin "${{ github.sha }}"
-            if [ -n "$(git status --porcelain)" ]; then
-              echo "Live checkout has local changes; stashing before deploy..."
-              git stash --include-untracked
-            fi
-            export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
             export PREV_COMMIT=$(git rev-parse HEAD)
-            git reset --hard FETCH_HEAD
+            git fetch origin "${{ github.sha }}"
+            export DEPLOY_TARGET_COMMIT=$(git rev-parse FETCH_HEAD)
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "FATAL: live checkout is dirty — refusing to deploy (no auto-stash). A session was working in the deploy directory."
+              git status --porcelain | head -20
+              exit 1
+            fi
+            git checkout --detach "$DEPLOY_TARGET_COMMIT"
+            git reset --hard "$DEPLOY_TARGET_COMMIT"
+            bash scripts/deploy-preflight.sh "$DEPLOY_TARGET_COMMIT"
             # ru-edge (src/ru-edge.js, issue #1288) has no Claude Code, no runner,
             # no MCP — only TELEGRAM_BOT_TOKEN and AGENT_SECRET are required.
             printf 'TELEGRAM_BOT_TOKEN=%s\nAGENT_SECRET=%s\nAGENT_PUBLIC_URL=%s\n' \
