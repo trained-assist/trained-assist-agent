@@ -9,10 +9,11 @@ const opts = { taskId: 'task', user: { id: 42, username: 'test' }, secrets: { BO
 
 // Execute the real runTask admission function with isolated infrastructure.
 // No server, subprocess, network or production journal is touched.
-// The ONLY gates left are the per-chat queue (one task per chat at a time) and
-// the global OOM guard (RAM + MAX_CONCURRENT_TASKS). Session-lane and
-// per-profile cap waits were removed — a stuck predecessor in the same chat is
-// the one case where the "waiting for previous work" message may still appear.
+// The ONLY gates are core admission (Telegram dialog lane + session writer
+// guard, src/core/admission.js) and the global OOM guard (RAM +
+// MAX_CONCURRENT_TASKS). Per-profile cap waits were removed — a busy
+// lane/session is the one case where the "waiting for previous work" message
+// may appear.
 function harness({ chatPending, run = async () => {}, taskOpts = opts, expectedToken = 'canonical-token' } = {}) {
   const source = fs.readFileSync(require.resolve('../src/runner'), 'utf8');
   const start = source.indexOf('function runTask(opts) {');
@@ -28,9 +29,13 @@ function harness({ chatPending, run = async () => {}, taskOpts = opts, expectedT
     STOP_TASK_INTENT: /$^/, GTD_STOP_INTENT: /$^/, WAKEUP_INTENT: /$^/, SKIP_TASK_INTENT: /$^/, ACTIVE_CHECKLIST_INTENT: /$^/, CHECKLIST_EDIT_INTENT: /$^/,
     isPreQueueQuickIntent: () => false,
     queuedSessions: new Set(),
-    chatQueue: {
-      hasPending: () => !!gate,
-      enqueue: (_id, fn) => gate ? gate.promise.then(fn) : Promise.resolve().then(fn),
+    queuedByOwner: new Map(), pendingSessionStops: new Set(),
+    ownerKey: (u, id) => `${u}\0${id}`, consumePendingStop: () => false,
+    legacyAdmissionScopes: () => ['lane:test'],
+    fromLegacyTelegram: () => null, sessionShadow: { shadowCompare: () => null },
+    admission: {
+      isBusy: () => !!gate,
+      run: (_scopes, fn) => gate ? gate.promise.then(fn) : Promise.resolve().then(fn),
     },
     savePendingTask: (id, data) => journal.set(id, data), clearPendingTask: id => journal.delete(id),
     tgEdit: async (token, chat, id, text) => { assert.equal(token, expectedToken); messages.push(text); return { ok: true }; },

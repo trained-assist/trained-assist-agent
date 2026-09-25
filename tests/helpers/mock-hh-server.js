@@ -173,16 +173,20 @@ function createMockHhServer(options = {}) {
 
   // Mutable per-test state
   const state = {
-    messages: {},      // negId → string[]
+    messages: {},      // negId → string[] | {text, role}[]
     moves: {},         // negId → string (action id)
     discarded: new Set(),
+    rejectActions: {}, // negId → discard action path suffix used
     resumeAccessDenied: false,
     invites: [],        // {resume_id, vacancy_id, message, send_sms}
   };
 
+  // Real HH collections: recorded employer states. There is deliberately NO
+  // 'discard' — HH 404s `/negotiations/discard`; rejections live in the
+  // action-named `discard_*` collections (see the GET handler below).
   const LIST_STATES = new Set([
     'response', 'consider', 'phone_interview', 'assessment',
-    'interview', 'offer', 'hired', 'discard', 'with_applicant_new',
+    'interview', 'offer', 'hired', 'with_applicant_new',
   ]);
 
   const server = http.createServer((req, res) => {
@@ -267,14 +271,25 @@ function createMockHhServer(options = {}) {
       });
     }
 
-    // GET /negotiations/{state}  (list by state)
+    // GET /negotiations/{collection}  (list by employer-state collection)
     const negList = p.match(/^\/negotiations\/([^/]+)$/);
-    if (req.method === 'GET' && negList && LIST_STATES.has(negList[1])) {
+    if (req.method === 'GET' && negList) {
       const stateFilter = negList[1];
       const vacId = u.searchParams.get('vacancy_id');
-      let items = negotiations.filter(n => n.state.id === stateFilter && !state.discarded.has(n.id));
-      if (vacId) items = items.filter(n => n.vacancy_id === vacId);
-      return send(200, { found: items.length, pages: 1, items });
+      // Real HH names collections after the ACTION that produced them: a rejected
+      // candidate appears under its exact `discard_*` action, never under a generic
+      // `discard` (which 404s). Mirror that so a wrong endpoint fails the test.
+      if (stateFilter.startsWith('discard_')) {
+        let items = negotiations.filter(n => state.rejectActions[n.id] === stateFilter);
+        if (vacId) items = items.filter(n => n.vacancy_id === vacId);
+        return send(200, { found: items.length, pages: 1, items });
+      }
+      if (LIST_STATES.has(stateFilter)) {
+        let items = negotiations.filter(n => n.state.id === stateFilter && !state.discarded.has(n.id));
+        if (vacId) items = items.filter(n => n.vacancy_id === vacId);
+        return send(200, { found: items.length, pages: 1, items });
+      }
+      // otherwise fall through to the single-negotiation lookup below
     }
 
     // GET /negotiations/{id}  (single negotiation)
@@ -288,12 +303,16 @@ function createMockHhServer(options = {}) {
     if (negMsg) {
       const negId = negMsg[1];
       if (req.method === 'GET') {
-        const sent = (state.messages[negId] || []).map((text, i) => ({
-          id: `msg-${negId}-${i}`,
-          text,
-          created_at: new Date(Date.now() - (state.messages[negId].length - i) * 3600 * 1000).toISOString(),
-          author: { participant_type: 'employer' },
-        }));
+        const sent = (state.messages[negId] || []).map((m, i) => {
+          const text = typeof m === 'string' ? m : m.text;
+          const role = typeof m === 'string' ? 'employer' : (m.role || 'employer');
+          return {
+            id: `msg-${negId}-${i}`,
+            text,
+            created_at: new Date(Date.now() - (state.messages[negId].length - i) * 3600 * 1000).toISOString(),
+            author: { participant_type: role === 'applicant' ? 'applicant' : 'employer' },
+          };
+        });
         const seed = negId === 'neg-001'
           ? [{ id: 'msg-seed-1', text: 'Здравствуйте, Алексей!', created_at: '2026-09-03T09:00:00+03:00', author: { participant_type: 'employer' } }]
           : [];
@@ -316,11 +335,13 @@ function createMockHhServer(options = {}) {
       return send(204, null);
     }
 
-    // PUT /negotiations/discard_vacancy_closed/{id}
-    const discard = p.match(/^\/negotiations\/discard_vacancy_closed\/([^/]+)$/);
+    // PUT /negotiations/{discard_action}/{id} — discard_by_employer is the correct
+    // reason for an open vacancy; discard_vacancy_closed only for a closing one.
+    const discard = p.match(/^\/negotiations\/(discard_[a-z_]+)\/([^/]+)$/);
     if (req.method === 'PUT' && discard) {
       if (state.failDiscard) { res.writeHead(503); return res.end(); }
-      state.discarded.add(discard[1]);
+      state.discarded.add(discard[2]);
+      state.rejectActions[discard[2]] = discard[1];
       return send(204, null);
     }
 
@@ -362,6 +383,7 @@ function createMockHhServer(options = {}) {
       state.messages = {};
       state.moves = {};
       state.discarded.clear();
+      state.rejectActions = {};
       state.resumeAccessDenied = false;
       state.invites = [];
     },

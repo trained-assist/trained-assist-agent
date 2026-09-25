@@ -16,9 +16,13 @@ class McpSkillSourceRegistry {
   #root; #sources = new Map(); #actions; #diagnostics = [];
 
   constructor({ config, root = process.env.MCP_SKILLS_ROOT || path.resolve(__dirname, '../..'),
-    actionRegistry = new ActionProviderRegistry() } = {}) {
+    actionRegistry = new ActionProviderRegistry(), reservedServerIds = [] } = {}) {
     this.#root = root;
     this.#actions = actionRegistry;
+    // Core-owned MCP server names (playwright, trained-skills, ...) can never be
+    // shadowed by an external source. An external source declaring a reserved
+    // mcpServerId is rejected entirely, exactly like any other collision.
+    const reserved = new Set(reservedServerIds);
     const input = config || JSON.parse(fs.readFileSync(path.join(__dirname, '../config/mcp-skill-sources.json'), 'utf8'));
     if (!input || input.version !== 1 || !Array.isArray(input.sources) ||
         Object.keys(input).some(k => !['version', 'sources'].includes(k))) {
@@ -52,7 +56,7 @@ class McpSkillSourceRegistry {
     const conflicts = new Set([...groups.values()].filter(g => g.length > 1).flat());
     const coreNames = new Set(actionRegistry.list().map(a => a.name));
     for (const s of candidates.sort((a, b) => a.id.localeCompare(b.id))) {
-      if (conflicts.has(s) || actionRegistry.getProvider(s.providerId) ||
+      if (conflicts.has(s) || reserved.has(s.mcpServerId) || actionRegistry.getProvider(s.providerId) ||
           s.approvedManifest.actions.some(a => coreNames.has(a.name))) {
         this.#diagnostics.push({ id: s.id, status: 'conflict' });
         continue;

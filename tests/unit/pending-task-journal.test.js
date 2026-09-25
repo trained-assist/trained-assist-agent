@@ -70,7 +70,7 @@ describe('pending-task journal', () => {
 describe('pending-task journal — terminal-phase safety net (watchdog step 1b)', () => {
   it('a thrown error during normal operation never leaves the journal stranded at phase=running', async () => {
     // Through the public runTask() entrypoint, the OUTER queue wrapper's own finally
-    // (chatQueue.enqueue(...).finally(() => { if (!restartShutdown) clearPendingTask(...) }))
+    // (admission.run(...).finally(() => { if (!restartShutdown) clearPendingTask(...) }))
     // already deletes the journal entry on every non-restart exit, including a thrown error —
     // so the observable end state here is "entry gone", same as before this change. What this
     // guards against is the INNER _runTask try/catch/finally regressing that: if it threw again

@@ -1,19 +1,14 @@
 'use strict';
-// Task admission for the runner: per-chat serialization + the global
-// RAM-aware concurrency semaphore. Extracted from runner.js (issue #942 P1.2)
-// so the queueing/admission logic is a self-contained, testable unit.
+// Task admission for the runner: scoped admission (Telegram dialog lane +
+// session writer guard, src/core/admission.js, epic #1365 PR2) + the global
+// RAM-aware concurrency semaphore. This module is the one place runner.js
+// reaches for queue/admission primitives.
 //
-// Per-chat serialization lives in runner-chat-queue.js — re-exported here as
-// `chatQueue` so this module is the one place runner.js reaches for
-// queue/admission primitives.
-//
-// There is intentionally NO per-session / per-profile / per-workDir locking:
-// a stale promise in those left chats saying "waiting for previous work" with
-// nothing running. The only gates are this per-chat queue (one task per
-// Telegram chat at a time — deliberate) and the global OOM guard below.
+// There is intentionally NO per-profile / per-project / per-workDir locking:
+// different dialogs and sessions of one profile run in parallel.
 
 const os = require('os');
-const chatQueue = require('../runner-chat-queue');
+const admission = require('../core/admission').createAdmission();
 
 // Global concurrency cap on live `claude` processes (across all profiles).
 // RAM is cheap and monitored externally, so this is deliberately generous;
@@ -61,7 +56,7 @@ async function _waitForRam() {
 }
 
 module.exports = {
-  chatQueue,
+  admission,
   MAX_CONCURRENT_TASKS,
   MIN_FREE_RAM_MB,
   _acquireSlot,

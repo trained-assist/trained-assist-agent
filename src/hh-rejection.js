@@ -1,5 +1,23 @@
 const fs = require('fs');
 
+// Employer-side rejection reason. `discard_vacancy_closed` is reserved for a
+// vacancy that is actually being closed (hh_bulk_reject). Rejecting a candidate
+// on a still-open vacancy MUST use `discard_by_employer` ("Не подходит"): the
+// closed-vacancy reason tells the candidate the vacancy is closed while it keeps
+// accepting responses, and HH can treat that as abuse of the reason.
+const REJECT_REASON_ACTION = 'discard_by_employer';
+
+// Single source of truth for the standard rejection text. The review page renders
+// it into every ОТКЛОНИТЬ card and the server/client both rebuild it from here, so
+// a rejection can never fall back to an LLM draft (invitations, "[Имя]" placeholders,
+// wrong-name greetings) that one click would send.
+const REJECTION_GREETING = 'Спасибо за отклик и уделённое время. Мы изучили ваше резюме и решили продолжить с другими кандидатами. Желаем успехов в поиске работы!';
+
+function standardRejectionText(firstName) {
+  const name = String(firstName || '').trim();
+  return (name ? name + ', здравствуйте! ' : 'Здравствуйте! ') + REJECTION_GREETING;
+}
+
 // Persist each external step: a retry must never resend a delivered message.
 async function sendRejection({ historyFile, message, send, discard }) {
   const read = () => fs.existsSync(historyFile) ? JSON.parse(fs.readFileSync(historyFile, 'utf8')) : { messages: [] };
@@ -49,4 +67,4 @@ async function sendRejection({ historyFile, message, send, discard }) {
   }
 }
 
-module.exports = { sendRejection };
+module.exports = { sendRejection, REJECT_REASON_ACTION, REJECTION_GREETING, standardRejectionText };

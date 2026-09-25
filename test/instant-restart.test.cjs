@@ -273,3 +273,14 @@ test('restart retains freelance audience (3rd bot, issue #1302) and failure noti
  const missing=resumeHarness({pending:[task({audience:'freelance',resumeAttempts:4})]});await missing.resume();
  assert.equal(missing.calls.length,0);
 });
+
+// Epic #1365 CH-08: recovery must not mint a new request identity.
+test('restart-resume carries the original rootTaskId and requestId into the new attempt', async () => {
+  const h = resumeHarness({ pending: [task({ taskId: 'alice-req9', requestId: 'req9' })] });
+  await h.resume();
+  assert.equal(h.runs[0].rootTaskId, 'alice-req9');
+  assert.equal(h.runs[0].requestId, 'req9');
+  const h2 = resumeHarness({ pending: [task({ taskId: 'alice-resume-1', rootTaskId: 'alice-req9', requestId: 'req9' })] });
+  await h2.resume();
+  assert.equal(h2.runs[0].rootTaskId, 'alice-req9', 'second restart keeps the FIRST id, not the resume id');
+});
