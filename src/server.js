@@ -1338,21 +1338,10 @@ ${recent || '(пока нет)'}
         const user = { id: chatId, name: username, username, profileId, workDir, cwd, telegramUserId: telegramUserId || null, audience: audience || 'default' };
         trackChat(chatId);
 
-        // OpenCode's models (minimax/GigaChat/DeepSeek) have no vision input, unlike Claude
-        // Code whose own Read tool hands images to the model natively — so a photo attachment
-        // is otherwise invisible to that engine (just an opaque path in the note below). Run it
-        // through vision OCR up front and fold the extracted text into the note. Claude/Codex are
-        // left alone: no known gap, and no point paying for a call the model doesn't need.
+        // One media pipeline for every ingress. Web bearer and /run both use
+        // intake-materializer for durable ref copy + fsync + image OCR notes.
         const runEngine = profiles.getEngine(workDir, chatId);
-        async function buildFileNote(filePath, mimeType) {
-          const typeNote = mimeType ? ` (${mimeType})` : '';
-          let note = `[Файл сохранён: ${filePath}${typeNote}. Временное медиа: TTL 48 часов. Если файл нужен проекту надолго, сохрани его в артефакты проекта.]`;
-          if (runEngine === 'opencode' && mimeType && mimeType.startsWith('image/') && secrets.OPENROUTER_API_KEY) {
-            const vision = await mediaVision.extractImageText({ filePath, mimeType, openrouterKey: secrets.OPENROUTER_API_KEY });
-            if (vision.ok) note += `\n[Распознано на изображении:\n${vision.text}]`;
-          }
-          return note;
-        }
+        const { buildFileNote, materializeFileRefs } = require('./intake-materializer');
 
         // Save attached file (base64) to workDir and prepend path info to the task.
         let effectiveTask = task || '';
@@ -1366,7 +1355,10 @@ ${recent || '(пока нет)'}
             try { fs.writeFileSync(fd, Buffer.from(fileBase64, 'base64')); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
             const dirFd = fs.openSync(uploadsDir, 'r');
             try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-            const fileNote = await buildFileNote(filePath, fileMimeType);
+            const fileNote = await buildFileNote({
+              filePath, mimeType: fileMimeType, engine: runEngine,
+              openrouterKey: secrets.OPENROUTER_API_KEY,
+            });
             effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
           } catch (e) {
             console.error('[/run] file save error:', e.message);
@@ -1374,35 +1366,21 @@ ${recent || '(пока нет)'}
           }
         }
 
-        // Copy durably-stored intake files (photos/voice/docs referenced by id,
-        // written via PUT /intake-files) into the task's media dir — same
-        // path/notice as the fileBase64 branch, just sourced from disk not the body.
-        if (Array.isArray(fileRefs)) {
-          const uploadsDir = path.join(workDir, 'media', 'intake');
-          for (const ref of fileRefs) {
-            if (!ref?.id || !/^[a-f0-9]{16,64}$/.test(ref.id)) return reject(400, { error: 'invalid fileRef' });
-            const src = path.join(BASE_USERS_DIR, username, 'media', 'intake-store', ref.id, 'data');
-            try {
-              const safeName = path.basename(ref.name || 'file').replace(/[^a-zA-Z0-9._\-() ]/g, '_').slice(0, 200);
-              fs.mkdirSync(uploadsDir, { recursive: true });
-              const filePath = path.join(uploadsDir, `${ref.id}-${safeName}`);
-              if (ref.storage === 'r2') {
-                await require('./r2-media').materializeR2({ ref, username, destination: filePath,
-                  gatewayUrl: process.env.MEDIA_GATEWAY_URL, secret: secrets.AGENT_SECRET });
-              } else {
-                if (ref.storage) throw new Error('Unknown media storage');
-                fs.copyFileSync(src, filePath);
-              }
-              const fd = fs.openSync(filePath, 'r');
-              try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-              const dirFd = fs.openSync(uploadsDir, 'r');
-              try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-              const fileNote = await buildFileNote(filePath, ref.mime);
-              effectiveTask = effectiveTask ? `${fileNote}\n\n${effectiveTask}` : fileNote;
-            } catch (e) {
-              console.error('[/run] fileRef copy error:', e.message);
-              return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
-            }
+        // Durably-stored refs use the same materialization/OCR implementation
+        // as the external web bearer ingress.
+        if (Array.isArray(fileRefs) && fileRefs.length) {
+          try {
+            const prepared = await materializeFileRefs({
+              workDir, username, fileRefs, task: effectiveTask, engine: runEngine,
+              openrouterKey: secrets.OPENROUTER_API_KEY,
+              gatewayUrl: process.env.MEDIA_GATEWAY_URL, agentSecret: secrets.AGENT_SECRET,
+            });
+            effectiveTask = prepared.task;
+            fileRefs = prepared.fileRefs;
+          } catch (e) {
+            if (e.statusCode === 400) return reject(400, { error: e.message });
+            console.error('[/run] fileRef materialize error:', e.cause?.message || e.message);
+            return json(res, 503, { error: 'attachment not persisted; retry with the same requestId' });
           }
         }
 
