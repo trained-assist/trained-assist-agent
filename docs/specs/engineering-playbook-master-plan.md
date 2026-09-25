@@ -153,14 +153,87 @@ Issue не заведён.
 
 ### Разрыв 4 — вынос плейбуков + дефолт по аудитории (P5)
 
-- ✅ `playbooks/development.json` (инженерный) — merged.
+- 🟡 `playbooks/development.json` (инженерный) — **должен переехать** из `trained-assist-agent`
+  в `trained-assist-engineering/playbooks/` (см. §«Доменный вынос» ниже). Пока в ядре.
 - 🟡 `playbooks/freelance-project.json` — draft PR `trained-assist-freelance-skill#20`
-  (sibling-репо, резолвится store'ом).
+  (sibling-репо, резолвится store'ом) — **правильный образец** для инженерного.
 - 🔵 выставочный плейбук (сейчас скрипты `exhibition-pipeline`) — не начат.
 - 🔵 `AUDIENCE_DEFAULT_PLAYBOOK` (`src/persona.js`) — дефолт плейбука по аудитории
   (freelance/engineer/recruiter): открытый вопрос epic (#1372 Q6).
 - 🔵 `docs/playbooks.md` (как писать/править/запускать) + апдейт `requirements-log.md`
   и каталога `00-meta.js`.
+
+---
+
+## Доменный вынос инженерного плейбука (P5)
+
+**Правило репо** (`CLAUDE.md` → Repos): predetermined-domain functionality живёт в
+domain skill server, а Control Plane (`trained-assist-agent`) держит только
+core/cross-domain. Значит:
+
+```
+trained-assist-agent/                 ← ЯДРО: schema + механика, но НЕ сам плейбук
+  contracts/playbook.schema.json      ← контракт (остаётся)
+  src/playbook-{store,compiler,executor,authoring}.js
+  src/gtd-controller.js               ← исполнитель (остаётся)
+  playbooks/                          ← system-fallback, НЕ доменный дом (см. «opt-in»)
+
+trained-assist-engineering/           ← ДОМЕН: инженерные плейбуки
+  playbooks/development.json          ← Playbook v1 (переехал сюда)
+  playbooks/*.md                      ← существующие prose-процедуры (отдельно, не v1)
+
+trained-assist-freelance-skill/       ← ДОМЕН: фриланс
+  playbooks/freelance-project.json    ← уже здесь (draft PR #20)
+```
+
+Резолвер уже умеет это: `PlaybookStore` смотрит **profile → sibling → system**
+(`src/playbook-store.js`), а sibling-лист — `DEFAULT_SIBLING_REPOS`. Нужно лишь
+добавить `trained-assist-engineering` в этот список (сегодня там только
+`freelance-skill` и `hh-skill`) и убрать доменный файл из ядра.
+
+### Плейбук — opt-in, а не ядровая зависимость
+
+**Инвариант: отсутствие плейбука `development` не ломает ничего.** Агенты в этом
+случае просто кодинг как умеют; никто не блокируется, ошибок нет. Пользователь
+может держать sibling-репо подключённым или нет — оба состояния валидны.
+
+Точки, где это должно соблюдаться:
+
+| Точка | Поведение при отсутствующем sibling/плейбуке |
+|-------|----------------------------------------------|
+| `playbook_list` | просто не содержит `development` (diagnostics пуст) — уже так |
+| `playbook_get id=development` | `{ error: "playbook not found" }` как **данные**, не throw |
+| `playbook_run id=development` | `PLAYBOOK_NOT_FOUND` — вызывающий агент решает, что делать; ядро живо |
+| `ba_development_playbook` | **не** `require` файла из ядра: читает реестр; при отсутствии возвращает `{ available:false, message:"плейбук не подключён — работай как обычно" }` |
+| `runDueDurable` | исполняет только уже созданные планы; без плейбука планов нет → ничего не фаерится |
+| `00-meta.js` каталог | `ba_development_playbook` показывается как opt-in, не «всегда доступен» |
+
+`src/development-playbook.js` (хардкод-stages в ядре) **удаляется** — источником
+становится `playbooks/development.json` в домене. `ba_development_playbook`
+перестаёт быть `require('../../development-playbook')` и читает реестр через
+`PlaybookStore`, как `playbook_get`.
+
+### Ядро-фallback: дублировать или нет?
+
+Решение (владелец, 2026-09-26): **не дублировать**. Плейбук живёт только в домене.
+Если sibling-репо не смонтирован — плейбук просто не виден. Ядро не хранит копию
+(иначе неизбежен рассинхрон двух файлов). `playbooks/` в ядре остаётся как место
+для system-плейбуков **cross-domain** (если такие появятся), но не для инженерного.
+
+### Проверка
+
+```bash
+# из trained-assist-agent, sibling-чекаут рядом
+node -e "
+const { PlaybookStore } = require('./src/playbook-store');
+const pb = new PlaybookStore({ profileId:'demo' }).get('development');
+console.log(pb ? pb.id + ' v' + pb.version + ' source=' + pb.source : 'not resolved');
+"
+# ожидаем: development v1 source=sibling  (при наличии trained-assist-engineering)
+#          not resolved                   (при отсутствии — это НЕ ошибка)
+```
+
+
 
 ---
 
