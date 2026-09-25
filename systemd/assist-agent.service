@@ -10,7 +10,10 @@ User=vova
 WorkingDirectory=/home/vova/trained-assist-agent
 # Refuse to serve anything but the revision deploy put in the live directory
 # (issue #1391). Repairs a clean session switch; refuses a dirty tree.
-ExecStartPre=/bin/bash /home/vova/trained-assist-agent/scripts/live-dir-guard.sh
+# Run the guard from OUTSIDE the repo tree: the tree is what it is guarding, so
+# reading the check itself from there would let a session alter its own guard.
+# deploy.sh installs this root-owned copy from the trusted, validated target.
+ExecStartPre=/bin/bash /usr/local/lib/assist/live-dir-guard.sh
 # Kill any process still holding port 8080 before we try to bind.
 # Uses lsof (more reliable than fuser across distros); sleep 1 gives the
 # kernel time to release the socket before the new server calls listen().

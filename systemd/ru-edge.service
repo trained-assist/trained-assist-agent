@@ -7,6 +7,10 @@ OnFailure=assist-agent-notify-failure.service
 Type=simple
 User=vova
 WorkingDirectory=/home/vova/trained-assist-agent
+# Refuse to serve anything but the revision deploy put in the live directory
+# (issue #1391) — same guard as the GCP unit, run from outside the repo tree so
+# a session cannot alter the check itself. deploy-ru-edge.sh installs it.
+ExecStartPre=/bin/bash /usr/local/lib/assist/live-dir-guard.sh
 ExecStartPre=/bin/bash -c 'pids=$(lsof -ti tcp:8080 2>/dev/null); [ -n "$pids" ] && { echo "[pre-start] killing PIDs on :8080: $pids"; kill -9 $pids 2>/dev/null; sleep 1; }; true'
 ExecStart=/usr/bin/node src/ru-edge.js
 KillMode=mixed

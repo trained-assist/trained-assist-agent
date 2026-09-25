@@ -136,3 +136,20 @@ test('the live service declares the startup guard as ExecStartPre', () => {
   const unit = fs.readFileSync(path.resolve(__dirname, '../systemd/assist-agent.service'), 'utf8');
   assert.match(unit, /ExecStartPre=.*live-dir-guard\.sh/);
 });
+
+test('the guard runs from OUTSIDE the repo tree (a session cannot alter its own check)', () => {
+  for (const name of ['assist-agent.service', 'ru-edge.service']) {
+    const unit = fs.readFileSync(path.resolve(__dirname, '../systemd', name), 'utf8');
+    assert.match(unit, /ExecStartPre=\/bin\/bash \/usr\/local\/lib\/assist\/live-dir-guard\.sh/, `${name} must run the out-of-tree guard`);
+    assert.doesNotMatch(unit, /ExecStartPre=\/bin\/bash \/home\/vova\/trained-assist-agent\/scripts\/live-dir-guard\.sh/, `${name} must not run the in-tree guard`);
+  }
+});
+
+test('deploy scripts install the guard out-of-tree, root-owned, before the unit', () => {
+  for (const name of ['deploy.sh', 'deploy-ru-edge.sh']) {
+    const body = fs.readFileSync(path.resolve(__dirname, '../scripts', name), 'utf8');
+    assert.match(body, /GUARD_DST="\/usr\/local\/lib\/assist\/live-dir-guard\.sh"/, `${name} must target the out-of-tree guard path`);
+    assert.match(body, /sudo cp "\$GUARD_SRC" "\$GUARD_DST"/, `${name} must install the guard`);
+    assert.match(body, /sudo chown root:root "\$GUARD_DST"/, `${name} must make the guard root-owned`);
+  }
+});

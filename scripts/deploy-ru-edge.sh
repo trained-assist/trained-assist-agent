@@ -8,6 +8,11 @@ set -Eeuo pipefail
 
 SERVICE="ru-edge"
 REPO_DIR="${REPO_DIR:-$(pwd)}"
+# Same live-dir guard contract as scripts/deploy.sh (issue #1391): the exact
+# revision this deploy put in the live directory, read by the systemd
+# ExecStartPre guard. Kept outside the repo tree so it never dirties the checkout.
+MARKER="${LIVE_DIR_MARKER:-${AGENT_DATA_DIR:-/home/vova/agent-data}/deployed-sha}"
+export MARKER
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
   exec 9>"${ASSIST_DEPLOY_LOCK_FILE:-$HOME/.assist-deploy.lock}"
   flock -n 9 || { echo "Another deploy owns the lock"; exit 1; }
@@ -27,7 +32,9 @@ rollback() {
   fi
   echo "==> Rolling back to $PREV_COMMIT..."
   sudo systemctl stop "$SERVICE" || return 1
+  git -C "$REPO_DIR" checkout --detach "$PREV_COMMIT" || return 1
   git -C "$REPO_DIR" reset --hard "$PREV_COMMIT" || return 1
+  printf '%s\n' "$PREV_COMMIT" > "$MARKER" 2>/dev/null || true
   if [ "$DEPS_SWAPPED" = "1" ]; then
     rm -rf "$REPO_DIR/node_modules" || return 1
     mv "$OLD_DEPS" "$REPO_DIR/node_modules" || return 1
@@ -69,6 +76,17 @@ if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; t
   (cd "$REPO_DIR" && npx playwright install chromium --with-deps 2>&1 | tail -5) || true
 fi
 
+# Install the live-dir guard OUTSIDE the repo tree (#1391) — see scripts/deploy.sh
+# for the rationale. systemd's ExecStartPre runs this root-owned copy, so a session
+# editing the repo tree cannot change the check that gates serving that tree.
+GUARD_SRC="$REPO_DIR/scripts/live-dir-guard.sh"
+GUARD_DST="/usr/local/lib/assist/live-dir-guard.sh"
+echo "==> Installing live-dir guard outside the repo tree ($GUARD_DST)..."
+sudo mkdir -p "$(dirname "$GUARD_DST")"
+sudo cp "$GUARD_SRC" "$GUARD_DST"
+sudo chown root:root "$GUARD_DST"
+sudo chmod 0755 "$GUARD_DST"
+
 echo "==> Installing systemd unit file..."
 UNIT_SRC="$REPO_DIR/systemd/${SERVICE}.service"
 UNIT_DST="/etc/systemd/system/${SERVICE}.service"
@@ -106,6 +124,8 @@ fi
 
 echo "==> Ensuring data directories exist..."
 sudo -u vova mkdir -p /home/vova/agent-tokens /home/vova/users
+mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
+printf '%s\n' "$(git -C "$REPO_DIR" rev-parse HEAD)" > "$MARKER"
 
 # ── Downtime window starts here ──────────────────────────────────────────────
 

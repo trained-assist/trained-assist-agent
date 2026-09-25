@@ -98,6 +98,19 @@ if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; t
   (cd "$REPO_DIR" && npx playwright install chromium --with-deps 2>&1 | tail -5) || true
 fi
 
+# Install the live-dir guard OUTSIDE the repo tree (#1391). The guard decides
+# whether the live tree is allowed to serve; if systemd read it from that tree,
+# a session could change the check itself (the guard would trust its own input).
+# It is installed root-owned from the trusted, preflight-validated target commit,
+# and both systemd units run this copy via ExecStartPre.
+GUARD_SRC="$REPO_DIR/scripts/live-dir-guard.sh"
+GUARD_DST="/usr/local/lib/assist/live-dir-guard.sh"
+echo "==> Installing live-dir guard outside the repo tree ($GUARD_DST)..."
+sudo mkdir -p "$(dirname "$GUARD_DST")"
+sudo cp "$GUARD_SRC" "$GUARD_DST"
+sudo chown root:root "$GUARD_DST"
+sudo chmod 0755 "$GUARD_DST"
+
 echo "==> Installing systemd unit file..."
 UNIT_SRC="$REPO_DIR/systemd/${SERVICE}${UNIT_VARIANT}.service"
 UNIT_DST="/etc/systemd/system/${SERVICE}.service"
