@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { mergeAdapterServers } = require('./mcp-source-runtime');
 
 // Services whose cookies we know how to inject into Playwright
 const COOKIE_DOMAINS = {
@@ -73,8 +74,13 @@ function buildStorageState(tokensDir) {
 /**
  * Writes per-user .mcp.json with Playwright MCP scoped to this user's Chrome profile.
  * If the user has captured service cookies (via Chrome extension), injects them via --storage-state.
+ *
+ * `extraServers` (optional): adapter server descriptors materialized by the host MCP
+ * source runtime (src/mcp-source-runtime.js, PR2b) for this one run — e.g. an engineering
+ * skill source. Merged in via mergeAdapterServers(), which never lets an extra server
+ * shadow a core name (playwright, trained-skills, hh-skills, freelance-skills).
  */
-function writeMcpConfig(workDir, userId, { userName, userHandle } = {}) {
+function writeMcpConfig(workDir, userId, { userName, userHandle, extraServers } = {}) {
   // Note: --user-data-dir creates a persistent context, which is incompatible
   // with --storage-state (Playwright limitation). We rely on --storage-state
   // for both cookie injection and session persistence. Per-user isolation is
@@ -184,6 +190,12 @@ function writeMcpConfig(workDir, userId, { userName, userHandle } = {}) {
       args: [freelanceSkillIndex],
       env: mcpToolEnv,
     };
+  }
+
+  if (extraServers && Object.keys(extraServers).length > 0) {
+    const { merged, skipped } = mergeAdapterServers(config.mcpServers, extraServers);
+    config.mcpServers = merged;
+    if (skipped.length > 0) console.warn('[browser] extraServers skipped (core name shadow):', skipped.join(', '));
   }
 
   const configPath = path.join(workDir, '.mcp.json');
