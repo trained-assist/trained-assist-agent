@@ -24,11 +24,14 @@ function freshStore(tag) {
   return require('../src/gtd-controller.js');
 }
 
-function activeContractTask(G, { goal, items, sessionId }) {
+function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
   const store = G.durableStore();
   const r = store.createPlan({
     profile_id: 'u1', goal, user_value: 'user value', session_id: sessionId || null,
     acceptance_criteria: [{ description: 'c' }],
+    // Deterministic mode by default: these wiring cases assert the registry path,
+    // not the P3d-1b LLM layer (which is covered by cases 12/13 + unit tests).
+    execution_policy: executionPolicy || { validation_mode: 'programmatic' },
     items: items.map(t => ({
       title: t, execution_kind: 'agent', executor_role: 'developer',
       minimum_model_level: 'bachelor', context_budget: 'small',
@@ -197,6 +200,7 @@ function activeContractTask(G, { goal, items, sessionId }) {
     const r = store.createPlan({
       profile_id: 'u1', goal: 'programmatic smoke', user_value: 'uv',
       acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
       items: [{ title: 'deterministic check', execution_kind: 'programmatic', validation: { command_exit_zero: 'true' } }],
     });
     store.updateTask(r.task.id, 'u1', { status: 'active' });
@@ -227,6 +231,7 @@ function activeContractTask(G, { goal, items, sessionId }) {
     const r = store.createPlan({
       profile_id: 'u1', goal: 'inconclusive smoke', user_value: 'uv',
       acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
       items: [{ title: 'self reported', execution_kind: 'programmatic', validation: { user_value_written: true } }],
     });
     store.updateTask(r.task.id, 'u1', { status: 'active' });
@@ -265,6 +270,63 @@ function activeContractTask(G, { goal, items, sessionId }) {
       `agent: self-reported validation recorded inconclusive (got ${JSON.stringify(validations.map(v => [v.validator, v.status]))})`);
     ok(item.evidence_json && /made the change/.test(item.evidence_json) && item.completed_at > 0,
       `agent: reply evidence attached (got ${item.evidence_json})`);
+  }
+
+  // 12. programmatic+llm: an unregistered key is decided by the injected LLM and
+  // completes the step when the LLM passes it (P3d-1b)
+  {
+    const G12 = freshStore('12');
+    const store = G12.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'llm validation', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic+llm' },
+      items: [{ title: 'write the user scenario', execution_kind: 'programmatic', validation: { user_value_written: true } }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    let fired = 0;
+    const llmCalls = [];
+    await G12.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, registry: {},
+      llmValidate: async (ctx) => { llmCalls.push(ctx.key); return { status: 'pass', reason: 'scenario doc has value + 2 ordered steps' }; },
+      runTask: async () => { fired++; return 'DURABLE: done'; },
+    });
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    const validations = store.listValidations(r.task.id, 'u1');
+    ok(fired === 0 && llmCalls.length === 1 && llmCalls[0] === 'user_value_written',
+      `programmatic+llm: no engine, llm consulted once for the unknown key (llm=${JSON.stringify(llmCalls)})`);
+    ok(item.status === 'done', `programmatic+llm: step completes on the llm pass (got ${item.status})`);
+    ok(validations.length === 1 && validations[0].status === 'pass'
+      && /"source":"llm"/.test(validations[0].evidence_json || ''),
+      `programmatic+llm: llm verdict recorded (got ${validations[0] && validations[0].status}/${validations[0] && validations[0].evidence_json})`);
+    ok(store.getTask(r.task.id, 'u1').status === 'done', 'programmatic+llm: task completes when the step passes');
+  }
+
+  // 13. programmatic mode ignores the LLM entirely: same step stays inconclusive
+  {
+    const G13 = freshStore('13');
+    const store = G13.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'deterministic only', user_value: 'uv',
+      acceptance_criteria: [{ id: 'crit', description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'write the user scenario', execution_kind: 'programmatic', validation: { user_value_written: true } }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    let fired = 0;
+    let llmCalls = 0;
+    await G13.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, registry: {},
+      llmValidate: async () => { llmCalls++; return { status: 'pass', reason: 'should not be consulted' }; },
+      runTask: async () => { fired++; return 'DURABLE: done'; },
+    });
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    const validations = store.listValidations(r.task.id, 'u1');
+    ok(fired === 0 && llmCalls === 0, `programmatic: llm never consulted (runTask=${fired}, llm=${llmCalls})`);
+    ok(validations.length === 1 && validations[0].status === 'inconclusive'
+      && /no-validator/.test(validations[0].evidence_json || ''),
+      `programmatic: unregistered key stays inconclusive (got ${validations[0] && validations[0].status})`);
+    ok(item.status === 'pending', `programmatic: step does not pass (got ${item.status})`);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
