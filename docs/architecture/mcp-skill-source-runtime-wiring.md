@@ -142,7 +142,7 @@ RunBinding v1
 ### 3.2 Путь `tools/call`
 
 ```text
-authenticate run/provider capability
+load + validate pinned RunBinding / adapter lease
 → ensure run admits new calls
 → resolve host resource binding + check current resource ownership
 → validate action name/args/trigger against pinned registry
@@ -280,10 +280,10 @@ Timeout после dispatch mutation → `unknown/OUTCOME_UNKNOWN`, без auto-
   releases/<source>/<release>/  # immutable prepared providers
   runs/<runId>/                 # session configs/binding references
   executions/<leaseId>/         # resource journal + private provider copy
-  core-bundles/<revision>/       # retained adapter/supervisor code
+  core-bundles/<revision>/       # retained adapter code
 ```
 
-`MCP_SKILLS_ROOT` задаётся явно, вне live repo. `MCP_SKILL_SOURCES_CONFIG` предлагается как путь к active config, а не enable-flag; execution/run roots тоже host config. Unix sockets могут жить в отдельном коротком защищённом `/run`-каталоге и восстанавливаться после reboot. Их отсутствие не означает отсутствие durable lease records.
+`MCP_SKILLS_ROOT` задаётся явно, вне live repo. `MCP_SKILL_SOURCES_CONFIG` — путь к active config, не enable-flag; execution/run roots тоже host config. V1 не требует Unix socket/custom IPC runtime.
 
 Незаполненный deployment path использует checked-in пустой config. Явно заданный, но недоступный path — ошибка, не молчаливый переход к sibling mounts. Релизы и runtime records не должны лежать в MCP execution-copy или workspace/code.
 
@@ -310,8 +310,8 @@ Rollback — публикация полной предыдущей конфиг
 ### 7.1 Три разных окружения
 
 - **Engine env:** текущая auth/session инфраструктура coding engine; исправление всей её least-privilege модели — A2/#1353, не обещание этого wiring.
-- **Stdio adapter env:** только core IPC binding/bootstrap. Engine может технически унаследовать собственный env в adapter, но adapter не спавнит provider и не пересылает унаследованные variables.
-- **Provider env:** core supervisor формирует allowlisted env с нуля, не `{...process.env}` и не общий `mcpToolEnv`. Profile data paths и только необходимые secret bindings берутся host-side. Никаких `NODE_OPTIONS`, `NODE_PATH`, arbitrary preload или Git credential variables от модели.
+- **Stdio adapter env:** минимальный bootstrap: RunBinding path, generation/runtime roots и только необходимые core execution settings. Adapter не пересылает своё унаследованное env provider-у автоматически.
+- **Provider env:** core adapter формирует allowlisted env с нуля, не `{...process.env}` и не общий `mcpToolEnv`. Profile data paths и только необходимые secret bindings берутся host-side. Никаких `NODE_OPTIONS`, `NODE_PATH`, arbitrary preload или Git credential variables от модели.
 
 Legacy `USER_ID`, `WORK_DIR` и нужные пути совместимости задаются host policy. Credentials не попадают в engine MCP config, tool arguments, Task Packet или diagnostics. На HH/Freelance onboarding отдельно перечислить реально требуемые env/file accesses; существующий общий `mcpToolEnv` не считать готовой least-privilege политикой. Provider, которому нужны hardcoded HOME paths, не переключать до адаптации/проверки этих зависимостей. Runtime permissions/secret references задаются deploy-owned policy, а не редактируемым project manifest.
 
@@ -331,9 +331,9 @@ Current code использует старый OpenCode shape `{mcp: {id: {type:
 
 Acceptance сравнивает фактический effective каталог `(mcpServerId, actionName, inputSchema)` и реальный marker-вызов всех трёх движков, а не только JSON renderer snapshot. Тест с нарочно добавленным старым HH/sibling server в global/project config обязателен.
 
-`writeMcpConfig` перестаёт совмещать browser state, per-user path и lifecycle. Выделить core server descriptor builder; `createSessionMcpRuntime` вызывается с `await` до построения engine argv. Per-run `.mcp.json`, OpenCode config, client files и logs лежат в `runs/<runId>/`, не в code cwd. `user.workDir` остаётся user-data root; `codeCwd` отдельный. Не мутировать общий объект user при конкурентных runs.
+`writeMcpConfig` перестаёт совмещать browser state, per-user path и external-provider lifecycle. Выделить core server descriptor builder; `materializeSessionMcp` вызывается до построения engine argv. Per-run `.mcp.json`, OpenCode config, RunBinding и logs лежат в `runs/<runId>/`, не в code cwd. `user.workDir` остаётся user-data root; `codeCwd` отдельный. Не мутировать общий объект user при конкурентных runs.
 
-Все exits — success, throw до spawn, timeout, stop, resume fallback — закрывают handle в `finally`, но `release` внутри ждёт реального завершения child. Обновить callers в `runner/index.js` и `hermes-tools-run.js`. Codex `-C` и `spawn.cwd` согласованы; на native resume, где `-C` отсутствует, настоящий process cwd остаётся правильным. Не рассчитывать, что переданный `env` уже применяется существующим `runEngineProcess`.
+Все exits — success, throw до engine spawn, timeout, stop, resume fallback — завершают/reconcile adapter/provider lifecycle; private copy не удаляется до доказанного завершения provider child. Обновить callers в `runner/index.js` и `hermes-tools-run.js`. Codex `-C` и `spawn.cwd` согласованы; на native resume, где `-C` отсутствует, настоящий process cwd остаётся правильным. Не рассчитывать, что переданный `env` уже применяется существующим `runEngineProcess`.
 
 ## 8. Protocol, ошибки и повторные вызовы
 
@@ -410,9 +410,17 @@ LLM/MCP client может повторить tool call новым JSON-RPC reque
 
 ### 10.3 Non-MCP остаётся first-class
 
-Library/CLI engineering вызываются непосредственно в подходящем trusted worker и не требуют запуска LLM или MCP server. Shared multi-user core **не импортирует** user-scoped provider handlers в свой процесс ради такой оптимизации.
+Library/CLI engineering вызываются непосредственно из trusted worker и не требуют LLM/MCP. Shared multi-user core **не импортирует** user-scoped provider handlers in-process.
 
-Для core quick actions, cron/domain calls: тот же `invokeAction` и resolved binding, тот же provider supervisor; invocation-scoped lease закрывается после вызова. Не нужно имитировать coding-agent session. Обновить `action-transport.js` и managed branch `runMcpTool`, чтобы они выбирали source по registry. Core-local legacy tools остаются отдельным core маршрутом; запрет bypass распространяется на мигрированные external sources.
+**Quick actions / cron / domain production path не переводится на новый managed transport до PR4 cutover.** PR1–PR3 могут добавить registry/adapter path для fake/test/canary sources, но существующий HH/Freelance traffic остаётся на старом маршруте до parity acceptance.
+
+Только в PR4:
+- `action-transport.js` и managed branch `runMcpTool` начинают выбирать migrated external source через registry;
+- invocation-scoped adapter/lease закрывается после call;
+- core-local legacy tools остаются отдельным core route;
+- direct sibling fallback для migrated provider удаляется.
+
+Так blast radius quick actions отделён от ранних runtime PR.
 
 ## 11. Controls и наблюдаемость
 
@@ -429,7 +437,7 @@ Library/CLI engineering вызываются непосредственно в �
 
 В existing readiness/journal добавить безопасный summary: run/task/source/provider/server IDs, revision/digest, generation, lifecycle phase, lease ID, acquisition/start/call/stop timings, error class и retained reason. В action history — correlation к lease/generation; не дублировать task и token accounting.
 
-Ни tokens, ни полные env, ни user-supplied args в exception logs. IPC capability и credentials обязательно redacted. Дополнительный dashboard для первой версии не нужен.
+Ни tokens, ни полные env, ни user-supplied args в exception logs. RunBinding/resource references и credentials логируются только как безопасные IDs/digests; secret values/paths redacted. Дополнительный dashboard для первой версии не нужен.
 
 ## 12. Четыре implementation-PR и приёмка
 
