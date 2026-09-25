@@ -23,16 +23,24 @@
 | **P1** | Авторинг через Hermes: `playbook_draft` / `playbook_edit` / `playbook_save` | ✅ IMPLEMENTED |
 | **P2** | `playbook_run` — компиляция плейбука + goal в DRAFT durable-план (items пиннятся к `playbook_id@version`) | ✅ IMPLEMENTED |
 | **P3a** | Активация (`task_update status=active`) + бюджет шага (`attempt_count`/`max_attempts`, `expireWaitingDeadlines`, `execution_timeout_seconds`) | ✅ IMPLEMENTED |
-| **P3b** | Резолв движка/модели по `executor_role` / `minimum_model_level` / `context_budget` | 🔵 PLANNED |
+| **P3b** | Резолв движка/модели по `executor_role` / `minimum_model_level` / `context_budget` (`src/playbook-executor.js`) | ✅ IMPLEMENTED |
 | **P3c** | Recovery-policy (`failure-classifier` → `recovery_policy`) после исчерпания бюджета | 🔵 PLANNED |
 | **P3d** | `task_validation_results` + `evidence_json`, разблокировка финализации contract-плана | 🔵 PLANNED |
 | **P4** | Исполнение хуков (`notify`/`check` на границах стадий/шагов) | 🔵 PLANNED |
 | **P5** | Миграция существующих плейбуков | 🔵 PLANNED |
 
-**Что это значит для сценария ниже:** шаги 1–3 (авторинг/компиляция) и шаги 5+ (активация,
-claim items, бюджет шага) **работают**; резолв конкретной модели по роли (P3b), recovery
+**Что это значит для сценария ниже:** шаги 1–3 (авторинг/компиляция), шаги 5+ (активация,
+claim items, бюджет шага) и резолв контракта в движок/модель (P3b) **работают**; recovery
 после исчерпания попыток (P3c) и машинная финализация по evidence (P3d) — **ещё нет**.
 Хуки (P4) описаны в плейбуке, но пока не исполняются.
+
+**Как работает резолв (P3b):** `src/playbook-executor.js` — чистый резолвер:
+`executor_role` + `minimum_model_level` (эскалированный `current_model_level` важнее) →
+`{engine, ocProfile, ocRole}`. Programmatic-шаги движка не получают; contract-шаги без
+контракта / legacy → дефолтный движок (`claude`). Таблица level→engine — это данные
+(`PLAYBOOK_LEVEL_MAP`): `bachelor → opencode/value`, `master → opencode/max`,
+`doctor → claude`. `context_budget` влияет на то, как шаг получает контекст
+(`contextSkipModels`).
 
 ---
 
@@ -179,8 +187,7 @@ Executor claim-ит items по порядку. Первые три шага:
 - `attempt_count` шага инкрементится на `startExecution`, а не на claim
 - Шаг без `DURABLE:`-маркера трактуется как провал и ретраится по `max_attempts`
 
-**Статус:** claim + бюджет ✅ IMPLEMENTED (P3a); резолв модели по `researcher/bachelor`
-🔵 PLANNED (P3b) — сейчас шаг исполняется движком по умолчанию, контракт сохраняется в БД.
+**Статус:** claim + бюджет ✅ IMPLEMENTED (P3a); резолв `researcher/bachelor` в движок ✅ IMPLEMENTED (P3b — `bachelor → opencode/value`).
 
 ---
 
@@ -233,7 +240,7 @@ Task(durable item): [developer/master/large] Implement
 - `implementation_complete`
 - Пробой `execution_timeout_seconds` = провал шага (не «бесконечное продолжение»),
   ретраит durable-слой по `max_attempts`
-- Движок для шага (`developer/master/large`) 🔵 PLANNED (P3b)
+- Движок для шага (`developer/master/large`) резолвится ✅ IMPLEMENTED (P3b — `master → opencode/max`)
 
 **Статус:** claim/таймаут ✅ IMPLEMENTED (P3a)
 
@@ -327,7 +334,7 @@ Task(durable item): [verifier/master/medium] Verify the actual user scenario
 **Validation:**
 - `user_scenario_verified`
 - Проверка идёт на реальном окружении, а не только unit-тестами
-- Резолв `verifier/master` движком — 🔵 PLANNED (P3b)
+- Резолв `verifier/master` движком ✅ IMPLEMENTED (P3b)
 
 ---
 
@@ -405,6 +412,65 @@ Task(durable item): [reviewer/doctor/medium] Finalize only with current acceptan
 
 Схема допускает также `check`, `create_issue`, `publish`. До P4 хуки — только данные
 в артефакте, рантайм их не исполняет.
+
+---
+
+## Programmatic-шаги → `runner` (предложение)
+
+Сейчас `execution_kind: programmatic` говорит только **что** шаг объективный, но не
+называет, **чем** он исполняется: в `contracts/playbook.schema.json` и
+`src/durable-task-plan.js` (`itemSchema`) нет поля `runner`/`script`/`command`. Поэтому
+`checklist.md` рендерит просто `[programmatic]`.
+
+Предложение — опциональное поле `runner` на шаге (schema v2), которое может быть
+**и shell-командой, и id зарегистрированного действия/MCP-тула** (для инженерных шагов —
+команды, для доменов — действия):
+
+| # | Programmatic-item | Что должно выполниться | Предлагаемый `runner` |
+|---|-------------------|------------------------|-----------------------|
+| 10 | Run tests, lint and regression checks | `npm run check` + `npm test` | `shell: npm run check && npm test` |
+| 11 | Open PR | `git push -u` + `gh pr create` | `action: git.open_pr` |
+| 12 | Wait for CI and staging; repair failures | `gh pr checks --watch` | `action: ci.wait_for_green` |
+| 13 | Merge and deploy | `gh pr merge --squash` + deploy | `action: deploy.merge_and_release` |
+
+Как это отображалось бы в `checklist.md`:
+
+```
+- [ ] [programmatic: shell: npm run check && npm test] Run tests, lint and regression checks
+- [ ] [programmatic: action: git.open_pr] Open PR
+```
+
+До schema v2 эквивалент — писать имя команды/действия в `instructions` шага (валидно
+сегодня, но не машиночитаемо). Резолв `runner` в исполнение — это отдельный слайс; поле
+только декларирует контракт.
+
+---
+
+## CI-сценарий (черновик): план моков
+
+Цель — тот же flow из 16 шагов, но детерминированно и без внешних миров, чтобы это был
+тест, а не ручной прогон. План моков пишется **вместе со сценарием** — моки это часть
+определения сценария, не постфактум.
+
+| Что мокаем | Чем | Что проверяем вместо реального |
+|------------|-----|-------------------------------|
+| LLM/Hermes (агентные шаги) | скриптованные ответы: шаг отдаёт нужный артефакт + `DURABLE: done` / `DURABLE: failed: <причина>` | порядок и состав агентных шагов, реакцию на провал |
+| Резолвер движка (P3b) | table-driven, без спавна процесса | что шаг с ролью/уровнем получает ожидаемый `{engine, ocProfile}` |
+| `git` / `gh` | фейковый провайдер: «PR создан», «checks green» | что programmatic-шаг вызвал нужный `runner`, а не просто отписался |
+| CI/staging и деплой | фейковый `ci.wait_for_green` / `deploy.merge_and_release` | что merge не идёт раньше зелёного CI |
+| Telegram (`sendMessage`/`editMessageText`) | перехват в массив | текст/факт отправки, без реальной сети |
+| Durable store + `checklist.md` | временная SQLite + temp-папка проекта | персистентность и рендер контрактов |
+| Часы / `delay_after_sec=600` | fake timers | что wait-шаг не становится runnable раньше срока |
+
+Детерминированные ассерты сценария:
+
+1. `playbook_run` создаёт **draft** ровно с 16 items, пиння к `development@1`.
+2. До `task_update status=active` ни один item не claim-ится; после — claim в порядке стадий.
+3. Programmatic-шаг вызывает объявленный `runner` (в v2) / записанную команду (сегодня).
+4. Провал шага ретраится ровно `max_attempts` раз, затем `failed` — не вечный `pending`.
+5. Шаг с `delay_after_sec=600` не runnable до +600s (fake clock), и по `wait_deadline_at`
+   истёкший waiter становится `failed`.
+6. Финализация (target P3d): план без свежего evidence не переходит в `done`.
 
 ---
 

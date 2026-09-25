@@ -177,7 +177,59 @@ User: дай вердикт — брать этот проект или нет
 
 > Плейбука в `trained-assist-freelance-skill` пока нет (папка `playbooks/` не создана) —
 > колонки «контракт» это **предлагаемый** маппинг на Playbook v1, не текущее поведение.
-> Сегодня домен исполняется MCP-тулами скилла.
+> Сегодня домен исполняется MCP-тулами скилла. Черновик плейбука — `playbooks/freelance-project.json`
+> (см. ниже § «Плейбук-драфт»).
+
+---
+
+## Programmatic-шаги → `runner` (предложение)
+
+У фриланса «скрипты» — это не shell-команды, а **MCP-тулы** скилла. Поэтому поле
+`runner` (schema v2) должно уметь ссылаться на действие, а не только на файл:
+
+| # | Шаг | Предлагаемый `runner` |
+|---|-----|-----------------------|
+| 1 | Intake (сырой ввод → provenance) | `action: freelance.add_info (stage=provenance)` |
+| 2 | Факты / требования / допущения | `action: freelance.add_info (stage=facts \| requirements \| interpretation)` |
+| 4 | Предложить решение | `action: freelance.add_info (stage=solution)` |
+| 5 | GO/NO-GO вердикт | `action: freelance.assess` (`lib/risk-engine.js`) + agent на обоснование |
+| 6 | Генерация спеки long/short | `action: freelance.generate_spec (variants=long \| short \| both)` |
+
+Как это отображалось бы в `checklist.md`:
+
+```
+- [ ] [programmatic: action: freelance.assess] GO/NO-GO вердикт
+- [ ] [programmatic: action: freelance.generate_spec] Генерация спеки long/short
+```
+
+---
+
+## CI-сценарий (черновик): план моков
+
+| Что мокаем | Чем | Что проверяем вместо реального |
+|------------|-----|-------------------------------|
+| LLM/OpenRouter (агентные шаги, генерация спеки) | скриптованные ответы/фикстуры `long.md`/`short.md` | стадийность и отсутствие утечек диалога |
+| risk-engine | **не мокаем** — он детерминированный и офлайн (`lib/risk-engine.js`) | вердикт на фиксированных сигналах |
+| Файловое хранилище `Фриланс проекты/` | временный `USERS_DIR` | раскладку файлов и изоляцию по профилю |
+| Классификатор документа | фикстуры ответов дешёвой модели | маршрутизацию по содержанию, а не по имени |
+
+Детерминированные ассерты:
+
+1. Сырой ввод попадает только в `provenance/log.jsonl`, **не** в `requirements.md`/`solution.md`.
+2. Стадии не смешиваются: один `add_info` пишет ровно один файл.
+3. Одни и те же сигналы → один и тот же вердикт (детерминизм risk-engine).
+4. `academic`-проект: бизнес-сигналы не влияют на вердикт.
+5. `long` и `short` сгенерированы независимо из одного `_source.md`.
+6. Классификатор документа не спавнит Claude-сессию (только cheap-LLM).
+
+---
+
+## Плейбук-драфт (`playbooks/freelance-project.json`)
+
+Черновик плейбука лежит в репозитории скилла (`trained-assist-freelance-skill/playbooks/`),
+scope `system` — sibling-репо читается резолвером `PlaybookStore` (profile → sibling → system).
+Стадии: `intake → extract → clarify → assess → spec`; programmatic-шаги ссылаются на
+MCP-тулы скилла. См. файл и `playbooks/README.md` (как ссылки на действия лягут в schema v2).
 
 ---
 
