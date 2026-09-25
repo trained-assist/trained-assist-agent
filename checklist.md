@@ -1,5 +1,5 @@
-Goal: prod runs from an immutable release dir (agent-releases/<sha> + agent-master symlink), replacing the live-tree guard rules (#1391) — PR #1414.
+Goal: #1372 P3a — activate contract plans + durable step budget (attempt_count/max_attempts, expireWaitingDeadlines, execution_timeout_seconds).
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1414
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1417
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live
