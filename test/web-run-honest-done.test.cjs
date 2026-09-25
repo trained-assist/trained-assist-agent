@@ -30,6 +30,7 @@ test('tgSend/tgEdit are no-ops without a Telegram chat', async () => {
 });
 
 function loadStream(runTaskImpl) {
+  process.env.WEB_CONVREF_CANARY = 'web-canary'; // exact-session path; CI env may set another value
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'web-honest-'));
   process.env.HOME = tmp;
   for (const key of Object.keys(require.cache)) {
