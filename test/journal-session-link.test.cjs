@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-test('getSessionFor serves sessions beyond the 50-entry recency index, keeps audience scope', () => {
+test('getSessionFor serves sessions beyond the 50-entry recency index, opens non-default-audience sessions by id', () => {
   const oldHome = process.env.HOME;
   process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'journal-session-'));
   for (const key of Object.keys(require.cache)) {
@@ -25,8 +25,14 @@ test('getSessionFor serves sessions beyond the 50-entry recency index, keeps aud
     const old = getSessionFor('alice', 's-1-1000');
     assert.equal(old?.id, 's-1-1000');
     assert.equal(old.messages[0].content, 'old dialog');
-    sessions.createSession(workDir, { task: 'recruiter', id: 's-1-9000', chatId: 1, audience: 'recruiter' });
-    assert.equal(getSessionFor('alice', 's-1-9000'), null);
+    // Journal from a freelance/recruiter bot group chat (negative chat id) links to
+    // that bot's session — it must open, not 404 (was "Failed to load session").
+    sessions.createSession(workDir, { task: 'freelance group', id: 's-1003093394558-9000', chatId: -1003093394558, audience: 'freelance' });
+    const fl = getSessionFor('alice', 's-1003093394558-9000');
+    assert.equal(fl?.id, 's-1003093394558-9000');
+    assert.equal(fl.audience, 'freelance');
+    assert.equal(fl.messages[0].content, 'freelance group');
+    assert.equal(sessions.listSessions(workDir, 100).some(s => s.id === 's-1003093394558-9000'), false, 'list stays default-audience');
     assert.equal(getSessionFor('alice', 's-missing'), null);
   } finally { process.env.HOME = oldHome; }
 });
