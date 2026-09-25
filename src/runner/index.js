@@ -1398,6 +1398,38 @@ function resolveRunSession(sessions, getCurrent, { workDir, sessionId, chatId, a
   return { activeSessionId, contextSessionId };
 }
 
+// GTD scheduling hook, run AFTER terminal delivery. Extracted out of _runTask so
+// it is directly callable from tests: previously it lived inline inside a
+// try/catch that swallowed a ReferenceError, so any wiring break silently killed
+// GTD scheduling for EVERY run with only a `[gtd] hook: ...` warn (2026-09-25:
+// `runThreadId` referenced from _runTask, where only the `threadId` param exists).
+// Returns the scheduling promise (fire-and-forget at the call site); a null return
+// means "nothing scheduled" (internal re-run / no session / no checklist).
+function scheduleGtdAfterRun({ internalGtd, activeSessionId, explicitMode, task, secrets, workDir, username, projectDir, audience, chatId, threadId }) {
+  if (internalGtd || !activeSessionId) return null;
+  const gtd = require('../gtd-controller');
+  const checklistArgs = {
+    workDir, sessionId: activeSessionId, chatId,
+    username, projectDir: projectDir || null, audience: audience || 'default',
+    threadId: Number.isInteger(threadId) && threadId > 0 ? threadId : null,
+  };
+  if (explicitMode === 'deep') {
+    // Осознанный launch — «⏻ Запустить проработку» (workrun). Свободный текст
+    // задачи ("доведи до конца") гоняем через LLM-гейт (#501/#502/#505); если
+    // фраза не совпала, но в проекте уже лежит незакрытый checklist.md — тот сам
+    // по себе достаточное основание трекать (checklist ⇒ intent).
+    return gtd.maybeSchedule({ ...checklistArgs, task, apiKey: secrets?.OPENROUTER_API_KEY })
+      .then(rec => rec || gtd.scheduleFromChecklist(checklistArgs))
+      .catch(e => { console.warn('[gtd] schedule:', e.message); return null; });
+  }
+  // Обычный reply/clarify: НЕ зовём LLM-гейт на каждый ход (дорого/шумно,
+  // #501/#502) — но checklist.md уже сам по себе авторский сигнал, и его
+  // достаточно, чтобы трекать (дефолт для PR: «создал PR → checklist.md с 3
+  // пунктами → GTD подхватывает» без явной фразы «доведи до конца»).
+  return gtd.scheduleFromChecklist(checklistArgs)
+    .catch(e => { console.warn('[gtd] schedule:', e.message); return null; });
+}
+
 async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, webExactSession = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
@@ -2562,36 +2594,15 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
   }
 
-  if (activeSessionId) {
-    // Schedule durable GTD checks after terminal delivery.
-    // Skip на внутренних GTD re-runs (no self-loop).
-    if (!internalGtd) {
-      try {
-        const gtd = require('../gtd-controller');
-        const checklistArgs = {
-          workDir: user.workDir, sessionId: activeSessionId, chatId,
-          username: user.username, projectDir: user.cwd || null, audience: user.audience || 'default',
-          threadId: runThreadId,
-        };
-        if (explicitMode === 'deep') {
-          // Осознанный launch — «⏻ Запустить проработку» (workrun). Свободный текст
-          // задачи ("доведи до конца") гоняем через LLM-гейт (#501/#502/#505); если
-          // фраза не совпала, но в проекте уже лежит незакрытый checklist.md —
-          // тот сам по себе достаточное основание трекать (checklist ⇒ intent).
-          gtd.maybeSchedule({
-            ...checklistArgs, task, apiKey: secrets.OPENROUTER_API_KEY,
-          }).then(rec => rec || gtd.scheduleFromChecklist(checklistArgs))
-            .catch(e => console.warn('[gtd] schedule:', e.message));
-        } else {
-          // Обычный reply/clarify: НЕ зовём LLM-гейт на каждый ход (дорого/шумно,
-          // #501/#502) — но checklist.md уже сам по себе авторский сигнал, и его
-          // достаточно, чтобы трекать (дефолт для PR: «создал PR → checklist.md
-          // с 3 пунктами → GTD подхватывает» без явной фразы «доведи до конца»).
-          gtd.scheduleFromChecklist(checklistArgs).catch(e => console.warn('[gtd] schedule:', e.message));
-        }
-      } catch (e) { console.warn('[gtd] hook:', e.message); }
-    }
-  }
+  // Schedule durable GTD checks after terminal delivery (extracted to
+  // scheduleGtdAfterRun for testability). Fire-and-forget: never blocks the reply.
+  try {
+    scheduleGtdAfterRun({
+      internalGtd, activeSessionId, explicitMode, task, secrets,
+      workDir: user.workDir, username: user.username, projectDir: user.cwd || null,
+      audience: user.audience || 'default', chatId, threadId,
+    });
+  } catch (e) { console.warn('[gtd] hook:', e.message); }
 
   return result;
   } catch (e) {
@@ -2657,4 +2668,7 @@ module.exports = {
   _forceOpencodeAlternation: forceOpencodeAlternation,
   // Exported for failure-brain wiring tests only (issue #1175, PR #1179 follow-up)
   _recordFailureAttempt,
+  // Exported for GTD scheduling-hook wiring tests only (regression: inline hook
+  // referenced an out-of-scope `runThreadId`, silently killing all GTD scheduling)
+  _gtd: { scheduleGtdAfterRun },
 };
