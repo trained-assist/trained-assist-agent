@@ -30,7 +30,9 @@ REPO_DIR=$(CDPATH= cd -- "$DIR/../.." && pwd)
 BEGIN="# >>> trained-assist disk-hygiene (managed by ops/cron/install.sh) >>>"
 END="# <<< trained-assist disk-hygiene <<<"
 
-chmod +x "$DIR/disk-guard.sh" "$DIR/dead-tenant-sweep.sh" "$REPO_DIR/scripts/bugs-collector-cron.sh" "$REPO_DIR/scripts/issue-fixer-cron.sh"
+# Exec bits come from git (all four are 100755); the release dir is root-owned
+# and not chmod-able by the deploy user, so this is best-effort only.
+chmod +x "$DIR/disk-guard.sh" "$DIR/dead-tenant-sweep.sh" "$REPO_DIR/scripts/bugs-collector-cron.sh" "$REPO_DIR/scripts/issue-fixer-cron.sh" 2>/dev/null || true
 
 block() {
   echo "$BEGIN"

@@ -23,11 +23,15 @@ esac
 
 SERVICE="assist-agent"
 REPO_DIR="${REPO_DIR:-$(pwd)}"                              # git source; may be a session worktree
-RELEASES_DIR="${RELEASES_DIR:-$HOME/agent-releases}"
-CURRENT_LINK="${CURRENT_LINK:-$HOME/agent-master}"
+# Absolute paths, NOT $HOME: the SSH deploy user is not necessarily the service
+# user (on the shared RU box it is not vova), while the units hardcode
+# /home/vova/agent-master. Releases must land where the service looks.
+AGENT_HOME="${AGENT_HOME:-/home/vova}"
+RELEASES_DIR="${RELEASES_DIR:-$AGENT_HOME/agent-releases}"
+CURRENT_LINK="${CURRENT_LINK:-$AGENT_HOME/agent-master}"
 TARGET="${DEPLOY_TARGET_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}"
 RELEASE_DIR="$RELEASES_DIR/$TARGET"
-HH_SKILL_DIR="${HH_SKILL_DIR:-$HOME/trained-assist-hh-skill}"
+HH_SKILL_DIR="${HH_SKILL_DIR:-$AGENT_HOME/trained-assist-hh-skill}"
 export REPO_DIR RELEASES_DIR CURRENT_LINK SERVICE
 
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
