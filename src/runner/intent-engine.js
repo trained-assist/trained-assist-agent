@@ -354,6 +354,20 @@ function renderChatSettings({ userId, workDir, chatId, audience = 'default', thr
   return out.join('\n');
 }
 
+// /oc_* changes the OpenCode MODEL profile — but a user reaching for it is switching TO OpenCode.
+// Before this, the command left the chat's engine untouched: a chat pinned to codex (e.g. one
+// that just hit Codex's usage limit) stayed on codex, so "переключение" appeared to do nothing and
+// the next task kept failing on the old engine (bug report 2026-09-25, chat shown with /oc_deepseek
+// → "⛔️ Codex: You've hit your usage limit"). Make the intent explicit: /oc_* also moves THIS
+// chat's engine to opencode. Returns an explanatory suffix for the reply, or '' if already opencode.
+function switchChatEngineToOpencode(workDir, chatId) {
+  const prev = profiles.getEngine(workDir, chatId);
+  if (prev === 'opencode') return '';
+  profiles.setEngine(workDir, 'opencode', chatId);
+  const label = prev === 'codex' ? 'Codex CLI' : 'Claude Code';
+  return `\n🔀 Движок этого чата переключён с ${label} на OpenCode — следующая задача пойдёт через него.`;
+}
+
 // Guard rule for return null inside a matched intent block:
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
@@ -597,13 +611,15 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     // toggle (src/opencode-go-toggle.js), so it skips the file-existence check below.
     if (raw === 'deepseek') {
       profiles.setOcProfile(workDir, 'deepseek');
+      const engineNote = switchChatEngineToOpencode(workDir, chatId);
       const opencodeGoToggle = require('../opencode-go-toggle');
       const modeLabel = opencodeGoToggle.getMode() === 'go' ? 'Go (opencode-go/deepseek-v4.1-flash)' : 'OpenRouter (openrouter/z-ai/glm-5.3-flash)';
-      return `✅ OpenCode профиль → DEEPSEEK — общий, единая модель на всех ролях\n\nПрименён только для твоего профиля. Реальный шлюз (Go или OpenRouter) переключается общим VM-тумблером — сейчас: ${modeLabel}. Ручное переключение: /oc_go, /oc_openrouter. Авто-переключение на OpenRouter при упоре в лимит Go, авто-возврат через ~5ч.`;
+      return `✅ OpenCode профиль → DEEPSEEK — общий, единая модель на всех ролях\n\nПрименён только для твоего профиля. Реальный шлюз (Go или OpenRouter) переключается общим VM-тумблером — сейчас: ${modeLabel}. Ручное переключение: /oc_go, /oc_openrouter. Авто-переключение на OpenRouter при упоре в лимит Go, авто-возврат через ~5ч.${engineNote}`;
     }
     const profileFile = path.join(__dirname, '..', '..', '.opencode', 'profiles', `${raw}.json`);
     if (!fs.existsSync(profileFile)) return `⚠️ Профиль '${raw}' не найден (.opencode/profiles/${raw}.json)`;
     profiles.setOcProfile(workDir, raw);
+    const engineNote = switchChatEngineToOpencode(workDir, chatId);
     const PROFILE_LABELS = {
       max:      'MAX — лестница GPT-6/5.6 Luna → DeepSeek (дефолт)',
       value:    'VALUE — DeepSeek V4 Flash → GLM → Qwen',
@@ -619,7 +635,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     const pinNote = (raw === 'deepseek-openrouter' || raw === 'deepseek-go')
       ? ' Закреплено намертво за твоим профилем — в отличие от /oc_deepseek (следует общему VM-тумблеру /oc_go, /oc_openrouter), сюда переключиться и остаться можно только явно через /oc_ds_or или /oc_ds_go.'
       : '';
-    return `✅ OpenCode профиль → ${label}\n\nПрименён только для твоего профиля (другие юзеры VM не затронуты). Следующая задача в OpenCode подхватит новые модели.${pinNote}`;
+    return `✅ OpenCode профиль → ${label}\n\nПрименён только для твоего профиля (другие юзеры VM не затронуты). Следующая задача в OpenCode подхватит новые модели.${pinNote}${engineNote}`;
   }
 
   // /oc_go, /oc_openrouter — manual override for the shared "deepseek" profile's VM-wide
