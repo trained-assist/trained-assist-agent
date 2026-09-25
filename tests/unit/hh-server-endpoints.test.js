@@ -323,6 +323,9 @@ describe('POST /hh/reject', () => {
     expect(mockHh.state.discarded.has('neg-001')).toBe(true);
     expect(mockHh.state.discarded.has('neg-003')).toBe(true);
     expect(mockHh.state.discarded.has('neg-002')).toBe(false);
+    // Open vacancy → "Не подходит" (discard_by_employer), never "Вакансия закрыта".
+    expect(mockHh.state.rejectActions['neg-001']).toBe('discard_by_employer');
+    expect(mockHh.state.rejectActions['neg-003']).toBe('discard_by_employer');
   });
 
   it('returns per-negotiation results', async () => {
@@ -415,6 +418,18 @@ describe('POST /hh/send-and-reject', () => {
     expect((await post(url, body, authHeader())).body).toMatchObject({ ok: true });
     expect(mockHh.state.messages['neg-001']).toEqual([body.message]);
     expect(mockHh.state.discarded.has('neg-001')).toBe(true);
+    expect(mockHh.state.rejectActions['neg-001']).toBe('discard_by_employer');
+  });
+
+  it('refuses a whitespace-only rejection message', async () => {
+    const r = await post(
+      `http://127.0.0.1:${serverPort}/hh/send-and-reject`,
+      { username: TEST_UID, negotiation_id: 'neg-001', message: '   \n  ' },
+      authHeader(),
+    );
+    expect(r.status).toBe(400);
+    expect(mockHh.state.messages['neg-001']).toBeUndefined();
+    expect(mockHh.state.discarded.has('neg-001')).toBe(false);
   });
 });
 

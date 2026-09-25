@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, buildRejectionSystemPrompt, loadBaseOverride } = require('./hh-message-prompts');
+const { buildAvailabilityBlock, buildRecruiterIdentity, buildMessageSystemPrompt, loadBaseOverride } = require('./hh-message-prompts');
 
 const FALLBACK_MODEL = 'google/gemini-2.5-flash';
 
@@ -440,13 +440,16 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
   const needDraft = negotiations.filter(neg => {
     if (neg._resume_status !== 'full') return false;
     const h = readCandidateHistory(username, neg.id);
+    // Rejections use the fixed standard text rendered on the review page — never an
+    // LLM draft. Generated "rejections" produced invitations, "[Имя]" placeholders
+    // and wrong-name greetings that a single click could send to a candidate.
+    if (h.ats_result?.verdict === 'ОТКЛОНИТЬ') return false;
     return h.ats_result?.score != null && !h.ats_result?.draft_message;
   });
 
   if (!needDraft.length) return 0;
 
   const baseSystem = buildMessageSystemPrompt({ vacancyContext: vacancyCtx, recruiterCtx, commStyle, baseOverride });
-  const rejectionSystem = buildRejectionSystemPrompt({ recruiterCtx, commStyle });
 
   let generated = 0;
 
@@ -455,19 +458,14 @@ async function generateDraftMessages(negotiations, username, workDir, { maxConcu
     await Promise.all(batch.map(async (neg) => {
       try {
         const history = readCandidateHistory(username, neg.id);
-        const verdict = history.ats_result?.verdict || 'ОТКЛОНИТЬ';
-        // First contact (no messages yet) → always send qualifying questions, never a cold rejection
-        const isReject = verdict === 'ОТКЛОНИТЬ' && (history.messages || []).length > 0;
 
         const r = neg.resume || {};
         const firstName = r.first_name || r.last_name || 'Кандидат';
 
-        const systemPrompt = isReject ? rejectionSystem : baseSystem;
+        const systemPrompt = baseSystem;
 
         const resumeText = buildResumeText(neg);
-        const userMsg = isReject
-          ? `Напиши вежливый отказ кандидату ${firstName}.`
-          : `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resumeText}${availabilityBlock}`;
+        const userMsg = `Напиши первое сообщение кандидату ${firstName}.\n\nРезюме:\n${resumeText}${availabilityBlock}`;
 
         const messages = [
           { role: 'system', content: systemPrompt },

@@ -211,7 +211,7 @@ let _secretsCache = null;
 // (used by many other handlers here).
 // readChatId is defined inline here too (used by many other handlers).
 const {
-  fetchAllHhNegotiations, hhCacheFile, getHhNegotiationsWithCache,
+  fetchAllHhNegotiations, fetchDiscardedNegotiations, getHhDiscardedWithCache, hhCacheFile, getHhNegotiationsWithCache,
   syncHhMessagesToHistory, runHhScoringForUser,
   buildProactiveUrlForScheduler, scheduleProactiveSearchRuns, scheduleHhBackgroundScoring,
 } = createHhNegotiations({
@@ -230,6 +230,7 @@ const hhCtx = {
   getHhNegotiationsWithCache,
   syncHhMessagesToHistory,
   fetchAllHhNegotiations,
+  getHhDiscardedWithCache,
   hhCacheFile,
 };
 
