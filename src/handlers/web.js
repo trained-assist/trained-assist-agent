@@ -328,7 +328,7 @@ async function handleWeb(req, url, res, ctx) {
     if (projectId != null && !require('../valid-project-id').isValidProjectId(projectId)) return json(res, 400, { error: 'invalid projectId' });
     const { streamWebTask, prepareWebTaskFiles, claimWebMutation } = require('../web-routes');
     let prepared;
-    try { prepared = prepareWebTaskFiles(username, taskText, refs); }
+    try { prepared = await prepareWebTaskFiles(username, taskText, refs, secrets); }
     catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }
     const sid = (sessionId && /^[a-zA-Z0-9_-]+$/.test(sessionId)) ? sessionId : null;
     let claim;
@@ -373,7 +373,7 @@ async function handleWeb(req, url, res, ctx) {
     if (!messageText && !refs.length) return json(res, 400, { error: 'message or attachment required' });
     const { streamWebTask, prepareWebTaskFiles, claimWebMutation } = require('../web-routes');
     let prepared;
-    try { prepared = prepareWebTaskFiles(username, messageText, refs); }
+    try { prepared = await prepareWebTaskFiles(username, messageText, refs, secrets); }
     catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }
     let claim;
     try { claim = claimWebMutation(username, requestId || null, { kind: 'reply', sessionId: id }); }
