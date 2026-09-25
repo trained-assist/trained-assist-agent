@@ -264,7 +264,7 @@ jobs:
               '${{ secrets.RECRAFT_API_KEY }}' \
               '${{ secrets.OPENROUTER_API_KEY }}' \
               '${{ secrets.ZEROCREDS_ADMIN_TOKEN }}' \
-              '${{ secrets.GITHUB_ISSUES_TOKEN }}' \
+              '${{ secrets.ISSUES_PIPELINE_TOKEN }}' \
               '${{ secrets.CHECKLIST_API_KEY }}' \
               '' \
               '${{ secrets.OPENCODE_PROFILE }}' \
