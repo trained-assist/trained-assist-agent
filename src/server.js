@@ -1117,30 +1117,42 @@ ${recent || '(пока нет)'}
       const username = payload?.username;
       const audience = payload?.audience;
       const chatId = payload?.chatId ?? payload?.userId ?? null;
+      // Forum topic scope (#255): a task started in topic A is only stoppable from
+      // topic A. Null/absent keeps the legacy chat-wide behavior.
+      const rawThreadId = payload?.threadId;
+      const threadId = Number.isInteger(rawThreadId) && rawThreadId > 0 ? rawThreadId : null;
+      if (rawThreadId != null && threadId == null) return json(res, 400, { error: 'invalid threadId' });
       if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 403, { error: 'forbidden: owner username required' });
       if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience)))
         return json(res, 400, { error: 'invalid audience' });
       const { stopTask } = require('./runner');
-      const result = stopTask(taskId, { username, audience: audience || 'default', chatId });
+      const result = stopTask(taskId, { username, audience: audience || 'default', chatId, threadId });
       if (result.forbidden) return json(res, 403, { error: result.error });
       return json(res, result.ok ? 200 : 404, result);
     }
 
     // POST /tasks/stop — kill any running Claude process for a user by username,
     // scoped to one audience/bot (default 'default' — never "every audience", #1302 §3.2).
-    // Body: { username: string, audience?: string }
+    // Body: { username: string, audience?: string, chatId?: number, threadId?: number }
+    // When chatId is supplied the kill is scoped to that chat; threadId (when valid)
+    // further scopes it to one forum topic, so «стоп» in topic A cannot kill topic B.
     if (req.method === 'POST' && url.pathname === '/tasks/stop') {
       const body = await readBody(req);
       let payload;
       try { payload = JSON.parse(body); } catch { return json(res, 400, { error: 'bad json' }); }
-      const { username, audience } = payload || {};
+      const { username, audience, chatId } = payload || {};
+      const rawThreadId = payload?.threadId;
+      const threadId = Number.isInteger(rawThreadId) && rawThreadId > 0 ? rawThreadId : null;
+      if (rawThreadId != null && threadId == null) return json(res, 400, { error: 'invalid threadId' });
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
       if (audience != null && (typeof audience !== 'string' || !/^[a-zA-Z0-9_-]{1,32}$/.test(audience)))
         return json(res, 400, { error: 'invalid audience' });
-      const { killTaskByUsername } = require('./runner');
-      const killed = killTaskByUsername(username, audience || null);
+      const { stopUserTask, killTaskByUsername } = require('./runner');
+      const scoped = stopUserTask(username, chatId ?? null, audience || null, threadId);
+      // Profile-wide (no chatId) callers keep the audience-wide kill semantics.
+      const killed = (chatId == null && !scoped) ? killTaskByUsername(username, audience || null) : (scoped ? 1 : 0);
       return json(res, 200, { ok: true, killed, audience: audience || 'default' });
     }
 
@@ -1204,6 +1216,8 @@ ${recent || '(пока нет)'}
       // audience scopes the decision to the calling bot/surface (see AUDIENCE-SCOPE-SPEC);
       // omitted -> 'default', matching every project/session created before this feature existed.
       const audience = url.searchParams.get('audience') || 'default';
+      const threadIdParam = Number(url.searchParams.get('threadId'));
+      const decisionThreadId = Number.isInteger(threadIdParam) && threadIdParam > 0 ? threadIdParam : null;
       if (!username || !/^[a-zA-Z0-9_-]+$/.test(username))
         return json(res, 400, { error: 'invalid username' });
 
@@ -1227,7 +1241,7 @@ ${recent || '(пока нет)'}
         const countByProject = {};
         for (const s of allSess) if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
 
-        let d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience);
+        let d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience, decisionThreadId);
         // Pinned chat, but the task is confidently about another project → ask (suggested
         // first, pinned second) instead of binding silently. Any doubt keeps the pin.
         if (d.action === 'auto' && d.pinned && taskParam && (process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY)) {
