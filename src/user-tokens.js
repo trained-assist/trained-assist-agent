@@ -118,15 +118,9 @@ function tokensDir(userId) {
   return path.join(TOKENS_ROOT, String(userId));
 }
 
-// Parses zerocreds JSON format {"value": "..."} with fallback to plain string (legacy).
-function readTokenValue(raw) {
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed.value ?? raw;
-  } catch {
-    return raw;
-  }
-}
+// Parses credential files ({"value":...}, {"access_token":...}, plain string).
+// Shared single source of truth so every reader agrees on the format.
+const { readTokenValue } = require('./token-value');
 
 function appendSecretsLog(userId, services) {
   try {
