@@ -15,6 +15,8 @@
 //   C8  context card «📁 Проект» only when a new session really goes there without asking
 //   R*  run-level decision (resolveRunProject): only a menu pick pins
 //   P*  /project <name> and /project new pin via the intent engine
+//   U*  pin controls: /project current, /project unpin (+legacy flag), pin <name>, per-thread
+//   S*  /settings shows the effective chat config from the on-disk sources
 //   B*  /bug_or_feature does not steal the pin
 //   M*  reorg merging the pinned project moves the pin; revert restores it
 
@@ -121,10 +123,41 @@ try {
   const pa = projects.createProject(pr, 'Первый');
   projects.createProject(pr, 'Второй');
   const ans = getQuickAnswer('/project Второй', 'u', pr, false, CHAT);
-  ok(/Проект чата/.test(String(ans)) && projects.getProject(pr, projects.getPinnedProjectId(pr, CHAT)).name === 'Второй', `P1 /project <name> pins (${ans})`);
+  ok(/Проект «Второй» закреплён за этим чатом\. Новые задачи по умолчанию будут относиться к нему/.test(String(ans)) && projects.getProject(pr, projects.getPinnedProjectId(pr, CHAT)).name === 'Второй', `P1 /project <name> pins (${ans})`);
   const ans2 = getQuickAnswer('/project new recruiting: Третий', 'u', pr, false, CHAT);
   const pinned3 = projects.getProject(pr, projects.getPinnedProjectId(pr, CHAT));
   ok(pinned3 && pinned3.name === 'Третий', `P2 /project new pins the new project (${ans2})`);
+
+  // ── U*: show / unpin / re-pin ──────────────────────────────────────────────
+  let u = getQuickAnswer('/project current', 'u', pr, false, CHAT);
+  ok(/закреплён проект «Третий»/.test(String(u)), `U1 /project current names the pinned project (${u})`);
+  ok(/📌 Закреплён за этим чатом: «Третий»/.test(String(getQuickAnswer('/project', 'u', pr, false, CHAT))), 'U2 /project list states the pin');
+  u = getQuickAnswer('/project unpin', 'u', pr, false, CHAT);
+  ok(/Закрепление снято/.test(String(u)) && projects.getPinnedProjectId(pr, CHAT) === null, `U3 /project unpin clears the pin (${u})`);
+  ok(projects.decideNewSessionProject(pr, CHAT).action === 'ask', 'U3 after unpin → automatic choice again (ask with ≥2 projects)');
+  ok(/не закреплён/i.test(String(getQuickAnswer('/project current', 'u', pr, false, CHAT))), 'U4 /project current after unpin → not pinned');
+  ok(/и так ничего не закреплено/.test(String(getQuickAnswer('/project unpin', 'u', pr, false, CHAT))), 'U4 second unpin is a no-op');
+  // legacy pinned:true inside active-*.json must not resurrect after unpin
+  fs.writeFileSync(path.join(projects.projectsRoot(pr), `active-${CHAT}.json`), JSON.stringify({ id: pa.id, at: 1, pinned: true }));
+  ok(projects.getPinnedProjectId(pr, CHAT) === pa.id, 'U5 legacy pin is read');
+  projects.clearPinnedProjectId(pr, CHAT);
+  ok(projects.getPinnedProjectId(pr, CHAT) === null, 'U5 unpin also drops the legacy flag');
+  getQuickAnswer('/project pin «Второй»', 'u', pr, false, CHAT);
+  ok(projects.getProject(pr, projects.getPinnedProjectId(pr, CHAT)).name === 'Второй', 'U6 /project pin «name» pins');
+  // forum topic: pin in a thread stays in that thread
+  getQuickAnswer('/project Первый', 'u', pr, false, CHAT, null, 'default', 77);
+  ok(projects.getPinnedProjectId(pr, CHAT, 'default', 77) === pa.id && projects.getProject(pr, projects.getPinnedProjectId(pr, CHAT)).name === 'Второй', 'U7 thread pin is per-topic, chat pin untouched');
+
+  // ── S*: /settings ───────────────────────────────────────────────────────────
+  fs.writeFileSync(path.join(pr, 'agent-notes.md'), '## Тема А\n- x\n## Тема Б\n- y\n');
+  fs.writeFileSync(path.join(pr, 'requirements-log.md'), '**[001]** a\n**[002]** b\n');
+  fs.mkdirSync(path.join(pr, 'contexts', 'hh'), { recursive: true });
+  fs.writeFileSync(path.join(pr, 'contexts', 'hh', 'active_vacancy.json'), '{}');
+  const st = String(getQuickAnswer('/settings', 'u', pr, false, CHAT));
+  ok(/Закреплён: «Второй»/.test(st), `S1 settings shows pinned project (${st})`);
+  ok(/Заметки агента.*2 тем/.test(st) && /Лог требований\/фич: 2 записей/.test(st) && /hh\/active_vacancy/.test(st), 'S2 settings lists saved memory layers');
+  ok(!/[{}]"/.test(st), 'S3 settings is human text, not JSON');
+  ok(String(getQuickAnswer('покажи настройки', 'u', pr, false, CHAT)).startsWith('⚙️'), 'S4 NL «покажи настройки» → settings');
 
   // ── B*: /bug_or_feature does not steal the pin ──────────────────────────────
   projects.setActiveProjectId(pr, pa.id, CHAT, { pinned: true });

@@ -130,6 +130,8 @@ const PERSONA_GUIDE_URL     = 'https://instant-publish.trainedassist.store/p/per
 // /project — list / switch / create projects. Lets the user steer which project new
 // sessions bind to (see projects.js + the project-binding block in run()).
 const PROJECT_INTENT        = /^\/(?:projects?|проекты?|проект)(?=\s|$)/i;
+// /settings — effective chat config (pinned project, engine, role, saved memory). Read-only.
+const SETTINGS_INTENT       = /^\/(?:settings|config|настройки|конфиг)(?:@\S+)?$|^(?:покажи\s+)?(?:мои\s+)?(?:настройки|конфиг(?:урацию)?)(?:\s+(?:чата|агента|ассистента))?\s*\??$|^(?:get\s+config|user\s+settings|show\s+settings)$/i;
 // /switch2klod, /switch2codex (or natural "switch to codex" / "переключись на клод") — which
 // CLI (Claude Code vs Codex) runs THIS CHAT's tasks going forward. Any profile can flip its
 // own chat — unlike CLI_USAGE_INTENT above, this isn't reading the operator's shared VM
@@ -173,7 +175,7 @@ function isPreQueueQuickIntent(task) {
   return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
     MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
     USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
-    ENGINE_SWITCH_INTENT.test(task);
+    ENGINE_SWITCH_INTENT.test(task) || PROJECT_INTENT.test(task) || SETTINGS_INTENT.test(task);
 }
 // A slash command is an unambiguous, registry-backed user command — never fuzzy prose.
 function isSlashCommand(task) {
@@ -295,11 +297,68 @@ function lastClaudeModel(workDir) {
   return null;
 }
 
+// /settings — human-readable effective configuration of THIS chat. Every line maps to a
+// real on-disk source (pin-*.json, profile.json, persona.md, agent-notes.md, contexts/…) so
+// the user sees what actually persists, not what the model claims it "remembered".
+function renderChatSettings({ userId, workDir, chatId, audience = 'default', threadId = null }) {
+  const clip = (t, n) => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > n ? x.slice(0, n - 1) + '…' : x; };
+  const read = (f) => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return ''; } };
+  const out = ['⚙️ Настройки этого чата', ''];
+
+  // Project
+  const pinnedId = projects.getPinnedProjectId(workDir, chatId, audience, threadId);
+  const lastId = projects.getActiveProjectId(workDir, chatId, audience, threadId);
+  const pname = (id) => { const m = id && projects.getProject(workDir, id); return m ? m.name : id; };
+  out.push('📁 Проект');
+  out.push(pinnedId
+    ? `• Закреплён: «${pname(pinnedId)}» — новые задачи идут в него`
+    : `• Не закреплён — выбирается автоматически${lastId ? ` (последний: «${pname(lastId)}»)` : ''}`);
+  out.push(`• Всего проектов: ${projects.listProjects(workDir, audience).length}`);
+  out.push('');
+
+  // Behaviour
+  const eng = profiles.getEngine(workDir, chatId);
+  const engLabel = eng === 'codex' ? 'Codex CLI' : eng === 'opencode' ? `OpenCode (профиль ${profiles.getOcProfile(workDir) || 'по умолчанию'})` : 'Claude Code';
+  const role = persona.load(workDir);
+  out.push('🤖 Поведение агента');
+  out.push(`• Движок: ${engLabel}`);
+  out.push(`• Роль: ${role ? `«${clip(role, 90)}»` : 'не задана'}`);
+  out.push(`• Карточка контекста: ${fs.existsSync(path.join(workDir, '.context_disabled')) ? 'выключена' : 'включена'}`);
+  out.push('');
+
+  // Saved memory — the layers injected into every new session
+  out.push('🧠 Что реально сохранено (подмешивается в каждую новую сессию)');
+  const notes = read(path.join(workDir, 'agent-notes.md'));
+  const heads = notes ? (notes.match(/^##\s+.+$/gm) || []).map(h => h.replace(/^##\s+/, '')) : [];
+  out.push(notes
+    ? `• Заметки агента (весь профиль): ${heads.length || notes.split('\n').length} ${heads.length ? 'тем' : 'строк'}${heads.length ? ` — последние: ${heads.slice(-3).map(h => `«${clip(h, 50)}»`).join(', ')}` : ''}`
+    : '• Заметки агента (весь профиль): пусто');
+  const projForNotes = pinnedId || lastId;
+  const pnotes = projForNotes ? projects.notesText(workDir, projForNotes) : null;
+  out.push(`• Заметки проекта${projForNotes ? ` «${pname(projForNotes)}»` : ''}: ${pnotes ? `${pnotes.split('\n').filter(Boolean).length} строк` : 'пусто'}`);
+  const req = read(path.join(workDir, 'requirements-log.md'));
+  const reqN = (req.match(/^\*\*\[\d+\]\*\*/gm) || []).length;
+  out.push(`• Лог требований/фич: ${reqN ? `${reqN} записей` : 'пусто'}`);
+  try {
+    const root = path.join(workDir, 'contexts');
+    const keys = [];
+    for (const skill of fs.readdirSync(root)) {
+      let files = [];
+      try { files = fs.readdirSync(path.join(root, skill)); } catch { continue; }
+      for (const f of files) if (f.endsWith('.json')) keys.push(`${skill}/${f.replace(/\.json$/, '')}`);
+    }
+    out.push(`• Контекст скилов: ${keys.length ? `${clip(keys.slice(0, 8).join(', '), 300)}${keys.length > 8 ? ` и ещё ${keys.length - 8}` : ''}` : 'пусто'}`);
+  } catch { out.push('• Контекст скилов: пусто'); }
+  out.push('');
+  out.push('Управление: `/project` — проект · `/project unpin` — снять закрепление · `/persona` — роль · `/switch2klod` / `/switch2codex` — движок · `/context_on` / `/context_off` — карточка');
+  return out.join('\n');
+}
+
 // Guard rule for return null inside a matched intent block:
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
-function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null, telegramUserId = null, audience = 'default') {
+function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null, telegramUserId = null, audience = 'default', threadId = null) {
   // Stale PR alarm — fires repeatedly from csm-relay after PR is already merged
   if (STALE_PR_ALARM_INTENT.test(task)) {
     const prNum = task.match(/#(\d+)/)?.[1];
@@ -362,21 +421,25 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
     ].join('\n');
   }
 
-  // /project — list / switch / create projects. The active project (per chat) decides
-  // which project folder NEW sessions bind to (see decideNewSessionProject + the binding
-  // block in run()). A running session keeps its own project; switching affects new ones.
+  // /project — show / pin / unpin / create / rename the chat's project. The PINNED project
+  // (pin-*.json, explicit user choice) decides which project NEW tasks of this chat bind to;
+  // without a pin the choice is automatic (single project, or the gateway asks). A running
+  // session keeps its own project; pin changes affect new ones.
   if (PROJECT_INTENT.test(task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
     const rest = task.replace(PROJECT_INTENT, '').trim();
     const list = projects.listProjects(workDir, audience);
-    const activeId = projects.getActiveProjectId(workDir, chatId, audience);
+    const pinnedId = projects.getPinnedProjectId(workDir, chatId, audience, threadId);
+    const lastId = projects.getActiveProjectId(workDir, chatId, audience, threadId);
+    const nameOf = (id) => { const p = list.find(x => x.id === id) || projects.getProject(workDir, id); return p ? p.name : id; };
+    const PIN_HINT = 'Сменить: `/project <номер или название>` · снять закрепление: `/project unpin`';
 
     // create: /project new recruiting: Название
     const createMatch = rest.match(/^(?:new|new project|новый|создать|создай|create|add)\s+(.+)$/i);
     if (createMatch) {
       const meta = projects.createProject(workDir, createMatch[1].trim(), { audience });
-      projects.setActiveProjectId(workDir, meta.id, chatId, { audience, pinned: true });
-      return `✅ Проект создан и выбран: «${meta.name}» (${meta.label}).\nНовые сессии пойдут в него. Список: \`/project\``;
+      projects.setActiveProjectId(workDir, meta.id, chatId, { audience, pinned: true, threadId });
+      return `✅ Проект «${meta.name}» создан и закреплён за этим чатом. Новые задачи по умолчанию будут относиться к нему.\n${PIN_HINT}`;
     }
 
     // rename: /project rename <номер|часть названия> = Новое имя  (locks against auto-naming)
@@ -391,6 +454,20 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       return `✏️ Переименовал: «${meta.name}». Авто-переименование для него теперь отключено.`;
     }
 
+    // unpin: back to automatic project choice
+    if (/^(?:unpin|off|auto|авто|открепи(?:ть)?|сними|снять|сброс|reset|clear)(?:\s|$)/i.test(rest)) {
+      const had = projects.clearPinnedProjectId(workDir, chatId, { audience, threadId });
+      return had
+        ? `📍 Закрепление снято: «${nameOf(had)}» больше не закреплён за этим чатом. Проект для новых задач снова определяется автоматически.\nЗакрепить: \`/project <номер или название>\``
+        : '📍 За этим чатом и так ничего не закреплено — проект определяется автоматически.';
+    }
+
+    // current: what is pinned right now
+    if (/^(?:current|status|now|текущий|сейчас|какой)\s*\??$/i.test(rest)) {
+      if (pinnedId) return `📌 За этим чатом закреплён проект «${nameOf(pinnedId)}». Новые задачи по умолчанию относятся к нему.\n${PIN_HINT}`;
+      return `📍 Проект не закреплён — выбирается автоматически${lastId ? ` (последний использованный: «${nameOf(lastId)}»)` : ''}.\nЗакрепить: \`/project <номер или название>\``;
+    }
+
     if (!rest) {
       if (list.length === 0) {
         return [
@@ -402,36 +479,52 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
       // Rich rendering: name + the 3-sense summary (start → middle → end) so a long,
       // meandering project reads clearly. Falls back to the type label when no summary yet.
       const lines = list.map((p, i) => {
-        const head = `${p.id === activeId ? '▶️' : '  '} ${i + 1}. ${p.name}${p.type && p.type !== 'generic' ? ` · ${p.label}` : ''}`;
+        const mark = p.id === pinnedId ? '📌' : (!pinnedId && p.id === lastId ? '▶️' : '  ');
+        const head = `${mark} ${i + 1}. ${p.name}${p.type && p.type !== 'generic' ? ` · ${p.label}` : ''}`;
         const s = p.summary;
         if (!s || !s.start) return head;
         const parts = [s.start, s.middle, s.end].filter(Boolean).map(x => `      ${x}`);
         return [head, ...parts].join('\n');
       });
+      const state = pinnedId
+        ? `📌 Закреплён за этим чатом: «${nameOf(pinnedId)}» — новые задачи идут в него.`
+        : `📍 Не закреплён — проект выбирается автоматически${lastId ? ` (▶️ последний: «${nameOf(lastId)}»)` : ''}.`;
       return [
-        '📁 Проекты (▶️ — проект этого чата, новые сессии идут в него):',
+        state,
+        '',
+        '📁 Проекты:',
         '',
         lines.join('\n\n'),
         '',
-        'Сменить: `/project <номер или часть названия>`',
+        'Закрепить: `/project <номер или название>`',
+        'Снять закрепление: `/project unpin`',
         'Переименовать: `/project rename <номер> = Новое имя`',
         'Создать: `/project new recruiting: Название`',
       ].join('\n');
     }
 
-    // switch: by list number or by id/name substring
+    // pin: by list number or by id/name substring (optional «pin»/«закрепи» keyword)
+    const q0 = rest.replace(/^(?:pin|закрепи(?:ть)?|switch|сменить\s+на|смени\s+на)\s+/i, '').replace(/^[«"']|[»"']$/g, '').trim();
     let target = null;
-    const num = /^\d+$/.test(rest) ? parseInt(rest, 10) : null;
+    const num = /^\d+$/.test(q0) ? parseInt(q0, 10) : null;
     if (num && num >= 1 && num <= list.length) {
       target = list[num - 1];
     } else {
-      const q = rest.toLowerCase();
+      const q = q0.toLowerCase();
       target = list.find(p => p.id.toLowerCase() === q || (p.name || '').toLowerCase() === q)
         || list.find(p => (p.name || '').toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
     }
-    if (!target) return `Проект «${rest}» не найден. Список проектов: \`/project\``;
-    projects.setActiveProjectId(workDir, target.id, chatId, { audience, pinned: true });
-    return `📌 Проект чата: «${target.name}» (${target.label}).\nВсе новые сессии этого чата пойдут в него без вопроса. Сменить: \`/project\``;
+    if (!target) return `Проект «${q0}» не найден. Список проектов: \`/project\``;
+    projects.setActiveProjectId(workDir, target.id, chatId, { audience, pinned: true, threadId });
+    return `📌 Проект «${target.name}» закреплён за этим чатом. Новые задачи по умолчанию будут относиться к нему.\n${PIN_HINT}`;
+  }
+
+  // /settings (/config, /настройки) — the chat's EFFECTIVE configuration in human terms:
+  // what is pinned, which engine/role applies, and what the agent has actually saved
+  // (memory layers that get injected into every session). Read-only.
+  if (SETTINGS_INTENT.test(task.trim())) {
+    if (!workDir) return 'Не удалось определить рабочую директорию. Попробуй ещё раз.';
+    return renderChatSettings({ userId, workDir, chatId, audience, threadId });
   }
 
   // /switch2klod, /switch2codex — see ENGINE_SWITCH_INTENT above.
@@ -1227,7 +1320,7 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // chat turn — e.g. after a forceNew dispatch. BUG_OR_FEATURE_INTENT honors it (PR3) so
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
-async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default') {
+async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default', threadId = null) {
   const notificationIntents = require('../domains/hh/intents');
   if (userId && workDir && (notificationIntents.HH_NOTIFY_OFF_INTENT.test(task) || notificationIntents.HH_NOTIFY_ON_INTENT.test(task))) {
     return 'Уведомления холодного поиска выключены: функция удалена для всех пользователей. Настройки автопоиска не изменены.';
@@ -1364,7 +1457,7 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
   const LONG_MSG_QUICK_SKIP = 200;
   const isSlashCommand = /^\//.test(task.trim());
   const sync = (isSlashCommand || task.trim().length <= LONG_MSG_QUICK_SKIP)
-    ? getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId, audience)
+    ? getQuickAnswer(task, userId, workDir, sessionExists, chatId, telegramUserId, audience, threadId)
     : null;
   if (sync !== null) {
     const preview = (sync && typeof sync === 'object') ? sync.hint : sync;
@@ -1570,6 +1663,7 @@ module.exports = {
   CONTEXT_OFF_INTENT,
   CONTEXT_ON_INTENT,
   PERSONA_INTENT,
+  SETTINGS_INTENT,
   PROJECT_INTENT,
   AGENT_INFO_INTENT,
   MODEL_INFO_INTENT,
