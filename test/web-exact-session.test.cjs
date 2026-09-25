@@ -38,8 +38,10 @@ test('minted Web session ids are unique and pass the route validator', () => {
   for (const id of ids) assert.match(id, SESSION_ID_RE);
 });
 
-test('canary flag: unset=off, * = all, list = exact usernames', () => {
-  assert.equal(webCanaryEnabled('alice', {}), false);
+test('canary flag: unset=repo default (test profile only), empty=off, * = all, list = exact usernames', () => {
+  assert.equal(webCanaryEnabled('alice', {}), false, 'live profiles are not in the default canary');
+  assert.equal(webCanaryEnabled('web-canary', {}), true, 'test profile is on by default — survives deploys');
+  assert.equal(webCanaryEnabled('web-canary', { WEB_CONVREF_CANARY: '' }), false, 'empty env = kill switch');
   assert.equal(webCanaryEnabled('alice', { WEB_CONVREF_CANARY: ' ' }), false);
   assert.equal(webCanaryEnabled('alice', { WEB_CONVREF_CANARY: '*' }), true);
   assert.equal(webCanaryEnabled('alice', { WEB_CONVREF_CANARY: 'bob, alice' }), true);
