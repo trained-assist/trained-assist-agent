@@ -30,6 +30,7 @@ function harness({ chatPending, run = async () => {}, taskOpts = opts, expectedT
     isPreQueueQuickIntent: () => false,
     queuedSessions: new Set(),
     legacyAdmissionScopes: () => ['lane:test'],
+    fromLegacyTelegram: () => null, sessionShadow: { shadowCompare: () => null },
     admission: {
       isBusy: () => !!gate,
       run: (_scopes, fn) => gate ? gate.promise.then(fn) : Promise.resolve().then(fn),
