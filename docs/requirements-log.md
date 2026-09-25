@@ -189,7 +189,7 @@
 | ✅ реализовано | `programmatic+llm-fastpass` | Отдельный (более мягкий) промпт: осмотреться, терпеть тривиальные пропуски, дополнить контекст; всё ещё не слепой pass. Значение selectable. |
 | ✅ реализовано | Softening auto-resolver | Промпт-гайд + ограниченный детерминированный пост-чек: `fail` из-за отсутствующей явной ссылки при наличии близкого эквивалента (напр. PR-ссылка) понижается до `inconclusive` с эквивалентом в evidence — не авто-pass, не скрывает причину. |
 | ✅ реализовано | Тесты | `tests/unit/playbook-validators-mode.test.js`: (a) `programmatic` не зовёт LLM; (b) `+llm` зовёт только для unregistered/inconclusive и пишет вердикт; (c) throw/invalid/bad-JSON/non-ok → `inconclusive`; (d) приоритет plan>env>default; fastpass; softening. `gtd-durable-wiring` кейсы 12/13: `user_value_written` проходит через инъектированный LLM под `programmatic+llm`, остаётся `inconclusive` под `programmatic`. P3d-1 тесты зелёные; `npx eslint src` → 0. |
-| 🔵 планируется | P3d-2 | Финализация: `finalizePlan`/ослабление `updateTask` по `validation_mode` (гейт не тронут в этом слайсе). |
+| ✅ реализовано | P3d-2 | Финализация: `finalizePlan` + гейт в `updateTask` (слайс P3d-2, см. секцию ниже). |
 
 ## 2026-09-26 — playbooks P3d-1c: agent-chosen per-step mode + fast-pass escape (#1372)
 
@@ -199,4 +199,14 @@
 | ✅ реализовано | Agent выбирает режим | Новый MCP-тул `task_item_update(item_id, validation_mode)`; step-промпт показывает `Step id`, текущий режим, доступные значения и рекомендует `programmatic+llm`. Колбэк завершения перечитывает item, поэтому выбранный в рантайме per-step режим учитывается. |
 | ✅ реализовано | Явный fast-pass escape | Под `programmatic+llm-fastpass` шаг может пропустить проверку финальной строкой `VALIDATION: fastpass-skip: <reason>`. Пропуск пишется в `task_validation_results` как `status:'pass'` + `evidence_json {skipped:true, reason, mode}` по каждому объявленному ключу (либо одна строка `fastpass-skip`, если ключей нет) — никогда не тихий pass. Пропускаются и детерминированные валидаторы (в этом и смысл escape), но пропуск всегда записан. Маркер учитывается только при effective-режиме fastpass; programmatic-шаги (без модели) пропускать не могут. |
 | ✅ реализовано | Тесты | `gtd-durable-wiring` кейсы 14–16: (14) маркер пишет skip с причиной и не зовёт ни реестр, ни LLM; (15) per-step override перебивает план; (16) обычные pass/fail/inconclusive под `+llm` не затронуты, а fastpass сам по себе — не auto-skip. Unit: приоритет per-step в `resolveValidationMode`, `parseFastpassSkip`; MCP: `task_item_update` (+ изоляция профиля). P3d-1/1b зелёные; `NODE_ENV=development npx eslint src` → 0. |
-| 🔵 планируется | P3d-2 | Финализация: `finalizePlan`/ослабление `updateTask` по `validation_mode` (гейт не тронут). |
+| ✅ реализовано | P3d-2 | Финализация: `finalizePlan` + гейт в `updateTask` (см. секцию P3d-2 ниже). |
+
+## 2026-09-26 — playbooks P3d-2: гейт финализации по validation_mode (#1372)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | `DurableTaskStore.finalizePlan(taskId, profileId)` | Contract-план становится `done` только если каждое объявленное (criterion_id, validator) имеет строку `task_validation_results` со `status='pass'` на текущем `contract_revision`. Иначе — `{finalized:false, missing:[{criterion_id, validator, got}]}`, статус не меняется. Повторный вызов на уже `done` идемпотентен. |
+| ✅ реализовано | Единая схема criterion_id | `criterionIdForItem` + `declaredValidations` вынесены в `src/durable-task-plan.js` — исполнитель (запись строк) и гейт (чтение строк) используют одно определение, без дрейфа. |
+| ✅ реализовано | `updateTask status='done'` через гейт | Для contract-плана `updateTask`/`completeTask` бросают `Plan finalization blocked: unmet validations — …` при невыполненных проверках. Сырой SQL-обход в `runDueDurable` заменён на `store.finalizePlan(...)`; при блокировке — явный warn со списком недостающих пар. |
+| ✅ реализовано | mode-aware без изменений валидаторов | Строгость уже закодирована при записи (P3d-1b LLM-вердикты; P3d-1c fast-pass skip = `pass` + `evidence {skipped:true, reason, mode}`). Гейт требует лишь `pass`, поэтому skip удовлетворяет его, но остаётся видимым в audit trail. |
+| ✅ реализовано | Тесты | Unit (`durable-task-store.test.js`): блок при missing/fail/inconclusive, pass всех строк, игнор строк другого `contract_revision`, fast-pass skip виден и проходит, `updateTask`/`completeTask` не обходят гейт, legacy-задачи не затронуты, критерий без declared-validations ничего не гейтит. Wiring (`gtd-durable-wiring.test.cjs` кейс 17): `runDueDurable` финализирует только через гейт; все items done + unmet validation → задача остаётся `active`. `NODE_ENV=development npx eslint src` → 0. |

@@ -28,6 +28,7 @@ const path = require('path');
 const os = require('os');
 const { readTokenValue } = require('./token-value');
 const { DurableTaskStore } = require('./durable-task-store');
+const { criterionIdForItem } = require('./durable-task-plan');
 const { durableTaskDbPath, userWorkDir, projectDir: projectDirPath } = require('./data-paths');
 const { resolveStepExecution } = require('./playbook-executor');
 const {
@@ -167,30 +168,6 @@ function retryFailedItem(store, itemId, profileId, { retryDelayMs = 0, escalate 
   return { retried: true, attempts, maxAttempts };
 }
 
-// Which acceptance criterion does this validation belong to? Prefer the
-// criterion whose validations declare this key for this step; fall back to the
-// plan's single criterion, then to the item's stage/position. P3d-2's gate reads
-// rows back keyed by (criterion_id, validator), so an honest id here matters.
-function criterionIdForItem(task, item, validatorKey) {
-  let criteria = null;
-  try { criteria = task.acceptance_criteria_json ? JSON.parse(task.acceptance_criteria_json) : null; } catch { criteria = null; }
-  if (Array.isArray(criteria) && criteria.length) {
-    for (const c of criteria) {
-      const validations = Array.isArray(c && c.validations) ? c.validations : [];
-      for (const v of validations) {
-        const obj = v && v.validation;
-        if (obj && typeof obj === 'object'
-          && Object.prototype.hasOwnProperty.call(obj, validatorKey)
-          && (v.step == null || v.step === item.title)) {
-          return c.id || 'acceptance';
-        }
-      }
-    }
-    if (criteria.length === 1 && criteria[0] && criteria[0].id) return criteria[0].id;
-  }
-  return item.stage != null ? String(item.stage) : 'acceptance';
-}
-
 // Evaluate an item's declared validations through the registry and persist each
 // verdict as a task_validation_results row (profile-scoped). Returns the raw
 // results so the caller can decide complete vs fail. A validator that throws is
@@ -254,15 +231,26 @@ function recordFastpassSkip(store, { task, item, executionId, reason }) {
   return validators;
 }
 
-// All items finished → close the task. Contract plans still finalize through the
-// raw SQL the P3d-2 gate will replace (this slice must not touch the gate).
+// All items finished → close the task. Legacy (non-contract) tasks close by
+// fiat; a contract plan must pass the P3d-2 finalization gate: every declared
+// validation needs a matching 'pass' row (fast-pass skips are stored as pass).
 function settleTaskCompletion(store, task) {
   const progress = store.progressSummary(task.id, task.profile_id);
-  if (progress.total > 0 && progress.finished >= progress.total) {
-    if (!task.acceptance_criteria_json) store.completeTask(task.id, task.profile_id, 'done');
-    else store.db.prepare('UPDATE durable_tasks SET status=?, updated_at=? WHERE id=?').run('done', Date.now(), task.id);
+  if (!(progress.total > 0 && progress.finished >= progress.total)) return;
+  if (!task.acceptance_criteria_json) {
+    store.completeTask(task.id, task.profile_id, 'done');
     console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
+    return;
   }
+  const res = store.finalizePlan(task.id, task.profile_id);
+  if (res.finalized) {
+    console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
+    return;
+  }
+  const missing = (res.missing || [])
+    .map(m => `${m.criterion_id}/${m.validator}=${m.got == null ? 'missing' : m.got}`)
+    .join(', ');
+  console.warn(`[gtd-durable] finalization blocked: ${task.id.slice(0, 8)} — unmet validations: ${missing}`);
 }
 
 // Fire a claimed durable item through the same pipeline as legacy GTD fires.

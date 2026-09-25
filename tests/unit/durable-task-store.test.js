@@ -124,12 +124,15 @@ describe('DurableTaskStore', () => {
     const s = tmpStore();
     s.createPlan({
       id: 'plan', profile_id: 'p', goal: 'g', user_value: 'uv',
-      acceptance_criteria: [{ id: 'c', description: 'done' }],
+      acceptance_criteria: [{ id: 'c', description: 'done', validations: [{ step: 'step', validation: { v: true } }] }],
       items: [{ title: 'step', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { v: true } }],
     });
     expect(s.claimNextRunnable()).toBeNull(); // draft
     expect(s.updateTask('plan', 'p', { status: 'active' }).status).toBe('active');
     expect(() => s.updateTask('plan', 'p', { status: 'done' })).toThrow(/finalization/);
+    // once the declared validation has a pass row, the gate opens
+    s.recordValidation({ task_id: 'plan', profile_id: 'p', criterion_id: 'c', contract_revision: 1, validator: 'v', status: 'pass' });
+    expect(s.updateTask('plan', 'p', { status: 'done' }).status).toBe('done');
   });
 
   it('validation results are appended, listed and profile-scoped (P3d)', () => {
@@ -175,5 +178,118 @@ describe('DurableTaskStore', () => {
     });
     expect(updated.evidence_json).toContain('file_exists');
     expect(updated.completed_at).toBe(12345);
+  });
+});
+
+describe('finalizePlan gate (P3d-2)', () => {
+  // A plan whose single criterion declares two validations (keys ci_green and
+  // file_exists) — the gate needs a current 'pass' row for both.
+  function gatedPlan(s) {
+    return s.createPlan({
+      id: 'gated', profile_id: 'p', goal: 'g', user_value: 'uv',
+      acceptance_criteria: [{
+        id: 'crit-1', description: 'shipped', source: 'test',
+        validations: [
+          { stage: 'build', step: 'run tests', validation: { ci_green: true } },
+          { stage: 'deliver', step: 'merge', validation: { file_exists: 'dist/app.js' } },
+        ],
+      }],
+      items: [
+        { title: 'run tests', execution_kind: 'programmatic', validation: { ci_green: true } },
+        { title: 'merge', execution_kind: 'programmatic', validation: { file_exists: 'dist/app.js' } },
+      ],
+    });
+  }
+  const record = (s, validator, status, extra = {}) => s.recordValidation({
+    task_id: 'gated', profile_id: 'p', criterion_id: 'crit-1', contract_revision: 1,
+    validator, status, ...extra,
+  });
+
+  it('refuses while any declared validation is missing, fail or inconclusive', () => {
+    const s = tmpStore();
+    gatedPlan(s);
+
+    let res = s.finalizePlan('gated', 'p');
+    expect(res.finalized).toBe(false);
+    expect(res.missing).toEqual([
+      { criterion_id: 'crit-1', validator: 'ci_green', got: null },
+      { criterion_id: 'crit-1', validator: 'file_exists', got: null },
+    ]);
+    expect(s.getTask('gated', 'p').status).not.toBe('done');
+
+    record(s, 'ci_green', 'fail');
+    record(s, 'file_exists', 'inconclusive');
+    res = s.finalizePlan('gated', 'p');
+    expect(res.finalized).toBe(false);
+    expect(res.missing).toEqual([
+      { criterion_id: 'crit-1', validator: 'ci_green', got: 'fail' },
+      { criterion_id: 'crit-1', validator: 'file_exists', got: 'inconclusive' },
+    ]);
+    expect(s.getTask('gated', 'p').status).not.toBe('done');
+  });
+
+  it('finalizes when every declared validation has a current pass row', () => {
+    const s = tmpStore();
+    gatedPlan(s);
+    record(s, 'ci_green', 'pass');
+    record(s, 'file_exists', 'pass');
+    expect(s.finalizePlan('gated', 'p')).toEqual({ finalized: true });
+    expect(s.getTask('gated', 'p').status).toBe('done');
+    // idempotent: a second finalize does not error or re-block
+    expect(s.finalizePlan('gated', 'p')).toEqual({ finalized: true });
+  });
+
+  it('ignores pass rows recorded at a different contract revision', () => {
+    const s = tmpStore();
+    gatedPlan(s);
+    record(s, 'ci_green', 'pass', { contract_revision: 99 });
+    record(s, 'file_exists', 'pass');
+    const res = s.finalizePlan('gated', 'p');
+    expect(res.finalized).toBe(false);
+    expect(res.missing.map(m => m.validator)).toEqual(['ci_green']);
+    expect(s.getTask('gated', 'p').status).not.toBe('done');
+  });
+
+  it('a fast-pass skip satisfies the gate but stays visible in the audit', () => {
+    const s = tmpStore();
+    gatedPlan(s);
+    record(s, 'ci_green', 'pass', { evidence_json: JSON.stringify({ skipped: true, reason: 'urgent prod fix', mode: 'programmatic+llm-fastpass' }) });
+    record(s, 'file_exists', 'pass');
+    expect(s.finalizePlan('gated', 'p')).toEqual({ finalized: true });
+    const skipped = s.listValidations('gated', 'p').find(v => v.validator === 'ci_green');
+    expect(JSON.parse(skipped.evidence_json).skipped).toBe(true);
+    expect(JSON.parse(skipped.evidence_json).reason).toBe('urgent prod fix');
+  });
+
+  it('updateTask status=done cannot bypass the gate', () => {
+    const s = tmpStore();
+    gatedPlan(s);
+    s.updateTask('gated', 'p', { status: 'active' });
+    expect(() => s.updateTask('gated', 'p', { status: 'done' })).toThrow(/finalization blocked/i);
+    expect(() => s.completeTask('gated', 'p')).toThrow(/finalization blocked/i);
+    expect(s.getTask('gated', 'p').status).toBe('active');
+    // with both pass rows the same call now succeeds
+    record(s, 'ci_green', 'pass');
+    record(s, 'file_exists', 'pass');
+    expect(s.updateTask('gated', 'p', { status: 'done' }).status).toBe('done');
+  });
+
+  it('a criterion with no declared validations has nothing to gate', () => {
+    const s = tmpStore();
+    s.createPlan({
+      id: 'loose', profile_id: 'p', goal: 'g', user_value: 'uv',
+      acceptance_criteria: [{ id: 'c', description: 'self-reported' }],
+      items: [{ title: 'step', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { v: true } }],
+    });
+    s.updateTask('loose', 'p', { status: 'active' });
+    expect(s.finalizePlan('loose', 'p')).toEqual({ finalized: true });
+    expect(s.getTask('loose', 'p').status).toBe('done');
+  });
+
+  it('legacy (non-contract) tasks are unaffected by the gate', () => {
+    const s = tmpStore();
+    s.createTask({ id: 'legacy', profile_id: 'p', goal: 'g' });
+    s.createTaskItem({ id: 'li', task_id: 'legacy', title: 'x' });
+    expect(s.updateTask('legacy', 'p', { status: 'done' }).status).toBe('done');
   });
 });

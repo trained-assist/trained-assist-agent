@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
-const { validateItem } = require('./durable-task-plan');
+const { validateItem, declaredValidations } = require('./durable-task-plan');
 
 const TASK_STATUSES = ['draft', 'paused', 'blocked', 'active', 'done', 'failed', 'cancelled'];
 const ITEM_STATUSES = ['pending', 'running', 'waiting', 'done', 'failed', 'skipped'];
@@ -15,6 +15,12 @@ const TIERS = ['free', 'standard', 'strong'];
 const TIER_RANK = { free: 0, standard: 1, strong: 2 };
 
 function nowMs() { return Date.now(); }
+
+function describeMissing(missing) {
+  return missing
+    .map(m => `${m.criterion_id}/${m.validator}=${m.got == null ? 'missing' : m.got}`)
+    .join(', ');
+}
 
 class DurableTaskStore {
   constructor(dbPath) {
@@ -158,12 +164,16 @@ class DurableTaskStore {
   updateTask(id, profileId, patch) {
     const task = this.getTask(id, profileId);
     if (!task) return null;
-    // P3a: a contract plan may be ACTIVATED explicitly (draft→active) — that is
-    // what puts its items in front of the executor. Finalization to 'done' is
-    // still gated: it needs per-criterion validation (`task_validation_results`,
-    // P3d); until then the executor must not claim a plan is done by fiat.
+    // P3d-2: a contract plan may only become 'done' through the finalization
+    // gate — every declared (criterion, validator) needs a matching 'pass' row
+    // at the current contract revision. This is the ONE write path: the executor
+    // calls finalizePlan, which enforces the same gate, so there is no raw-SQL
+    // bypass left.
     if (task.acceptance_criteria_json && patch.status === 'done') {
-      throw new Error('Plan finalization requires validated runtime (not enabled yet)');
+      const missing = this._finalizationMissing(task);
+      if (missing.length) {
+        throw new Error(`Plan finalization blocked: unmet validations — ${describeMissing(missing)}`);
+      }
     }
     const allowed = ['goal', 'status', 'project_id'];
     const sets = [];
@@ -196,6 +206,50 @@ class DurableTaskStore {
       const updated = this.updateTask(id, profileId, { status: finalStatus });
       return updated;
     })();
+  }
+
+  /**
+   * Which declared (criterion, validator) pairs lack a current 'pass' row. Only
+   * rows at the task's current contract_revision count; the latest row per pair
+   * wins (a retry that later passes overrides an earlier fail). `got` is the
+   * latest status, or null when no row exists at all.
+   */
+  _finalizationMissing(task) {
+    const revision = task.contract_revision || 1;
+    const latest = new Map();
+    for (const row of this.listValidations(task.id, task.profile_id)) {
+      if ((row.contract_revision || 1) !== revision) continue;
+      latest.set(`${row.criterion_id}\u0000${row.validator}`, row);
+    }
+    const missing = [];
+    for (const declared of declaredValidations(task)) {
+      const row = latest.get(`${declared.criterion_id}\u0000${declared.validator}`);
+      if (!row || row.status !== 'pass') {
+        missing.push({ criterion_id: declared.criterion_id, validator: declared.validator, got: row ? row.status : null });
+      }
+    }
+    return missing;
+  }
+
+  /**
+   * P3d-2 finalization gate. A contract plan becomes 'done' only when every
+   * declared validation has a matching 'pass' row at the current
+   * contract_revision; otherwise nothing changes and the unmet pairs are
+   * returned. Mode-awareness (deterministic vs LLM vs explicit fast-pass skip)
+   * is already encoded at record time — a fast-pass skip is stored as 'pass'
+   * with evidence {skipped:true}, so it satisfies the gate while staying visible.
+   */
+  finalizePlan(taskId, profileId) {
+    const task = this.getTask(taskId, profileId);
+    if (!task) return { finalized: false, missing: [], reason: 'task-not-found' };
+    if (task.status === 'done') return { finalized: true };
+    const missing = this._finalizationMissing(task);
+    if (missing.length) return { finalized: false, missing };
+    this.db.transaction(() => {
+      this._prep(`UPDATE durable_tasks SET status = 'done', updated_at = ?, revision = revision + 1
+        WHERE id = ? AND profile_id = ?`).run(nowMs(), taskId, profileId);
+    })();
+    return { finalized: true };
   }
 
   // ── Items ──────────────────────────────────────────────────────────────
