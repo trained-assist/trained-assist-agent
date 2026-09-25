@@ -12,7 +12,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { REJECT_REASON_ACTION, REJECTION_GREETING, standardRejectionText } = require('../../src/hh-rejection');
-const { createHhNegotiations } = require('../../src/hh-negotiations');
+const { createHhNegotiations, HH_DISCARD_ACTIONS } = require('../../src/hh-negotiations');
 const { generateReviewPageHtml } = require('../../src/hh-review-page-html');
 const { createMockHhServer } = require('../helpers/mock-hh-server');
 
@@ -93,31 +93,45 @@ describe('review page ОТКЛОНИТЬ cards', () => {
 });
 
 describe('discard-stage message sync', () => {
-  it('fetches /negotiations/discard and stores the post-rejection reply', async () => {
+  it('queries the action-named discard collections, not a generic /negotiations/discard', () => {
+    // HH has no `/negotiations/discard` (404) — rejections live in the collection
+    // named after the action. Both actions the system can produce must be covered.
+    expect(HH_DISCARD_ACTIONS).toEqual(['discard_by_employer', 'discard_vacancy_closed']);
+  });
+
+  it('unions replies from both discard actions and stores the post-rejection reply', async () => {
+    const mkNeg = (id, stateId) => ({
+      id,
+      state: { id: stateId },
+      vacancy_id: 'vac-001',
+      created_at: '2026-09-16T14:20:00+03:00',
+      updated_at: new Date().toISOString(),
+      counters: { messages: 2, unread_messages: 1 },
+      resume: { id: 'res-' + id, first_name: 'Илья', last_name: 'Петров' },
+    });
     const srv = createMockHhServer({
-      negotiations: [{
-        id: 'neg-d1',
-        state: { id: 'discard' },
-        vacancy_id: 'vac-001',
-        created_at: '2026-09-16T14:20:00+03:00',
-        updated_at: new Date().toISOString(),
-        counters: { messages: 2, unread_messages: 1 },
-        resume: { id: 'res-d1', first_name: 'Илья', last_name: 'Петров' },
-      }],
+      negotiations: [mkNeg('neg-d1', 'discard_by_employer'), mkNeg('neg-d2', 'discard_vacancy_closed')],
     });
     await srv.start();
     const prevBase = process.env.HH_API_BASE_URL;
     process.env.HH_API_BASE_URL = srv.baseUrl;
     srv.state.discarded.add('neg-d1');
+    srv.state.rejectActions['neg-d1'] = 'discard_by_employer';
+    srv.state.discarded.add('neg-d2');
+    srv.state.rejectActions['neg-d2'] = 'discard_vacancy_closed';
     srv.state.messages['neg-d1'] = [
       { text: 'Спасибо за отклик', role: 'employer' },
       { text: 'почему?', role: 'applicant' },
     ];
     const root = mkTmp();
     try {
+      // The generic path must be a 404 on real HH — guard against re-introducing it.
+      const generic = await fetch(`${srv.baseUrl}/negotiations/discard?vacancy_id=vac-001&per_page=50&page=0`);
+      expect(generic.status).toBe(404);
+
       const hh = createHhNegotiations({ refreshHhToken: async () => null, readChatId: () => {}, getSecretsCache: () => ({}) });
       const discarded = await hh.fetchDiscardedNegotiations('vac-001', 'tok');
-      expect(discarded.map(n => n.id)).toContain('neg-d1');
+      expect(discarded.map(n => n.id).sort()).toEqual(['neg-d1', 'neg-d2']);
 
       await hh.syncHhMessagesToHistory(root, 'discard-u1', discarded, 'tok', { incremental: false, cap: 5 });
       const hist = JSON.parse(fs.readFileSync(path.join(root, 'hh', 'discard-u1', 'candidates', 'neg-d1.json'), 'utf8'));

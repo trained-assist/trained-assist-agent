@@ -181,9 +181,12 @@ function createMockHhServer(options = {}) {
     invites: [],        // {resume_id, vacancy_id, message, send_sms}
   };
 
+  // Real HH collections: recorded employer states. There is deliberately NO
+  // 'discard' — HH 404s `/negotiations/discard`; rejections live in the
+  // action-named `discard_*` collections (see the GET handler below).
   const LIST_STATES = new Set([
     'response', 'consider', 'phone_interview', 'assessment',
-    'interview', 'offer', 'hired', 'discard', 'with_applicant_new',
+    'interview', 'offer', 'hired', 'with_applicant_new',
   ]);
 
   const server = http.createServer((req, res) => {
@@ -268,19 +271,25 @@ function createMockHhServer(options = {}) {
       });
     }
 
-    // GET /negotiations/{state}  (list by state)
+    // GET /negotiations/{collection}  (list by employer-state collection)
     const negList = p.match(/^\/negotiations\/([^/]+)$/);
-    if (req.method === 'GET' && negList && LIST_STATES.has(negList[1])) {
+    if (req.method === 'GET' && negList) {
       const stateFilter = negList[1];
       const vacId = u.searchParams.get('vacancy_id');
-      // Real HH returns discarded negotiations from /negotiations/discard and
-      // excludes them from every other state — mirror that so post-rejection
-      // reply sync can be tested.
-      let items = stateFilter === 'discard'
-        ? negotiations.filter(n => state.discarded.has(n.id))
-        : negotiations.filter(n => n.state.id === stateFilter && !state.discarded.has(n.id));
-      if (vacId) items = items.filter(n => n.vacancy_id === vacId);
-      return send(200, { found: items.length, pages: 1, items });
+      // Real HH names collections after the ACTION that produced them: a rejected
+      // candidate appears under its exact `discard_*` action, never under a generic
+      // `discard` (which 404s). Mirror that so a wrong endpoint fails the test.
+      if (stateFilter.startsWith('discard_')) {
+        let items = negotiations.filter(n => state.rejectActions[n.id] === stateFilter);
+        if (vacId) items = items.filter(n => n.vacancy_id === vacId);
+        return send(200, { found: items.length, pages: 1, items });
+      }
+      if (LIST_STATES.has(stateFilter)) {
+        let items = negotiations.filter(n => n.state.id === stateFilter && !state.discarded.has(n.id));
+        if (vacId) items = items.filter(n => n.vacancy_id === vacId);
+        return send(200, { found: items.length, pages: 1, items });
+      }
+      // otherwise fall through to the single-negotiation lookup below
     }
 
     // GET /negotiations/{id}  (single negotiation)
