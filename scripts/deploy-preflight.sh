@@ -29,9 +29,9 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-if ! git rev-parse --verify --quiet origin/main >/dev/null; then
-  git fetch --quiet origin main
-fi
+# Always refresh: a stale origin/main on the VM (e.g. RU) makes every newly
+# merged target look "not an ancestor" and blocks all deploys (#1406).
+git fetch --quiet origin main
 
 if ! git merge-base --is-ancestor "$TARGET" origin/main; then
   echo "deploy-preflight: FATAL: $TARGET is not an ancestor of origin/main — refusing to deploy." >&2
