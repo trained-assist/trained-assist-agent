@@ -281,7 +281,7 @@ function formatToolActivity(name, input = {}) {
 async function runEngineProcess(opts) {
   const {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
-    cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers,
+    cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers, consumePendingStop = null,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
     ocProfileOverrides, onHeartbeat, onEngineSessionId,
   } = opts;
@@ -706,6 +706,11 @@ async function runEngineProcess(opts) {
   // chatId == Telegram user id, identical regardless of which bot is messaged).
   const sessionState = { killFn: null, killTimer: null, extendCount: 0, proc, userStopped: false, chatId, sessionId, username: user.username, audience: user.audience || 'default' };
   activeTimers.set(taskId, sessionState);
+  // A Stop that arrived before the process existed (queued web Stop) lands now.
+  if (consumePendingStop?.()) {
+    sessionState.userStopped = true;
+    try { proc.kill('SIGTERM'); } catch {}
+  }
   try {
     await new Promise((resolve, reject) => {
       // 38 min: graceful SIGTERM + warn user. Claude Code handles SIGTERM by finishing current step and exiting.

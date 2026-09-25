@@ -56,7 +56,18 @@ async function tgFormat(text, extra) {
 // when absent the request omits the field entirely — private/non-forum behavior is
 // byte-for-byte unchanged (hard guard). Edit/pin need no thread: they target an
 // existing message_id that already lives in the right topic.
+// A run with no Telegram chat (Web: user.id 0, epic #1365) has nowhere to post
+// status bubbles. Never call the Bot API for it: chat_id 0 → 400, and the throw
+// from the '🧠 Думаю…' send aborted every Web run before the engine started
+// (the Web client still got 'done' with an empty history). Web output goes
+// through outputCallback; Telegram delivery is a no-op for chatless runs.
+function hasTelegramChat(chatId) {
+  return chatId != null && chatId !== '' && Number(chatId) !== 0;
+}
+const NO_TELEGRAM_CHAT = Object.freeze({ ok: true, skipped: 'no-telegram-chat', result: null });
+
 async function tgSend(token, chatId, text, extra = {}, threadId = null) {
+  if (!hasTelegramChat(chatId)) return NO_TELEGRAM_CHAT;
   const f = await tgFormat(text, extra);
   const body = { chat_id: chatId, text: f.text, ...f.extra };
   if (Number.isInteger(threadId) && threadId > 0) body.message_thread_id = threadId;
@@ -146,6 +157,7 @@ function _rememberFlood(chatId, retryAfterSec) {
  * (e.g. message deleted) survives all retries, so callers can fall back to send.
  */
 async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
+  if (!hasTelegramChat(chatId)) return NO_TELEGRAM_CHAT;
   const deliveryKey = `${String(token).split(':')[0]}:${chatId}`;
   const { retries = 3, bestEffort = false, coalesce = false } = opts;
   const f = await tgFormat(text, extra);
@@ -214,4 +226,4 @@ async function tgEdit(token, chatId, messageId, text, extra = {}, opts = {}) {
   throw new Error('Telegram editMessageText rate limit retries exhausted');
 }
 
-module.exports = { TG_API, tgFormat, tgSend, tgEdit };
+module.exports = { TG_API, tgFormat, tgSend, tgEdit, hasTelegramChat };
