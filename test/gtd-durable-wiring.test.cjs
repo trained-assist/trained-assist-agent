@@ -41,14 +41,16 @@ function activeContractTask(G, { goal, items, sessionId }) {
     const G1 = freshStore('1');
     const taskId = activeContractTask(G1, { goal: 'wire smoke', items: ['step one'] });
     let prompted = '';
+    let firedOpts = null;
     const fired = await G1.runDueDurable({
       secrets: {}, now: Date.now(), isTaskRunning: () => false,
-      runTask: async (opts) => { prompted = opts.task; return 'ok. DURABLE: done'; },
+      runTask: async (opts) => { prompted = opts.task; firedOpts = opts; return 'ok. DURABLE: done'; },
     });
     const store = G1.durableStore();
     const item = store.listTaskItems(taskId, 'u1')[0];
     ok(fired === 1, `durable: one item fired (got ${fired})`);
     ok(/step one/.test(prompted) && /DURABLE: done/.test(prompted), 'durable: prompt carries step + completion marker');
+    ok(firedOpts.stepTimeoutMs === 600 * 1000, `durable: step carries execution_timeout_seconds as the engine budget (got ${firedOpts && firedOpts.stepTimeoutMs})`);
     ok(item.status === 'done', `durable: item completed (got ${item.status})`);
     ok(store.getTask(taskId, 'u1').status === 'done', 'durable: task completes when all items done');
     ok(store.claimNextRunnable() === null, 'durable: drained task is not claimable');
@@ -100,17 +102,69 @@ function activeContractTask(G, { goal, items, sessionId }) {
       `durable: live session defers item to waiting (got fired=${fired}, ${item.status})`);
   }
 
-  // 5. contract plans stay unclaimable while draft (activation gate untouched)
+  // 5. contract plans stay unclaimable while draft — activation is explicit (P3a)
   {
     const G5 = freshStore('5');
     const store = G5.durableStore();
-    store.createPlan({ profile_id: 'u1', goal: 'draft plan', user_value: 'uv',
+    const r = store.createPlan({ profile_id: 'u1', goal: 'draft plan', user_value: 'uv',
       acceptance_criteria: [{ description: 'c' }],
       items: [{ title: 'draft step', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } }] });
     let fired = 0;
     await G5.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
       runTask: async () => { fired++; return 'DURABLE: done'; } });
-    ok(fired === 0 && store.claimNextRunnable() === null, 'durable: draft contract plans are not executed');
+    ok(fired === 0 && store.claimNextRunnable() === null, 'durable: draft contract plans are not executed until activated');
+    // explicit activation (P3a) makes the same plan claimable
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    ok(store.claimNextRunnable() !== null, 'durable: activated contract plan becomes claimable');
+  }
+
+  // 6. max_attempts is a hard budget: after it is spent the item stays failed and
+  // is never re-fired (no "pend forever").
+  {
+    const G6 = freshStore('6');
+    const store = G6.durableStore();
+    const r = store.createPlan({ profile_id: 'u1', goal: 'budget smoke', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      items: [{ title: 'flaky', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor',
+        context_budget: 'small', validation: { command: 'true' }, max_attempts: 2 }] });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const failRun = () => G6.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      runTask: async () => 'nope. DURABLE: failed: exploded' });
+
+    await failRun();
+    let item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'pending' && item.attempt_count === 1,
+      `durable: first failure re-pends within budget (got ${item.status}/attempts=${item.attempt_count})`);
+    await failRun();
+    item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'failed' && item.attempt_count === 2,
+      `durable: exhausted budget leaves item failed (got ${item.status}/attempts=${item.attempt_count})`);
+
+    let extraFires = 0;
+    await G6.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      runTask: async () => { extraFires++; return 'DURABLE: done'; } });
+    item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(extraFires === 0 && item.status === 'failed', 'durable: exhausted item is not re-fired on later ticks');
+    ok(store.getTask(r.task.id, 'u1').status === 'active', 'durable: task stays active (failed step is visible, not silently done)');
+  }
+
+  // 7. an expired waiter is failed before claim, so it is never handed out again
+  {
+    const G7 = freshStore('7');
+    const store = G7.durableStore();
+    const r = store.createPlan({ profile_id: 'u1', goal: 'waiter smoke', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      items: [{ title: 'waiter', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor',
+        context_budget: 'small', validation: { command: 'true' } }] });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    store.updateTaskItem(item.id, { status: 'waiting', wait_deadline_at: Date.now() - 1000 }, 'u1');
+    let fired = 0;
+    await G7.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      runTask: async () => { fired++; return 'DURABLE: done'; } });
+    const after = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(fired === 0 && after.status === 'failed' && /deadline expired/.test(after.last_error || ''),
+      `durable: expired waiter fails instead of being re-run (got fired=${fired}, status=${after.status})`);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

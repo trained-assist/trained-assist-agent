@@ -83,5 +83,52 @@ describe('DurableTaskStore', () => {
     const b = s.getTaskItem('b');
     expect(b.status).toBe('waiting');
     expect(b.due_at).toBeGreaterThan(Date.now() + 80000000);
+    // A waiting sibling gets a wait window past its due time (P3a), so a stuck
+    // waiter cannot defer forever.
+    expect(b.wait_deadline_at).toBeGreaterThan(b.due_at);
+  });
+
+  it('expireWaitingDeadlines fails only waiting items past their deadline', () => {
+    const s = tmpStore();
+    s.createTask({ id: 't', profile_id: 'p', goal: 'g' });
+    s.createTaskItem({ id: 'expired', task_id: 't', position: 1, title: 'expired' });
+    s.createTaskItem({ id: 'alive', task_id: 't', position: 2, title: 'alive' });
+    s.createTaskItem({ id: 'undated', task_id: 't', position: 3, title: 'undated' });
+    s.updateTaskItem('expired', { status: 'waiting', wait_deadline_at: Date.now() - 1000 }, 'p');
+    s.updateTaskItem('alive', { status: 'waiting', wait_deadline_at: Date.now() + 60_000 }, 'p');
+    s.updateTaskItem('undated', { status: 'waiting' }, 'p'); // no deadline → never expires
+
+    expect(s.expireWaitingDeadlines()).toBe(1);
+    expect(s.getTaskItem('expired').status).toBe('failed');
+    expect(s.getTaskItem('expired').last_error).toMatch(/deadline expired/);
+    expect(s.getTaskItem('alive').status).toBe('waiting');
+    expect(s.getTaskItem('undated').status).toBe('waiting');
+    // P3a guarantee: an expired waiter is not handed out again.
+    const claimed = s.claimNextRunnable();
+    expect(claimed.id).toBe('alive');
+    expect(claimed.id).not.toBe('expired');
+  });
+
+  it('startExecution counts the attempt (not the claim)', () => {
+    const s = tmpStore();
+    s.createTask({ id: 't', profile_id: 'p', goal: 'g' });
+    s.createTaskItem({ id: 'i', task_id: 't', title: 'x' });
+    s.claimNextRunnable();
+    expect(s.getTaskItem('i').attempt_count).toBe(0);
+    s.startExecution({ id: 'e1', task_id: 't', task_item_id: 'i' });
+    s.startExecution({ id: 'e2', task_id: 't', task_item_id: 'i' });
+    expect(s.getTaskItem('i').attempt_count).toBe(2);
+  });
+
+  it('contract plan activates explicitly but finalization stays gated', () => {
+    const s = tmpStore();
+    s.createPlan({
+      id: 'plan', profile_id: 'p', goal: 'g', user_value: 'uv',
+      acceptance_criteria: [{ id: 'c', description: 'done' }],
+      items: [{ title: 'step', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { v: true } }],
+    });
+    expect(s.claimNextRunnable()).toBeNull(); // draft
+    expect(s.updateTask('plan', 'p', { status: 'active' }).status).toBe('active');
+    expect(() => s.updateTask('plan', 'p', { status: 'done' })).toThrow(/finalization/);
   });
 });
