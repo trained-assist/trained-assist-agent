@@ -3,17 +3,29 @@
 // MCP surface for Playbooks (Playbook v1, issue #1372).
 //   P0: playbook_list / playbook_get (read-only registry).
 //   P1: playbook_draft / playbook_edit / playbook_save (authoring via Hermes).
+//   P2: playbook_run (compile a playbook + goal into a durable draft plan).
 // Resolution is profile custom → domain sibling repo → system repo; see
 // src/playbook-store.js. Authoring follows the flow draft → (edit)* → save:
 // the draft is a durable profile-scope file, save() validates it and promotes
 // it to ~/users/<profile>/playbooks/<id>.json with a bumped version. Repo
 // ("system") playbooks are immutable here — they change through a PR.
-// Execution (playbook_run) is a later slice and deliberately absent.
+// Execution itself (activating/running a plan) is a later slice.
 
-const { PlaybookStore, renderPlaybook } = require('../../playbook-store');
+const { PlaybookStore, renderPlaybook, playbookError } = require('../../playbook-store');
 const { createPlaybookAuthoring } = require('../../playbook-authoring');
+const { compilePlaybook } = require('../../playbook-compiler');
 
 const authoring = createPlaybookAuthoring();
+
+// Authoring rejects a missing profile loudly; playbook_run must do the same so
+// an unscoped call can never resolve a different profile's playbooks.
+function requireUser(ctx) {
+  const username = ctx && ctx.userId;
+  if (typeof username !== 'string' || !username.trim()) {
+    throw playbookError('USER_REQUIRED', 'username (profile id) обязателен');
+  }
+  return username;
+}
 
 // Forward ALL arguments (args AND ctx) — dropping ctx silently sent
 // username=undefined into the authoring layer, which wrote into a literal
@@ -124,6 +136,57 @@ module.exports = {
       },
       handler: safe(({ playbook_id, vars }, ctx) =>
         authoring.save({ username: ctx?.userId, playbook_id, vars })),
+    },
+
+    playbook_run: {
+      description:
+        'Compile a saved Playbook v1 into a concrete durable plan: bind the playbook to a goal, render every step, pin ' +
+        '{playbook_id, playbook_version} and persist one draft plan through the same atomic task_create path ' +
+        '(user_value rendered from the template; acceptance_criteria derived from the step validations when omitted). ' +
+        'The result is a DRAFT plan — stored, not executed; editing the playbook later never mutates a plan already pinned ' +
+        'to its version. Repo/draft playbooks must be saved first (resolution sees saved playbooks only).',
+      inputSchema: {
+        type: 'object',
+        required: ['playbook_id', 'goal'],
+        properties: {
+          playbook_id: { type: 'string', description: 'Saved playbook id, e.g. "development"' },
+          goal: { type: 'string', description: 'Concrete goal for this run (substituted into {goal}/{input})' },
+          version: { type: 'integer', minimum: 1, description: 'Pin an exact version; omit for the resolved one' },
+          user_value: { type: 'string', description: 'Override the rendered user_value_template' },
+          acceptance_criteria: { type: 'array', minItems: 1, items: { type: 'object' }, description: 'Goal-specific criteria; derived from step validations when omitted' },
+          vars: { type: 'object', description: 'Extra template values for {placeholder} rendering' },
+          project_id: { type: 'string', description: 'Optional project to bind the plan (and its checklist.md projection) to' },
+          session_id: { type: 'string', description: 'Optional session to attach the plan to' },
+        },
+      },
+      handler: safe(async ({ playbook_id, goal, version, user_value, acceptance_criteria, vars, project_id, session_id }, ctx) => {
+        const profileId = requireUser(ctx);
+        const playbook = new PlaybookStore({ profileId }).get(playbook_id, version);
+        if (!playbook) throw playbookError('PLAYBOOK_NOT_FOUND', `плейбук «${playbook_id}» не найден`);
+        const compiled = compilePlaybook(playbook, { goal, vars, acceptance_criteria, user_value });
+        // Persist through task_create so reference checks, the atomic SQLite
+        // transaction and the checklist projection stay in one place.
+        const { task_create } = require('./101-durable-tasks').tools;
+        const persisted = await task_create.handler({
+          goal: compiled.goal,
+          user_value: compiled.user_value,
+          acceptance_criteria: compiled.acceptance_criteria,
+          items: compiled.items,
+          playbook_id: playbook.id,
+          playbook_version: playbook.version,
+          project_id: project_id || undefined,
+          session_id: session_id || undefined,
+        }, ctx);
+        return {
+          task: persisted.task,
+          items: persisted.items,
+          projection: persisted.projection,
+          projection_warning: persisted.projection_warning,
+          playbook: { id: playbook.id, version: playbook.version, scope: playbook.scope, source: playbook.source },
+          summary: { stages: playbook.stages.length, items: compiled.items.length },
+          render: renderPlaybook(playbook, { ...(vars || {}), input: goal, goal }),
+        };
+      }),
     },
 
   },
