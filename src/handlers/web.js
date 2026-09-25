@@ -331,8 +331,13 @@ async function handleWeb(req, url, res, ctx) {
     try { prepared = prepareWebTaskFiles(username, taskText, refs); }
     catch (e) { return json(res, e.statusCode || 503, { error: e.message || 'attachment preparation failed' }); }
     const sid = (sessionId && /^[a-zA-Z0-9_-]+$/.test(sessionId)) ? sessionId : null;
+    // Exact-session Web runs mint the new id BEFORE the receipt, so a duplicate
+    // requestId arriving while the first run is still going gets the id to
+    // navigate to (was sessionId:null until the run finished).
+    const { webCanaryEnabled, newWebSessionId } = require('../core/web-conversation');
+    const newSessionId = !sid && webCanaryEnabled(username) ? newWebSessionId() : null;
     let claim;
-    try { claim = claimWebMutation(username, requestId || null, { kind: 'run', sessionId: sid }); }
+    try { claim = claimWebMutation(username, requestId || null, { kind: 'run', sessionId: sid || newSessionId }); }
     catch { return json(res, 503, { error: 'could not persist mutation receipt' }); }
     if (claim.invalid) return json(res, 400, { error: 'invalid requestId' });
     if (!claim.claimed) return json(res, 409, {
@@ -348,7 +353,7 @@ async function handleWeb(req, url, res, ctx) {
       if (released.failed) console.warn('[web-media] failed to release %d original ref(s)', released.failed);
     }
     return streamWebTask({
-      req, res, secrets, username, task: prepared.task, sessionId: sid,
+      req, res, secrets, username, task: prepared.task, sessionId: sid, newSessionId,
       projectId: projectId || null, fileRefs: prepared.fileRefs, requestId: requestId || null,
     });
   }

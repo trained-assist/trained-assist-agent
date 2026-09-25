@@ -1,0 +1,166 @@
+{
+  "id": "development",
+  "version": 1,
+  "scope": "system",
+  "title": "Engineering development",
+  "goal_template": "{goal}",
+  "user_value_template": "Working, verified change for the goal, with current acceptance evidence.",
+  "defaults": {
+    "max_attempts": 3,
+    "execution_timeout_seconds": 600,
+    "recovery_policy": "default"
+  },
+  "stages": [
+    {
+      "id": "frame",
+      "title": "Frame value and acceptance",
+      "steps": [
+        {
+          "title": "Define user value",
+          "execution_kind": "agent",
+          "executor_role": "researcher",
+          "minimum_model_level": "bachelor",
+          "context_budget": "small",
+          "validation": { "user_value_written": true }
+        },
+        {
+          "title": "Record acceptance criteria",
+          "execution_kind": "agent",
+          "executor_role": "researcher",
+          "minimum_model_level": "bachelor",
+          "context_budget": "small",
+          "validation": { "acceptance_criteria_recorded": true }
+        },
+        {
+          "title": "Define validation",
+          "execution_kind": "agent",
+          "executor_role": "reviewer",
+          "minimum_model_level": "master",
+          "context_budget": "medium",
+          "validation": { "validation_defined_per_item": true }
+        }
+      ]
+    },
+    {
+      "id": "discover",
+      "title": "Research and reproduce",
+      "steps": [
+        {
+          "title": "Research or reproduce the problem",
+          "execution_kind": "agent",
+          "executor_role": "researcher",
+          "minimum_model_level": "bachelor",
+          "context_budget": "medium",
+          "validation": { "problem_reproduced_or_researched": true }
+        },
+        {
+          "title": "Identify root cause when needed",
+          "execution_kind": "agent",
+          "executor_role": "researcher",
+          "minimum_model_level": "master",
+          "context_budget": "medium",
+          "validation": { "root_cause_identified": true }
+        }
+      ]
+    },
+    {
+      "id": "design",
+      "title": "Design the smallest change",
+      "steps": [
+        {
+          "title": "Design the smallest change",
+          "execution_kind": "agent",
+          "executor_role": "developer",
+          "minimum_model_level": "master",
+          "context_budget": "medium",
+          "validation": { "smallest_change_designed": true }
+        },
+        {
+          "title": "Check risks and rollback",
+          "execution_kind": "agent",
+          "executor_role": "reviewer",
+          "minimum_model_level": "master",
+          "context_budget": "medium",
+          "validation": { "risks_and_rollback_recorded": true }
+        },
+        {
+          "title": "Split implementation into small slices",
+          "execution_kind": "agent",
+          "executor_role": "developer",
+          "minimum_model_level": "master",
+          "context_budget": "small",
+          "validation": { "slices_defined": true }
+        }
+      ]
+    },
+    {
+      "id": "build",
+      "title": "Implement and test",
+      "steps": [
+        {
+          "title": "Implement",
+          "execution_kind": "agent",
+          "executor_role": "developer",
+          "minimum_model_level": "master",
+          "context_budget": "large",
+          "validation": { "implementation_complete": true }
+        },
+        {
+          "title": "Run tests, lint and regression checks",
+          "execution_kind": "programmatic",
+          "validation": { "tests_lint_regression_green": true }
+        },
+        {
+          "title": "Open PR",
+          "execution_kind": "programmatic",
+          "validation": { "pr_opened": true }
+        }
+      ]
+    },
+    {
+      "id": "deliver",
+      "title": "Deliver and verify",
+      "steps": [
+        {
+          "title": "Wait for CI and staging; repair failures",
+          "execution_kind": "programmatic",
+          "delay_after_sec": 600,
+          "validation": { "ci_and_staging_green": true }
+        },
+        {
+          "title": "Merge and deploy",
+          "execution_kind": "programmatic",
+          "validation": { "merged_and_deployed": true }
+        },
+        {
+          "title": "Verify the actual user scenario",
+          "execution_kind": "agent",
+          "executor_role": "verifier",
+          "minimum_model_level": "master",
+          "context_budget": "medium",
+          "validation": { "user_scenario_verified": true }
+        },
+        {
+          "title": "Observe when needed",
+          "execution_kind": "agent",
+          "executor_role": "verifier",
+          "minimum_model_level": "master",
+          "context_budget": "medium",
+          "validation": { "observation_done": true }
+        },
+        {
+          "title": "Finalize only with current acceptance evidence",
+          "execution_kind": "agent",
+          "executor_role": "reviewer",
+          "minimum_model_level": "doctor",
+          "context_budget": "medium",
+          "validation": { "acceptance_evidence_current": true }
+        }
+      ]
+    }
+  ],
+  "hooks": {
+    "task_done": [{ "type": "notify", "to": "owner", "text": "Task done: {goal}" }],
+    "task_failed": [{ "type": "notify", "to": "owner", "text": "Task stuck: {goal} — {error}" }]
+  }
+}
