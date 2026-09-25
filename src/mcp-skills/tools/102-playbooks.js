@@ -15,10 +15,13 @@ const { createPlaybookAuthoring } = require('../../playbook-authoring');
 
 const authoring = createPlaybookAuthoring();
 
+// Forward ALL arguments (args AND ctx) — dropping ctx silently sent
+// username=undefined into the authoring layer, which wrote into a literal
+// "users/undefined/" profile. Caught by the live smoke test.
 function safe(fn) {
-  return async args => {
+  return async (...allArgs) => {
     try {
-      return await fn(args);
+      return await fn(...allArgs);
     } catch (error) {
       if (error && error.code) return { error: error.message, code: error.code };
       throw error;
