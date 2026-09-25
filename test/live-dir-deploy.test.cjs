@@ -154,3 +154,18 @@ test('deploy scripts use the release mechanics', () => {
     assert.match(body, /release_set_link /, `${name} must activate via symlink swap`);
   }
 });
+
+test('release paths are absolute /home/vova, not $HOME (RU deploy user is not the service user)', () => {
+  for (const name of ['deploy.sh', 'deploy-ru-edge.sh']) {
+    const body = fs.readFileSync(path.resolve(__dirname, '../scripts', name), 'utf8');
+    assert.match(body, /AGENT_HOME="\$\{AGENT_HOME:-\/home\/vova\}"/, `${name} must default AGENT_HOME to /home/vova`);
+    assert.doesNotMatch(body, /RELEASES_DIR="\$\{RELEASES_DIR:-\$HOME/, `${name} must not derive the release dir from $HOME`);
+    assert.doesNotMatch(body, /CURRENT_LINK="\$\{CURRENT_LINK:-\$HOME/, `${name} must not derive the symlink from $HOME`);
+  }
+});
+
+test('cron install tolerates a root-owned release dir', () => {
+  const body = fs.readFileSync(path.resolve(__dirname, '../ops/cron/install.sh'), 'utf8');
+  assert.match(body, /chmod \+x[\s\S]*\|\| true/, 'cron chmod must be best-effort on a root-owned release');
+});
+

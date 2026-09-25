@@ -13,8 +13,11 @@ source "$SCRIPT_DIR/release-lib.sh"
 
 SERVICE="ru-edge"
 REPO_DIR="${REPO_DIR:-$(pwd)}"                              # git source; may be a session worktree
-RELEASES_DIR="${RELEASES_DIR:-$HOME/agent-releases}"
-CURRENT_LINK="${CURRENT_LINK:-$HOME/agent-master}"
+# Absolute paths, NOT $HOME: on the shared RU box the SSH deploy user is not
+# the service user (vova), while ru-edge.service hardcodes /home/vova/agent-master.
+AGENT_HOME="${AGENT_HOME:-/home/vova}"
+RELEASES_DIR="${RELEASES_DIR:-$AGENT_HOME/agent-releases}"
+CURRENT_LINK="${CURRENT_LINK:-$AGENT_HOME/agent-master}"
 TARGET="${DEPLOY_TARGET_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}"
 RELEASE_DIR="$RELEASES_DIR/$TARGET"
 export REPO_DIR RELEASES_DIR CURRENT_LINK SERVICE
