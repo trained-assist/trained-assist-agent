@@ -183,48 +183,73 @@ Managed adapter предотвращает accidental mixing generations/runs и
 - для недоверенного/multi-tenant engine нужен separate UID/container/VM или brokered boundary;
 - дополнительный custom IPC в v1 сам по себе эту проблему не решает.
 
-## 4. Provider lease: жизнь процесса, а не одного tool call
+## 4. Provider lease: adapter владеет child и journal
 
-### 4.1 API и владелец
+### 4.1 Владелец процесса
 
-Добавить `acquireProvider(providerId, profileId, executionRoot)` как явное приобретение процесса. Он проверяет source eligibility и вызывает существующую acquireArtifact-семантику: full verification → private copy → full post-copy verification. Существующий `acquireAction` сохранить для single-call пользователей; не вызывать его с «первым попавшимся action» как фиктивное право на весь provider.
+V1 не вводит отдельный `SessionMcpRuntime`/supervisor service. **Один core adapter-process на `(engineRunId, providerId, generationId, resourceBindingVersion)`** является владельцем:
+- provider private execution-copy;
+- provider child process;
+- bounded call queue;
+- lease journal;
+- MCP client state к provider.
 
-Один ключ процесса: `(engineRunId, providerId, generationId, resourceBindingVersion)`. Параллельные первые вызовы используют single-flight. V1 исполняет calls последовательно внутри provider instance; это не глобальный лимит всех agents. Ожидающие вызовы имеют bounded queue/deadline. Идемпотентность business task и #706 этим не решаются.
+Параллельные первые calls внутри adapter используют single-flight. V1 сериализует calls внутри одного provider instance; это не глобальный limit agents. Lease не совпадает с workspace lease и не решает #706.
 
-Владелец lease — core `SessionMcpRuntime`, supervisor выполняет управление процессом. Engine child владеет только stdio adapter. Lease не освобождается после каждого call и не совпадает с workspace lease.
-
-### 4.2 Durable record и порядок запуска
-
-Существующее замыкание `release()` недостаточно для crash recovery. Добавить небольшой versioned journal управляемых ресурсов — не новую БД задач:
-
+Acquire sequence:
 ```text
-leaseId, engineRunId, providerId, generationId, artifactDigest
-hostId, bootId, supervisor/child pid + processStartIdentity + processGroup
-executionCopyPath, lifecycleState, timestamps, cleanupReason
+adapter start
+→ validate pinned generation/source/profile
+→ atomic lease ownership
+→ full verify approved artifact
+→ private copy
+→ post-copy verify
+→ spawn provider child
+→ MCP initialize/initialized/tools-list parity
+→ ready
 ```
 
-Порядок: сохранить/fsync `preparing` intent → создать private copy → проверить bytes → сохранить `prepared` → запустить служебный supervisor → сохранить его identity → supervisor сообщает child identity **до обработки tools/call** → MCP handshake → `ready`. Child может инициализировать свой модуль до сообщения identity, поэтому startup provider должен быть без business side effects; иначе onboarding не пройден.
+### 4.2 Single-writer journal
 
-Supervisor — небольшой retained core helper, не provider code. Он отслеживает control pipe к host. Потеря host приводит к drain/stop provider, но не к удалению файлов живого child. Адаптер/supervisor и их dependency closure тоже должны лежать в сохранённом core runtime bundle, а не лениво загружаться из изменяемого live checkout после `git reset`.
+Journal должен иметь одного writer **по конструкции**.
 
-### 4.3 Закрытие и recovery
+Для каждого lease:
+1. adapter атомарно создаёт lock directory / ownership record (`mkdir` или equivalent create-if-absent);
+2. record содержит `leaseGeneration`, run/provider IDs, host/boot identity, adapter PID+start identity, provider PID+start identity, process group, copy path, lifecycle/timestamps;
+3. обновление record: temp file → fsync → atomic rename; только holder текущего `leaseGeneration` пишет;
+4. новый adapter того же run/provider не steal-ит lock по TTL. Сначала reconcile recorded OS identity; ambiguous live/unknown → `needs_reconcile`, без второго provider child;
+5. normal release снимает lock только после доказанного завершения provider process group и durable final record.
+
+Это не task DB и не business source of truth; journal нужен только для lifecycle/recovery provider copies/processes.
+
+### 4.3 Закрытие и crash semantics
 
 | Событие | Поведение |
 |---|---|
-| Engine завершён / stop / timeout / launch failure | Запретить новые calls, отменить очередь, закрыть provider stdin, bounded wait → TERM → KILL при необходимости. Release только после подтверждения остановки managed process group. |
-| Adapter disconnected | Короткое bounded reconnect окно в том же run, без нового child и replay mutations; окончание engine закрывает весь runtime. |
-| Provider crash | In-flight outcome сохранить; очередь не должна бесконечно перезапускать child. Следующий явный запуск — новый проверенный lease той же версии. |
-| Host crash | Supervisor видит control-pipe EOF и останавливает provider. Незавершённые effects не объявлять failed-with-no-effect. Startup reconciliation проверяет journal и OS identity. |
-| Supervisor погиб, provider ещё жив | Копию retain. Не запускать второй экземпляр для unresolved owner. Recovery сначала доказывает ownership/liveness, затем управляемо останавливает либо требует ручной reconcile. |
-| Host reboot | Несовпадающий bootId означает, что записанные процессы прежней загрузки не живы. Незавершённые actions остаются unknown; resource copy можно reclaim после сверки. |
-| PID переиспользован / OS identity недоступна | Не сигналить только по номеру PID, не удалять lease по возрасту. Retain + `needs_reconcile`. |
-| Copy есть, record отсутствует/повреждён | Отметить orphan; не удалять автоматически. |
+| Engine/adapter normal EOF, stop, timeout | Запретить новые calls, отменить queue, close provider stdin, bounded wait → TERM → KILL; release после подтверждённого exit. |
+| Provider crash | In-flight outcome нормализовать; не auto-replay mutation. Новый verified child — только после final/reconciled old lease. |
+| Adapter crash, provider child жив | Новый adapter не стартует второй child вслепую. Startup reconcile по bootId/PID/start identity/process group; ambiguity → retain + unavailable/needs_reconcile. |
+| Host reboot | Старые process identities не живы; unresolved actions остаются unknown; private copy reclaim после reconciliation. |
+| PID reuse / identity unavailable | Не signal/delete только по PID или возрасту. Retain. |
+| Copy есть без valid record | Orphan retained; explicit reconcile. |
 
-Для обычного live child использовать process handle/exit events; `kill()` и поле `killed` не доказывают завершение. Linux PID/starttime checks снижают риск mistaken identity, но не являются атомарной защитой от всех PID races: неоднозначное orphan состояние остаётся retained. Провайдеры с daemonized descendants вне managed process group не поддерживаются v1; для них нужна проверенная cgroup/OS-supervision интеграция до onboarding.
+Provider не должен daemonize descendants вне managed process group в v1. Parent-death magic не считается достаточной гарантией; normal shutdown управляется adapter, hard-crash recovery — conservative reconciliation.
 
-Начальные local deadlines предлагаются как конфигурация implementation, не измеренный SLA: handshake 10 s, обычный action 45 s, shutdown grace 5 s + TERM grace 5 s. Для длительных действий нужен явный ограниченный override; progress не отменяет абсолютный deadline. На пилоте согласовать эти значения с client timeout каждого движка.
+**Осознанный trade-off v1:** recovery не живёт как отдельный host service после смерти adapter. Мы принимаем это ради меньшей инфраструктуры. Если реальные инциденты покажут необходимость always-on central supervisor, он становится v2 и использует те же journal/RunBinding/contracts.
 
-**TTL запускает reconcile, не удаление. Workspace/code/data пользователя этот reaper никогда не трогает.**
+### 4.4 Deadlines по классам actions
+
+Начальные implementation defaults, не SLA:
+- MCP handshake/provider startup: 10 s;
+- обычный read action: 45 s;
+- idempotent mutation/long engineering action: 120 s;
+- shutdown: 5 s graceful + 5 s TERM before KILL.
+
+Override задаёт **host/deployment policy по action/provider**, не LLM argument. Client timeout Claude/Codex/OpenCode должен быть >= внутреннего deadline + transport margin; это проверяется real CLI smoke.
+
+Timeout после dispatch mutation → `unknown/OUTCOME_UNKNOWN`, без auto-replay. Progress не отменяет absolute deadline.
+
+**TTL только инициирует reconcile. Workspace/code/data этот reaper не удаляет.**
 
 ## 5. Проверка артефакта и производительность
 
@@ -312,26 +337,44 @@ Acceptance сравнивает фактический effective каталог 
 
 ## 8. Protocol, ошибки и повторные вызовы
 
-Адаптер реализует проверенный tools-only MCP subset: initialize/version negotiation → initialized, ping, tools/list, tools/call, bounded framing/output, cancellation и shutdown через transport. Неподдерживаемые sampling/elicitation/resources/tasks не объявляются и не проксируются автоматически. Server-initiated requests от provider не получают доступа к LLM/cookies/host functions просто потому, что пришли по stdio.
+Adapter реализует tools-only MCP subset на **обоих stdio hops**:
 
-Клиентский и provider-side handshake — два отдельных соединения. Provider может остаться на поддерживаемом `2024-11-05`; версия не объявляется «новейшей» без реализации. Host ↔ provider выполняет handshake перед tools/call, а не копирует текущую отправку единственной строки из `runMcpTool`. JSON-RPC IDs, notifications и страницы tools/list разбираются корректно. Stdout только protocol; logs в stderr. Проверить `ping` и реакцию на EOF на реальных adapters.
+```text
+engine --MCP stdio--> core adapter --MCP stdio--> provider child
+```
 
-`isError: true` — не успешный action. Сохранять весь нормализованный MCP CallToolResult (content blocks + structuredContent при поддержке), а не только `content[0].text`; text/JSON parsing остаётся явным compatibility adapter для прежних non-MCP callers.
+Оба соединения имеют initialize/version negotiation → initialized, ping, tools/list, tools/call, bounded framing/output, cancellation и shutdown semantics. Unsupported sampling/elicitation/resources/tasks не объявляются и не проксируются автоматически.
+
+Provider может остаться на поддерживаемом `2024-11-05`; версию не объявлять «новейшей» без implementation. Adapter выполняет provider handshake до первого `tools/call`. JSON-RPC IDs/notifications/pages разбираются корректно. Stdout — protocol only, logs — stderr. Проверить ping/EOF на реальных adapters.
+
+`isError:true` — failure, не success. Нормализовать весь CallToolResult, включая structuredContent при поддержке; legacy text parsing остаётся explicit compatibility adapter.
 
 | Событие | Семантика |
 |---|---|
-| Malformed request / unknown tool | Protocol/service error с безопасным сообщением. |
-| Forbidden scope / approval required | Текущий contract code, provider не вызван. |
-| `isError:true` / business failure | Action failure и MCP tool error, не зелёный success. |
-| Недоступность до dispatch | `PROVIDER_UNAVAILABLE`, effect не начат. |
-| Timeout/disconnect после dispatch | `unknown` / `OUTCOME_UNKNOWN`; эффект мог состояться. Нельзя безусловно повторить mutation. |
-| Stop до dispatch | Ничего не запускать; зафиксировать отмену queued call. |
+| Malformed request / unknown tool | protocol/service error. |
+| Forbidden scope / approval required | existing contract code; provider не вызван. |
+| `isError:true` | action failure/tool error. |
+| Unavailable до dispatch | `PROVIDER_UNAVAILABLE`, effect не начат. |
+| Timeout/disconnect после dispatch | `unknown / OUTCOME_UNKNOWN`; effect мог состояться. |
+| Stop до dispatch | queued call отменён без effect. |
 
-Idempotency key генерирует host из run/binding + adapter connection epoch + JSON-RPC request ID, с привязкой к canonical action/args fingerprint. Один и тот же transport request не запускается дважды; повтор с другими args → conflict, в том числе при race on insert. Reconnect/replay сохраняет исходную identity только для реально повторяемого запроса.
+### 8.1 Mutation retry invariant
 
-Новый engine run или новый запрос модели не считается автоматически тем же business action. Общая exactly-once семантика не обещается; workspace operation key/rootTaskId и business effect ledger остаются отдельными механизмами #1353/#706. Нельзя вводить авто-replay mutations ради прозрачного восстановления MCP.
+LLM/MCP client может повторить tool call новым JSON-RPC request ID. Поэтому request ID **не является** business idempotency key.
 
-Небольшие обязательные исправления action boundary для этого transport: передача host-only context; `isError`/unknown mapping; корректный same-key race check; schema-valid ответ на существующий in-progress execution. Сейчас `resultFromRow` не должен выдавать `running` как будто это разрешённый ActionResult. Для in-progress выбрать controlled `CONFLICT`/in-progress service response без повторного dispatch; результат `unknown` использовать только при реальной неопределённости исполнения, не вместо «ещё работает».
+Для autonomous MCP v1:
+- `effect=read` + `retrySafety=read_only` — обычный safe path;
+- mutation (`write`, `external_message`, `destructive`) экспонируется только если integration умеет получить **stable operation identity из host context** и provider/transport реально dedupe-ит её;
+- предпочтительно descriptor имеет `retrySafety=idempotent`; `unsafe` mutation без durable operation identity через autonomous MCP v1 **не монтируется**;
+- key не берётся из model args как authority. Он выводится host-side из root task/action-specific operation identity/resolved binding;
+- одинаковая logical operation → одинаковый key даже при новом JSON-RPC ID/LLM retry; другие canonical args под тем же key → conflict;
+- timeout after dispatch не даёт права «просто повторить».
+
+`engineering_spawn_workspace` соответствует этому через operation key/rootTask identity. Для других mutation actions нужен аналогичный declared strategy до onboarding.
+
+Общая exactly-once семантика не обещается: effect ledger/outbox/provider-specific idempotency остаются частью capability. Не вводить auto-replay mutations ради «прозрачного» MCP recovery.
+
+Небольшие обязательные fixes action boundary: host-only context; `isError`/unknown mapping; корректный same-key race; schema-valid response на running execution. `running` не выдавать как готовый ActionResult — вернуть controlled in-progress/conflict semantics без второго dispatch.
 
 ## 9. B2: manifest contract и независимые блокеры
 
