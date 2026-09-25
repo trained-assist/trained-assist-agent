@@ -72,57 +72,57 @@ core-owned adapter process
 
 ## 2. Состав компонентов и точное построение session config
 
-### 2.1 Три отдельные операции
+### 2.1 Три операции v1
 
 ```ts
-// Предлагаемые signatures; types описывают границы, не готовый SDK.
 compileSourceGeneration(config, coreCatalog, deploymentPolicy): Generation
 planSessionMcp(generation, hostRunBinding, coreServers): SessionMcpPlan
-openSessionMcpRuntime(plan): Promise<SessionMcpHandle>
+materializeSessionMcp(plan, runtimeDir): SessionMcpFiles
 ```
 
-`compileSourceGeneration` строит новый `ActionProviderRegistry` со всеми core descriptors, затем `McpSkillSourceRegistry` этой же генерации. Не регистрировать разные поколения внешних actions в один mutable global registry. Дополнительно резервируются core MCP names `playwright` и `trained-skills`, включая legacy core tool names: текущая проверка action collisions не покрывает сама по себе конфликт серверного имени с core.
+`compileSourceGeneration` строит новый `ActionProviderRegistry` со всеми core descriptors, затем `McpSkillSourceRegistry` этой же generation. Разные поколения external actions не регистрируются в один mutable global registry. Дополнительно резервируются core MCP names `playwright` и `trained-skills`: action-collision check сам по себе не покрывает конфликт server name с core.
 
-`planSessionMcp` — детерминированное преобразование **снимка** metadata/availability и host binding. Не скачивает packages, не запускает provider, не проверяет credentials в сети. Нынешний строгий `availability()` не вызывать N раз из renderer каждого движка; использовать снимок, подготовленный generation loader. Снимок готовности — информация, не разрешение исполнить bytes.
+`planSessionMcp` — детерминированное преобразование снимка metadata/availability + host binding. Оно не скачивает packages, не запускает provider и не проверяет credentials в сети. Строгий `availability()` не вызывается N раз из renderers каждого engine; generation loader готовит status snapshot. Snapshot — информация для plan, не spawn authority.
 
 Алгоритм:
-
 1. Зафиксировать `generationId`, `engineRunId`, `profileId`, `projectId`, task binding и host-generated runtime directory.
-2. Скопировать core server descriptors; не менять их provider policy в этом PR.
-3. В стабильном порядке по `mcpServerId` рассмотреть целиком каждый source. Invalid/conflicting sources не монтировать; core выигрывает; все конфликтующие external sources исключаются независимо от порядка массива.
-4. `enabled !== true` или profile отсутствует в `profiles` → не монтировать. Пустой allowlist не означает «все».
-5. Нет проверенной установки → диагностировать unavailable и не монтировать. Другие sources/core остаются работоспособны.
-6. Для доступного source создать descriptor **core stdio adapter**. Ни source entrypoint, ни sibling-checkout не появляются как команда engine config.
-7. Вернуть `{generationId, mcpServers, mounts, diagnostics}`. `mounts` содержит provider/source/revision/digest, но не секреты.
+2. Скопировать core server descriptors.
+3. В стабильном порядке по `mcpServerId` рассмотреть каждый source целиком. Invalid/conflicting source не монтировать; core выигрывает.
+4. `enabled !== true` или profile отсутствует в `profiles` → source не монтировать.
+5. Нет проверенной установки → diagnostic unavailable; другие sources/core продолжают работать.
+6. Для доступного source создать descriptor **core-owned adapter-process**. Ни source entrypoint, ни sibling checkout не появляются как command в engine config.
+7. Вернуть `{generationId, mcpServers, mounts, diagnostics}` без secrets.
 
-Пример **шаблона**, не готового production-конфига:
+`materializeSessionMcp` записывает versioned RunBinding + adapter config в host-selected runtime directory вне code checkout. Пример:
 
 ```json
 {
   "mcpServers": {
     "engineering": {
       "command": "<absolute trusted node binary>",
-      "args": ["<retained core adapter bundle>/stdio.js", "--binding-file", "<run-runtime>/engineering/client.json"]
+      "args": ["<retained core adapter bundle>/provider-adapter.js", "--binding-file", "<run-runtime>/engineering/run-binding.json"]
     }
   }
 }
 ```
 
-В полной карте остаются `playwright`/`trained-skills`. `client.json` — файл `0600` в каталоге `0700`, содержащий только адрес локального IPC и run/provider-scoped capability. Он не содержит GitHub/API-токены и не определяет roots. Host берёт полномочия из своего binding table, а не из полей этого файла. Чужая или изменённая capability не расширяет scope.
+`run-binding.json` содержит pinned generation/source IDs и host-resolved opaque bindings; raw credentials в нём не нужны. Adapter использует этот snapshot весь lifetime.
 
-`openSessionMcpRuntime` регистрирует IPC endpoint и сохраняет run binding **до запуска engine**. Provider приобретается лениво при первом реальном вызове; обычные `initialize`/`tools/list` обслуживаются статически. Required provider для bootstrap задаётся доверенным caller: его отсутствие останавливает соответствующую coding-задачу, а не включает fallback в live checkout. Это зависимость задачи, не ещё один feature flag.
+**Это не security capability против самого engine.** Directory/file modes уменьшают случайное смешение, но same-UID shell способен читать/chmod/запустить тот же adapter вручную. V1 threat model доверяет coding engine на уровне Linux UID; для adversarial engine нужен separate UID/container/signed brokered context, а не усложнение MCP wiring.
 
-### 2.2 Каталог tools без выполнения внешнего JS
+Provider приобретается лениво при первом `tools/call`; `initialize`/`tools/list` обслуживаются по approved static catalog. Optional source failure возвращает unavailable/degraded и не заставляет coding agent останавливаться. Обязательность конкретной capability определяет caller/project policy, не adapter.
 
-Каталог строится из approved action names и input schemas; не делать `require` внешнего registry ради discovery. Description в действующем action descriptor отсутствует: не предполагать обратное. Для первого wiring допустимы name + inputSchema. При необходимости сохранения legacy descriptions — статический presentation catalog внутри проверяемого release, созданный и проверенный при onboarding; он не расширяет перечень actions и не задаёт permissions. Его формат/наличие фиксирует release, не ответ неизвестного процесса.
+### 2.2 Каталог tools без выполнения external JS
 
-После первого запуска child проверить его `tools/list` против approved каталога: extra names/schema mismatch не дают новых полномочий. Динамически недоступные credential-dependent tools дают отдельный readiness reason; setup/status actions сохраняются. Для cutover HH/Freelance сопоставление каталога и readiness — обязательная приёмка, не слепое равенство количества tools.
+Каталог строится из approved action names/input schemas; не делать `require` external registry ради discovery. Description в текущем action descriptor отсутствует — не предполагать обратное. Для первого wiring достаточно name + inputSchema. Если legacy descriptions нужны, они входят в статический presentation catalog проверяемого release и не расширяют permissions.
+
+После первого запуска provider child проверить его `tools/list` против approved catalog: extra names/schema mismatch не дают новых полномочий. Credential-dependent runtime readiness — отдельный diagnostic. Для HH/Freelance cutover требуется parity fixture, а не слепое сравнение количества tools.
 
 ## 3. Доверенный host-context и единый action path
 
 ### 3.1 Источник полномочий
 
-Host создаёт binding из аутентифицированного запуска:
+Host создаёт binding из аутентифицированного запуска **до запуска engine**:
 
 ```text
 RunBinding v1
@@ -130,13 +130,14 @@ RunBinding v1
   profileId, projectId, trigger, origin, channel
   generationId, providerId, sourceRevision, artifactDigest
   repositoryBindingId?, workspaceBindingId?, resourceBindingVersion
+  policyDecisionRefs / allowed action surface
 ```
 
-`profileId` использует текущую identity core; не вводить переименование пользователя/профиля попутно. Абсолютные пути и credential references хранятся в host-owned resource binding. Они не становятся authority потому, что их прислала LLM.
+`profileId` использует текущую identity core; не вводить rename пользователя/профиля попутно. Absolute paths и credential references остаются host/deployment concerns; модель не получает authority из arguments.
 
-IPC v1 — приватный Unix socket на том же Linux host, без публичного HTTP endpoint. Короткий socket path в защищённом runtime root; endpoint принимает только binding capability и MCP request. Capability ограничена конкретным engine run/provider, отзывается при stop и не выдаётся provider child. Никакого общего `AGENT_SECRET` в adapter config.
+В v1 нет отдельного host IPC. Core-owned adapter читает pinned RunBinding, обслуживает MCP connection движка и сам владеет provider child. Public MCP request содержит только tool name/arguments/protocol metadata. Adapter назначает profile/project/trigger/origin/channel и resolved resource binding из RunBinding, а не из payload.
 
-Engine adapter — обычный MCP server для движка, но не произвольный прокси ко всем host functions. Public request содержит только `name`, `arguments` и protocol metadata. Host самостоятельно назначает profile/project/trigger/origin/channel и разрешает ссылку на repository/workspace. Идентификатор из payload — запрос на ресурс, не доказательство владения.
+Это защищает от **случайной** подмены context внутри managed path, но не от намеренно adversarial same-UID engine: такой engine с shell может читать/изменять runtime files или вызвать core code в обход MCP. Это честная граница v1, не OS sandbox.
 
 ### 3.2 Путь `tools/call`
 
@@ -157,19 +158,30 @@ authenticate run/provider capability
 
 ### 3.3 Как context доходит до provider handler
 
-Выбранное расширение **только core ↔ provider**: `params._meta['trained-assist/host-context']` с versioned resolved invocation context. Core сначала удаляет одноимённое входное поле от клиента, затем формирует своё. Прямой доступ engine к stdin provider отсутствует. Provider adapter передаёт context вторым параметром handler (`handler(args, ctx)`), а library по-прежнему принимает обычный resolved binding.
+**Протокол фиксируем явно:**
+- engine ↔ core adapter = **MCP stdio**;
+- core adapter ↔ provider child = **MCP stdio**;
+- host context передаётся только на втором hop через versioned `params._meta['trained-assist/host-context']`.
 
-Это наше proposed extension, не стандартная гарантия MCP. Его поддержку provider явно подтверждает в negotiated experimental capability. Поля context не становятся domain `contextFields` manifest v2: те описывают данные домена, не источник полномочий.
+Adapter удаляет одноимённое входное `_meta` поле от engine и формирует своё из RunBinding/resolved resource binding. Provider подтверждает поддержку extension в negotiated experimental capability. Provider-side adapter передаёт context вторым параметром handler (`handler(args, ctx)`); library code принимает resolved binding напрямую.
 
-Для старых HH/Freelance adapters допускается фиксированный **per-run** `USER_ID`/`WORK_DIR` из host binding; env не менять между конкурентными вызовами. Такие adapters не получают новые workspace mutation actions до поддержки invocation context. Процесс не переиспользуется между profiles/projects/resource bindings. Динамический context держится в локальной переменной вызова, не в module-level state.
+Host context не является manifest v2 `contextFields`: domain fields и authority context — разные понятия.
 
-Для существующего `engineering_prepare_task(repo_path, task)` — временная совместимость: host принимает `repo_path` только при точном соответствии разрешённому read binding после canonical/symlink checks. Несовпадение → reject до запуска provider; не молча подменять путь. Для будущих mutation tools использовать opaque repository/workspace IDs и resolved host context, а не произвольные roots из arguments. Отсутствует binding → controlled failure, не `process.cwd()` fallback.
+Для legacy HH/Freelance допускается фиксированный **per-run** `USER_ID`/`WORK_DIR` из RunBinding; env не меняется между calls. Provider process не переиспользуется между profiles/projects/resource bindings и не получает новые workspace mutation actions до поддержки invocation context.
 
-Поддельные `repo_path`, `profileId`, `approved:true`, `_meta` или workspace ID другого task проверяются отрицательными тестами. Секретные пути не раскрывать в сообщениях о таких отказах.
+Для текущего `engineering_prepare_task(repo_path, task)` — временная compatibility: adapter принимает `repo_path` только при exact match разрешённому read binding после canonical/symlink checks. Будущие mutation tools используют opaque repository/workspace IDs + host-resolved context, не arbitrary roots.
 
-### 3.4 Важная граница защиты
+Поддельные `repo_path`, `profileId`, `approved:true`, `_meta` или workspace ID другого task покрываются negative tests.
 
-Этот дизайн защищает управляемый MCP action path от подмены контекста и случайного смешения задач. Он **не создаёт OS sandbox**: текущий engine может иметь shell и доступ того же Linux UID. Процесс с такими правами может читать/изменять файлы в обход MCP. Для недоверенных пользователей/кода нужен отдельный UID/container boundary. Не выдавать private copy, chmod или capability за защиту от враждебного same-UID процесса.
+### 3.4 Граница защиты
+
+Managed adapter предотвращает accidental mixing generations/runs и не доверяет LLM arguments как authority. Он **не защищает от самого coding engine**, если engine имеет shell под тем же Linux UID.
+
+Следовательно:
+- runtime file modes/copies — hygiene и determinism, не security sandbox;
+- same-UID engine теоретически может читать чужой run directory;
+- для недоверенного/multi-tenant engine нужен separate UID/container/VM или brokered boundary;
+- дополнительный custom IPC в v1 сам по себе эту проблему не решает.
 
 ## 4. Provider lease: жизнь процесса, а не одного tool call
 
