@@ -28,7 +28,8 @@ const path = require('path');
 const os = require('os');
 const { readTokenValue } = require('./token-value');
 const { DurableTaskStore } = require('./durable-task-store');
-const { durableTaskDbPath } = require('./data-paths');
+const { durableTaskDbPath, userWorkDir } = require('./data-paths');
+const { resolveStepExecution } = require('./playbook-executor');
 
 // ── Разумные дефолты (небольшие, но осмысленные) ────────────────────────────
 const DEFAULT_ETA_MIN = 60;   // через сколько минут после завершения проверить
@@ -192,6 +193,16 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     const executionId = `exec-${item.id.slice(0, 8)}-${now}`;
     store.startExecution({ id: executionId, task_id: task.id, task_item_id: item.id, session_id: sessionRow?.session_id || null, tier: item.current_tier });
 
+    // P3b: contract plans resolve the step's contract to a concrete engine/profile;
+    // legacy (non-contract) durable items keep the pre-P3b default engine.
+    const step = task.acceptance_criteria_json
+      ? resolveStepExecution(item)
+      : { engine: 'claude', ocProfile: null, ocRole: null, skipModels: [] };
+    // A durable step has no session chat but DOES have a profile workspace. Passing
+    // it (instead of null) is both correct context and required: writeMcpConfig
+    // path.join()s the workDir, so null crashed every real durable fire.
+    const workDir = userWorkDir(task.profile_id);
+
     const prompt = [
       '[DURABLE TASK — auto-execution]',
       `Task: ${task.goal}`,
@@ -213,8 +224,9 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
       ? item.execution_timeout_seconds * 1000 : null;
     runTask({
       taskId: `durable-${task.profile_id}-${item.id.slice(0, 8)}-${fireNow}`,
-      user: { id: null, name: task.profile_id, username: task.profile_id, workDir: null },
-      task: prompt, forceClaude: true, engine: 'claude', secrets, internalGtd: true,
+      user: { id: null, name: task.profile_id, username: task.profile_id, workDir },
+      task: prompt, forceClaude: true, engine: step.engine, secrets, internalGtd: true,
+      ocProfile: step.ocProfile || null, contextSkipModels: step.skipModels,
       stepTimeoutMs,
     }).then(reply => {
       const said = typeof reply === 'string' ? reply : '';
