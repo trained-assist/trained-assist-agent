@@ -1,5 +1,5 @@
-Goal: #1372 P3b design spec — resolve step contract (role/level/budget) to engine/model; implementation pending owner sign-off of mapping (§8).
+Goal: #1372 — user-scenario docs for Playbooks (engineering, exhibition + registry-check requirement, freelance spec).
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1420
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1423
 - [ ] Merged to main
-- [ ] Deployed to prod — verified live (docs-only, no runtime change)
+- [ ] Deployed to prod — verified live (docs-only)
