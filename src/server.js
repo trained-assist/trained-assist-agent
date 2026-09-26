@@ -324,6 +324,21 @@ async function resumePendingTasks(secrets) {
       // Stale entries would otherwise block GTD indefinitely: isTaskRunning() reads this journal.
       clearPendingTask(p.taskId);
       console.log(`[resume] cleared stale task ${p.taskId} (user=${p.username}, age=${Math.round(age / 60000)}min)`);
+      // A web task is never resumable (no Telegram audience), so every restart
+      // lands here with its mutation receipt stuck in 'accepted' — which then
+      // 409-blocks the user's retry forever. Finalize the receipt so the truth
+      // is on disk and claimWebMutation's takeover rule can re-run the task
+      // (#web-task-restart-recovery, 2026-09-26 incident).
+      const webMatch = /^(.+)-web-([A-Za-z0-9_-]+)$/.exec(p.taskId || '');
+      if (webMatch && webMatch[1] === p.username) {
+        try {
+          require('./web-routes').completeWebMutation(p.username, webMatch[2], {
+            state: 'error', error: 'Задача была прервана рестартом агента — отправьте ещё раз.',
+            sessionId: p.sessionId || null, clearedAt: new Date().toISOString(),
+          });
+          console.log(`[resume] finalized web mutation receipt for ${p.taskId}`);
+        } catch (e) { console.warn('[resume] web receipt finalize failed:', e.message); }
+      }
       if (p.startedAt && age < ABANDONED_NOTICE_MS && p.username && p.userId && !p.internalGtd) {
         await notifyFailure(p, '⚠️ Задача была прервана перезапуском и не возобновилась. Повтори запрос.');
       }
