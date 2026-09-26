@@ -59,3 +59,17 @@ test('opencode: `run --session <id>` on the resume path, none on a fresh run', (
   const [, freshArgs] = buildEngineCommand({ ...base, engine: 'opencode', resumeSessionId: null });
   assert.equal(freshArgs.includes('--session'), false, 'no --session on a fresh run');
 });
+
+test('opencode: a pinned ocRole becomes `--agent <role>`; absent without one (P3b #1449)', () => {
+  const [, withRole] = buildEngineCommand({ ...base, engine: 'opencode', ocRole: 'explore' });
+  const i = withRole.indexOf('--agent');
+  assert.notEqual(i, -1, '--agent present when a role is pinned');
+  assert.equal(withRole[i + 1], 'explore');
+
+  const [, noRole] = buildEngineCommand({ ...base, engine: 'opencode' });
+  assert.equal(noRole.includes('--agent'), false, 'non-contract callers keep the historical argv');
+
+  // The oc role must never leak into a claude/codex argv.
+  const [, claudeArgs] = buildEngineCommand({ ...base, engine: 'claude', ocRole: 'explore' });
+  assert.equal(claudeArgs.includes('--agent'), false, 'claude argv never gets --agent');
+});

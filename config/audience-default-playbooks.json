@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "playbooks": {
+    "freelance": "freelance-project-spec",
+    "exhibition": "exhibition-catalog-to-sales-site",
+    "development": "development",
+    "default": "development"
+  }
+}

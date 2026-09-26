@@ -18,11 +18,32 @@
 
 const { validateItem } = require('./durable-task-plan');
 const { playbookError, _internal } = require('./playbook-store');
+const { validateHooks, TASK_HOOK_EVENTS } = require('./playbook-hooks');
 
 const { substitute } = _internal;
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_TIMEOUT_SECONDS = 600;
+
+// Resolve one step's boundary hooks. Step hooks stay on their own item; a stage
+// boundary is carried by the stage's first/last item (items are strictly ordered,
+// so stage entry/exit coincide with those item boundaries).
+function compileItemHooks(stage, step, index, count) {
+  const hooks = {};
+  if (Array.isArray(step.on_complete) && step.on_complete.length) hooks.on_complete = step.on_complete;
+  if (Array.isArray(step.on_fail) && step.on_fail.length) hooks.on_fail = step.on_fail;
+  if (index === 0 && Array.isArray(stage.on_enter) && stage.on_enter.length) hooks.stage_enter = stage.on_enter;
+  if (index === count - 1 && Array.isArray(stage.on_exit) && stage.on_exit.length) hooks.stage_exit = stage.on_exit;
+  return Object.keys(hooks).length ? hooks : null;
+}
+
+function compileTaskHooks(playbook) {
+  validateHooks(playbook.hooks, { where: 'hooks', events: TASK_HOOK_EVENTS });
+  const hooks = {};
+  if (Array.isArray(playbook.hooks?.task_done) && playbook.hooks.task_done.length) hooks.task_done = playbook.hooks.task_done;
+  if (Array.isArray(playbook.hooks?.task_failed) && playbook.hooks.task_failed.length) hooks.task_failed = playbook.hooks.task_failed;
+  return Object.keys(hooks).length ? hooks : null;
+}
 
 // A goal_template that contains {input}/{goal} renders the concrete goal into the
 // task goal. A template without a slot is kept and the goal is appended, so the
@@ -67,7 +88,13 @@ function compilePlaybook(playbook, { goal, vars = {}, acceptance_criteria = null
 
   const items = [];
   for (const stage of playbook.stages || []) {
-    for (const step of stage.steps || []) {
+    const steps = stage.steps || [];
+    // Unknown hook type is a compile error, never a silently dropped hook.
+    validateHooks({ on_enter: stage.on_enter, on_exit: stage.on_exit },
+      { where: `stage «${stage.id}»`, events: ['on_enter', 'on_exit'] });
+    steps.forEach((step, stepIndex) => {
+      validateHooks({ on_complete: step.on_complete, on_fail: step.on_fail },
+        { where: `шаг «${step.title}»`, events: ['on_complete', 'on_fail'] });
       const item = {
         title: substitute(step.title, renderVars),
         stage: stage.id,
@@ -81,6 +108,8 @@ function compilePlaybook(playbook, { goal, vars = {}, acceptance_criteria = null
         execution_timeout_seconds:
           step.execution_timeout_seconds ?? defaults.execution_timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS,
       };
+      const itemHooks = compileItemHooks(stage, step, stepIndex, steps.length);
+      if (itemHooks) item.hooks = itemHooks;
       if (step.instructions) item.instructions = substitute(step.instructions, renderVars);
       try {
         validateItem(item);
@@ -88,7 +117,7 @@ function compilePlaybook(playbook, { goal, vars = {}, acceptance_criteria = null
         throw playbookError('COMPILE_INVALID', `шаг «${item.title}»: ${error.message}`);
       }
       items.push(item);
-    }
+    });
   }
   if (!items.length) {
     throw playbookError('COMPILE_INVALID', `плейбук «${playbook.id}» не содержит шагов`);
@@ -109,12 +138,17 @@ function compilePlaybook(playbook, { goal, vars = {}, acceptance_criteria = null
     user_value: planUserValue,
     acceptance_criteria: criteria,
     items,
+    // Task-level hooks, resolved at compile time and pinned with the plan's
+    // playbook_version. Null when the playbook declares none.
+    hooks: compileTaskHooks(playbook),
   };
 }
 
 module.exports = {
   compilePlaybook,
   deriveAcceptanceCriteria,
+  compileItemHooks,
+  compileTaskHooks,
   DEFAULT_MAX_ATTEMPTS,
   DEFAULT_TIMEOUT_SECONDS,
 };

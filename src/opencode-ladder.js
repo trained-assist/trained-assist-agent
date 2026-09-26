@@ -64,6 +64,16 @@ const CLASSIFIERS = [
   // the ladder only advanced via forceAdvance on retries; a short TTL degrades a dead rung
   // immediately without permanently poisoning a rung that might just be having a transient 5xx.
   { class: 'quota', ttlMs: 5 * 60 * 1000, pattern: /unexpected server error/i },
+  // A malformed/rejected model request from the gateway, e.g. `Bad Request: {"model":"deepseek-v4.1-flash"}`
+  // (observed live 2026-09-25 on the opencode-go deepseek rung: the same "top" model intermittently
+  // rejects a request while its siblings serve fine). Intermittent by nature, so this is NOT a
+  // reason to skip the rung right away — retrying the same model a few times is the point
+  // (owner 2026-09-26: "частенько багует. нужны ретраи грамотные, альтернатива — если три ретрая
+  // не сработали"). Classed 'transient': recordFailure() does NOT mark the rung exhausted and the
+  // runner leaves it for the generic same-model retry path; only after the retry budget is spent
+  // does forceAdvance() move the task to the sibling rung. Kept LAST of the pre-'context' rules so
+  // a more specific signal (429 / usage limit / context) wins when both appear in one error string.
+  { class: 'transient', ttlMs: 0, pattern: /bad\s*request/i },
   // The request itself didn't fit this rung's context window — not a quota/config problem
   // with the rung, so unlike the classes above this must NOT persist a shared exhaustion:
   // the next task on this rung (from any user) is very likely a normal-sized prompt that
@@ -135,6 +145,13 @@ function recordFailure(profile, role, model, errorText) {
     // The caller (runner/index.js) skips this rung for its own retry via buildOcProfileOverrides'
     // skipModels, not by writing shared state that would block unrelated, normal-sized tasks.
     return { class: 'context', model, alertNeeded: false };
+  }
+  if (verdict.class === 'transient') {
+    // Intermittent per-rung fault (e.g. "Bad Request") — retry the SAME model first. Also no
+    // markExhausted: the rung is fine most of the time, so poisoning it for every user because
+    // one request tripped would be wrong. The runner escalates to the next rung only after its
+    // own same-model retry budget is spent (forceAdvance on the last attempt).
+    return { class: 'transient', model, alertNeeded: false };
   }
   markExhausted(profile, role, model, verdict.ttlMs);
   return { class: verdict.class, model, alertNeeded: verdict.class === 'config' };

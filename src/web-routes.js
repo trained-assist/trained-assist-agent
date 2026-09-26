@@ -22,8 +22,31 @@ function webMutationReceiptPath(username, requestId) {
   return path.join(SYSTEM_ROOT, 'web-mutations', username, `${requestId}.json`);
 }
 
+// A web task in flight always has its pending-tasks journal record (runner's
+// savePendingTask). After a restart, boot resume clears every web record (web
+// tasks have no Telegram audience, so isTaskResumable is false) — so a receipt
+// WITHOUT a journal record is a crash orphan, not a running task.
+function webTaskJournalRecordExists(username, requestId) {
+  const fs = require('fs');
+  try {
+    return fs.existsSync(path.join(SYSTEM_ROOT, 'pending-tasks', `${username}-web-${requestId}.json`));
+  } catch { return false; }
+}
+
 // Durable claim: create-once with O_EXCL semantics. A duplicate requestId can
-// never start a second agent task, including after process restart.
+// never start a second agent task while the first is genuinely alive.
+//
+// Takeover rule (#web-task-restart-recovery, 2026-09-26 incident): a receipt
+// whose task completed (state 'done') blocks forever — correct. But a receipt
+// orphaned by a process restart (state 'accepted', task journal already
+// cleared) or left by a failed attempt (state 'error') used to 409 the retry
+// forever with the lie "already accepted" — the user's draft was permanently
+// poisoned. Now a retry takes the receipt over when the task is provably not
+// running: no journal record AND the receipt is older than the claim/flight
+// race window (a fresh double-submit within WEB_MUTATION_TAKEOVER_MS still
+// 409s, as does any in-flight task).
+const WEB_MUTATION_TAKEOVER_MS = 15_000;
+
 function claimWebMutation(username, requestId, meta = {}) {
   if (!requestId) return { claimed: true, receipt: null };
   if (!USERNAME_RE.test(username) || !REQUEST_ID_RE.test(requestId)) {
@@ -36,6 +59,11 @@ function claimWebMutation(username, requestId, meta = {}) {
     requestId, username, state: 'accepted', acceptedAt: Date.now(),
     kind: meta.kind || null, sessionId: meta.sessionId || null,
   };
+  const writeReceipt = (data) => {
+    const tmp = `${fp}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, fp);
+  };
   try {
     const fd = fs.openSync(fp, 'wx', 0o600);
     try {
@@ -45,8 +73,24 @@ function claimWebMutation(username, requestId, meta = {}) {
     return { claimed: true, receipt };
   } catch (e) {
     if (e.code !== 'EEXIST') throw e;
-    try { return { claimed: false, receipt: JSON.parse(fs.readFileSync(fp, 'utf8')) }; }
+    let existing = null;
+    try { existing = JSON.parse(fs.readFileSync(fp, 'utf8')); }
     catch { return { claimed: false, receipt: { requestId, username, state: 'accepted' } }; }
+    if (existing.state === 'done') return { claimed: false, receipt: existing };
+    const lastTouch = existing.updatedAt || existing.acceptedAt || 0;
+    const inFlight = webTaskJournalRecordExists(username, requestId)
+      || (Date.now() - lastTouch) < WEB_MUTATION_TAKEOVER_MS;
+    if (inFlight) return { claimed: false, receipt: existing };
+    const takeover = {
+      ...receipt,
+      attempt: (existing.attempt || 1) + 1,
+      previousState: existing.state || null,
+    };
+    try { writeReceipt(takeover); } catch (e2) {
+      console.warn('[web-mutation] takeover rewrite failed:', e2.message);
+      return { claimed: false, receipt: existing };
+    }
+    return { claimed: true, receipt: takeover, takeover: true };
   }
 }
 

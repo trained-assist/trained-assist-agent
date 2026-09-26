@@ -14,6 +14,7 @@
 const { PlaybookStore, renderPlaybook, playbookError } = require('../../playbook-store');
 const { createPlaybookAuthoring } = require('../../playbook-authoring');
 const { compilePlaybook } = require('../../playbook-compiler');
+const { suggestPlaybookForAudience } = require('../../audience-default-playbook');
 
 const authoring = createPlaybookAuthoring();
 
@@ -51,6 +52,23 @@ module.exports = {
         'A malformed file is reported under diagnostics instead of crashing the list.',
       inputSchema: { type: 'object', properties: {} },
       handler: async (_args, ctx) => new PlaybookStore({ profileId: ctx?.userId }).list(),
+    },
+
+    playbook_suggest: {
+      description:
+        'Suggest/pre-select the default playbook for an audience (bot surface) — e.g. freelance specs, exhibition ' +
+        'catalog, engineering. Read-only: it only reports the suggestion and whether the profile can actually see ' +
+        'that playbook; it never compiles, runs or activates a plan (the explicit draft→active step stays with the ' +
+        'caller). Resolution: env AUDIENCE_DEFAULT_PLAYBOOK → config/audience-default-playbooks.json → built-ins, ' +
+        'falling back to "development".',
+      inputSchema: {
+        type: 'object',
+        properties: { audience: { type: 'string', description: 'Bot/surface audience; omit for the default map' } },
+      },
+      handler: async ({ audience } = {}, ctx) => {
+        const store = new PlaybookStore({ profileId: ctx?.userId });
+        return suggestPlaybookForAudience(audience, { store });
+      },
     },
 
     playbook_get: {
@@ -155,11 +173,16 @@ module.exports = {
           user_value: { type: 'string', description: 'Override the rendered user_value_template' },
           acceptance_criteria: { type: 'array', minItems: 1, items: { type: 'object' }, description: 'Goal-specific criteria; derived from step validations when omitted' },
           vars: { type: 'object', description: 'Extra template values for {placeholder} rendering' },
+          approve_hooks: {
+            type: 'boolean',
+            description: 'Explicit consent to run external-effect hooks (notify/create_issue/publish) for this run. ' +
+              'Without it those hooks are recorded as skipped and never fail the task.',
+          },
           project_id: { type: 'string', description: 'Optional project to bind the plan (and its checklist.md projection) to' },
           session_id: { type: 'string', description: 'Optional session to attach the plan to' },
         },
       },
-      handler: safe(async ({ playbook_id, goal, version, user_value, acceptance_criteria, vars, project_id, session_id }, ctx) => {
+      handler: safe(async ({ playbook_id, goal, version, user_value, acceptance_criteria, vars, project_id, session_id, approve_hooks }, ctx) => {
         const profileId = requireUser(ctx);
         const playbook = new PlaybookStore({ profileId }).get(playbook_id, version);
         if (!playbook) throw playbookError('PLAYBOOK_NOT_FOUND', `плейбук «${playbook_id}» не найден`);
@@ -172,6 +195,8 @@ module.exports = {
           user_value: compiled.user_value,
           acceptance_criteria: compiled.acceptance_criteria,
           items: compiled.items,
+          hooks: compiled.hooks,
+          execution_policy: approve_hooks ? { hooks_approved: true } : undefined,
           playbook_id: playbook.id,
           playbook_version: playbook.version,
           project_id: project_id || undefined,

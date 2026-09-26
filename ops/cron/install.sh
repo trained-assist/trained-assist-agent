@@ -17,6 +17,10 @@
 #                                 execute costs a full clone+CI pass, with no quiet-file
 #                                 gate protecting it. No auto-merge — execute only opens
 #                                 a PR for a human to review.
+#   mcp-source-canary.sh daily    live mount canary for every extracted domain skill repo
+#                                 (scripts/staging/canaries/*.json): real prepare/registry/
+#                                 MCP child + one read-only call; opens/comments a GitHub
+#                                 issue on failure. Evidence in ~/agent-data/mcp-canary/.
 #
 # These first built live on the box (.pma runaway incident 2026-09-13, collector 2026-09-22).
 # Keeping them here + installing from deploy means a box reprovision re-creates them instead
@@ -38,7 +42,7 @@ END="# <<< trained-assist disk-hygiene <<<"
 
 # Exec bits come from git (all four are 100755); the release dir is root-owned
 # and not chmod-able by the deploy user, so this is best-effort only.
-chmod +x "$DIR/disk-guard.sh" "$DIR/dead-tenant-sweep.sh" "$REPO_DIR/scripts/bugs-collector-cron.sh" "$REPO_DIR/scripts/issue-fixer-cron.sh" 2>/dev/null || true
+chmod +x "$DIR/disk-guard.sh" "$DIR/dead-tenant-sweep.sh" "$REPO_DIR/scripts/bugs-collector-cron.sh" "$REPO_DIR/scripts/issue-fixer-cron.sh" "$DIR/mcp-source-canary.sh" 2>/dev/null || true
 
 block() {
   echo "$BEGIN"
@@ -46,6 +50,7 @@ block() {
   echo "30 6 * * 1 $CRON_BASE/ops/cron/dead-tenant-sweep.sh"
   echo "*/2 * * * * $CRON_BASE/scripts/bugs-collector-cron.sh"
   echo "5 * * * * $CRON_BASE/scripts/issue-fixer-cron.sh"
+  echo "15 6 * * * $CRON_BASE/ops/cron/mcp-source-canary.sh"
   echo "$END"
 }
 
@@ -55,7 +60,7 @@ current=$(crontab -l 2>/dev/null || true)
 # this was version-controlled migrates cleanly instead of running each cron twice.
 stripped=$(printf '%s\n' "$current" | awk -v b="$BEGIN" -v e="$END" '
   $0==b {skip=1} skip && $0==e {skip=0; next} skip {next}
-  /disk-guard\.sh/ {next} /dead-tenant-sweep\.sh/ {next} /bugs-collector-cron\.sh/ {next} /issue-fixer-cron\.sh/ {next}
+  /disk-guard\.sh/ {next} /dead-tenant-sweep\.sh/ {next} /bugs-collector-cron\.sh/ {next} /issue-fixer-cron\.sh/ {next} /mcp-source-canary\.sh/ {next}
   {print}')
 { printf '%s\n' "$stripped" | sed '/^$/d'; block; } | crontab -
 

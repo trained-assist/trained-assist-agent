@@ -31,6 +31,8 @@ const { DurableTaskStore } = require('./durable-task-store');
 const { criterionIdForItem } = require('./durable-task-plan');
 const { durableTaskDbPath, userWorkDir, projectDir: projectDirPath } = require('./data-paths');
 const { resolveStepExecution } = require('./playbook-executor');
+const { executeHooks, parseHooks, resolveHookApproval } = require('./playbook-hooks');
+const { recoverDurableItem, retryFailedItem } = require('./durable-recovery');
 const {
   evaluateItemValidationsModeAware, resolveValidationMode, getDefaultRegistry, DEFAULT_VALIDATION_MODE,
   parseValidation, FASTPASS_SKIP_MODE, parseFastpassSkip,
@@ -143,30 +145,18 @@ function claimNextDurableItem(store = durableStore(), { now = Date.now() } = {})
   // otherwise a 'waiting' step whose deadline passed defers forever.
   store.expireWaitingDeadlines(now);
   reconcileOrphanedRunning(store, { now });
-  return store.claimNextRunnable();
+  // Thread the injected tick time through so due_at selection is deterministic.
+  return store.claimNextRunnable(now);
 }
 
 
 const FRESH_CLAIM_GRACE_MS = 30 * 1000; // just-claimed items: let the claiming tick run them
 
-// A failed item retries until its declared `max_attempts` are spent (P3a: the
-// per-step budget the compiler writes into the item). Tier escalation still
-// happens on each retry (legacy durable tasks); once attempts are exhausted the
-// item stays 'failed' — never re-pended forever. The recovery slice (P3c) owns
-// what happens after a step has genuinely exhausted its budget.
-// `itemId` is re-read fresh because startExecution already bumped attempt_count.
-// `escalate` is false for engine/env crashes: a crash is not an item-quality
-// signal, so it retries at the same tier until the attempt budget is spent.
-function retryFailedItem(store, itemId, profileId, { retryDelayMs = 0, escalate = true } = {}) {
-  const item = store.getTaskItem(itemId);
-  if (!item) return { retried: false, attempts: 0, maxAttempts: 0 };
-  const attempts = item.attempt_count || 0;
-  const maxAttempts = item.max_attempts || 1;
-  if (attempts >= maxAttempts) return { retried: false, attempts, maxAttempts };
-  if (escalate) store.escalateItem(itemId, profileId); // legacy tier ladder; also sets pending
-  store.updateTaskItem(itemId, { status: 'pending', due_at: Date.now() + retryDelayMs }, profileId);
-  return { retried: true, attempts, maxAttempts };
-}
+// The per-step attempt budget (P3a) and the recovery-policy ladder (P3c) both
+// live in src/durable-recovery.js now — every failure branch below classifies the
+// error, asks recovery-policy.js what to do, and maps that onto an existing
+// mechanism (re-pend / model-ladder / provider flip / engine fallback), bounded
+// by max_attempts and DEFAULT_RECOVERY_BUDGET.
 
 // Evaluate an item's declared validations through the registry and persist each
 // verdict as a task_validation_results row (profile-scoped). Returns the raw
@@ -234,23 +224,91 @@ function recordFastpassSkip(store, { task, item, executionId, reason }) {
 // All items finished → close the task. Legacy (non-contract) tasks close by
 // fiat; a contract plan must pass the P3d-2 finalization gate: every declared
 // validation needs a matching 'pass' row (fast-pass skips are stored as pass).
+// Returns 'done' only when this call actually settled the task, so task_done
+// hooks fire on the transition (the hook log is also fire-once keyed).
 function settleTaskCompletion(store, task) {
   const progress = store.progressSummary(task.id, task.profile_id);
-  if (!(progress.total > 0 && progress.finished >= progress.total)) return;
+  if (!(progress.total > 0 && progress.finished >= progress.total)) return null;
   if (!task.acceptance_criteria_json) {
     store.completeTask(task.id, task.profile_id, 'done');
     console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
-    return;
+    return 'done';
   }
   const res = store.finalizePlan(task.id, task.profile_id);
   if (res.finalized) {
     console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
-    return;
+    return 'done';
   }
   const missing = (res.missing || [])
     .map(m => `${m.criterion_id}/${m.validator}=${m.got == null ? 'missing' : m.got}`)
     .join(', ');
   console.warn(`[gtd-durable] finalization blocked: ${task.id.slice(0, 8)} — unmet validations: ${missing}`);
+  return null;
+}
+
+// ── Playbook hook execution (P4, #1459) ─────────────────────────────────────
+// Hooks fire at plan boundaries: stage.on_enter (first item of a stage),
+// step.on_complete/on_fail, stage.on_exit (last item of a stage) and the
+// task-level task_done/task_failed. The boundary identity is (task, item, event,
+// hook index) and the store records each firing once, so a tick replay never
+// double-delivers. External-effect hooks need consent; without it they are
+// recorded skipped and the task is unaffected (a notification is not part of the
+// work's acceptance criteria).
+
+// Owner chat for a notify hook: the profile's session attached to the task, or
+// the last chat the profile talked from. Audience-aware delivery picks the bot.
+function resolveOwnerTarget(store, task) {
+  try {
+    for (const s of store.listSessions(task.id, task.profile_id)) {
+      const sess = require('./session-store').getSession(userWorkDir(task.profile_id), s.session_id);
+      const chatId = sess ? (sess.liveChatId ?? sess.ownerChatId) : null;
+      if (chatId != null) return { chatId, audience: sess.audience || 'default', threadId: sess.threadId || null };
+    }
+  } catch { /* fall through to .chatid */ }
+  try {
+    const c = fs.readFileSync(path.join(TOKENS_ROOT, String(task.profile_id), '.chatid'), 'utf8').trim();
+    if (c) return { chatId: c, audience: 'default', threadId: null };
+  } catch { /* no chat on record */ }
+  return null;
+}
+
+// Default sinks. `notify` reuses the audience-aware bot delivery; check /
+// create_issue / publish only run when a caller injects a sink (this slice does
+// not reimplement GitHub/publish orchestration — no transport configured means
+// the hook is recorded skipped, never faked).
+function defaultHookSinks({ secrets = {}, store, task }) {
+  return {
+    notify: async ({ text }) => {
+      const target = resolveOwnerTarget(store, task);
+      if (!target) throw new Error('no owner chat for notification');
+      const routeSecrets = require('./bot-delivery').deliverySecrets(secrets, target.audience);
+      const token = routeSecrets?.TELEGRAM_BOT_TOKEN || routeSecrets?.BOT_TOKEN;
+      if (!token) throw new Error('no telegram token for notification');
+      await _tgNotify(token, target.chatId, text, target.threadId);
+    },
+  };
+}
+
+async function fireItemHooks(store, task, item, event, vars, sinks, approved) {
+  const hooks = parseHooks(item && item.hooks_json)[event];
+  if (!Array.isArray(hooks) || !hooks.length) return [];
+  try {
+    return await executeHooks({ store, task, item, event, hooks, vars, approved, sinks });
+  } catch (error) {
+    console.error(`[gtd-durable] hook ${event} task=${task.id.slice(0, 8)}:`, error.message);
+    return [];
+  }
+}
+
+async function fireTaskHooks(store, task, event, vars, sinks, approved) {
+  const hooks = parseHooks(task && task.hooks_json)[event];
+  if (!Array.isArray(hooks) || !hooks.length) return [];
+  try {
+    return await executeHooks({ store, task, event, hooks, vars, approved, sinks });
+  } catch (error) {
+    console.error(`[gtd-durable] hook ${event} task=${task.id.slice(0, 8)}:`, error.message);
+    return [];
+  }
 }
 
 // Fire a claimed durable item through the same pipeline as legacy GTD fires.
@@ -259,7 +317,7 @@ function settleTaskCompletion(store, task) {
 // own max_attempts / execution_timeout_seconds. delay_after_sec / wait_deadline_at
 // shape when the store hands the item out (see durable-task-store.completeItem /
 // expireWaitingDeadlines).
-async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null, llmValidate = null }) {
+async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null, llmValidate = null, classifier = null, ladder = null, toggle = null, hookSinks = null, approveHooks = null }) {
   const store = durableStore();
   const validators = registry || getDefaultRegistry();
   // A programmatic step that fails is retried synchronously inside this pass
@@ -274,6 +332,10 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     if (!item) return fired;
     const task = store.db.prepare('SELECT * FROM durable_tasks WHERE id = ?').get(item.task_id);
     if (!task) { store.failItem(item.id, '__system__', { error: 'task vanished' }); continue; }
+    // P4: per-task consent for external-effect hooks + the sink transport.
+    const hooksApproved = resolveHookApproval(task, approveHooks);
+    const sinks = hookSinks || defaultHookSinks({ secrets, store, task });
+    const hookVars = (extra = {}) => ({ goal: task.goal, stage: item.stage ?? null, error: null, ...extra });
     // P3d-1b/1c: per-step > per-plan policy > env > default programmatic+llm.
     const validationMode = resolveValidationMode({ task, item });
     if (claimedThisPass.has(item.id)) {
@@ -295,6 +357,9 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     console.log(`[gtd-durable] fire item=${item.id.slice(0, 8)} task=${task.id.slice(0, 8)} tier=${item.current_tier}`);
     const executionId = `exec-${item.id.slice(0, 8)}-${now}`;
     store.startExecution({ id: executionId, task_id: task.id, task_item_id: item.id, session_id: sessionRow?.session_id || null, tier: item.current_tier });
+
+    // P4: stage entry — fire stage.on_enter (carried by the stage's first item).
+    await fireItemHooks(store, task, item, 'stage_enter', hookVars(), sinks, hooksApproved);
 
     // P3b: contract plans resolve the step's contract to a concrete engine/profile;
     // legacy (non-contract) durable items keep the pre-P3b default engine.
@@ -325,17 +390,32 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
         store.completeItem(item.id, task.profile_id, { executionId });
         store.finishExecution(executionId, { status: 'success' });
         console.log(`[gtd-durable] programmatic item done: ${item.id.slice(0, 8)}`);
+        // P4: step completed → on_complete, and stage_exit on the stage's last item.
+        await fireItemHooks(store, task, item, 'on_complete', hookVars(), sinks, hooksApproved);
+        await fireItemHooks(store, task, item, 'stage_exit', hookVars(), sinks, hooksApproved);
       } else {
         const failedKeys = results.filter(r => r.status !== 'pass').map(r => r.key).join(', ');
-        store.failItem(item.id, task.profile_id, {
-          executionId, error: `programmatic validation not passed: ${failedKeys || 'no validations'}`,
+        const errText = `programmatic validation not passed: ${failedKeys || 'no validations'}`;
+        store.failItem(item.id, task.profile_id, { executionId, error: errText });
+        const rec = await recoverDurableItem({
+          store, task, itemId: item.id, errorText: errText, classifier, ladder, toggle,
+          escalate: false, retryDelayMs: FRESH_CLAIM_GRACE_MS,
         });
-        store.finishExecution(executionId, { status: 'failed', error_class: 'validation', error_text: failedKeys.slice(0, 500) });
-        const r = retryFailedItem(store, item.id, task.profile_id, { escalate: false, retryDelayMs: FRESH_CLAIM_GRACE_MS });
-        if (r.retried) console.log(`[gtd-durable] programmatic retry ${item.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
-        else console.log(`[gtd-durable] programmatic item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${item.id.slice(0, 8)}`);
+        store.finishExecution(executionId, {
+          status: 'failed', error_class: rec.failureClass,
+          error_text: `${rec.action || 'terminal'}: ${failedKeys}`.slice(0, 500),
+        });
+        if (rec.recovered) console.log(`[gtd-durable] programmatic recovery ${item.id.slice(0, 8)} ${rec.failureClass}→${rec.action} (${rec.attempts}/${rec.maxAttempts})`);
+        else {
+          console.log(`[gtd-durable] programmatic item failed, ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${item.id.slice(0, 8)}`);
+          // P4: terminal step failure → on_fail + task_failed.
+          await fireItemHooks(store, task, item, 'on_fail', hookVars({ error: errText }), sinks, hooksApproved);
+          await fireTaskHooks(store, task, 'task_failed', hookVars({ error: errText }), sinks, hooksApproved);
+        }
       }
-      settleTaskCompletion(store, task);
+      if (settleTaskCompletion(store, task) === 'done') {
+        await fireTaskHooks(store, task, 'task_done', hookVars(), sinks, hooksApproved);
+      }
       continue;
     }
 
@@ -367,8 +447,10 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     runTask({
       taskId: `durable-${task.profile_id}-${item.id.slice(0, 8)}-${fireNow}`,
       user: { id: null, name: task.profile_id, username: task.profile_id, workDir },
-      task: prompt, forceClaude: true, engine: step.engine, secrets, internalGtd: true,
-      ocProfile: step.ocProfile || null, contextSkipModels: step.skipModels,
+      // P3b: forceClaude is only meaningful for a Claude step (it widens context +
+      // skips quick answers). An OpenCode step must not be treated as Claude.
+      task: prompt, forceClaude: step.engine === 'claude', engine: step.engine, secrets, internalGtd: true,
+      ocProfile: step.ocProfile || null, ocRole: step.ocRole || null, contextSkipModels: step.skipModels,
       stepTimeoutMs,
     }).then(async reply => {
       const said = typeof reply === 'string' ? reply : '';
@@ -402,30 +484,60 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
         store.completeItem(itemSnap.id, task.profile_id, { executionId });
         store.finishExecution(executionId, { status: 'success' });
         console.log(`[gtd-durable] item done: ${itemSnap.id.slice(0, 8)}`);
+        // P4: step completed → on_complete, and stage_exit on the stage's last item.
+        await fireItemHooks(store, task, itemSnap, 'on_complete', hookVars(), sinks, hooksApproved);
+        await fireItemHooks(store, task, itemSnap, 'stage_exit', hookVars(), sinks, hooksApproved);
       } else if (/DURABLE:\s*failed/i.test(said)) {
         store.failItem(itemSnap.id, task.profile_id, { executionId, error: said.slice(0, 500) });
-        store.finishExecution(executionId, { status: 'failed', error_text: said.slice(0, 500) });
-        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
-        if (r.retried) console.log(`[gtd-durable] retry ${itemSnap.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
-        else console.log(`[gtd-durable] item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
+        const rec = await recoverDurableItem({ store, task, itemId: itemSnap.id, errorText: said, classifier, ladder, toggle });
+        store.finishExecution(executionId, {
+          status: 'failed', error_class: rec.failureClass,
+          error_text: `${rec.action || 'terminal'}: ${said}`.slice(0, 500),
+        });
+        if (rec.recovered) console.log(`[gtd-durable] recovery ${itemSnap.id.slice(0, 8)} ${rec.failureClass}→${rec.action} (${rec.attempts}/${rec.maxAttempts})`);
+        else {
+          console.log(`[gtd-durable] item failed, ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${itemSnap.id.slice(0, 8)}`);
+          await fireItemHooks(store, task, itemSnap, 'on_fail', hookVars({ error: said.slice(0, 500) }), sinks, hooksApproved);
+          await fireTaskHooks(store, task, 'task_failed', hookVars({ error: said.slice(0, 500) }), sinks, hooksApproved);
+        }
       } else {
         // no terminal marker — treat as failure, bounded by the item's own max_attempts
-        store.failItem(itemSnap.id, task.profile_id, { executionId, error: 'no DURABLE terminal marker in reply' });
-        store.finishExecution(executionId, { status: 'failed', error_class: 'no-marker' });
-        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
-        if (!r.retried) console.log(`[gtd-durable] item failed (no marker), budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
+        const errText = 'no DURABLE terminal marker in reply';
+        store.failItem(itemSnap.id, task.profile_id, { executionId, error: errText });
+        const rec = await recoverDurableItem({ store, task, itemId: itemSnap.id, errorText: errText, classifier, ladder, toggle });
+        store.finishExecution(executionId, {
+          status: 'failed', error_class: rec.failureClass,
+          error_text: `${rec.action || 'terminal'}: no marker`.slice(0, 500),
+        });
+        if (!rec.recovered) {
+          console.log(`[gtd-durable] item failed (no marker), ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${itemSnap.id.slice(0, 8)}`);
+          await fireItemHooks(store, task, itemSnap, 'on_fail', hookVars({ error: errText }), sinks, hooksApproved);
+          await fireTaskHooks(store, task, 'task_failed', hookVars({ error: errText }), sinks, hooksApproved);
+        }
       }
       // Keep the task row's revision ticking so projections/UI notice progress.
-      settleTaskCompletion(store, task);
-    }).catch(e => {
+      if (settleTaskCompletion(store, task) === 'done') {
+        await fireTaskHooks(store, task, 'task_done', hookVars(), sinks, hooksApproved);
+      }
+    }).catch(async e => {
       console.error(`[gtd-durable] runTask ${itemSnap.id.slice(0, 8)}:`, e.message);
       store.failItem(itemSnap.id, task.profile_id, { executionId, error: e.message.slice(0, 500) });
-      store.finishExecution(executionId, { status: 'failed', error_class: 'run-crash', error_text: e.message.slice(0, 500) });
-      // Engine/env crash: same bounded retry as a marker failure, but without
-      // tier escalation (a crash is not an item-quality signal) — just re-pend up
-      // to the item's attempt budget; after it is spent the item stays failed.
-      const r = retryFailedItem(store, itemSnap.id, task.profile_id, { retryDelayMs: 5 * 60 * 1000, escalate: false });
-      if (!r.retried) console.log(`[gtd-durable] item crashed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
+      // Engine/env crash: same bounded recovery as a marker failure, but without
+      // tier escalation (a crash is not an item-quality signal) and with the
+      // crash-retry backoff; after the budgets are spent the item stays failed.
+      const rec = await recoverDurableItem({
+        store, task, itemId: itemSnap.id, errorText: e.message, classifier, ladder, toggle,
+        retryDelayMs: 5 * 60 * 1000, escalate: false,
+      });
+      store.finishExecution(executionId, {
+        status: 'failed', error_class: rec.failureClass,
+        error_text: `${rec.action || 'terminal'}: ${e.message}`.slice(0, 500),
+      });
+      if (!rec.recovered) {
+        console.log(`[gtd-durable] item crashed, ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${itemSnap.id.slice(0, 8)}`);
+        await fireItemHooks(store, task, itemSnap, 'on_fail', hookVars({ error: e.message.slice(0, 500) }), sinks, hooksApproved);
+        await fireTaskHooks(store, task, 'task_failed', hookVars({ error: e.message.slice(0, 500) }), sinks, hooksApproved);
+      }
     });
   }
 }

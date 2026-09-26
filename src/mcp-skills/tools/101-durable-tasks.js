@@ -76,6 +76,12 @@ module.exports = {
           acceptance_criteria: { type: 'array', minItems: 1, items: { type: 'object' } },
           items: { type: 'array', minItems: 1, items: itemSchema },
           execution_policy: { type: 'object' }, request_id: { type: 'string' },
+          hooks: {
+            type: 'object',
+            description: 'Resolved boundary hooks pinned to this plan: {task_done:[], task_failed:[]} ' +
+              '(per-item hooks live on each item.hooks). External-effect hooks (notify/create_issue/publish) ' +
+              'need consent via execution_policy.hooks_approved=true, otherwise they are logged as skipped.',
+          },
           project_id: { type: 'string', description: 'Optional project id to associate' },
         },
       },

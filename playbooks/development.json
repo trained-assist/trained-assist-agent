@@ -108,7 +108,7 @@
         {
           "title": "Run tests, lint and regression checks",
           "execution_kind": "programmatic",
-          "validation": { "tests_lint_regression_green": true }
+          "validation": { "command_exit_zero": "npm run check && npm test" }
         },
         {
           "title": "Open PR",
@@ -125,12 +125,12 @@
           "title": "Wait for CI and staging; repair failures",
           "execution_kind": "programmatic",
           "delay_after_sec": 600,
-          "validation": { "ci_and_staging_green": true }
+          "validation": { "ci_green": true }
         },
         {
           "title": "Merge and deploy",
           "execution_kind": "programmatic",
-          "validation": { "merged_and_deployed": true }
+          "validation": { "merged": true }
         },
         {
           "title": "Verify the actual user scenario",

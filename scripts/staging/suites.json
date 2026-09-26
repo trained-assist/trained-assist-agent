@@ -31,6 +31,7 @@
     "test/bot-registry.test.cjs",
     "test/reproject-sandbox.test.cjs",
     "test/chat-pinned-project.test.cjs",
-    "test/published-page-password.test.cjs"
+    "test/published-page-password.test.cjs",
+    "test/mcp-source-canary.test.cjs"
   ]
 }

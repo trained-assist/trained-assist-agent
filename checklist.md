@@ -1,5 +1,5 @@
-Goal: OpenCode Go key rotation — primary + spare key, rotate on quota before falling back to OpenRouter (PR #1445)
+Goal: #1462 P5 — migrate freelance/exhibition playbooks + AUDIENCE_DEFAULT_PLAYBOOK (closes epic #1372 P5).
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1445
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1464
 - [ ] Merged to main
-- [ ] Deployed to prod — verified live (two keys provisioned, rotation path live)
+- [ ] Deployed to prod — verified live

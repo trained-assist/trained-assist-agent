@@ -494,6 +494,343 @@ function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
       `gate: items done but unmet validation keeps the task active (item=${item.status}, task=${blocked.status})`);
   }
 
+  // 18. P3d follow-up (#1449): the REAL development playbook's 4 programmatic
+  // steps name the registered deterministic vocabulary, and the whole plan
+  // finalizes under `programmatic` with a fake GitHub + fake command and NO LLM.
+  {
+    const G18 = freshStore('18');
+    const store = G18.durableStore();
+    const playbook = require('../playbooks/development.json');
+    const { compilePlaybook } = require('../src/playbook-compiler');
+    const prUrl = 'https://github.com/acme/widgets/pull/777';
+    const compiled = compilePlaybook(playbook, { goal: `finish #1449 — PR ${prUrl}` });
+
+    const programmatic = compiled.items.filter(i => i.execution_kind === 'programmatic');
+    const programKeys = programmatic.flatMap(i => Object.keys(i.validation));
+    ok(programmatic.length === 4
+      && programKeys.sort().join(',') === 'ci_green,command_exit_zero,merged,pr_opened',
+      `p3d: development programmatic steps use the registered vocabulary (got ${JSON.stringify(programmatic.map(i => i.validation))})`);
+
+    const r = store.createPlan({
+      profile_id: 'u1', goal: compiled.goal, user_value: compiled.user_value,
+      acceptance_criteria: compiled.acceptance_criteria,
+      execution_policy: { validation_mode: 'programmatic' },
+      items: compiled.items,
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+
+    const { createDefaultRegistry } = require('../src/playbook-validators');
+    const ghFetch = async (url) => {
+      if (/\/pulls\/777$/.test(url)) {
+        return { state: 'closed', merged: true, merged_at: '2026-09-26T00:00:00Z',
+          merge_commit_sha: 'deadbeef', head: { sha: 'abc123', ref: 'fix/x' } };
+      }
+      if (url.endsWith('/commits/abc123/check-runs')) {
+        return { check_runs: [{ name: 'ci', status: 'completed', conclusion: 'success' }] };
+      }
+      return null;
+    };
+    const registry = createDefaultRegistry({
+      ghToken: () => 'fake-token', ghFetch,
+      gitInfo: () => ({ repo: 'acme/widgets', branch: 'fix/x' }),
+    });
+    // The shell executor itself is unit-tested; here we isolate the orchestration
+    // path with a fake (the built command is asserted by the playbook snapshot).
+    registry.command_exit_zero = async () => ({ status: 'pass', subject: {}, evidence: { exit_code: 0 } });
+    // The 12 agent steps' self-reported keys are the LLM-judge domain (other cases
+    // cover them); this case isolates the programmatic half with no LLM at all.
+    for (const it of compiled.items) {
+      if (it.execution_kind === 'programmatic') continue;
+      for (const key of Object.keys(it.validation)) registry[key] = async () => ({ status: 'pass', subject: {}, evidence: {} });
+    }
+
+    let llmCalls = 0;
+    let engineFires = 0;
+    for (let i = 0; i < 40; i++) {
+      await G18.runDueDurable({
+        secrets: {}, now: Date.now(), isTaskRunning: () => false, registry,
+        llmValidate: async () => { llmCalls++; return { status: 'inconclusive', reason: 'must not be used' }; },
+        runTask: async () => { engineFires++; return 'worked on it.\nDURABLE: done'; },
+        maxFires: 50,
+      });
+      await new Promise(res => setTimeout(res, 5));
+      if (store.getTask(r.task.id, 'u1').status !== 'active') break;
+      // Only the delay_after_sec=600 waiter remains: fast-forward it (claimNextRunnable
+      // reads real Date.now(), so an injected `now` cannot move it).
+      const w = store.db.prepare(
+        `SELECT id FROM task_items WHERE task_id=? AND status='waiting' ORDER BY due_at LIMIT 1`).get(r.task.id);
+      if (w) store.updateTaskItem(w.id, { due_at: Date.now() - 1, wait_deadline_at: Date.now() + 3600000 }, 'u1');
+    }
+    const task = store.getTask(r.task.id, 'u1');
+    const vals = store.listValidations(r.task.id, 'u1');
+    const progVals = vals.filter(v => ['command_exit_zero', 'pr_opened', 'ci_green', 'merged'].includes(v.validator));
+    ok(task.status === 'done', `p3d: development plan finalizes under programmatic (got ${task.status})`);
+    ok(progVals.length === 4 && progVals.every(v => v.status === 'pass'),
+      `p3d: every programmatic validator passes deterministically (got ${JSON.stringify(progVals.map(v => [v.validator, v.status]))})`);
+    ok(engineFires === 12, `p3d: the 4 programmatic steps fired no engine (engine fires=${engineFires})`);
+    ok(llmCalls === 0, `p3d: no LLM call in programmatic mode (llm=${llmCalls})`);
+  }
+
+  // 19. P3b role wiring (#1449): the resolver's ocRole reaches runTask and selects
+  // the ladder role; forceClaude is engine-scoped (false for opencode, true for claude).
+  {
+    const G19 = freshStore('19');
+    const store = G19.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'role wiring', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      // Deterministic mode: under strict positional ordering the next step only
+      // becomes claimable after this step's completion callback runs, so the
+      // callback must not block on the default cheap-LLM judge (case 18 already
+      // covers validation; this case isolates role wiring).
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [
+        { title: 'research', execution_kind: 'agent', executor_role: 'researcher', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } },
+        { title: 'review', execution_kind: 'agent', executor_role: 'reviewer', minimum_model_level: 'master', context_budget: 'medium', validation: { command: 'true' } },
+        { title: 'finalize', execution_kind: 'agent', executor_role: 'reviewer', minimum_model_level: 'doctor', context_budget: 'medium', validation: { command: 'true' } },
+      ],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const opts = [];
+    for (let i = 0; i < 3; i++) {
+      await G19.runDueDurable({
+        secrets: {}, now: Date.now(), isTaskRunning: () => false,
+        runTask: async (o) => { opts.push(o); return 'DURABLE: done'; },
+        maxFires: 1,
+      });
+      await drain();
+    }
+    ok(opts.length === 3, `role: three agent steps fired (got ${opts.length})`);
+    const shape = o => o && { engine: o.engine, ocProfile: o.ocProfile, ocRole: o.ocRole, forceClaude: o.forceClaude };
+    ok(opts[0] && opts[0].engine === 'opencode' && opts[0].ocRole === 'explore' && opts[0].forceClaude === false,
+      `role: researcher→opencode/explore, forceClaude=false (got ${JSON.stringify(shape(opts[0]))})`);
+    ok(opts[1] && opts[1].engine === 'opencode' && opts[1].ocRole === 'review' && opts[1].forceClaude === false,
+      `role: reviewer→opencode/review, forceClaude=false (got ${JSON.stringify(shape(opts[1]))})`);
+    ok(opts[2] && opts[2].engine === 'claude' && !opts[2].ocRole && opts[2].forceClaude === true,
+      `role: doctor→claude, forceClaude=true (got ${JSON.stringify(shape(opts[2]))})`);
+  }
+
+  // 20. strict positional ordering (#1450): a 3-item plan with a delay-gated step
+  // fires strictly 1→2→3 through runDueDurable. The delayed step also proves the
+  // injected `now` drives due_at selection — the tick is advanced to the waiter's
+  // own due_at, not the wall clock, so the case is deterministic.
+  {
+    const G20 = freshStore('20');
+    const store = G20.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'positional smoke', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [
+        { title: 'one', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } },
+        { title: 'two', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, delay_after_sec: 600 },
+        { title: 'three', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } },
+      ],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const order = [];
+    const tick = (now) => G20.runDueDurable({
+      secrets: {}, now, isTaskRunning: () => false, maxFires: 5,
+      runTask: async (o) => { order.push(o.task.match(/Step \(\d+\/\d+\): (\w+)/)[1]); return 'DURABLE: done'; },
+    });
+
+    await tick(Date.now());
+    await drain();
+    let items = store.listTaskItems(r.task.id, 'u1');
+    ok(order.join(',') === 'one',
+      `positional: only step 1 fires before the delay gate (got ${order.join(',')})`);
+    ok(items[0].status === 'done' && items[1].status === 'waiting' && items[2].status === 'pending',
+      `positional: after step 1 — done/waiting/pending (got ${items.map(i => i.status).join('/')})`);
+
+    // Not-yet-due waiter blocks step 3 even though step 3 has no delay.
+    const due = items[1].due_at;
+    await tick(due - 1);
+    await drain();
+    ok(order.join(',') === 'one',
+      `positional: a not-yet-due predecessor blocks the successor (got ${order.join(',')})`);
+
+    await tick(due);
+    await drain();
+    ok(order.join(',') === 'one,two',
+      `positional: waiter fires once now reaches its due_at (got ${order.join(',')})`);
+
+    await tick(due);
+    await drain();
+    ok(order.join(',') === 'one,two,three',
+      `positional: step 3 fires only after step 2 is done (got ${order.join(',')})`);
+    ok(store.getTask(r.task.id, 'u1').status === 'done', 'positional: plan finalizes after strict 1→2→3');
+  }
+
+  // 21. P3c recovery: a QUOTA-classified failure walks the model ladder one rung
+  // (bachelor→master, still OpenCode here) and re-pends, recording class+action.
+  {
+    const G21 = freshStore('21');
+    const store = G21.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'quota recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'agent step', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 3 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const advanced = [];
+    const ladder = {
+      buildOcProfileOverrides: () => ({ agent: { build: { model: 'anthropic/claude-sonnet' } } }),
+      forceAdvance: (p, role, model) => advanced.push([p, role, model]),
+    };
+    await G21.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, ladder,
+      classifier: () => ({ class: 'QUOTA', retryable: true, source: 'rule', confidence: 1 }),
+      runTask: async () => 'boom. DURABLE: failed: quota exceeded',
+    });
+    await drain(); await drain();
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'pending' && item.current_model_level === 'master',
+      `p3c: QUOTA advances model level bachelor→master and re-pends (got ${item.status}/${item.current_model_level})`);
+    ok(item.last_failure_class === 'QUOTA' && /^next_model_or_provider/.test(item.last_recovery_action || ''),
+      `p3c: failure class + action recorded on the item (got ${item.last_failure_class}/${item.last_recovery_action})`);
+    ok(advanced.length === 1 && advanced[0][0] === 'value' && advanced[0][1] === 'build',
+      `p3c: opencode ladder advanced for the step's role (got ${JSON.stringify(advanced)})`);
+  }
+
+  // 22. P3c recovery: a terminal action leaves the item failed (alternative
+  // provider already spent → AUTH's second rung is terminal).
+  {
+    const G22 = freshStore('22');
+    const store = G22.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'terminal recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'auth step', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 5 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const it = store.listTaskItems(r.task.id, 'u1')[0];
+    // Pretend one recovery move was already spent: startExecution will bump this
+    // to 2 → spent=1 → AUTH actions[1] === 'terminal' → null.
+    store.db.prepare('UPDATE task_items SET attempt_count=1 WHERE id=?').run(it.id);
+    await G22.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      classifier: () => ({ class: 'AUTH', retryable: false, source: 'rule', confidence: 1 }),
+      runTask: async () => 'nope. DURABLE: failed: not logged in',
+    });
+    await drain();
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'failed' && item.last_recovery_action === 'terminal',
+      `p3c: terminal class leaves the item failed (got ${item.status}/${item.last_recovery_action})`);
+  }
+
+  // 23. P3c recovery is bounded by DEFAULT_RECOVERY_BUDGET: even with attempt
+  // budget to spare, a spent recovery budget is terminal. Direct module call with
+  // an injected budget keeps the assertion deterministic.
+  {
+    const G23 = freshStore('23');
+    const store = G23.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'budget recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'never ends', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 50 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const it = store.listTaskItems(r.task.id, 'u1')[0];
+    store.db.prepare('UPDATE task_items SET attempt_count=3 WHERE id=?').run(it.id); // spent = 2
+    const { recoverDurableItem } = require('../src/durable-recovery');
+    const rec = await recoverDurableItem({
+      store, task: store.getTask(r.task.id, 'u1'), itemId: it.id, errorText: 'anything',
+      classifier: () => ({ class: 'UNKNOWN', retryable: true, source: 'rule', confidence: 1 }),
+      budget: 2,
+    });
+    ok(rec.recovered === false && rec.reason === 'terminal' && rec.action === null,
+      `p3c: recovery stops at the spent budget (got ${JSON.stringify(rec)})`);
+  }
+
+  // 24. P3c recovery never re-pends infinitely: a class whose action ladder ends
+  // at 'terminal' stops even with a huge max_attempts. UNKNOWN is
+  // conservative_retry → fallback → terminal, so it fails on the 3rd attempt.
+  {
+    const G24 = freshStore('24');
+    const store = G24.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'bounded recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'endless?', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 50 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const ladder = {
+      buildOcProfileOverrides: () => ({ agent: { build: { model: 'some/model' } } }),
+      forceAdvance: () => {},
+    };
+    let fires = 0;
+    const failRun = () => G24.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, ladder,
+      classifier: () => ({ class: 'UNKNOWN', retryable: true, source: 'rule', confidence: 1 }),
+      runTask: async () => { fires++; return 'boom. DURABLE: failed: exploded'; },
+    });
+    for (let i = 0; i < 6; i++) { await failRun(); await drain(); }
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'failed' && fires === 3,
+      `p3c: bounded re-pend stops after the action ladder (fires=${fires}, status=${item.status}, attempts=${item.attempt_count})`);
+    let extra = 0;
+    await G24.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      classifier: () => ({ class: 'UNKNOWN' }), runTask: async () => { extra++; return 'DURABLE: done'; } });
+    ok(extra === 0, `p3c: exhausted item is never re-fired (extra=${extra})`);
+  }
+
+  // 25. P3c recovery: provider switch for the deepseek pair flips go↔openrouter
+  // via the injectable toggle; the item re-pends with the action recorded.
+  {
+    const G25 = freshStore('25');
+    const store = G25.durableStore();
+    process.env.PLAYBOOK_LEVEL_MAP = JSON.stringify({ bachelor: { engine: 'opencode', ocProfile: 'deepseek' } });
+    try {
+      const r = store.createPlan({
+        profile_id: 'u1', goal: 'provider recovery', user_value: 'uv',
+        acceptance_criteria: [{ description: 'c' }],
+        execution_policy: { validation_mode: 'programmatic' },
+        items: [{ title: 'deepseek step', execution_kind: 'agent', executor_role: 'developer',
+          minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 5 }],
+      });
+      store.updateTask(r.task.id, 'u1', { status: 'active' });
+      let flipped = 0;
+      const toggle = { getMode: () => 'go', forceFlip: () => { flipped++; return 'openrouter'; } };
+      await G25.runDueDurable({
+        secrets: {}, now: Date.now(), isTaskRunning: () => false, toggle,
+        classifier: () => ({ class: 'AUTH', retryable: false, source: 'rule', confidence: 1 }),
+        runTask: async () => 'nope. DURABLE: failed: not logged in',
+      });
+      await drain();
+      const item = store.listTaskItems(r.task.id, 'u1')[0];
+      ok(item.status === 'pending' && flipped === 1 && /^alternate_provider/.test(item.last_recovery_action || ''),
+        `p3c: deepseek provider switch flips the go↔openrouter toggle (got ${item.status}, flips=${flipped}, ${item.last_recovery_action})`);
+    } finally {
+      delete process.env.PLAYBOOK_LEVEL_MAP;
+    }
+  }
+
+  // 26. legacy (non-contract) item still works through recovery: no model level
+  // to bump, so a failure takes the bounded re-pend path and stays claimable.
+  {
+    const G26 = freshStore('26');
+    const store = G26.durableStore();
+    store.createTask({ id: 'legacy-26', profile_id: 'u1', goal: 'legacy recovery' });
+    store.createTaskItem({ id: 'legacy-item-26', task_id: 'legacy-26', title: 'legacy step' });
+    await G26.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      classifier: () => ({ class: 'MODEL_ERROR', retryable: true, source: 'rule', confidence: 1 }),
+      runTask: async () => 'nope. DURABLE: failed: internal server error',
+    });
+    await drain();
+    const item = store.getTaskItem('legacy-item-26');
+    ok(item.status === 'pending' && !item.current_model_level && item.last_recovery_action,
+      `p3c: legacy item re-pends through recovery without a model level (got ${item.status}/${item.current_model_level}/${item.last_recovery_action})`);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
