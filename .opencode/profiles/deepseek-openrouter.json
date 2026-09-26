@@ -1,4 +1,4 @@
 {
   "ladderRef": "deepseek-openrouter",
-  "model": "openrouter/z-ai/glm-5.3-flash"
+  "model": "openrouter/deepseek/deepseek-v4-flash-0731"
 }
