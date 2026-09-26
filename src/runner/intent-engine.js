@@ -177,10 +177,28 @@ const MODEL_INFO_INTENT = /(?:на\s+какой\s+(?:модел|нейросет
 // «Ожидаю завершения предыдущей работы»").
 // OC_PROFILE_INTENT (/oc_max, /oc_deepseek, …) — same class again: getQuickAnswer handles it as
 // a sync profiles.json write (it also pins this chat's engine), so it rides the same whitelist.
+// Fuzzy natural-language info intents (HELP/USAGE/SECRETS_*/CONTEXT_*/MODEL_INFO) are
+// unanchored: they exist for a SHORT standalone question («что ты умеешь», «сколько я
+// потратил»). Inside a real task the same words are just prose («…посчитай расход токенов…»,
+// «какие есть возможности…») and used to swallow the whole task with a canned ⚡ reply —
+// silently, before the queue (#1479, 2026-09-26). Slash commands keep matching as before;
+// prose must be a single short message to count as an info question.
+const FUZZY_INFO_MAX_CHARS = 100;
+function isShortStandaloneQuestion(task) {
+  const raw = String(task || '').trim();
+  if ((raw.match(/\[Сообщение \d+\]/g) || []).length > 1) return false;
+  const text = raw.replace(/^\[Сообщение \d+\]\s*/, '').replace(/^@\w+\s*/, '').trim();
+  return text.length <= FUZZY_INFO_MAX_CHARS;
+}
+function fuzzyInfoIntent(re, task) {
+  if (!re.test(task)) return false;
+  const text = String(task || '').trim().replace(/^\[Сообщение \d+\]\s*/, '').replace(/^@\w+\s*/, '');
+  return /^\//.test(text) || isShortStandaloneQuestion(task);
+}
 function isPreQueueQuickIntent(task) {
-  return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
-    MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
-    USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
+  return PING_INTENT.test(task) || fuzzyInfoIntent(HELP_INTENT, task) || AGENT_INFO_INTENT.test(task) ||
+    fuzzyInfoIntent(MODEL_INFO_INTENT, task) || fuzzyInfoIntent(SECRETS_LIST_INTENT, task) || fuzzyInfoIntent(SECRETS_LOG_INTENT, task) ||
+    fuzzyInfoIntent(USAGE_INTENT, task) || fuzzyInfoIntent(CONTEXT_OFF_INTENT, task) || fuzzyInfoIntent(CONTEXT_ON_INTENT, task) ||
     ENGINE_SWITCH_INTENT.test(task) || OC_GO_TOGGLE_INTENT.test(task) ||
     OC_PROFILE_INTENT.test(task) || PROJECT_INTENT.test(task) || SETTINGS_INTENT.test(task);
 }
@@ -560,7 +578,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
 
   // /get_agent_info — show current engine, model, profile, VM, version
   // Also natural-language "what model/agent are you?" questions (MODEL_INFO_INTENT).
-  if (AGENT_INFO_INTENT.test(task) || MODEL_INFO_INTENT.test(task)) {
+  if (AGENT_INFO_INTENT.test(task) || fuzzyInfoIntent(MODEL_INFO_INTENT, task)) {
     const eng = workDir ? profiles.getEngine(workDir, chatId) : 'claude';
     const vmName = process.env.VM_NAME || 'unknown';
     let commit = 'unknown';
@@ -690,7 +708,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
         return null; // fall through to async handler
       }
       // Skip other quick-answer patterns while collecting (except ping/help)
-      if (!PING_INTENT.test(task) && !HELP_INTENT.test(task)) {
+      if (!PING_INTENT.test(task) && !fuzzyInfoIntent(HELP_INTENT, task)) {
         const count = appendVacancyMessage(workDir, task);
         const countLabel = count === 1 ? 'блок' : count < 5 ? 'блока' : 'блоков';
         return `✅ Принял (${count} ${countLabel}). Ещё что-нибудь? Или скажи «всё» — начну генерировать.\nЧтобы отменить: «отмени создание вакансии».`;
@@ -783,7 +801,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   if (PING_INTENT.test(task)) return '🟢 Онлайн. Готов к работе.';
 
   // /help — capability overview (static, no Claude needed)
-  if (HELP_INTENT.test(task)) {
+  if (fuzzyInfoIntent(HELP_INTENT, task)) {
     return [
       '🤖 Что я умею:',
       '',
@@ -825,7 +843,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   }
 
   // /usage — token usage stats
-  if (USAGE_INTENT.test(task)) {
+  if (fuzzyInfoIntent(USAGE_INTENT, task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию.';
     const t = getUsageTotals(workDir);
     if (!t || t.tasks === 0) return 'Данных об использовании пока нет.';
@@ -840,7 +858,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   }
 
   // /context_off / /context_on — toggle context card
-  if (CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task)) {
+  if (fuzzyInfoIntent(CONTEXT_OFF_INTENT, task) || fuzzyInfoIntent(CONTEXT_ON_INTENT, task)) {
     if (!workDir) return 'Не удалось определить рабочую директорию.';
     const flagPath = path.join(workDir, '.context_disabled');
     if (CONTEXT_OFF_INTENT.test(task)) {
@@ -852,7 +870,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   }
 
   // /secrets_list — show connected services
-  if (SECRETS_LIST_INTENT.test(task)) {
+  if (fuzzyInfoIntent(SECRETS_LIST_INTENT, task)) {
     const services = userId ? listConnectedServices(userId) : null;
     if (!services || services.length === 0) {
       return 'Нет подключённых сервисов.\n\nЧтобы подключить: «подключи GitHub», «подключи Налог.ру» и т. д.';
@@ -871,7 +889,7 @@ function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = n
   }
 
   // /secrets_log — show access log
-  if (SECRETS_LOG_INTENT.test(task)) {
+  if (fuzzyInfoIntent(SECRETS_LOG_INTENT, task)) {
     const log = userId ? getSecretsLog(userId) : null;
     if (!log || log.length === 0) return 'История обращений пуста.';
     const lines = log.map(l => {
@@ -1691,6 +1709,7 @@ module.exports = {
   MODEL_INFO_INTENT,
   BUG_OR_FEATURE_INTENT,
   isPreQueueQuickIntent,
+  fuzzyInfoIntent,
   isSlashCommand,
   shouldAttemptQuickAnswer,
   // Constants for runner.js _intents export
