@@ -209,6 +209,11 @@ let workDir;
 
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), 'runner-e2e-'));
+  // These scenarios count answer-delivery messages one by one. Since 2026-09-26 every
+  // profile with a project gets a pinned project card after a run — an extra send that is
+  // covered by test/pin-context-card + test/chat-pinned-project, not here. Same switch as
+  // the user's /context_off.
+  writeFileSync(join(workDir, '.context_disabled'), '');
   tgLog = [];
   tgRespond = null;
   setupFakeClaude('OK');
