@@ -285,8 +285,9 @@ test('deepseek-openrouter profile: config-driven ladder on the OpenRouter gatewa
   assert.equal(profile.ladderRef, 'deepseek-openrouter');
   const ladder = routing.ladders['deepseek-openrouter'];
   assert.ok(Array.isArray(ladder?.build) && ladder.build.length >= 2);
-  assert.equal(ladder.build[0], 'openrouter/z-ai/glm-5.3-flash');
+  assert.equal(ladder.build[0], 'openrouter/deepseek/deepseek-v4-flash-0731');
   assert.ok(ladder.build.includes('openrouter/xiaomi/mimo-v2.6-flash'));
+  assert.ok(!ladder.build.some(m => m.includes('glm')), 'the expensive GLM rung was replaced by the cheap mimo sibling (owner 2026-09-26)');
 });
 
 test('buildOcProfileOverrides resolves a ladderRef from config/model-routing.json (issue #1467)', () => {

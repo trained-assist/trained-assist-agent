@@ -133,8 +133,10 @@ owner's chosen analogue for the flaky deepseek rung):
 - `deepseek-go` (`ladderRef` in `deepseek-go.json`): `opencode-go/deepseek-v4.1-flash` →
   `opencode-go/deepseek-v4-flash` (or `-v4-pro` for `plan`/`review`) → `opencode-go/mimo-v2.6-flash`
 - `deepseek-openrouter` (`ladderRef` in `deepseek-openrouter.json`):
-  `openrouter/z-ai/glm-5.3-flash` → `openrouter/deepseek/deepseek-v4-flash-0731`
-  → `openrouter/xiaomi/mimo-v2.6-flash`
+  `openrouter/deepseek/deepseek-v4-flash-0731` → `openrouter/xiaomi/mimo-v2.6-flash`
+  (2026-09-26: `openrouter/z-ai/glm-5.3-flash` dropped — it was the most expensive rung of this
+  ladder and added nothing over the deepseek/mimo pair, per the owner: "glm дорогая и не очень
+  она классная. вместо glm поставим этот Mimo").
 
 Behaviour consequence: a failing rung now degrades **within the same gateway** first; the VM-wide
 toggle flip is reserved for a genuine account-wide Go quota hit (`noteFailure` classifies it as
