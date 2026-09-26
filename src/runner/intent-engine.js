@@ -171,11 +171,16 @@ const MODEL_INFO_INTENT = /(?:на\s+какой\s+(?:модел|нейросет
 // task in this chat, so applying it immediately is safe. Was missing from this whitelist
 // (2026-09-24 bug report: /switch2codex sat behind "Ожидаю завершения предыдущей работы"
 // instead of answering instantly like /ping does).
+// OC_GO_TOGGLE_INTENT (/oc_go, /oc_openrouter) — same class, missed in that fix: it's a sync
+// write of one VM-wide toggle file (src/opencode-go-toggle.js), no Claude/session/network, so a
+// quick command must never queue behind a running task. (2026-09-26 bug report: "/oc_go вернул
+// «Ожидаю завершения предыдущей работы»").
 function isPreQueueQuickIntent(task) {
   return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
     MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
     USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
-    ENGINE_SWITCH_INTENT.test(task) || PROJECT_INTENT.test(task) || SETTINGS_INTENT.test(task);
+    ENGINE_SWITCH_INTENT.test(task) || OC_GO_TOGGLE_INTENT.test(task) ||
+    PROJECT_INTENT.test(task) || SETTINGS_INTENT.test(task);
 }
 // A slash command is an unambiguous, registry-backed user command — never fuzzy prose.
 function isSlashCommand(task) {
