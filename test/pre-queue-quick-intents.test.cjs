@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 const { isPreQueueQuickIntent } = require('../src/runner/intent-engine');
 
 test('pre-queue whitelist: sync quick commands answer before the admission queue', () => {
-  for (const cmd of ['/ping', '/help', '/agent_info', '/switch2klod', '/oc_go', '/oc_openrouter', '/settings']) {
+  for (const cmd of ['/ping', '/help', '/agent_info', '/switch2klod', '/oc_go', '/oc_openrouter', '/oc_deepseek', '/oc_max', '/settings']) {
     assert.equal(isPreQueueQuickIntent(cmd), true, `${cmd} must be a pre-queue quick intent`);
   }
 });

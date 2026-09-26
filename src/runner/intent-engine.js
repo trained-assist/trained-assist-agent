@@ -175,12 +175,14 @@ const MODEL_INFO_INTENT = /(?:на\s+какой\s+(?:модел|нейросет
 // write of one VM-wide toggle file (src/opencode-go-toggle.js), no Claude/session/network, so a
 // quick command must never queue behind a running task. (2026-09-26 bug report: "/oc_go вернул
 // «Ожидаю завершения предыдущей работы»").
+// OC_PROFILE_INTENT (/oc_max, /oc_deepseek, …) — same class again: getQuickAnswer handles it as
+// a sync profiles.json write (it also pins this chat's engine), so it rides the same whitelist.
 function isPreQueueQuickIntent(task) {
   return PING_INTENT.test(task) || HELP_INTENT.test(task) || AGENT_INFO_INTENT.test(task) ||
     MODEL_INFO_INTENT.test(task) || SECRETS_LIST_INTENT.test(task) || SECRETS_LOG_INTENT.test(task) ||
     USAGE_INTENT.test(task) || CONTEXT_OFF_INTENT.test(task) || CONTEXT_ON_INTENT.test(task) ||
     ENGINE_SWITCH_INTENT.test(task) || OC_GO_TOGGLE_INTENT.test(task) ||
-    PROJECT_INTENT.test(task) || SETTINGS_INTENT.test(task);
+    OC_PROFILE_INTENT.test(task) || PROJECT_INTENT.test(task) || SETTINGS_INTENT.test(task);
 }
 // A slash command is an unambiguous, registry-backed user command — never fuzzy prose.
 function isSlashCommand(task) {
