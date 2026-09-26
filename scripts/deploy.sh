@@ -33,6 +33,7 @@ TARGET="${DEPLOY_TARGET_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}"
 RELEASE_DIR="$RELEASES_DIR/$TARGET"
 HH_SKILL_DIR="${HH_SKILL_DIR:-$AGENT_HOME/trained-assist-hh-skill}"
 ENGINEERING_DIR="${ENGINEERING_DIR:-$AGENT_HOME/trained-assist-engineering}"
+FREELANCE_SKILL_DIR="${FREELANCE_SKILL_DIR:-$AGENT_HOME/trained-assist-freelance-skill}"
 export REPO_DIR RELEASES_DIR CURRENT_LINK SERVICE
 
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
@@ -95,15 +96,32 @@ if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; t
   (cd "$RELEASE_DIR" && npx playwright install chromium --with-deps 2>&1 | tail -5) || true
 fi
 
+# Sibling MCP servers go live the moment their checkout moves (sessions spawn them by
+# path), so a new sibling revision must pass the host's MCP contract (#1481: tool
+# results are never empty) BEFORE the reset; a violating revision keeps the old one.
+sync_sibling_checked() {
+  local dir="$1" probe
+  if ! git -C "$dir" fetch --quiet origin main 2>/dev/null; then
+    echo "  ⚠️  update failed — keeping existing checkout"; return 0
+  fi
+  probe="$(mktemp -d)"
+  if git -C "$dir" archive origin/main src | tar -x -C "$probe" &&
+     node "$RELEASE_DIR/scripts/check-mcp-conformance.js" "$probe"; then
+    git -C "$dir" reset --quiet --hard origin/main 2>/dev/null ||
+      echo "  ⚠️  update failed — keeping existing checkout"
+  else
+    echo "  ⚠️  $(basename "$dir") origin/main violates the MCP contract — keeping $(git -C "$dir" rev-parse --short HEAD)"
+  fi
+  rm -rf "$probe"
+}
+
 echo "==> Ensuring trained-assist-hh-skill sibling checkout exists (feeds the HH skill fallback)..."
 if [ ! -d "$HH_SKILL_DIR/.git" ]; then
   HH_SKILL_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's#/trained-assist-agent\(\.git\)\?$#/trained-assist-hh-skill.git#')
   echo "  Cloning $HH_SKILL_DIR..."
   git clone --quiet "$HH_SKILL_URL" "$HH_SKILL_DIR" || echo "  ⚠️  clone failed — hh skill fallback will be unavailable until fixed"
 else
-  git -C "$HH_SKILL_DIR" fetch --quiet origin main 2>/dev/null &&
-    git -C "$HH_SKILL_DIR" reset --quiet --hard origin/main 2>/dev/null ||
-    echo "  ⚠️  update failed — keeping existing checkout"
+  sync_sibling_checked "$HH_SKILL_DIR"
 fi
 # Releases resolve the sibling as <release>/../../trained-assist-hh-skill, i.e.
 # <releases>/trained-assist-hh-skill — link that to the canonical checkout.
@@ -116,15 +134,26 @@ if [ ! -d "$ENGINEERING_DIR/.git" ]; then
   echo "  Cloning $ENGINEERING_DIR..."
   git clone --quiet "$ENGINEERING_URL" "$ENGINEERING_DIR" || echo "  ⚠️  clone failed — engineering_spawn_workspace will be unavailable until fixed"
 else
-  git -C "$ENGINEERING_DIR" fetch --quiet origin main 2>/dev/null &&
-    git -C "$ENGINEERING_DIR" reset --quiet --hard origin/main 2>/dev/null ||
-    echo "  ⚠️  update failed — keeping existing checkout"
+  sync_sibling_checked "$ENGINEERING_DIR"
 fi
 # Same resolution depth as trained-assist-hh-skill above: both browser.js's
 # sibling mount (2 levels up from src/) and 61-dev.js's engineeringLibPath()
 # (4 levels up from src/mcp-skills/tools/) land on <releases>/, since a release
 # dir itself is one path segment (<releases>/<sha>/src/...).
 $SUDO ln -sfn "$ENGINEERING_DIR" "$RELEASES_DIR/trained-assist-engineering"
+
+# Freelance skill: same sibling pattern (server.js / browser.js resolve
+# <release>/../../trained-assist-freelance-skill). Was never synced nor linked for
+# releases, so live freelance lagged main and releases could not resolve it (#1481).
+echo "==> Ensuring trained-assist-freelance-skill sibling checkout exists..."
+if [ ! -d "$FREELANCE_SKILL_DIR/.git" ]; then
+  FREELANCE_SKILL_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's#/trained-assist-agent\(\.git\)\?$#/trained-assist-freelance-skill.git#')
+  echo "  Cloning $FREELANCE_SKILL_DIR..."
+  git clone --quiet "$FREELANCE_SKILL_URL" "$FREELANCE_SKILL_DIR" || echo "  ⚠️  clone failed — freelance skill will be unavailable until fixed"
+else
+  sync_sibling_checked "$FREELANCE_SKILL_DIR"
+fi
+$SUDO ln -sfn "$FREELANCE_SKILL_DIR" "$RELEASES_DIR/trained-assist-freelance-skill"
 
 echo "==> Validating and applying nginx config ($DEPLOY_ENV)..."
 REPO_DIR="$RELEASE_DIR" bash "$RELEASE_DIR/scripts/deploy-nginx.sh"
