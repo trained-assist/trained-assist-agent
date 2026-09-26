@@ -155,11 +155,16 @@ module.exports = {
           user_value: { type: 'string', description: 'Override the rendered user_value_template' },
           acceptance_criteria: { type: 'array', minItems: 1, items: { type: 'object' }, description: 'Goal-specific criteria; derived from step validations when omitted' },
           vars: { type: 'object', description: 'Extra template values for {placeholder} rendering' },
+          approve_hooks: {
+            type: 'boolean',
+            description: 'Explicit consent to run external-effect hooks (notify/create_issue/publish) for this run. ' +
+              'Without it those hooks are recorded as skipped and never fail the task.',
+          },
           project_id: { type: 'string', description: 'Optional project to bind the plan (and its checklist.md projection) to' },
           session_id: { type: 'string', description: 'Optional session to attach the plan to' },
         },
       },
-      handler: safe(async ({ playbook_id, goal, version, user_value, acceptance_criteria, vars, project_id, session_id }, ctx) => {
+      handler: safe(async ({ playbook_id, goal, version, user_value, acceptance_criteria, vars, project_id, session_id, approve_hooks }, ctx) => {
         const profileId = requireUser(ctx);
         const playbook = new PlaybookStore({ profileId }).get(playbook_id, version);
         if (!playbook) throw playbookError('PLAYBOOK_NOT_FOUND', `плейбук «${playbook_id}» не найден`);
@@ -172,6 +177,8 @@ module.exports = {
           user_value: compiled.user_value,
           acceptance_criteria: compiled.acceptance_criteria,
           items: compiled.items,
+          hooks: compiled.hooks,
+          execution_policy: approve_hooks ? { hooks_approved: true } : undefined,
           playbook_id: playbook.id,
           playbook_version: playbook.version,
           project_id: project_id || undefined,

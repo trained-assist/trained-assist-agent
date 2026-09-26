@@ -16,8 +16,13 @@ module.exports = function migratePlan(db) {
           playbook_id: 'TEXT', playbook_version: 'INTEGER', user_value: 'TEXT',
           acceptance_criteria_json: 'TEXT', contract_revision: 'INTEGER NOT NULL DEFAULT 1',
           execution_policy_json: 'TEXT', execution_session_id: 'TEXT', request_id: 'TEXT', blocker_reason: 'TEXT',
+          // P4 (#1459): resolved playbook hooks pinned at playbook_version — task_done/task_failed.
+          hooks_json: 'TEXT',
         },
         task_items: {
+          // P4 (#1459): resolved per-item hooks — step on_complete/on_fail and the
+          // stage boundaries carried on the stage's first/last item.
+          hooks_json: 'TEXT',
           stage: 'TEXT', instructions: 'TEXT', execution_kind: "TEXT NOT NULL DEFAULT 'agent' CHECK(execution_kind IN ('agent','programmatic'))",
           executor_role: "TEXT CHECK(executor_role IN ('researcher','developer','reviewer','verifier'))",
           minimum_model_level: "TEXT CHECK(minimum_model_level IN ('bachelor','master','doctor'))",
@@ -51,6 +56,18 @@ module.exports = function migratePlan(db) {
           criterion_id TEXT NOT NULL, contract_revision INTEGER NOT NULL, validator TEXT NOT NULL,
           status TEXT NOT NULL CHECK(status IN ('pass','fail','inconclusive')),
           subject_json TEXT, evidence_json TEXT, created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS hook_executions (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES durable_tasks(id) ON DELETE CASCADE,
+          task_item_id TEXT,
+          event TEXT NOT NULL,
+          hook_index INTEGER NOT NULL,
+          hook_type TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('fired','skipped','failed')),
+          detail TEXT,
+          boundary_key TEXT NOT NULL UNIQUE,
+          created_at INTEGER NOT NULL
         );`);
       if (db.pragma('foreign_key_check').length) throw new Error('plan migration foreign key check failed');
     })();
