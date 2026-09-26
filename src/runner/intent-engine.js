@@ -19,7 +19,17 @@ const {
   generateConnectLink,
   SERVICE_DISPLAY,
 } = require('../user-tokens');
-const { hhMyVacancies, hhFunnelStats, hhNewResponses, hhAtsEditor, hhReviewPage, hhWherePrompt, hhShowAtsConfig, hhStylePage, hhStatus, readActiveVacancy, hhSendPreview, hhSendConfirm, hhSendCancel, hhRejectDryRun, hhRejectConfirm, hhRejectCancel, hhBatchEvaluate, hhManualScan } = require('../hh-quick');
+const { runHostAction } = require('../mcp-action');
+
+// Outbound HH effects (send / mass reject) can take longer than a read.
+const HH_CONFIRM_TIMEOUT_MS = 120_000;
+
+// One user-typed HH quick command → host-only hh-skill action (epic #1470 P1.3).
+// Resolves to the provider's text ('' = no quick answer); rejects on provider failure.
+async function hhQuickAnswer({ intent, task, username, workDir, timeoutMs }) {
+  const text = await runHostAction({ tool: 'hh_quick_answer', params: { intent, task }, username, workDir, timeoutMs });
+  return text || '';
+}
 const { readVacancyState, initVacancyState, appendVacancyMessage, writeVacancyState, generateVacancyFromMessages, publishVacancyPage, publishToHH, getMissingFields } = require('../hh-vacancy');
 const { loadUserSiteIntents } = require('../user-sites');
 const { deleteServiceAccount: deleteGdriveSA } = require('../mcp-skills/tools/50-gdrive');
@@ -1643,38 +1653,34 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
       HH_REJECT_INTENT, HH_REJECT_CONFIRM_INTENT, HH_REJECT_CANCEL_INTENT, HH_SCAN_INTENT];
     if (hhIntents.some(intent => intent.test(task)) && !task.trim().startsWith('/') &&
         !await verifyQuickAnswerIntent(task, 'Быстрый ответ HeadHunter: вакансии, статистика, ссылки на ревью кандидатов или настройки рекрутинга', openrouterKey)) return null;
-    if (HH_STATUS_INTENT.test(task)) return hhStatus(userId);
-    if (HH_MY_VACANCIES_INTENT.test(task)) {
-      const r = await hhMyVacancies(userId, workDir).catch(() => null);
-      if (r) return r;
-    }
-    if (HH_FUNNEL_INTENT.test(task)) {
-      const r = await hhFunnelStats(userId, workDir).catch(() => null);
-      if (r) return r;
-    }
-    if (HH_RESPONSES_INTENT.test(task)) {
-      const r = await hhNewResponses(userId, workDir).catch(() => null);
-      if (r) return r;
-    }
-    if (HH_ATS_EDITOR_INTENT.test(task)) return hhAtsEditor(userId);
-    if (HH_REVIEW_PAGE_INTENT.test(task)) {
-      // Candidate review page — return immediately if active vacancy exists.
-      // Vacancy draft existing is irrelevant: user explicitly asked for candidate review, not vacancy publish.
-      const av = workDir ? readActiveVacancy(workDir) : null;
-      if (av) return hhReviewPage(userId);
-    }
-    if (HH_WHERE_PROMPT_INTENT.test(task)) return hhWherePrompt(userId);
-    if (HH_SHOW_ATS_CONFIG_INTENT.test(task)) return hhShowAtsConfig(userId);
-    if (HH_STYLE_INTENT.test(task)) return hhStylePage(userId);
-    // Action intents — order matters: confirm/cancel BEFORE the bare intent
-    if (HH_SEND_CONFIRM_INTENT.test(task)) return await hhSendConfirm(userId, workDir).catch(() => '⚠️ Не удалось отправить — попробуй ещё раз.');
-    if (HH_SEND_CANCEL_INTENT.test(task)) return hhSendCancel(userId, workDir);
-    if (HH_SEND_INTENT.test(task)) return await hhSendPreview(userId, workDir, task).catch(() => '⚠️ Не удалось подготовить сообщение.');
-    if (HH_REJECT_CONFIRM_INTENT.test(task)) return await hhRejectConfirm(userId, workDir).catch(() => '⚠️ Не удалось отклонить — попробуй ещё раз.');
-    if (HH_REJECT_CANCEL_INTENT.test(task)) return hhRejectCancel(userId, workDir);
-    if (HH_REJECT_INTENT.test(task)) return await hhRejectDryRun(userId, workDir, task).catch(() => '⚠️ Не удалось подготовить dry-run.');
-    if (HH_EVALUATE_INTENT.test(task)) return await hhBatchEvaluate(userId, workDir).catch(() => '⚠️ Не удалось запустить оценку.');
-    if (HH_SCAN_INTENT.test(task)) return await hhManualScan(userId, workDir).catch(() => '⚠️ Не удалось запустить скан.');
+    // HH logic lives in trained-assist-hh-skill (epic #1470 P1.3): each intent is
+    // one host-only provider action. '' / provider failure = no quick answer →
+    // fall through to the full session (hh_* MCP tools), never a crash.
+    const quick = (intent, opts = {}) => hhQuickAnswer({ intent, task, username: userId, workDir, ...opts });
+    const orNull = (p) => p.then(r => r || null, () => null);
+    let r;
+    if (HH_STATUS_INTENT.test(task) && (r = await orNull(quick('status')))) return r;
+    if (HH_MY_VACANCIES_INTENT.test(task) && (r = await orNull(quick('my_vacancies')))) return r;
+    if (HH_FUNNEL_INTENT.test(task) && (r = await orNull(quick('funnel')))) return r;
+    if (HH_RESPONSES_INTENT.test(task) && (r = await orNull(quick('new_responses')))) return r;
+    if (HH_ATS_EDITOR_INTENT.test(task) && (r = await orNull(quick('ats_editor')))) return r;
+    // Candidate review page — only with an active vacancy (provider returns '' otherwise).
+    if (HH_REVIEW_PAGE_INTENT.test(task) && (r = await orNull(quick('review_page')))) return r;
+    if (HH_WHERE_PROMPT_INTENT.test(task) && (r = await orNull(quick('where_prompt')))) return r;
+    if (HH_SHOW_ATS_CONFIG_INTENT.test(task) && (r = await orNull(quick('show_ats_config')))) return r;
+    if (HH_STYLE_INTENT.test(task) && (r = await orNull(quick('style_page')))) return r;
+    // Action intents — order matters: confirm/cancel BEFORE the bare intent.
+    // Confirm = outbound HH effect: longer deadline, and a timeout must not invite
+    // a blind retry (the send may have gone through).
+    const confirmFail = (msg) => (e) => (e && e.code === 'timeout' ? '⚠️ HH не ответил вовремя — проверь на hh.ru, прежде чем повторять.' : msg);
+    if (HH_SEND_CONFIRM_INTENT.test(task)) return quick('send_confirm', { timeoutMs: HH_CONFIRM_TIMEOUT_MS }).catch(confirmFail('⚠️ Не удалось отправить — попробуй ещё раз.'));
+    if (HH_SEND_CANCEL_INTENT.test(task)) return quick('send_cancel').catch(() => '⚠️ Не удалось отменить — попробуй ещё раз.');
+    if (HH_SEND_INTENT.test(task)) return quick('send_preview').catch(() => '⚠️ Не удалось подготовить сообщение.');
+    if (HH_REJECT_CONFIRM_INTENT.test(task)) return quick('reject_confirm', { timeoutMs: HH_CONFIRM_TIMEOUT_MS }).catch(confirmFail('⚠️ Не удалось отклонить — попробуй ещё раз.'));
+    if (HH_REJECT_CANCEL_INTENT.test(task)) return quick('reject_cancel').catch(() => '⚠️ Не удалось отменить — попробуй ещё раз.');
+    if (HH_REJECT_INTENT.test(task)) return quick('reject_dry_run').catch(() => '⚠️ Не удалось подготовить dry-run.');
+    // HH_EVALUATE_INTENT / HH_SCAN_INTENT: no quick answer — the full session runs
+    // hh_batch_evaluate / hh_proactive_search with the slash command intact.
   }
 
 
