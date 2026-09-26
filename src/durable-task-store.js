@@ -13,6 +13,9 @@ const TASK_STATUSES = ['draft', 'paused', 'blocked', 'active', 'done', 'failed',
 const ITEM_STATUSES = ['pending', 'running', 'waiting', 'done', 'failed', 'skipped'];
 const TIERS = ['free', 'standard', 'strong'];
 const TIER_RANK = { free: 0, standard: 1, strong: 2 };
+// P3c: the contract model ladder a step may be escalated through (matches
+// playbook-executor LEVELS — the executor resolver reads current_model_level).
+const MODEL_LEVELS = ['bachelor', 'master', 'doctor'];
 
 function nowMs() { return Date.now(); }
 
@@ -286,7 +289,9 @@ class DurableTaskStore {
     const allowed = ['title', 'status', 'current_tier', 'delay_after_sec', 'due_at',
                      'wait_deadline_at', 'last_execution_id', 'last_error',
                      // P3d-1c: per-step validation_mode override (nullable; DB CHECK enforces the enum)
-                     'validation_mode'];
+                     'validation_mode',
+                     // P3c: recovery observability (set by durable-recovery.js)
+                     'last_failure_class', 'last_recovery_action'];
     const sets = [];
     const args = [];
     for (const k of allowed) {
@@ -329,6 +334,26 @@ class DurableTaskStore {
       this._prep(`UPDATE task_items SET current_tier = ?, escalation_count =
           escalation_count + 1, status = 'pending', updated_at = ? WHERE id = ?`)
         .run(next[0], ts, id);
+      this._bump(item.task_id);
+      return this.getTaskItem(id);
+    })();
+  }
+
+  /**
+   * Bump a contract item's current_model_level one rung up (bachelor→master→
+   * doctor) — the P3c recovery move for a model/quota/context failure. Idempotent
+   * at the ceiling. A legacy item with no contract level (NULL) is left untouched;
+   * recovery falls back to a plain bounded re-pend for it. Does NOT change status:
+   * the caller decides complete vs re-pend through the usual transition.
+   */
+  bumpModelLevel(id, profileId) {
+    return this.db.transaction(() => {
+      const item = this._itemOwnedBy(id, profileId);
+      if (!item) return null;
+      const idx = MODEL_LEVELS.indexOf(item.current_model_level);
+      if (idx < 0 || idx >= MODEL_LEVELS.length - 1) return item; // unknown or at ceiling
+      this._prep(`UPDATE task_items SET current_model_level = ?, updated_at = ? WHERE id = ?`)
+        .run(MODEL_LEVELS[idx + 1], nowMs(), id);
       this._bump(item.task_id);
       return this.getTaskItem(id);
     })();
