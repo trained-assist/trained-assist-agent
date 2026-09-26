@@ -397,7 +397,7 @@ function switchChatEngineToOpencode(workDir, chatId) {
 //   FALL-THROUGH (not return null): intent matched but data missing → next pattern may give useful answer
 //   RETURN NULL (→ Claude): situation ambiguous, or Claude must call a tool (e.g. gdrive_setup) autonomously
 // See README.md § "Guard conditions — fall-through vs return null" for the full audit table.
-function getQuickAnswer(task, userId, workDir, sessionExists = false, chatId = null, telegramUserId = null, audience = 'default', threadId = null) {
+function getQuickAnswerUnchecked(task, userId, workDir, sessionExists = false, chatId = null, telegramUserId = null, audience = 'default', threadId = null) {
   // Stale PR alarm — fires repeatedly from csm-relay after PR is already merged
   if (STALE_PR_ALARM_INTENT.test(task)) {
     const prNum = task.match(/#(\d+)/)?.[1];
@@ -1360,7 +1360,7 @@ async function verifyQuickAnswerIntent(task, answerPreview, openrouterKey) {
 // chat turn — e.g. after a forceNew dispatch. BUG_OR_FEATURE_INTENT honors it (PR3) so
 // the session it creates is the SAME one the gateway's lastSessionId now points at,
 // instead of an orphan the next buffered message can never find its way back to.
-async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default', threadId = null) {
+async function runQuickAnswerUnchecked(task, userId, workDir, openrouterKey = null, sessionExists = false, chatId = null, telegramUserId = null, sessionId = null, audience = 'default', threadId = null) {
   const notificationIntents = require('../domains/hh/intents');
   if (userId && workDir && (notificationIntents.HH_NOTIFY_OFF_INTENT.test(task) || notificationIntents.HH_NOTIFY_ON_INTENT.test(task))) {
     return 'Уведомления холодного поиска выключены: функция удалена для всех пользователей. Настройки автопоиска не изменены.';
@@ -1680,6 +1680,15 @@ async function runQuickAnswer(task, userId, workDir, openrouterKey = null, sessi
 
 
   return null;
+}
+
+// Public entry points: an empty quick answer is never delivered (src/quick-reply.js).
+const { nonEmptyQuickReply } = require('../quick-reply');
+function getQuickAnswer(task, ...rest) {
+  return nonEmptyQuickReply(getQuickAnswerUnchecked(task, ...rest), task);
+}
+async function runQuickAnswer(task, ...rest) {
+  return nonEmptyQuickReply(await runQuickAnswerUnchecked(task, ...rest), task);
 }
 
 module.exports = {
