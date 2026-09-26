@@ -51,6 +51,17 @@ fi
 PREV_RELEASE="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
 export PREV_RELEASE
 
+# Same-SHA no-op. An auto-merged PR is deployed twice: once by the pull_request run (merge sha) and
+# again ~2.5 min later by the push-to-main run the merge itself triggers — both for the SAME commit.
+# Each deploy SIGKILLs every running agent session, so the second one was pure damage (2026-09-26:
+# 10 merges → 20 hard restarts; group chats died mid-answer twice per merge). FORCE_DEPLOY=1 opts out.
+if [ "${FORCE_DEPLOY:-}" != 1 ] && [ -n "$PREV_RELEASE" ] \
+   && [ "$(basename "$PREV_RELEASE")" = "$TARGET" ] \
+   && $SUDO systemctl is-active --quiet "$SERVICE"; then
+  echo "==> $TARGET is already live and $SERVICE is active — skipping restart (FORCE_DEPLOY=1 to override)"
+  exit 0
+fi
+
 rollback() {
   if [ -z "$PREV_RELEASE" ] || [ ! -d "$PREV_RELEASE" ]; then
     echo "No previous release recorded; cannot roll back" >&2

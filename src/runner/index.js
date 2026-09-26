@@ -2326,7 +2326,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       const onGo = opencodeGoToggle.getMode() === 'go';
       const newProfile = opencodeGoToggle.resolveProfileName();
       const switchMsg = onGo
-        ? `⚠️ OpenCode Go (${failedModel}) исчерпал лимит ключа — переключаюсь на резервный ключ Go, пробую снова.`
+        ? (opencodeGoToggle.isDeadKeyError(preLadderText)
+          ? `⚠️ OpenCode Go (${failedModel}): ключ отклонён шлюзом (Invalid credential) — переключаюсь на резервный ключ Go, пробую снова.`
+          : `⚠️ OpenCode Go (${failedModel}) исчерпал лимит ключа — переключаюсь на резервный ключ Go, пробую снова.`)
         : `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, switchMsg, threadId);
