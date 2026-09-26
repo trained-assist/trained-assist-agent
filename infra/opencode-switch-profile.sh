@@ -71,9 +71,17 @@ echo "opencode profile → $PROFILE ($OUT)"
 # only `opencode auth login` (interactive, browser OAuth) writes ~/.local/share/opencode/auth.json.
 # For a headless VM, write the Go service-account key there directly instead, merging with
 # whatever auth.json already has so we never drop other providers' credentials.
+#
+# Prefer the FIRST key of OPENCODE_GO_API_KEYS (the rotation pool; first = active/primary) and
+# fall back to the legacy single OPENCODE_GO_API_KEY. Re-writing auth.json to the primary on every
+# deploy is intended: src/opencode-go-keys.js re-derives the active key from auth.json, so a deploy
+# resets rotation back to the primary, whose exhaustion TTL has by then long expired.
 SECRETS="${SECRETS_ENV:-$HOME/secrets.env}"
 if [[ -f "$SECRETS" ]]; then
-  GO_KEY=$(grep '^OPENCODE_GO_API_KEY=' "$SECRETS" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+  GO_KEY=$(grep '^OPENCODE_GO_API_KEYS=' "$SECRETS" 2>/dev/null | cut -d= -f2- | tr -d '"' | cut -d, -f1 | xargs || true)
+  if [[ -z "${GO_KEY:-}" ]]; then
+    GO_KEY=$(grep '^OPENCODE_GO_API_KEY=' "$SECRETS" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+  fi
   if [[ -n "${GO_KEY:-}" ]]; then
     AUTH_FILE="$HOME/.local/share/opencode/auth.json"
     mkdir -p "$(dirname "$AUTH_FILE")"
