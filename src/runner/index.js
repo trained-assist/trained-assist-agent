@@ -19,6 +19,7 @@ const { classifyDeterministic: classifyFailureDeterministic } = require('../fail
 const executionHistory = require('../execution-history');
 const { markEngineSuccess, markEngineFailure, isCredentialInvalidClass } = require('../engine-health');
 const { randomUUID } = require('crypto');
+const { recordQuickExchange, escalateRows } = require('../quick-reply');
 const {
   loadUserTokens,
   listConnectedServices,
@@ -686,12 +687,18 @@ function runTask(opts) {
       const msg = `⚡ ${quick}`;
       const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
       const chatId = opts.user.id;
+      // Every ⚡ reply is one tap from the agent (src/quick-reply.js).
+      const qaSessionId = recordQuickExchange(opts.user.workDir, {
+        username: opts.user.username, chatId, threadId: runThreadId, audience: opts.user.audience,
+        projectId: opts.projectId || null, task: opts.task, reply: quick,
+      });
+      const extra = { reply_markup: { inline_keyboard: escalateRows(qaSessionId) } };
       return (async () => {
         if (botToken) {
           const im = opts.initialMsgId;
           try {
-            if (im) await tgEdit(botToken, chatId, im, msg, {}).catch(() => sendTo(botToken, chatId, msg));
-            else     await sendTo(botToken, chatId, msg);
+            if (im) await tgEdit(botToken, chatId, im, msg, extra).catch(() => sendTo(botToken, chatId, msg, extra));
+            else     await sendTo(botToken, chatId, msg, extra);
           } catch (e) { console.warn('[runner] pre-queue quick-answer send:', e.message); }
         }
         return quick;
@@ -1682,13 +1689,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // qa_more|{sessionId} (tg-bot callbacks.js) reruns this session with forceClaude+deep;
     // runner.js's own forceClaude-deep wrap (below, "Пользователь запустил проработку того
     // же запроса") already attaches the quick reply as prior context — no new plumbing
-    // needed there. Utility replies (ping/help/sessions/...) stay button-less: they're not
-    // logged to session history at all, so there's nothing yet to hand off to Claude.
-    const expandMarkup = !isUtility && activeSessionId
-      ? { inline_keyboard: [[{ text: '🔎 Разобраться подробнее', callback_data: `qa_more|${activeSessionId}` }]] }
-      : null;
+    // needed there.
+    // Utility replies are not in the chat's session, so they escalate from a side session
+    // (recordQuickExchange) — every ⚡ reply gets the button, none is a dead end.
+    const escalateSessionId = isUtility
+      ? recordQuickExchange(user.workDir, { username: user.username, chatId, threadId, audience, projectId: boundProjectId, task, reply: quickReply })
+      : activeSessionId;
     const quickExtra = { reply_markup: { inline_keyboard: [
-      ...(expandMarkup?.inline_keyboard || []), ...inputInspectionRows(initialMsgId, activeSessionId),
+      ...escalateRows(escalateSessionId), ...inputInspectionRows(initialMsgId, activeSessionId),
     ] } };
     if (initialMsgId) {
       await tgEdit(BOT_TOKEN, chatId, initialMsgId, `⚡ ${quickReply}`, quickExtra).catch(() => tgSend(BOT_TOKEN, chatId, `⚡ ${quickReply}`, quickExtra, threadId));
