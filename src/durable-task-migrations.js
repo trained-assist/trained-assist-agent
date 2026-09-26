@@ -28,6 +28,9 @@ module.exports = function migratePlan(db) {
           validation_mode: "TEXT CHECK(validation_mode IN ('programmatic','programmatic+llm','programmatic+llm-fastpass'))",
           attempt_count: 'INTEGER NOT NULL DEFAULT 0', max_attempts: 'INTEGER NOT NULL DEFAULT 3',
           execution_timeout_seconds: 'INTEGER NOT NULL DEFAULT 600', wait_deadline_at: 'INTEGER', evidence_json: 'TEXT', completed_at: 'INTEGER',
+          // P3c: observability of the last recovery decision (failure-classifier class
+          // + recovery-policy action) so a stuck step can be diagnosed without replaying logs.
+          last_failure_class: 'TEXT', last_recovery_action: 'TEXT',
         },
         executions: { executor_role: 'TEXT', model_level: 'TEXT', context_budget: 'TEXT', profile: 'TEXT', provider: 'TEXT', attempt_number: 'INTEGER', result_json: 'TEXT' },
       };

@@ -31,6 +31,7 @@ const { DurableTaskStore } = require('./durable-task-store');
 const { criterionIdForItem } = require('./durable-task-plan');
 const { durableTaskDbPath, userWorkDir, projectDir: projectDirPath } = require('./data-paths');
 const { resolveStepExecution } = require('./playbook-executor');
+const { recoverDurableItem, retryFailedItem } = require('./durable-recovery');
 const {
   evaluateItemValidationsModeAware, resolveValidationMode, getDefaultRegistry, DEFAULT_VALIDATION_MODE,
   parseValidation, FASTPASS_SKIP_MODE, parseFastpassSkip,
@@ -150,24 +151,11 @@ function claimNextDurableItem(store = durableStore(), { now = Date.now() } = {})
 
 const FRESH_CLAIM_GRACE_MS = 30 * 1000; // just-claimed items: let the claiming tick run them
 
-// A failed item retries until its declared `max_attempts` are spent (P3a: the
-// per-step budget the compiler writes into the item). Tier escalation still
-// happens on each retry (legacy durable tasks); once attempts are exhausted the
-// item stays 'failed' — never re-pended forever. The recovery slice (P3c) owns
-// what happens after a step has genuinely exhausted its budget.
-// `itemId` is re-read fresh because startExecution already bumped attempt_count.
-// `escalate` is false for engine/env crashes: a crash is not an item-quality
-// signal, so it retries at the same tier until the attempt budget is spent.
-function retryFailedItem(store, itemId, profileId, { retryDelayMs = 0, escalate = true } = {}) {
-  const item = store.getTaskItem(itemId);
-  if (!item) return { retried: false, attempts: 0, maxAttempts: 0 };
-  const attempts = item.attempt_count || 0;
-  const maxAttempts = item.max_attempts || 1;
-  if (attempts >= maxAttempts) return { retried: false, attempts, maxAttempts };
-  if (escalate) store.escalateItem(itemId, profileId); // legacy tier ladder; also sets pending
-  store.updateTaskItem(itemId, { status: 'pending', due_at: Date.now() + retryDelayMs }, profileId);
-  return { retried: true, attempts, maxAttempts };
-}
+// The per-step attempt budget (P3a) and the recovery-policy ladder (P3c) both
+// live in src/durable-recovery.js now — every failure branch below classifies the
+// error, asks recovery-policy.js what to do, and maps that onto an existing
+// mechanism (re-pend / model-ladder / provider flip / engine fallback), bounded
+// by max_attempts and DEFAULT_RECOVERY_BUDGET.
 
 // Evaluate an item's declared validations through the registry and persist each
 // verdict as a task_validation_results row (profile-scoped). Returns the raw
@@ -260,7 +248,7 @@ function settleTaskCompletion(store, task) {
 // own max_attempts / execution_timeout_seconds. delay_after_sec / wait_deadline_at
 // shape when the store hands the item out (see durable-task-store.completeItem /
 // expireWaitingDeadlines).
-async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null, llmValidate = null }) {
+async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null, llmValidate = null, classifier = null, ladder = null, toggle = null }) {
   const store = durableStore();
   const validators = registry || getDefaultRegistry();
   // A programmatic step that fails is retried synchronously inside this pass
@@ -328,13 +316,18 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
         console.log(`[gtd-durable] programmatic item done: ${item.id.slice(0, 8)}`);
       } else {
         const failedKeys = results.filter(r => r.status !== 'pass').map(r => r.key).join(', ');
-        store.failItem(item.id, task.profile_id, {
-          executionId, error: `programmatic validation not passed: ${failedKeys || 'no validations'}`,
+        const errText = `programmatic validation not passed: ${failedKeys || 'no validations'}`;
+        store.failItem(item.id, task.profile_id, { executionId, error: errText });
+        const rec = await recoverDurableItem({
+          store, task, itemId: item.id, errorText: errText, classifier, ladder, toggle,
+          escalate: false, retryDelayMs: FRESH_CLAIM_GRACE_MS,
         });
-        store.finishExecution(executionId, { status: 'failed', error_class: 'validation', error_text: failedKeys.slice(0, 500) });
-        const r = retryFailedItem(store, item.id, task.profile_id, { escalate: false, retryDelayMs: FRESH_CLAIM_GRACE_MS });
-        if (r.retried) console.log(`[gtd-durable] programmatic retry ${item.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
-        else console.log(`[gtd-durable] programmatic item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${item.id.slice(0, 8)}`);
+        store.finishExecution(executionId, {
+          status: 'failed', error_class: rec.failureClass,
+          error_text: `${rec.action || 'terminal'}: ${failedKeys}`.slice(0, 500),
+        });
+        if (rec.recovered) console.log(`[gtd-durable] programmatic recovery ${item.id.slice(0, 8)} ${rec.failureClass}→${rec.action} (${rec.attempts}/${rec.maxAttempts})`);
+        else console.log(`[gtd-durable] programmatic item failed, ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${item.id.slice(0, 8)}`);
       }
       settleTaskCompletion(store, task);
       continue;
@@ -407,28 +400,41 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
         console.log(`[gtd-durable] item done: ${itemSnap.id.slice(0, 8)}`);
       } else if (/DURABLE:\s*failed/i.test(said)) {
         store.failItem(itemSnap.id, task.profile_id, { executionId, error: said.slice(0, 500) });
-        store.finishExecution(executionId, { status: 'failed', error_text: said.slice(0, 500) });
-        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
-        if (r.retried) console.log(`[gtd-durable] retry ${itemSnap.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
-        else console.log(`[gtd-durable] item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
+        const rec = await recoverDurableItem({ store, task, itemId: itemSnap.id, errorText: said, classifier, ladder, toggle });
+        store.finishExecution(executionId, {
+          status: 'failed', error_class: rec.failureClass,
+          error_text: `${rec.action || 'terminal'}: ${said}`.slice(0, 500),
+        });
+        if (rec.recovered) console.log(`[gtd-durable] recovery ${itemSnap.id.slice(0, 8)} ${rec.failureClass}→${rec.action} (${rec.attempts}/${rec.maxAttempts})`);
+        else console.log(`[gtd-durable] item failed, ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${itemSnap.id.slice(0, 8)}`);
       } else {
         // no terminal marker — treat as failure, bounded by the item's own max_attempts
-        store.failItem(itemSnap.id, task.profile_id, { executionId, error: 'no DURABLE terminal marker in reply' });
-        store.finishExecution(executionId, { status: 'failed', error_class: 'no-marker' });
-        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
-        if (!r.retried) console.log(`[gtd-durable] item failed (no marker), budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
+        const errText = 'no DURABLE terminal marker in reply';
+        store.failItem(itemSnap.id, task.profile_id, { executionId, error: errText });
+        const rec = await recoverDurableItem({ store, task, itemId: itemSnap.id, errorText: errText, classifier, ladder, toggle });
+        store.finishExecution(executionId, {
+          status: 'failed', error_class: rec.failureClass,
+          error_text: `${rec.action || 'terminal'}: no marker`.slice(0, 500),
+        });
+        if (!rec.recovered) console.log(`[gtd-durable] item failed (no marker), ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${itemSnap.id.slice(0, 8)}`);
       }
       // Keep the task row's revision ticking so projections/UI notice progress.
       settleTaskCompletion(store, task);
-    }).catch(e => {
+    }).catch(async e => {
       console.error(`[gtd-durable] runTask ${itemSnap.id.slice(0, 8)}:`, e.message);
       store.failItem(itemSnap.id, task.profile_id, { executionId, error: e.message.slice(0, 500) });
-      store.finishExecution(executionId, { status: 'failed', error_class: 'run-crash', error_text: e.message.slice(0, 500) });
-      // Engine/env crash: same bounded retry as a marker failure, but without
-      // tier escalation (a crash is not an item-quality signal) — just re-pend up
-      // to the item's attempt budget; after it is spent the item stays failed.
-      const r = retryFailedItem(store, itemSnap.id, task.profile_id, { retryDelayMs: 5 * 60 * 1000, escalate: false });
-      if (!r.retried) console.log(`[gtd-durable] item crashed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
+      // Engine/env crash: same bounded recovery as a marker failure, but without
+      // tier escalation (a crash is not an item-quality signal) and with the
+      // crash-retry backoff; after the budgets are spent the item stays failed.
+      const rec = await recoverDurableItem({
+        store, task, itemId: itemSnap.id, errorText: e.message, classifier, ladder, toggle,
+        retryDelayMs: 5 * 60 * 1000, escalate: false,
+      });
+      store.finishExecution(executionId, {
+        status: 'failed', error_class: rec.failureClass,
+        error_text: `${rec.action || 'terminal'}: ${e.message}`.slice(0, 500),
+      });
+      if (!rec.recovered) console.log(`[gtd-durable] item crashed, ${rec.reason} (${rec.attempts}/${rec.maxAttempts}) class=${rec.failureClass}: ${itemSnap.id.slice(0, 8)}`);
     });
   }
 }

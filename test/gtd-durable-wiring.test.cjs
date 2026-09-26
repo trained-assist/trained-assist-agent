@@ -661,6 +661,176 @@ function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
     ok(store.getTask(r.task.id, 'u1').status === 'done', 'positional: plan finalizes after strict 1→2→3');
   }
 
+  // 21. P3c recovery: a QUOTA-classified failure walks the model ladder one rung
+  // (bachelor→master, still OpenCode here) and re-pends, recording class+action.
+  {
+    const G21 = freshStore('21');
+    const store = G21.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'quota recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'agent step', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 3 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const advanced = [];
+    const ladder = {
+      buildOcProfileOverrides: () => ({ agent: { build: { model: 'anthropic/claude-sonnet' } } }),
+      forceAdvance: (p, role, model) => advanced.push([p, role, model]),
+    };
+    await G21.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, ladder,
+      classifier: () => ({ class: 'QUOTA', retryable: true, source: 'rule', confidence: 1 }),
+      runTask: async () => 'boom. DURABLE: failed: quota exceeded',
+    });
+    await drain(); await drain();
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'pending' && item.current_model_level === 'master',
+      `p3c: QUOTA advances model level bachelor→master and re-pends (got ${item.status}/${item.current_model_level})`);
+    ok(item.last_failure_class === 'QUOTA' && /^next_model_or_provider/.test(item.last_recovery_action || ''),
+      `p3c: failure class + action recorded on the item (got ${item.last_failure_class}/${item.last_recovery_action})`);
+    ok(advanced.length === 1 && advanced[0][0] === 'value' && advanced[0][1] === 'build',
+      `p3c: opencode ladder advanced for the step's role (got ${JSON.stringify(advanced)})`);
+  }
+
+  // 22. P3c recovery: a terminal action leaves the item failed (alternative
+  // provider already spent → AUTH's second rung is terminal).
+  {
+    const G22 = freshStore('22');
+    const store = G22.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'terminal recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'auth step', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 5 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const it = store.listTaskItems(r.task.id, 'u1')[0];
+    // Pretend one recovery move was already spent: startExecution will bump this
+    // to 2 → spent=1 → AUTH actions[1] === 'terminal' → null.
+    store.db.prepare('UPDATE task_items SET attempt_count=1 WHERE id=?').run(it.id);
+    await G22.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      classifier: () => ({ class: 'AUTH', retryable: false, source: 'rule', confidence: 1 }),
+      runTask: async () => 'nope. DURABLE: failed: not logged in',
+    });
+    await drain();
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'failed' && item.last_recovery_action === 'terminal',
+      `p3c: terminal class leaves the item failed (got ${item.status}/${item.last_recovery_action})`);
+  }
+
+  // 23. P3c recovery is bounded by DEFAULT_RECOVERY_BUDGET: even with attempt
+  // budget to spare, a spent recovery budget is terminal. Direct module call with
+  // an injected budget keeps the assertion deterministic.
+  {
+    const G23 = freshStore('23');
+    const store = G23.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'budget recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'never ends', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 50 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const it = store.listTaskItems(r.task.id, 'u1')[0];
+    store.db.prepare('UPDATE task_items SET attempt_count=3 WHERE id=?').run(it.id); // spent = 2
+    const { recoverDurableItem } = require('../src/durable-recovery');
+    const rec = await recoverDurableItem({
+      store, task: store.getTask(r.task.id, 'u1'), itemId: it.id, errorText: 'anything',
+      classifier: () => ({ class: 'UNKNOWN', retryable: true, source: 'rule', confidence: 1 }),
+      budget: 2,
+    });
+    ok(rec.recovered === false && rec.reason === 'terminal' && rec.action === null,
+      `p3c: recovery stops at the spent budget (got ${JSON.stringify(rec)})`);
+  }
+
+  // 24. P3c recovery never re-pends infinitely: a class whose action ladder ends
+  // at 'terminal' stops even with a huge max_attempts. UNKNOWN is
+  // conservative_retry → fallback → terminal, so it fails on the 3rd attempt.
+  {
+    const G24 = freshStore('24');
+    const store = G24.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'bounded recovery', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [{ title: 'endless?', execution_kind: 'agent', executor_role: 'developer',
+        minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 50 }],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const ladder = {
+      buildOcProfileOverrides: () => ({ agent: { build: { model: 'some/model' } } }),
+      forceAdvance: () => {},
+    };
+    let fires = 0;
+    const failRun = () => G24.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false, ladder,
+      classifier: () => ({ class: 'UNKNOWN', retryable: true, source: 'rule', confidence: 1 }),
+      runTask: async () => { fires++; return 'boom. DURABLE: failed: exploded'; },
+    });
+    for (let i = 0; i < 6; i++) { await failRun(); await drain(); }
+    const item = store.listTaskItems(r.task.id, 'u1')[0];
+    ok(item.status === 'failed' && fires === 3,
+      `p3c: bounded re-pend stops after the action ladder (fires=${fires}, status=${item.status}, attempts=${item.attempt_count})`);
+    let extra = 0;
+    await G24.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      classifier: () => ({ class: 'UNKNOWN' }), runTask: async () => { extra++; return 'DURABLE: done'; } });
+    ok(extra === 0, `p3c: exhausted item is never re-fired (extra=${extra})`);
+  }
+
+  // 25. P3c recovery: provider switch for the deepseek pair flips go↔openrouter
+  // via the injectable toggle; the item re-pends with the action recorded.
+  {
+    const G25 = freshStore('25');
+    const store = G25.durableStore();
+    process.env.PLAYBOOK_LEVEL_MAP = JSON.stringify({ bachelor: { engine: 'opencode', ocProfile: 'deepseek' } });
+    try {
+      const r = store.createPlan({
+        profile_id: 'u1', goal: 'provider recovery', user_value: 'uv',
+        acceptance_criteria: [{ description: 'c' }],
+        execution_policy: { validation_mode: 'programmatic' },
+        items: [{ title: 'deepseek step', execution_kind: 'agent', executor_role: 'developer',
+          minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, max_attempts: 5 }],
+      });
+      store.updateTask(r.task.id, 'u1', { status: 'active' });
+      let flipped = 0;
+      const toggle = { getMode: () => 'go', forceFlip: () => { flipped++; return 'openrouter'; } };
+      await G25.runDueDurable({
+        secrets: {}, now: Date.now(), isTaskRunning: () => false, toggle,
+        classifier: () => ({ class: 'AUTH', retryable: false, source: 'rule', confidence: 1 }),
+        runTask: async () => 'nope. DURABLE: failed: not logged in',
+      });
+      await drain();
+      const item = store.listTaskItems(r.task.id, 'u1')[0];
+      ok(item.status === 'pending' && flipped === 1 && /^alternate_provider/.test(item.last_recovery_action || ''),
+        `p3c: deepseek provider switch flips the go↔openrouter toggle (got ${item.status}, flips=${flipped}, ${item.last_recovery_action})`);
+    } finally {
+      delete process.env.PLAYBOOK_LEVEL_MAP;
+    }
+  }
+
+  // 26. legacy (non-contract) item still works through recovery: no model level
+  // to bump, so a failure takes the bounded re-pend path and stays claimable.
+  {
+    const G26 = freshStore('26');
+    const store = G26.durableStore();
+    store.createTask({ id: 'legacy-26', profile_id: 'u1', goal: 'legacy recovery' });
+    store.createTaskItem({ id: 'legacy-item-26', task_id: 'legacy-26', title: 'legacy step' });
+    await G26.runDueDurable({
+      secrets: {}, now: Date.now(), isTaskRunning: () => false,
+      classifier: () => ({ class: 'MODEL_ERROR', retryable: true, source: 'rule', confidence: 1 }),
+      runTask: async () => 'nope. DURABLE: failed: internal server error',
+    });
+    await drain();
+    const item = store.getTaskItem('legacy-item-26');
+    ok(item.status === 'pending' && !item.current_model_level && item.last_recovery_action,
+      `p3c: legacy item re-pends through recovery without a model level (got ${item.status}/${item.current_model_level}/${item.last_recovery_action})`);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
