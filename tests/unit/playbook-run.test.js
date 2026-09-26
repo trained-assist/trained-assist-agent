@@ -187,6 +187,18 @@ describe('MCP surface: playbook_run', () => {
     expect(readFileSync(got.projection, 'utf8')).toContain('Finalize only with current acceptance evidence');
   });
 
+  it('carries the playbook hooks into the persisted plan (P4)', async () => {
+    const tools = loadTools();
+    const res = await tools.playbook_run.handler({ playbook_id: 'development', goal: 'hooks' }, ALICE);
+    const hooks = JSON.parse(res.task.hooks_json);
+    expect(hooks.task_done).toEqual([{ type: 'notify', to: 'owner', text: 'Task done: {goal}' }]);
+    expect(hooks.task_failed[0]).toMatchObject({ type: 'notify', to: 'owner' });
+    // External-effect hooks are only consented to when the run opts in.
+    expect(res.task.execution_policy_json).toBeNull();
+    const approved = await tools.playbook_run.handler({ playbook_id: 'development', goal: 'hooks ok', approve_hooks: true }, ALICE);
+    expect(JSON.parse(approved.task.execution_policy_json)).toEqual({ hooks_approved: true });
+  });
+
   it('pins the version: editing the playbook never mutates a plan already run', async () => {
     const tools = loadTools();
     const first = await tools.playbook_run.handler({ playbook_id: 'development', goal: 'pin' }, ALICE);

@@ -122,16 +122,17 @@ class DurableTaskStore {
   /** Persist the complete planner contract in one transaction. No execution. */
   createPlan({ id = crypto.randomUUID(), profile_id, project_id = null, goal,
     playbook_id = null, playbook_version = null, user_value, acceptance_criteria,
-    items, session_id = null, execution_policy = null, request_id = null }) {
+    items, session_id = null, execution_policy = null, request_id = null, hooks = null }) {
     if (typeof user_value !== 'string' || !user_value.trim()) throw new Error('user_value required');
     if (!Array.isArray(acceptance_criteria) || !acceptance_criteria.length || acceptance_criteria.some(c => !c || typeof c !== 'object' || Array.isArray(c) || !Object.keys(c).length)) throw new Error('acceptance_criteria required');
     if (!Array.isArray(items) || !items.length) throw new Error('items required');
     return this.db.transaction(() => {
       this.createTask({ id, profile_id, project_id, goal });
       this._prep(`UPDATE durable_tasks SET status='draft', playbook_id=?, playbook_version=?,
-        user_value=?, acceptance_criteria_json=?, execution_policy_json=?, request_id=? WHERE id=?`)
+        user_value=?, acceptance_criteria_json=?, execution_policy_json=?, request_id=?, hooks_json=? WHERE id=?`)
         .run(playbook_id, playbook_version, user_value, JSON.stringify(acceptance_criteria),
-          execution_policy == null ? null : JSON.stringify(execution_policy), request_id, id);
+          execution_policy == null ? null : JSON.stringify(execution_policy), request_id,
+          hooks == null ? null : JSON.stringify(hooks), id);
       items.forEach((item, position) => {
         validateItem(item);
         const itemId = crypto.randomUUID();
@@ -139,11 +140,12 @@ class DurableTaskStore {
           delay_after_sec: item.delay_after_sec ?? 0 });
         this._prep(`UPDATE task_items SET stage=?, instructions=?, execution_kind=?, executor_role=?,
           minimum_model_level=?, current_model_level=?, context_budget=?, validation_json=?,
-          max_attempts=?, execution_timeout_seconds=? WHERE id=?`)
+          max_attempts=?, execution_timeout_seconds=?, hooks_json=? WHERE id=?`)
           .run(item.stage ?? null, item.instructions ?? null, item.execution_kind,
             item.executor_role ?? null, item.minimum_model_level ?? null, item.minimum_model_level ?? null,
             item.context_budget ?? null, JSON.stringify(item.validation), item.max_attempts ?? 3,
-            item.execution_timeout_seconds ?? 600, itemId);
+            item.execution_timeout_seconds ?? 600,
+            item.hooks == null ? null : JSON.stringify(item.hooks), itemId);
       });
       if (session_id) this.attachSession(id, session_id, profile_id);
       return { task: this.getTask(id, profile_id), items: this.listTaskItems(id, profile_id) };
@@ -523,6 +525,46 @@ class DurableTaskStore {
       this._bump(item.task_id);
     })();
     return this.getTaskItem(itemId);
+  }
+
+  // ── Hook execution log (P4, #1459) ─────────────────────────────────────
+  /**
+   * Record one hook boundary outcome. `boundary_key` is unique, so a replay of
+   * the same (task, item, event, index) is a no-op — a fired notification is
+   * never re-delivered and a skip is not double-logged. Returns
+   * `{recorded, row}` where `recorded:false` means the boundary already existed.
+   */
+  recordHookExecution({ task_id, task_item_id = null, event, hook_index, hook_type,
+    status, detail = null, boundary_key }) {
+    if (!task_id) throw new Error('task_id is required');
+    if (!['fired', 'skipped', 'failed'].includes(status)) throw new Error(`invalid hook status: ${status}`);
+    if (!boundary_key) throw new Error('boundary_key is required');
+    return this.db.transaction(() => {
+      const existing = this._prep('SELECT * FROM hook_executions WHERE boundary_key = ?').get(boundary_key);
+      if (existing) return { recorded: false, row: existing };
+      const id = crypto.randomUUID();
+      this._prep(`INSERT INTO hook_executions
+          (id, task_id, task_item_id, event, hook_index, hook_type, status, detail, boundary_key, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, task_id, task_item_id, event, hook_index, hook_type, status, detail, boundary_key, nowMs());
+      return { recorded: true, row: this.getHookExecution(id) };
+    })();
+  }
+
+  getHookExecution(id) {
+    return this._prep('SELECT * FROM hook_executions WHERE id = ?').get(id) || null;
+  }
+
+  hasHookRun(boundaryKey) {
+    return !!this._prep('SELECT 1 FROM hook_executions WHERE boundary_key = ?').get(boundaryKey);
+  }
+
+  /** All hook boundary rows for a task, profile-scoped, oldest first. */
+  listHookExecutions(taskId, profileId) {
+    return this._prep(`SELECT h.* FROM hook_executions h
+      JOIN durable_tasks t ON t.id = h.task_id
+      WHERE h.task_id = ? AND t.profile_id = ?
+      ORDER BY h.rowid`).all(taskId, profileId);
   }
 
   progressSummary(taskId, profileId) {
