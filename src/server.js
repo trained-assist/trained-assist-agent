@@ -1367,7 +1367,9 @@ ${recent || '(пока нет)'}
         }
 
         // Durably-stored refs use the same materialization/OCR implementation
-        // as the external web bearer ingress.
+        // as the external web bearer ingress. `fileRefs` is destructured const,
+        // so normalize into a fresh binding instead of reassigning it.
+        let effectiveFileRefs = fileRefs;
         if (Array.isArray(fileRefs) && fileRefs.length) {
           try {
             const prepared = await materializeFileRefs({
@@ -1376,7 +1378,7 @@ ${recent || '(пока нет)'}
               gatewayUrl: process.env.MEDIA_GATEWAY_URL, agentSecret: secrets.AGENT_SECRET,
             });
             effectiveTask = prepared.task;
-            fileRefs = prepared.fileRefs;
+            effectiveFileRefs = prepared.fileRefs;
           } catch (e) {
             if (e.statusCode === 400) return reject(400, { error: e.message });
             console.error('[/run] fileRef materialize error:', e.cause?.message || e.message);
@@ -1385,7 +1387,7 @@ ${recent || '(пока нет)'}
         }
 
         // runTask journals synchronously, before any await or acknowledgement.
-        const completion = runTask({ taskId, requestId: requestId || null, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs, mode: mode || null, projectId: projectId || null, projectPicked: projectPicked === true, newProjectName: newProjectName || null });
+        const completion = runTask({ taskId, requestId: requestId || null, user, threadId, ...(Object.hasOwn(payload, 'initiatedAt') ? { initiatedAt } : {}), task: effectiveTask, context, sessionId: sessionId || null, contextFromSession: contextFromSession || null, forceClaude: !!forceClaude, forceNew: !!forceNew, initialMsgId: initialMsgId || null, pinnedMsgId: pinnedMsgId || null, secrets, fileRefs: effectiveFileRefs, mode: mode || null, projectId: projectId || null, projectPicked: projectPicked === true, newProjectName: newProjectName || null });
         completion.catch(err => console.error(`[${taskId}] runTask error:`, err.message));
         if (requestId) atomicJson(receipt, { taskId, audience: audience || 'default', acceptedAt: Date.now() });
         json(res, 202, { taskId, requestId, durable: true });
