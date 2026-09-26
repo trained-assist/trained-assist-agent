@@ -53,18 +53,15 @@
       ]
     },
     "src/runner/index.js": {
-      "removeIn": "P1.3-runner-quick",
+      "removeIn": "P1.3-runner-vacancy",
       "modules": [
-        "hh-autoscan",
-        "hh-quick",
         "hh-vacancy"
       ]
     },
     "src/runner/intent-engine.js": {
-      "removeIn": "P1.3-runner-quick",
+      "removeIn": "P1.3-runner-vacancy",
       "modules": [
         "hh-cold-search-schedule",
-        "hh-quick",
         "hh-vacancy"
       ]
     },
