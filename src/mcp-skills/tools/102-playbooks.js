@@ -14,6 +14,7 @@
 const { PlaybookStore, renderPlaybook, playbookError } = require('../../playbook-store');
 const { createPlaybookAuthoring } = require('../../playbook-authoring');
 const { compilePlaybook } = require('../../playbook-compiler');
+const { suggestPlaybookForAudience } = require('../../audience-default-playbook');
 
 const authoring = createPlaybookAuthoring();
 
@@ -51,6 +52,23 @@ module.exports = {
         'A malformed file is reported under diagnostics instead of crashing the list.',
       inputSchema: { type: 'object', properties: {} },
       handler: async (_args, ctx) => new PlaybookStore({ profileId: ctx?.userId }).list(),
+    },
+
+    playbook_suggest: {
+      description:
+        'Suggest/pre-select the default playbook for an audience (bot surface) — e.g. freelance specs, exhibition ' +
+        'catalog, engineering. Read-only: it only reports the suggestion and whether the profile can actually see ' +
+        'that playbook; it never compiles, runs or activates a plan (the explicit draft→active step stays with the ' +
+        'caller). Resolution: env AUDIENCE_DEFAULT_PLAYBOOK → config/audience-default-playbooks.json → built-ins, ' +
+        'falling back to "development".',
+      inputSchema: {
+        type: 'object',
+        properties: { audience: { type: 'string', description: 'Bot/surface audience; omit for the default map' } },
+      },
+      handler: async ({ audience } = {}, ctx) => {
+        const store = new PlaybookStore({ profileId: ctx?.userId });
+        return suggestPlaybookForAudience(audience, { store });
+      },
     },
 
     playbook_get: {

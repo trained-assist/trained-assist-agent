@@ -1,16 +1,5 @@
-Goal: #1450 durable executor — strict positional ordering + claimNextRunnable honors now
+Goal: #1462 P5 — migrate freelance/exhibition playbooks + AUDIENCE_DEFAULT_PLAYBOOK (closes epic #1372 P5).
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1452
-
-
-Goal: Retry deepseek "Bad Request" 3x on the same model, then a sibling mimo model on the same gateway (PR #1446)
-
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1446
-- [ ] Merged to main
-- [ ] Deployed to prod — verified live
-
-Goal: #1459 P4 — execute playbook hooks at stage/step boundaries
-
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1460
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1464
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live
