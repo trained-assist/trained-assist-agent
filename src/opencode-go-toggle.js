@@ -62,17 +62,27 @@ function resolveProfileName() {
   return getMode() === 'openrouter' ? 'deepseek-openrouter' : 'deepseek-go';
 }
 
-// Called on an OpenCode invocation failure for the "deepseek" logical profile. Only auto-flips
-// when the failing model is on the opencode-go/* provider (an OpenRouter-side failure isn't this
-// toggle's concern) and the error classifies as a quota hit (reuses opencode-ladder's own
-// classifier so "Go usage limit exceeded" etc. stay defined in one place, not duplicated).
-// Returns true if it flipped the mode (i.e. a retry should pick up 'openrouter' next).
+// Called on an OpenCode invocation failure for the "deepseek" logical profile. Only acts when the
+// failing model is on the opencode-go/* provider (an OpenRouter-side failure isn't this toggle's
+// concern) and the error classifies as a quota hit (reuses opencode-ladder's own classifier so
+// "Go usage limit exceeded" etc. stay defined in one place, not duplicated).
+//
+// Two-stage degradation, both returning true = "retry this task":
+//   1. If another provisioned Go key exists, rotate auth.json onto it and STAY on the Go gateway
+//      (opencode-go-keys.js) — fresh quota beats a different gateway.
+//   2. Only once every key is exhausted, flip the VM-wide mode to 'openrouter' (auto-revert ~5h).
+// Callers distinguish the two via getMode() (unchanged = key rotation).
 function noteFailure(model, errorText) {
   if (!/^opencode-go\//.test(model || '')) return false;
   if (getMode() === 'openrouter') return false; // already switched
   const { classifyError } = require('./opencode-ladder');
   const verdict = classifyError(errorText);
   if (!verdict || verdict.class !== 'quota') return false;
+  const rotated = require('./opencode-go-keys').rotate();
+  if (rotated) {
+    console.log(`[opencode-go-toggle] Go key ${rotated.fromIndex} exhausted — rotated to key ${rotated.toIndex}, staying on Go`);
+    return true;
+  }
   setMode('openrouter', { auto: true });
   return true;
 }

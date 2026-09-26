@@ -211,6 +211,16 @@
 | ✅ реализовано | mode-aware без изменений валидаторов | Строгость уже закодирована при записи (P3d-1b LLM-вердикты; P3d-1c fast-pass skip = `pass` + `evidence {skipped:true, reason, mode}`). Гейт требует лишь `pass`, поэтому skip удовлетворяет его, но остаётся видимым в audit trail. |
 | ✅ реализовано | Тесты | Unit (`durable-task-store.test.js`): блок при missing/fail/inconclusive, pass всех строк, игнор строк другого `contract_revision`, fast-pass skip виден и проходит, `updateTask`/`completeTask` не обходят гейт, legacy-задачи не затронуты, критерий без declared-validations ничего не гейтит. Wiring (`gtd-durable-wiring.test.cjs` кейс 17): `runDueDurable` финализирует только через гейт; все items done + unmet validation → задача остаётся `active`. `NODE_ENV=development npx eslint src` → 0. |
 
+## 2026-09-26 — OpenCode Go: пул ключей и ротация (основной + резервный)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | Два ключа на VM | Новый секрет `OPENCODE_GO_API_KEYS` — comma-separated пул (первый = активный/основной), добавлен в `infra/env-manifest.json` и `ci.yml` printf. Fallback на одиночный `OPENCODE_GO_API_KEY` сохранён, поэтому VM без пула работает как раньше. |
+| ✅ реализовано | Ротация при исчерпании лимита | `src/opencode-go-keys.js`: при Go-quota `opencode-go-toggle.noteFailure()` сначала переписывает `~/.local/share/opencode/auth.json` на следующий не-исчерпанный ключ и остаётся на Go; к OpenRouter флипает только когда все ключи сожжены. Источник активного ключа — сам `auth.json` (нет рассинхрона); исчерпание (TTL ~5ч, как окно сброса Go) — в `~/.config/opencode/go-keys-state.json`. |
+| ✅ реализовано | Сообщение пользователю | Runner различает два случая по `getMode()`: «переключаюсь на резервный ключ Go» против «тумблер на OpenRouter»; action в execution-history — `deepseek_go_key_rotation` / `deepseek_go_toggle_flip`. |
+| ✅ реализовано | Деплой | `infra/opencode-switch-profile.sh` пишет в auth.json первый ключ пула (иначе fallback на старый сингл). |
+| ✅ реализовано | Тесты | 5 новых кейсов в `test/opencode-go-toggle.test.cjs` (readPool, ротация + остаётся на Go, флип после исчерпания всех ключей, TTL/`null` при всех сожжённых, no-op на одном ключе). `npm run check`, `check-env-sync`, `runner-index-contract`, `opencode-alternation-wiring` — зелёные. |
+
 ## 2026-09-26 — OpenCode deepseek: ретраи на Bad Request + sibling-модель профиля
 
 | Статус | Требование | Описание |

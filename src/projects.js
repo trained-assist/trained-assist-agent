@@ -454,39 +454,49 @@ function setActiveProjectId(workDir, id, chatId, { now = Date.now(), audience, p
 }
 
 // ── Binding decision for a NEW session ──────────────────────────────────────
-// Pure over the on-disk state. Caller (runner/gateway) turns 'ask' into a prompt.
-//   { action:'auto',   project, pinned? }     one project, or the chat's pinned one -> bind silently
-//   { action:'ask',    choices, active }      several projects, nothing pinned -> ask which / offer new
-//   { action:'create', suggestType }          no projects yet    -> create the first one
+// The bot NEVER asks "which project?" (owner decision 2026-09-26: the question annoyed
+// users more than a wrong bucket costs — misplaced sessions are fixed later by reproject).
+// Every chat has a CURRENT project; silence = it stays what it was.
+//   { action:'auto',   project, pinned? }  pinned → last used in this chat → default «Все подряд»
+//                                          (legacy «Основной») → the profile's only project
+//   { action:'create', suggestType }       nothing to reuse → create the default «Все подряд»
 // A CONTINUING session never calls this — it keeps the project stored on the session.
+const DEFAULT_PROJECT_NAME = 'Все подряд';
+const DEFAULT_PROJECT_NAMES = [DEFAULT_PROJECT_NAME, 'Основной'];
+function findDefaultProject(projects) {
+  return projects.find(p => (p.type || 'generic') === 'generic' && DEFAULT_PROJECT_NAMES.includes(p.name)) || null;
+}
 function decideNewSessionProject(workDir, chatId, countByProject, audience = 'default', threadId = null) {
   const projects = sortByUsage(listProjects(workDir, audience), countByProject);
-  if (projects.length === 0) return { action: 'create', suggestType: 'generic' };
   const pinnedId = getPinnedProjectId(workDir, chatId, audience, threadId);
   const pinned = pinnedId && projects.find(p => p.id === pinnedId);
   if (pinned) return { action: 'auto', project: pinned, pinned: true };
-  if (projects.length === 1) return { action: 'auto', project: projects[0] };
-  return { action: 'ask', choices: projects, active: getActiveProjectId(workDir, chatId, audience, threadId) };
+  const activeId = getActiveProjectId(workDir, chatId, audience, threadId);
+  const active = activeId && projects.find(p => p.id === activeId);
+  if (active) return { action: 'auto', project: active };
+  const def = findDefaultProject(projects) || (projects.length === 1 ? projects[0] : null);
+  if (def) return { action: 'auto', project: def };
+  return { action: 'create', suggestType: 'generic', name: DEFAULT_PROJECT_NAME };
 }
 
 // Which project a run binds to + whether that pins the chat — the runner's decision,
 // pure over disk state so it's testable at the run level (#1318). `continuingProjectId`
 // is the project stored on an existing session (undefined for a new session).
 //   continuing session        → its own project (or the last-used one), never pins
-//   projectId + projectPicked → the user's menu choice → pins
-//   projectId alone           → the gateway resolved it itself → binds, no pin
+//   projectId + projectPicked → the user's explicit choice → pins
+//   projectId alone           → the gateway resolved it itself → binds; pins only if nothing is pinned
 //   newProjectName            → «➕ Новый проект» → creates + pins
-//   otherwise                 → decideNewSessionProject (auto / create / ask-fallback)
+//   otherwise                 → decideNewSessionProject; the result becomes the chat's
+//                               current project (pinned), so it stays put until /project
 function resolveRunProject(workDir, { chatId, audience = 'default', continuing = false, continuingProjectId = null,
   projectId = null, projectPicked = false, newProjectName = null, threadId = null } = {}) {
   if (continuing) return { projectId: continuingProjectId || getActiveProjectId(workDir, chatId, audience, threadId), pin: false };
-  if (projectId && getProject(workDir, projectId)) return { projectId, pin: projectPicked === true };
+  // No pin yet → whatever the gateway resolved becomes the chat's current project.
+  if (projectId && getProject(workDir, projectId)) return { projectId, pin: projectPicked === true || !getPinnedProjectId(workDir, chatId, audience, threadId) };
   if (newProjectName) return { projectId: createProject(workDir, newProjectName, { audience }).id, pin: true };
   const d = decideNewSessionProject(workDir, chatId, undefined, audience, threadId);
-  if (d.action === 'auto') return { projectId: d.project.id, pin: false };
-  if (d.action === 'create') return { projectId: createProject(workDir, { type: 'generic', name: 'Основной' }, { audience }).id, pin: false };
-  // 'ask' — gateway didn't pass a choice; fall back so we never block silently
-  return { projectId: d.active || (d.choices[0] && d.choices[0].id) || null, pin: false };
+  if (d.action === 'auto') return { projectId: d.project.id, pin: !d.pinned };
+  return { projectId: createProject(workDir, { type: 'generic', name: DEFAULT_PROJECT_NAME }, { audience }).id, pin: true };
 }
 
 // PROFILE.md text for merging into the system prompt (null if none).
@@ -534,6 +544,7 @@ module.exports = {
   clearPinnedProjectId,
   repointPins,
   setActiveProjectId,
+  DEFAULT_PROJECT_NAME,
   decideNewSessionProject,
   resolveRunProject,
   profileText,

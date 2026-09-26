@@ -3,17 +3,17 @@
 // «Чат = проект» (issues #1312, #1318): a project the user explicitly chose is PINNED to
 // the chat; every new session of that chat goes into it without the "which project?" picker.
 //
-//   C1  ≥2 projects, nothing pinned → 'ask'
+//   C1  ≥2 projects, nothing pinned/used → auto into the default («Все подряд»/legacy «Основной»), never 'ask'
 //   C2  explicit choice (pinned:true) → decideNewSessionProject = 'auto' + pinned
 //   C3  automatic bookkeeping (continuing an OLD session in another project) keeps the pin
-//   C4  pin is per chat: another chat of the same profile still gets 'ask'
+//   C4  pin is per chat: another chat of the same profile gets its own (default) project
 //   C5  archived pinned project: exact outcome — 1 project left → auto into it (not pinned);
-//       ≥2 left → ask
+//       ≥2 left, no default → create «Все подряд»
 //   C6  explicit re-choice moves the pin
 //   C7  pin and last-used live in separate files: interleaved writes never lose the pin;
 //       legacy pinned:true inside active-*.json is read and migrated on the next write
-//   C8  context card «📁 Проект» only when a new session really goes there without asking
-//   R*  run-level decision (resolveRunProject): only a menu pick pins
+//   C8  context card always shows the chat's current project + the /project hint line
+//   R*  run-level decision (resolveRunProject): whatever binds a new session with no pin becomes the pin
 //   P*  /project <name> and /project new pin via the intent engine
 //   U*  pin controls: /project current, /project unpin (+legacy flag), pin <name>, per-thread
 //   S*  /settings shows the effective chat config from the on-disk sources
@@ -38,8 +38,10 @@ try {
   const a = projects.createProject(root, 'recruiting: Вакансия А');
   const b = projects.createProject(root, 'Основной');
   const CHAT = 111, OTHER = 222;
+  let d0;
 
-  ok(projects.decideNewSessionProject(root, CHAT).action === 'ask', 'C1 nothing pinned → ask');
+  d0 = projects.decideNewSessionProject(root, CHAT);
+  ok(d0.action === 'auto' && d0.project.id === b.id && !d0.pinned, 'C1 nothing pinned → auto into default «Основной», no ask');
 
   projects.setActiveProjectId(root, a.id, CHAT, { pinned: true });
   let d = projects.decideNewSessionProject(root, CHAT);
@@ -50,7 +52,7 @@ try {
   ok(d.action === 'auto' && d.project.id === a.id, 'C3 bookkeeping does not steal the pin');
   ok(projects.getActiveProjectId(root, CHAT) === b.id, 'C3 last-used is recorded separately (B)');
 
-  ok(projects.decideNewSessionProject(root, OTHER).action === 'ask', 'C4 other chat unaffected → ask');
+  ok(projects.decideNewSessionProject(root, OTHER).project.id === b.id, 'C4 other chat unaffected by CHAT pin → its own default');
 
   projects.setActiveProjectId(root, b.id, CHAT, { pinned: true });
   ok(projects.getPinnedProjectId(root, CHAT) === b.id && projects.decideNewSessionProject(root, CHAT).project.id === b.id, 'C6 explicit re-choice moves the pin');
@@ -75,9 +77,9 @@ try {
   fs.mkdirSync(path.join(tokensRoot, username), { recursive: true });
   fs.writeFileSync(path.join(tokensRoot, username, 'github'), JSON.stringify({ value: 'fake' }));
   const { _pin } = require('../src/runner');
-  ok(/📁 Проект: Основной · сменить: \/project/.test(_pin.buildContextCard(username, root, CHAT) || ''), 'C8 pinned chat → card shows the project');
+  ok(/📁 Проект: Основной\n\/project — список, перейти на другой, добавить новый/.test(_pin.buildContextCard(username, root, CHAT) || ''), 'C8 pinned chat → card shows the project');
   projects.setActiveProjectId(root, a.id, OTHER); // last-used but NOT pinned, 2 projects
-  ok(!/📁 Проект/.test(_pin.buildContextCard(username, root, OTHER) || ''), 'C8 ≥2 projects, no pin → no line (bot will ask)');
+  ok(/📁 Проект: Вакансия А/.test(_pin.buildContextCard(username, root, OTHER) || ''), 'C8 ≥2 projects, no pin → card shows the last-used one (current)');
   const single = tmp('chat-pin-single-'); roots.push(single);
   projects.createProject(single, 'Единственный');
   ok(/📁 Проект: Единственный/.test(_pin.buildContextCard(username, single, OTHER) || ''), 'C8 single project → line shown (auto)');
@@ -93,14 +95,19 @@ try {
   projects.createProject(three, 'Три');
   projects.setActiveProjectId(three, t1.id, CHAT, { pinned: true });
   projects.archiveProject(three, t1.id);
-  ok(projects.decideNewSessionProject(three, CHAT).action === 'ask', 'C5 ≥2 left → ask');
+  ok(projects.decideNewSessionProject(three, CHAT).action === 'create', 'C5 ≥2 left, no default → create «Все подряд»');
+  const rc = projects.resolveRunProject(three, { chatId: CHAT });
+  ok(projects.getProject(three, rc.projectId).name === 'Все подряд' && rc.pin === true, 'C5 run creates «Все подряд» and makes it current');
 
   // ── R*: run-level decision ──────────────────────────────────────────────────
   const run = tmp('chat-pin-run-'); roots.push(run);
   const ra = projects.createProject(run, 'Альфа');
   const rb = projects.createProject(run, 'Бета');
   let r = projects.resolveRunProject(run, { chatId: CHAT, projectId: ra.id });
-  ok(r.projectId === ra.id && r.pin === false, 'R1 projectId without projectPicked → binds, does not pin');
+  ok(r.projectId === ra.id && r.pin === true, 'R1 projectId without projectPicked, chat has no pin → binds + becomes current');
+  projects.setActiveProjectId(run, ra.id, CHAT, { pinned: true });
+  r = projects.resolveRunProject(run, { chatId: CHAT, projectId: rb.id });
+  ok(r.projectId === rb.id && r.pin === false, 'R1 projectId without projectPicked, chat pinned → binds, keeps the pin');
   r = projects.resolveRunProject(run, { chatId: CHAT, projectId: rb.id, projectPicked: true });
   ok(r.projectId === rb.id && r.pin === true, 'R2 menu pick → binds + pins');
   r = projects.resolveRunProject(run, { chatId: CHAT, newProjectName: 'Гамма' });
@@ -113,9 +120,9 @@ try {
   const solo = tmp('chat-pin-solo-'); roots.push(solo);
   const so = projects.createProject(solo, 'Соло');
   r = projects.resolveRunProject(solo, { chatId: CHAT, projectId: so.id });
-  ok(r.pin === false, 'R6 single project routed by the gateway is NOT a pin (path-independent)');
+  ok(r.pin === true, 'R6 single project routed by the gateway → current (path-independent)');
   r = projects.resolveRunProject(solo, { chatId: CHAT });
-  ok(r.projectId === so.id && r.pin === false, 'R6 single project via plain path → same outcome');
+  ok(r.projectId === so.id && r.pin === true, 'R6 single project via plain path → same outcome');
 
   // ── P*: /project switch / new via the intent engine ─────────────────────────
   const { getQuickAnswer } = require('../src/runner/intent-engine');
@@ -134,7 +141,8 @@ try {
   ok(/📌 Закреплён за этим чатом: «Третий»/.test(String(getQuickAnswer('/project', 'u', pr, false, CHAT))), 'U2 /project list states the pin');
   u = getQuickAnswer('/project unpin', 'u', pr, false, CHAT);
   ok(/Закрепление снято/.test(String(u)) && projects.getPinnedProjectId(pr, CHAT) === null, `U3 /project unpin clears the pin (${u})`);
-  ok(projects.decideNewSessionProject(pr, CHAT).action === 'ask', 'U3 after unpin → automatic choice again (ask with ≥2 projects)');
+  const du = projects.decideNewSessionProject(pr, CHAT);
+  ok(du.action === 'auto' && du.project.name === 'Третий', 'U3 after unpin → stays in the last-used project, no ask');
   ok(/не закреплён/i.test(String(getQuickAnswer('/project current', 'u', pr, false, CHAT))), 'U4 /project current after unpin → not pinned');
   ok(/и так ничего не закреплено/.test(String(getQuickAnswer('/project unpin', 'u', pr, false, CHAT))), 'U4 second unpin is a no-op');
   // legacy pinned:true inside active-*.json must not resurrect after unpin

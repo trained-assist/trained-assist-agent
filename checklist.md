@@ -1,8 +1,9 @@
-Goal: P3d-2 of #1426 — finalization gate driven by validation_mode: `finalizePlan` + `updateTask done` gate, no raw-SQL bypass (PR #1442)
+Goal: OpenCode Go key rotation — primary + spare key, rotate on quota before falling back to OpenRouter (PR #1445)
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1442
+- [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1445
 - [ ] Merged to main
-- [ ] Deployed to prod — verified live
+- [ ] Deployed to prod — verified live (two keys provisioned, rotation path live)
+
 Goal: Retry deepseek "Bad Request" 3x on the same model, then a sibling mimo model on the same gateway (PR #1443)
 
 - [ ] CI green on https://github.com/trained-assist/trained-assist-agent/pull/1443

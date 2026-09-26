@@ -816,8 +816,8 @@ function _hasProactiveResults(dataDir, username, vacancyId) {
 // actualModel: the model the just-finished run really used (claudeModel from the engine
 // stream). Optional — callers that don't have it (tests, older paths) fall back to env.
 function buildContextCard(username, workDir, chatId, actualModel = null, threadId = null) {
-  const services = username ? listConnectedServices(username) : [];
-  if (!services || !services.length) return null;
+  // Built even with nothing connected: the card always carries the chat's current project.
+  const services = (username && listConnectedServices(username)) || [];
 
   // Build service labels, merging inline details where available
   const gcConfig = path.join(TOKENS_ROOT, String(username), 'getcourse', 'config.json');
@@ -835,18 +835,23 @@ function buildContextCard(username, workDir, chatId, actualModel = null, threadI
   const illustrateFlagPath = path.join(workDir, 'contexts', 'illustrate', '.enabled');
   if (fs.existsSync(illustrateFlagPath)) serviceLabels.push('🎨 иллюстрации');
 
-  const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
+  const lines = ['📌 Контекст', ''];
 
-  // Chat's project (issue #1312, «чат = проект»): every new session of this chat goes
-  // into it. Pinned = explicit user choice; otherwise the last-used one.
+  // Chat's CURRENT project — first line of the card. The bot never asks which project
+  // (owner decision 2026-09-26): silence keeps it, /project changes it.
   try {
-    // Show the line ONLY when a new session really goes there without asking (#1318):
-    // pinned, or the profile's single project. ≥2 projects and no pin → the bot will ask,
-    // so a «📁 Проект» line would be a lie.
     const d = chatId ? projects.decideNewSessionProject(workDir, chatId, undefined, undefined, threadId) : null;
     const pmeta = d && d.action === 'auto' ? d.project : null;
-    if (pmeta) lines.push(`📁 Проект: ${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''} · сменить: /project`);
+    const name = pmeta ? `${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''}` : (d ? projects.DEFAULT_PROJECT_NAME : null);
+    // Brand-new profile (no project yet, nothing connected): no card — a /ping must not
+    // spawn a pinned message. The first real run creates «Все подряд», then the card shows.
+    if (!pmeta && !serviceLabels.length) return null;
+    if (name) {
+      lines.push(`📁 Проект: ${name}`);
+      lines.push('/project — список, перейти на другой, добавить новый');
+    }
   } catch (e) { console.warn('[runner] project pin line:', e.message); }
+  if (serviceLabels.length) lines.push(`🔗 Подключено: ${serviceLabels.join(' · ')}`);
 
   // HH: active vacancy(ies) + ATS config / scoring status.
   // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
@@ -1538,9 +1543,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Continuing session -> keep the project stored on the session (never re-ask).
   // New session:
   //   - gateway already resolved the choice -> opts.projectId is passed in -> bind it.
-  //   - otherwise decideNewSessionProject: auto (1 project) / create default (0) /
-  //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
-  //     so we never block silently here.
+  //   - otherwise decideNewSessionProject: pinned → last used → default «Все подряд»
+  //     (created if missing). Never asks; the result becomes the chat's current project.
   let boundProjectId = null;
   let pinProject = false; // explicit user choice → becomes the chat's pinned project (#1312)
   try {
@@ -2285,9 +2289,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // the ladder never degrades, even though the raw error was a clean quota hit.
   const preLadderText = codexErrorMsg || claudeResult || fullOutput.text || result;
 
-  // Shared "deepseek" OpenCode profile (issue #1096): a GENUINE Go account-wide quota hit flips
-  // the VM-wide go/openrouter toggle — the Go subscription's limit is account-wide, not per-model,
-  // so trying other rungs of the Go ladder would just burn them against a dead gateway.
+  // Shared "deepseek" OpenCode profile (issue #1096): on a Go quota hit, degrade the gateway —
+  // first rotate to a spare service-account key (opencode-go-keys.js) and stay on Go; only once
+  // every key is exhausted flip the VM-wide go/openrouter toggle. The Go subscription's quota is
+  // account-wide per key across the whole team, not per-model, so a GENUINE quota hit must NOT
+  // burn the rest of the Go ladder against a dead gateway ("try the next rung" doesn't apply the
+  // way it does for max/value). A successful rotation/flip retries the SAME task; the retry
+  // re-resolves the "deepseek" profile (see ocProfileIsDeepseek above) and picks up the new key
+  // or deepseek-openrouter.
   //
   // Every OTHER per-rung fault (a "Bad Request: {model:...}" on the top rung, a 5xx, a bare crash)
   // must NOT flip the gateway and must NOT dead-end: it falls through to the generic ladder block
@@ -2300,14 +2309,19 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const failedModel = ocProfileOverrides?.model;
     const flipped = opencodeGoToggle.noteFailure(failedModel, preLadderText);
     if (flipped && ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
+      // Still on Go ⇒ noteFailure rotated to a spare key (service-account key pool); otherwise it
+      // gave up on the gateway and flipped to OpenRouter. Message must match which one happened.
+      const onGo = opencodeGoToggle.getMode() === 'go';
       const newProfile = opencodeGoToggle.resolveProfileName();
-      const switchMsg = `⚠️ OpenCode Go (${failedModel}) упёрся в общий лимит — тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
+      const switchMsg = onGo
+        ? `⚠️ OpenCode Go (${failedModel}) исчерпал лимит ключа — переключаюсь на резервный ключ Go, пробую снова.`
+        : `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, switchMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: failedModel,
-        errorText: preLadderText, action: 'deepseek_go_toggle_flip',
+        errorText: preLadderText, action: onGo ? 'deepseek_go_key_rotation' : 'deepseek_go_toggle_flip',
       });
       const queuedRetry = runTask({
         initiatedAt, threadId,
@@ -2703,7 +2717,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
     const card = buildContextCard(user.username, user.workDir, chatId, claudeModel, threadId);
-    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
+    // Awaited (after the answer is already delivered): the run ends with the card settled,
+    // so no card send leaks past the run — every user now has a project card.
+    if (card) await updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
   }
 
   // Schedule durable GTD checks after terminal delivery (extracted to
