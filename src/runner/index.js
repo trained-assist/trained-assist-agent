@@ -816,8 +816,8 @@ function _hasProactiveResults(dataDir, username, vacancyId) {
 // actualModel: the model the just-finished run really used (claudeModel from the engine
 // stream). Optional — callers that don't have it (tests, older paths) fall back to env.
 function buildContextCard(username, workDir, chatId, actualModel = null, threadId = null) {
-  const services = username ? listConnectedServices(username) : [];
-  if (!services || !services.length) return null;
+  // Built even with nothing connected: the card always carries the chat's current project.
+  const services = (username && listConnectedServices(username)) || [];
 
   // Build service labels, merging inline details where available
   const gcConfig = path.join(TOKENS_ROOT, String(username), 'getcourse', 'config.json');
@@ -835,18 +835,23 @@ function buildContextCard(username, workDir, chatId, actualModel = null, threadI
   const illustrateFlagPath = path.join(workDir, 'contexts', 'illustrate', '.enabled');
   if (fs.existsSync(illustrateFlagPath)) serviceLabels.push('🎨 иллюстрации');
 
-  const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
+  const lines = ['📌 Контекст', ''];
 
-  // Chat's project (issue #1312, «чат = проект»): every new session of this chat goes
-  // into it. Pinned = explicit user choice; otherwise the last-used one.
+  // Chat's CURRENT project — first line of the card. The bot never asks which project
+  // (owner decision 2026-09-26): silence keeps it, /project changes it.
   try {
-    // Show the line ONLY when a new session really goes there without asking (#1318):
-    // pinned, or the profile's single project. ≥2 projects and no pin → the bot will ask,
-    // so a «📁 Проект» line would be a lie.
     const d = chatId ? projects.decideNewSessionProject(workDir, chatId, undefined, undefined, threadId) : null;
     const pmeta = d && d.action === 'auto' ? d.project : null;
-    if (pmeta) lines.push(`📁 Проект: ${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''} · сменить: /project`);
+    const name = pmeta ? `${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''}` : (d ? projects.DEFAULT_PROJECT_NAME : null);
+    // Brand-new profile (no project yet, nothing connected): no card — a /ping must not
+    // spawn a pinned message. The first real run creates «Все подряд», then the card shows.
+    if (!pmeta && !serviceLabels.length) return null;
+    if (name) {
+      lines.push(`📁 Проект: ${name}`);
+      lines.push('/project — список, перейти на другой, добавить новый');
+    }
   } catch (e) { console.warn('[runner] project pin line:', e.message); }
+  if (serviceLabels.length) lines.push(`🔗 Подключено: ${serviceLabels.join(' · ')}`);
 
   // HH: active vacancy(ies) + ATS config / scoring status.
   // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
@@ -1528,9 +1533,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Continuing session -> keep the project stored on the session (never re-ask).
   // New session:
   //   - gateway already resolved the choice -> opts.projectId is passed in -> bind it.
-  //   - otherwise decideNewSessionProject: auto (1 project) / create default (0) /
-  //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
-  //     so we never block silently here.
+  //   - otherwise decideNewSessionProject: pinned → last used → default «Все подряд»
+  //     (created if missing). Never asks; the result becomes the chat's current project.
   let boundProjectId = null;
   let pinProject = false; // explicit user choice → becomes the chat's pinned project (#1312)
   try {
@@ -2670,7 +2674,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
     const card = buildContextCard(user.username, user.workDir, chatId, claudeModel, threadId);
-    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
+    // Awaited (after the answer is already delivered): the run ends with the card settled,
+    // so no card send leaks past the run — every user now has a project card.
+    if (card) await updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
   }
 
   // Schedule durable GTD checks after terminal delivery (extracted to
