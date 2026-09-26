@@ -147,4 +147,79 @@ describe('playbook-validators', () => {
     expect(r.status).toBe('inconclusive');
     expect(r.evidence.reason).toBe('deploy-unverified');
   });
+
+  describe('pr_opened (#1449)', () => {
+    const prBody = {
+      state: 'open', merged: false, number: 7,
+      html_url: 'https://github.com/acme/widgets/pull/7', head: { ref: 'fix/x' },
+    };
+
+    it('passes on a referenced PR that exists', async () => {
+      const registry = createDefaultRegistry({
+        ghToken: () => 'token',
+        ghFetch: async url => (url.endsWith('/pulls/7') ? prBody : null),
+      });
+      const r = await evaluateValidation('pr_opened', { item: item(), profileId: 'u1' }, registry);
+      expect(r.status).toBe('pass');
+      expect(r.subject.number).toBe('7');
+    });
+
+    it('is inconclusive when the referenced PR does not exist', async () => {
+      const registry = createDefaultRegistry({ ghToken: () => 'token', ghFetch: async () => null });
+      const r = await evaluateValidation('pr_opened', { item: item(), profileId: 'u1' }, registry);
+      expect(r.status).toBe('inconclusive');
+      expect(r.evidence.reason).toBe('pr-not-found');
+    });
+
+    it('finds a PR by repo + head branch when the validation names them', async () => {
+      const seen = [];
+      const registry = createDefaultRegistry({
+        ghToken: () => 'token',
+        ghFetch: async url => { seen.push(url); return [prBody]; },
+      });
+      const r = await evaluateValidation('pr_opened', {
+        item: item({ instructions: 'no link here' }), profileId: 'u1',
+        validation: { repo: 'acme/widgets', branch: 'fix/x' },
+      }, registry);
+      expect(r.status).toBe('pass');
+      expect(r.subject).toMatchObject({ repo: 'acme/widgets', branch: 'fix/x' });
+      expect(seen[0]).toContain('/pulls?head=acme%3Afix%2Fx');
+    });
+
+    it('discovers repo + branch from the git checkout via the injected gitInfo', async () => {
+      const registry = createDefaultRegistry({
+        ghToken: () => 'token',
+        ghFetch: async () => [prBody],
+        gitInfo: dir => (dir === '/repo' ? { repo: 'acme/widgets', branch: 'feature/y' } : null),
+      });
+      const r = await evaluateValidation('pr_opened', {
+        item: item({ instructions: 'no link here' }), profileId: 'u1', projectDir: '/repo', validation: true,
+      }, registry);
+      expect(r.status).toBe('pass');
+      expect(r.subject.branch).toBe('feature/y');
+    });
+
+    it('fails when no PR exists for the discovered branch', async () => {
+      const registry = createDefaultRegistry({
+        ghToken: () => 'token', ghFetch: async () => [],
+        gitInfo: () => ({ repo: 'acme/widgets', branch: 'feature/y' }),
+      });
+      const r = await evaluateValidation('pr_opened', {
+        item: item({ instructions: 'no link here' }), profileId: 'u1', projectDir: '/repo', validation: true,
+      }, registry);
+      expect(r.status).toBe('fail');
+      expect(r.evidence.reason).toBe('no-pr-for-branch');
+    });
+
+    it('is inconclusive without a token or without a reference', async () => {
+      const noToken = await evaluateValidation('pr_opened', { item: item(), profileId: null }, createDefaultRegistry({ ghToken: () => null, ghFetch: async () => null }));
+      expect(noToken.evidence.reason).toBe('no-github-token');
+
+      const noRef = await evaluateValidation('pr_opened', {
+        item: item({ instructions: 'no link here' }), profileId: 'u1', validation: true,
+      }, createDefaultRegistry({ ghToken: () => 'token', ghFetch: async () => null, gitInfo: () => null }));
+      expect(noRef.status).toBe('inconclusive');
+      expect(noRef.evidence.reason).toBe('no-pr-reference');
+    });
+  });
 });

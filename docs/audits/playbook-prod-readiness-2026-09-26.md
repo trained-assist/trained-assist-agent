@@ -18,6 +18,16 @@ What is **not** production-real yet:
 
 Plus two execution-ordering issues found in the sim (a delay-gated step does not block later steps; `claimNextRunnable` ignores injected `now`).
 
+> **Post-fix update (#1449, 2026-09-26):** items 1 and 2 above are closed —
+> `playbooks/development.json` now names the registered deterministic vocabulary
+> (`command_exit_zero` / `pr_opened` / `ci_green` / `merged`; the staging/deploy
+> halves are dropped by an explicit product decision), a deterministic `pr_opened`
+> validator was added, and the P3b role wiring is finished (`_runTask` accepts
+> `ocRole`, `runDueDurable` sets `forceClaude: step.engine === 'claude'`). Evidence:
+> the re-run simulation below (roles now `explore`/`review`) and
+> `test/gtd-durable-wiring.test.cjs` cases 18–19. The gap list and hop table
+> describe the pre-fix state.
+
 ---
 
 ## 1. Evidence: tests and simulation

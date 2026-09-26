@@ -494,6 +494,117 @@ function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
       `gate: items done but unmet validation keeps the task active (item=${item.status}, task=${blocked.status})`);
   }
 
+  // 18. P3d follow-up (#1449): the REAL development playbook's 4 programmatic
+  // steps name the registered deterministic vocabulary, and the whole plan
+  // finalizes under `programmatic` with a fake GitHub + fake command and NO LLM.
+  {
+    const G18 = freshStore('18');
+    const store = G18.durableStore();
+    const playbook = require('../playbooks/development.json');
+    const { compilePlaybook } = require('../src/playbook-compiler');
+    const prUrl = 'https://github.com/acme/widgets/pull/777';
+    const compiled = compilePlaybook(playbook, { goal: `finish #1449 — PR ${prUrl}` });
+
+    const programmatic = compiled.items.filter(i => i.execution_kind === 'programmatic');
+    const programKeys = programmatic.flatMap(i => Object.keys(i.validation));
+    ok(programmatic.length === 4
+      && programKeys.sort().join(',') === 'ci_green,command_exit_zero,merged,pr_opened',
+      `p3d: development programmatic steps use the registered vocabulary (got ${JSON.stringify(programmatic.map(i => i.validation))})`);
+
+    const r = store.createPlan({
+      profile_id: 'u1', goal: compiled.goal, user_value: compiled.user_value,
+      acceptance_criteria: compiled.acceptance_criteria,
+      execution_policy: { validation_mode: 'programmatic' },
+      items: compiled.items,
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+
+    const { createDefaultRegistry } = require('../src/playbook-validators');
+    const ghFetch = async (url) => {
+      if (/\/pulls\/777$/.test(url)) {
+        return { state: 'closed', merged: true, merged_at: '2026-09-26T00:00:00Z',
+          merge_commit_sha: 'deadbeef', head: { sha: 'abc123', ref: 'fix/x' } };
+      }
+      if (url.endsWith('/commits/abc123/check-runs')) {
+        return { check_runs: [{ name: 'ci', status: 'completed', conclusion: 'success' }] };
+      }
+      return null;
+    };
+    const registry = createDefaultRegistry({
+      ghToken: () => 'fake-token', ghFetch,
+      gitInfo: () => ({ repo: 'acme/widgets', branch: 'fix/x' }),
+    });
+    // The shell executor itself is unit-tested; here we isolate the orchestration
+    // path with a fake (the built command is asserted by the playbook snapshot).
+    registry.command_exit_zero = async () => ({ status: 'pass', subject: {}, evidence: { exit_code: 0 } });
+    // The 12 agent steps' self-reported keys are the LLM-judge domain (other cases
+    // cover them); this case isolates the programmatic half with no LLM at all.
+    for (const it of compiled.items) {
+      if (it.execution_kind === 'programmatic') continue;
+      for (const key of Object.keys(it.validation)) registry[key] = async () => ({ status: 'pass', subject: {}, evidence: {} });
+    }
+
+    let llmCalls = 0;
+    let engineFires = 0;
+    for (let i = 0; i < 40; i++) {
+      await G18.runDueDurable({
+        secrets: {}, now: Date.now(), isTaskRunning: () => false, registry,
+        llmValidate: async () => { llmCalls++; return { status: 'inconclusive', reason: 'must not be used' }; },
+        runTask: async () => { engineFires++; return 'worked on it.\nDURABLE: done'; },
+        maxFires: 50,
+      });
+      await new Promise(res => setTimeout(res, 5));
+      if (store.getTask(r.task.id, 'u1').status !== 'active') break;
+      // Only the delay_after_sec=600 waiter remains: fast-forward it (claimNextRunnable
+      // reads real Date.now(), so an injected `now` cannot move it).
+      const w = store.db.prepare(
+        `SELECT id FROM task_items WHERE task_id=? AND status='waiting' ORDER BY due_at LIMIT 1`).get(r.task.id);
+      if (w) store.updateTaskItem(w.id, { due_at: Date.now() - 1, wait_deadline_at: Date.now() + 3600000 }, 'u1');
+    }
+    const task = store.getTask(r.task.id, 'u1');
+    const vals = store.listValidations(r.task.id, 'u1');
+    const progVals = vals.filter(v => ['command_exit_zero', 'pr_opened', 'ci_green', 'merged'].includes(v.validator));
+    ok(task.status === 'done', `p3d: development plan finalizes under programmatic (got ${task.status})`);
+    ok(progVals.length === 4 && progVals.every(v => v.status === 'pass'),
+      `p3d: every programmatic validator passes deterministically (got ${JSON.stringify(progVals.map(v => [v.validator, v.status]))})`);
+    ok(engineFires === 12, `p3d: the 4 programmatic steps fired no engine (engine fires=${engineFires})`);
+    ok(llmCalls === 0, `p3d: no LLM call in programmatic mode (llm=${llmCalls})`);
+  }
+
+  // 19. P3b role wiring (#1449): the resolver's ocRole reaches runTask and selects
+  // the ladder role; forceClaude is engine-scoped (false for opencode, true for claude).
+  {
+    const G19 = freshStore('19');
+    const store = G19.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'role wiring', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      items: [
+        { title: 'research', execution_kind: 'agent', executor_role: 'researcher', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } },
+        { title: 'review', execution_kind: 'agent', executor_role: 'reviewer', minimum_model_level: 'master', context_budget: 'medium', validation: { command: 'true' } },
+        { title: 'finalize', execution_kind: 'agent', executor_role: 'reviewer', minimum_model_level: 'doctor', context_budget: 'medium', validation: { command: 'true' } },
+      ],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const opts = [];
+    for (let i = 0; i < 3; i++) {
+      await G19.runDueDurable({
+        secrets: {}, now: Date.now(), isTaskRunning: () => false,
+        runTask: async (o) => { opts.push(o); return 'DURABLE: done'; },
+        maxFires: 1,
+      });
+      await drain();
+    }
+    ok(opts.length === 3, `role: three agent steps fired (got ${opts.length})`);
+    const shape = o => o && { engine: o.engine, ocProfile: o.ocProfile, ocRole: o.ocRole, forceClaude: o.forceClaude };
+    ok(opts[0] && opts[0].engine === 'opencode' && opts[0].ocRole === 'explore' && opts[0].forceClaude === false,
+      `role: researcher→opencode/explore, forceClaude=false (got ${JSON.stringify(shape(opts[0]))})`);
+    ok(opts[1] && opts[1].engine === 'opencode' && opts[1].ocRole === 'review' && opts[1].forceClaude === false,
+      `role: reviewer→opencode/review, forceClaude=false (got ${JSON.stringify(shape(opts[1]))})`);
+    ok(opts[2] && opts[2].engine === 'claude' && !opts[2].ocRole && opts[2].forceClaude === true,
+      `role: doctor→claude, forceClaude=true (got ${JSON.stringify(shape(opts[2]))})`);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

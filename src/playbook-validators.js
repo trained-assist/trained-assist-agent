@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const PR_REF_RE = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
@@ -137,6 +137,83 @@ function makeMergedValidator({ ghToken, ghFetch, deployed = false }) {
     const evidence = { merged_at: pr.merged_at || null, merge_commit_sha: pr.merge_commit_sha || null };
     if (deployed) return { status: 'inconclusive', subject, evidence: { ...evidence, reason: 'deploy-unverified' } };
     return { status: 'pass', subject, evidence };
+  };
+}
+
+// ── pr_opened (P3d follow-up, #1449) ────────────────────────────────────────
+// Deterministic "a PR exists" check, so the engineering playbook's "Open PR"
+// step no longer needs an LLM. Resolution, in order:
+//   1. an explicit PR URL anywhere on the step (title/instructions/evidence/goal)
+//      — verify it exists via `GET /repos/{owner}/{repo}/pulls/{n}`;
+//   2. validation spec `{ repo: "owner/name", branch: "..." }`;
+//   3. otherwise discover repo + current branch from the step's git checkout.
+// A URL that 404s, or no PR for the branch, is a hard fail; missing inputs are
+// inconclusive (never a silent pass). `gitInfo` is injectable so tests never
+// shell out.
+const GIT_REMOTE_RE = /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/;
+
+function gitRemoteRepo(url) {
+  const m = String(url || '').trim().match(GIT_REMOTE_RE);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+function defaultGitInfo(projectDir) {
+  if (!projectDir) return null;
+  const run = args => {
+    try {
+      const r = spawnSync('git', ['-C', projectDir, ...args], { encoding: 'utf8', timeout: DEFAULT_STAT_TIMEOUT_MS });
+      return r.status === 0 ? (r.stdout || '').trim() : null;
+    } catch { return null; }
+  };
+  const repo = gitRemoteRepo(run(['remote', 'get-url', 'origin']));
+  const branch = run(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!repo || !branch || branch === 'HEAD') return null;
+  return { repo, branch };
+}
+
+function makePrOpenedValidator({ ghToken, ghFetch, gitInfo = defaultGitInfo }) {
+  return async function prOpenedValidator(ctx) {
+    const token = ghToken(ctx.profileId);
+    if (!token) return inconclusive('no-github-token');
+
+    // 1. An explicit PR reference: confirm it exists.
+    const ref = extractPrRef(ctx);
+    if (ref) {
+      let pr;
+      try { pr = await ghFetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`, token); }
+      catch (e) { return inconclusive('github-unreachable', { error: e.message, pr: ref.url }); }
+      if (!pr) return inconclusive('pr-not-found', { pr: ref.url });
+      return {
+        status: 'pass',
+        subject: { pr: ref.url, number: ref.number, repo: `${ref.owner}/${ref.repo}` },
+        evidence: { state: pr.state || null, merged: pr.merged === true, head: (pr.head && pr.head.ref) || null },
+      };
+    }
+
+    // 2/3. Look up a PR for this repo + head branch.
+    const spec = typeof ctx.validation === 'object' && ctx.validation ? ctx.validation : {};
+    let repo = typeof spec.repo === 'string' ? spec.repo : null;
+    let branch = typeof spec.branch === 'string' ? spec.branch : null;
+    if ((!repo || !branch) && typeof gitInfo === 'function') {
+      let info = null;
+      try { info = gitInfo(ctx.projectDir); } catch { info = null; }
+      if (info) { repo = repo || info.repo || null; branch = branch || info.branch || null; }
+    }
+    if (!repo || !branch) return inconclusive('no-pr-reference', { repo: repo || null, branch: branch || null });
+
+    const owner = repo.split('/')[0];
+    let prs;
+    try {
+      prs = await ghFetch(`https://api.github.com/repos/${repo}/pulls?head=${encodeURIComponent(`${owner}:${branch}`)}&state=all&per_page=1`, token);
+    } catch (e) { return inconclusive('github-unreachable', { error: e.message, repo, branch }); }
+    const list = Array.isArray(prs) ? prs : [];
+    if (!list.length) return { status: 'fail', subject: { repo, branch }, evidence: { reason: 'no-pr-for-branch' } };
+    const pr = list[0];
+    return {
+      status: 'pass',
+      subject: { repo, branch, number: pr.number || null, pr: pr.html_url || null },
+      evidence: { state: pr.state || null, merged: pr.merged_at != null, head: (pr.head && pr.head.ref) || null },
+    };
   };
 }
 
@@ -381,13 +458,14 @@ function softenLlmVerdict(key, result, ctx) {
  * Build a registry of the initial validation keys. `ghToken` / `ghFetch` are
  * overridable so tests drive the GitHub validators with fakes.
  */
-function createDefaultRegistry({ ghToken = defaultGhToken, ghFetch = defaultGhFetch } = {}) {
+function createDefaultRegistry({ ghToken = defaultGhToken, ghFetch = defaultGhFetch, gitInfo = defaultGitInfo } = {}) {
   return {
     ci_green: makeCiValidator({ ghToken, ghFetch, staging: false }),
     ci_and_staging_green: makeCiValidator({ ghToken, ghFetch, staging: true }),
     merged: makeMergedValidator({ ghToken, ghFetch, deployed: false }),
     pr_merged: makeMergedValidator({ ghToken, ghFetch, deployed: false }),
     merged_and_deployed: makeMergedValidator({ ghToken, ghFetch, deployed: true }),
+    pr_opened: makePrOpenedValidator({ ghToken, ghFetch, gitInfo }),
     file_exists: fileExists,
     command_exit_zero: commandExitZero,
   };
@@ -468,6 +546,7 @@ module.exports = {
   createDefaultRegistry, getDefaultRegistry, evaluateValidation, evaluateItemValidations,
   evaluateItemValidationsModeAware, resolveValidationMode,
   parseValidation, collectDocExcerpts, buildLlmValidatorPrompt, makeLlmValidate, getDefaultLlmValidate,
+  makePrOpenedValidator, defaultGitInfo, gitRemoteRepo,
   PR_REF_RE, DEFAULT_COMMAND_TIMEOUT_MS,
   VALIDATION_MODES, DEFAULT_VALIDATION_MODE, DEFAULT_VALIDATION_MODEL, LLM_VALIDATOR_TIMEOUT_MS,
   FASTPASS_SKIP_MODE, FASTPASS_SKIP_RE, parseFastpassSkip,
