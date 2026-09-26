@@ -338,14 +338,36 @@ class DurableTaskStore {
    * Claim the next runnable item atomically (scheduler tick). Never returns the
    * same item to two concurrent callers — status flips to 'running' inside the
    * same transaction that selects it.
+   *
+   * Strict positional ordering: an item is runnable only when every
+   * earlier-position item of the same task is terminal (`done`/`skipped`). A
+   * `pending`/`waiting`/`running`/`failed` predecessor blocks it, so a
+   * delay-gated step (waiting out its `delay_after_sec`) or a failed step stops
+   * the plan from skipping ahead out of order — P3c owns what happens once a
+   * predecessor is genuinely stuck.
+   *
+   * We gate here in the claim query rather than by creating items non-claimable
+   * until `completeItem` arms them: the gate is one SELECT predicate, so it
+   * leaves `createPlan`'s transaction, `completeItem`'s next-sibling arming,
+   * `reconcileOrphanedRunning`/`expireWaitingDeadlines`, and every status
+   * semantic untouched — only "which item may the scheduler hand out" changes.
+   * The arm-based alternative would add a claimable/armed concept that must be
+   * threaded through all of those paths for the same guarantee.
+   *
+   * `now` is injectable so the tick and tests drive `due_at` selection
+   * deterministically (defaults to the wall clock).
    */
-  claimNextRunnable() {
+  claimNextRunnable(now = nowMs()) {
     return this.db.transaction(() => {
-      const now = nowMs();
       const row = this._prep(`SELECT i.* FROM task_items i
         JOIN durable_tasks t ON t.id = i.task_id
         WHERE i.status IN ('pending','waiting') AND t.status = 'active'
           AND (i.due_at IS NULL OR i.due_at <= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM task_items p
+            WHERE p.task_id = i.task_id AND p.position < i.position
+              AND p.status NOT IN ('done','skipped')
+          )
         ORDER BY (i.due_at IS NULL) DESC, i.due_at ASC, i.position ASC
         LIMIT 1`).get(now);
       if (!row) return null;
