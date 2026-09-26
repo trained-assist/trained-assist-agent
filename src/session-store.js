@@ -78,7 +78,11 @@ function belongsToConversation(session, chatId, threadId) {
   return t === undefined || t === normThreadId(threadId);
 }
 
-function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience, threadId }) {
+// `sideSession: true` writes only the session file, not the index: the record exists for
+// qa_more escalation (src/quick-reply.js) but must not show up in the picker/journal or
+// evict real dialogs from the MAX_SESSIONS index. promoteSideSession() indexes it once
+// the user actually escalates it into a dialog.
+function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience, threadId, sideSession = false }) {
   const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
@@ -86,9 +90,11 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
 
   const meta = { id, topic, projectId: projectId || null, audience: aud, createdAt: now, lastAt: now, messageCount: 1, lastUserMessage: topic, lastMessageRole: 'user' };
 
-  const sessions = loadIndex(workDir);
-  sessions.unshift(meta);
-  saveIndex(workDir, sessions); // saveIndex orders by recency and caps at MAX_SESSIONS
+  if (!sideSession) {
+    const sessions = loadIndex(workDir);
+    sessions.unshift(meta);
+    saveIndex(workDir, sessions); // saveIndex orders by recency and caps at MAX_SESSIONS
+  }
 
   // Write full session file
   const dir = path.join(workDir, SESSIONS_DIR);
@@ -101,6 +107,7 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
     // semantics) instead of wrongly pinning the session to "no topic".
     ...(threadId !== undefined && chatId ? { messageThreadId: normThreadId(threadId) } : {}),
     projectId: projectId || null,
+    ...(sideSession ? { sideSession: true } : {}),
     messages: [{ role: 'user', content: task, at: now }],
   };
   atomicWrite(sessionFilePath(workDir, id), JSON.stringify(full, null, 2));
@@ -114,6 +121,33 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
   if (chatId) setCurrentSessionId(workDir, id, chatId, audience, threadId ?? null);
 
   return id;
+}
+
+/** Index a side session (createSession sideSession:true) once it becomes a real dialog. */
+function promoteSideSession(workDir, id) {
+  try {
+    const fp = sessionFilePath(workDir, id);
+    if (!fs.existsSync(fp)) return false;
+    const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    if (!full.sideSession) return false;
+    delete full.sideSession;
+    atomicWrite(fp, JSON.stringify(full, null, 2));
+    const sessions = loadIndex(workDir);
+    if (!sessions.some(s => s.id === id)) {
+      const lastUser = [...(full.messages || [])].reverse().find(m => m.role === 'user');
+      sessions.unshift({
+        id, topic: full.topic, projectId: full.projectId || null, audience: full.audience || 'default',
+        createdAt: full.createdAt, lastAt: full.lastAt || Date.now(), messageCount: full.messageCount || (full.messages || []).length,
+        lastUserMessage: String(lastUser?.content || full.topic || '').slice(0, 120),
+        lastMessageRole: (full.messages || []).slice(-1)[0]?.role || 'user',
+      });
+      saveIndex(workDir, sessions);
+    }
+    return true;
+  } catch (e) {
+    console.warn('[session-store] promoteSideSession:', e.message);
+    return false;
+  }
 }
 
 /** Append user message to an existing session (before running Claude) */
@@ -448,7 +482,7 @@ function archiveSessions(workDir, sessionIds) {
 }
 
 module.exports = {
-  createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
+  createSession, promoteSideSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
   getCurrentSessionId, setCurrentSessionId, claimLiveChatId, normThreadId, threadOf, belongsToConversation, resolveChatSession, archiveSessions, setSummary, needsSummary,
   getLastOcModel, setLastOcModel, setSessionProject,
   getEngineSessionId, setEngineSessionId,
