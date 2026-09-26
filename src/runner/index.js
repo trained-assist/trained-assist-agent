@@ -143,6 +143,20 @@ const MAX_CONTINUATIONS = 10; // auto-resume after timeout up to 10 times
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-restart (all engines)
 const QUICK_CRASH_MS = 15 * 1000; // crash faster than this after launch → likely transient, worth 1 retry
 const MAX_QUICK_RETRIES = 1; // cap so a repeatable crash doesn't loop forever
+// #1474: a provider-side fault (rejected key, quota/usage limit, rate limit, 5xx) says nothing
+// about the engine SESSION — the transcript is intact, only the upstream call failed. Such an
+// error must not trigger the native-resume fallback (which drops the engine session and restarts
+// from a rebuilt context — the "lost history" users saw after the 2026-09-26 dead-key restarts).
+// 'context' (prompt too long) is deliberately NOT a provider fault: a fresh rebuilt context is the
+// right answer there.
+function isProviderFault(text) {
+  const t = String(text || '');
+  if (!t) return false;
+  if (opencodeGoToggle.isDeadKeyError(t)) return true;
+  if (/usage limit|purchase more credits|rate.?limit|too many requests|\b429\b|\b5\d\d\b|overloaded|upstream request failed/i.test(t)) return true;
+  const verdict = opencodeLadder.classifyError(t);
+  return !!verdict && verdict.class !== 'context';
+}
 const MAX_RESUME_ATTEMPTS = 3; // cap on auto-retries for a task resumed after a server restart — a
 // restart is our fault, not the user's, so it's worth retrying automatically, but bounded: without
 // this, a task whose resume keeps crashing (e.g. a genuinely broken session) would retry forever
@@ -2224,7 +2238,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // restart-retry budget on a resume that cannot succeed. resumeSessionId is NOT carried into
     // the retry, so the next attempt takes the normal context-rebuild path; resumeFallbackDone
     // is belt-and-braces against re-entering this branch.
-    if (resumeSessionId && !resumeFallbackDone && !restartShutdown) {
+    const resumeErrText = codexErrorMsg || fullOutput.text.trim().slice(-1000);
+    const providerFault = isProviderFault(resumeErrText);
+    if (resumeSessionId && !resumeFallbackDone && !restartShutdown && !providerFault) {
       console.warn(`[${taskId}] resume: fallback reason=native_resume_failed engine=${engine} (${reason})`);
       const fallbackMsg = '↩️ Не удалось продолжить сессию движка — перезапускаю с восстановленным контекстом.';
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
@@ -2255,8 +2271,15 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     // that can re-fire it — bounded by MAX_RESUME_ATTEMPTS so a genuinely broken resume
     // can't loop forever across restarts.
     if (resumedAfterRestart && resumeAttempts < MAX_RESUME_ATTEMPTS && !restartShutdown) {
+      // Provider fault on the shared Go gateway: degrade it (rotate key / flip) BEFORE retrying,
+      // otherwise every resume attempt hits the same dead key (2026-09-26: 3/3 burned on one key).
+      let providerNote = '';
+      if (providerFault && engine === 'opencode' && ocProfileIsDeepseek) {
+        try { if (opencodeGoToggle.noteFailure(ocActiveModel, resumeErrText)) providerNote = 'шлюз Go переключён на рабочий ключ'; } catch {}
+      }
+      if (providerFault) console.warn(`[${taskId}] resume: provider fault — keeping engine session ${resumeSessionId || '-'} (${resumeErrText.slice(0, 200)})`);
       const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek, ocRole });
-      const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})${altNote ? `, ${altNote}` : ''}…`;
+      const retryMsg = `🔄 Восстановление после перезапуска сервера не удалось (${reason}) — пробую ещё раз (${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS})${providerNote ? `, ${providerNote}` : ''}${altNote ? `, ${altNote}` : ''}…`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
       _recordFailureAttempt(executionId, {
@@ -2270,6 +2293,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         sessionId: activeSessionId, webExactSession,
         forceClaude, initialMsgId: msgId, pinnedMsgId, secrets,
         resumedAfterRestart: true, resumeAttempts: resumeAttempts + 1,
+        // Provider fault → the engine session is intact: resume it natively again, don't rebuild.
+        resumeSessionId: providerFault ? resumeSessionId : null, resumeFallbackDone,
         continuationCount, mode, projectId, internalGtd, engine,
         executionId,
         lastAttemptError: { reason: `восстановление после перезапуска сервера не удалось (${reason})`, errorText: codexErrorMsg || fullOutput.text.trim().slice(-1000) },
@@ -2278,7 +2303,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     }
 
     result = resumedAfterRestart
-      ? `⚠️ Не удалось восстановить сессию после перезапуска сервера (${reason}), попытка ${resumeAttempts + 1}/${MAX_RESUME_ATTEMPTS}. Это сбой сервера, а не твоей задачи — отправь «продолжай», чтобы попробовать вручную ещё раз.`
+      ? `⚠️ Не удалось восстановить сессию после перезапуска сервера (${reason}) — ${Math.min(resumeAttempts + 1, MAX_RESUME_ATTEMPTS)} из ${MAX_RESUME_ATTEMPTS} автоматических попыток не помогли. Это сбой сервера, а не твоей задачи — отправь «продолжай», чтобы попробовать вручную ещё раз.`
       : incompleteRetryAttempts > 0
       ? `⚠️ Работа прервана (${reason}) — не помогло и после ${incompleteRetryAttempts} автоматических попыток. Отправь «продолжай», чтобы попробовать вручную ещё раз.`
       : `⚠️ Работа прервана (${reason}). Завершение задачи не подтверждено. Отправь «продолжай», чтобы продолжить эту сессию.`;
@@ -2789,7 +2814,7 @@ function interruptForRestart() {
 }
 
 module.exports = {
-  interruptForRestart, MAX_RESUME_ATTEMPTS,
+  interruptForRestart, MAX_RESUME_ATTEMPTS, isProviderFault,
   runTask, getQuickAnswer, runQuickAnswer, shouldAttemptQuickAnswer, generateConnectLink, getPendingTasks, clearPendingTask, ensureSkillDir,
   resolveRunSession,
   isTaskRunning, isSessionRunning, isSessionQueuedFor, stopSessionTask, extendTaskTimeout, stopTask, stopUserTask, killTaskByUsername,
