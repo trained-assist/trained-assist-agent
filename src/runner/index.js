@@ -2275,26 +2275,32 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // the ladder never degrades, even though the raw error was a clean quota hit.
   const preLadderText = codexErrorMsg || claudeResult || fullOutput.text || result;
 
-  // Shared "deepseek" OpenCode profile (issue #1096): flip the VM-wide go/openrouter toggle
-  // instead of the per-role ladder above — deepseek-go/deepseek-openrouter are each a single
-  // uniform model (no ladder to degrade through within the profile), and the Go subscription's
-  // quota is account-wide across the whole team, not per-model, so "try the next rung" doesn't
-  // apply here the way it does for max/value. A successful flip retries the SAME task; the
-  // retry re-resolves the "deepseek" profile (see ocProfileIsDeepseek above) and picks up
+  // Shared "deepseek" OpenCode profile (issue #1096): on a Go quota hit, degrade the gateway —
+  // first rotate to a spare service-account key (opencode-go-keys.js) and stay on Go; only once
+  // every key is exhausted flip the VM-wide go/openrouter toggle. deepseek-go/deepseek-openrouter
+  // each carry a real ladder now, but the Go subscription's quota is account-wide per key across
+  // the whole team, not per-model, so "try the next rung" doesn't apply here the way it does for
+  // max/value. A successful rotation/flip retries the SAME task; the retry re-resolves the
+  // "deepseek" profile (see ocProfileIsDeepseek above) and picks up the new key or
   // deepseek-openrouter. Falls through to the generic ladder block below when the failure isn't
   // a Go-quota hit (e.g. the OpenRouter side itself failed) so it's still reported normally.
   if (engine === 'opencode' && ocProfileIsDeepseek) {
     const failedModel = ocProfileOverrides?.model;
     const flipped = opencodeGoToggle.noteFailure(failedModel, preLadderText);
     if (flipped && ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
+      // Still on Go ⇒ noteFailure rotated to a spare key (service-account key pool); otherwise it
+      // gave up on the gateway and flipped to OpenRouter. Message must match which one happened.
+      const onGo = opencodeGoToggle.getMode() === 'go';
       const newProfile = opencodeGoToggle.resolveProfileName();
-      const switchMsg = `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
+      const switchMsg = onGo
+        ? `⚠️ OpenCode Go (${failedModel}) исчерпал лимит ключа — переключаюсь на резервный ключ Go, пробую снова.`
+        : `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, switchMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: failedModel,
-        errorText: preLadderText, action: 'deepseek_go_toggle_flip',
+        errorText: preLadderText, action: onGo ? 'deepseek_go_key_rotation' : 'deepseek_go_toggle_flip',
       });
       const queuedRetry = runTask({
         initiatedAt, threadId,
