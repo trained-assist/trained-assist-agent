@@ -46,18 +46,6 @@
         "hh-utils"
       ]
     },
-    "src/hermes-run.js": {
-      "removeIn": "P1.3-hermes-scoring",
-      "modules": [
-        "hh-scoring"
-      ]
-    },
-    "src/hermes-tools-run.js": {
-      "removeIn": "P1.3-hermes-scoring",
-      "modules": [
-        "hh-scoring"
-      ]
-    },
     "src/mcp-skills/tools/93-calltips.js": {
       "removeIn": "P1.4-satellites",
       "modules": [
