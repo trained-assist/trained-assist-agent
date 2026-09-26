@@ -22,6 +22,14 @@ changes, don't let it drift into a description of some past state.
   "subscription required", "requires Global regions" (OpenCode Go region not enabled on the
   account — a one-time setting, not a quota), "insufficient account funds" (Zen pay-as-you-go
   balance empty — needs a human to top up, doesn't reset itself).
+- **transient** (does NOT mark the rung exhausted, does NOT skip it): an intermittent per-rung
+  fault where the model usually works — currently `"Bad Request: {model:...}"` (observed live
+  2026-09-25 on `opencode-go/deepseek-v4.1-flash`, which intermittently rejects a request while
+  its siblings serve fine). The runner retries the SAME model up to `MAX_INCOMPLETE_RETRIES` (3)
+  times with backoff and only escalates to the sibling rung after those fail — see the owner
+  requirement (2026-09-26) "частенько багует, нужны ретраи грамотные, альтернатива — если три
+  ретрая не сработали". The macro-alternation (`forceOpencodeAlternation`) takes an `escalate`
+  flag so early same-model retries leave the rung untouched and only the last retry advances it.
 
 Codex auth-error patterns are still unconfirmed empirically (issue #1061 spike 0.1, open) — the
 config/quota classifiers above are OpenCode-engine-specific (they classify errors from `opencode
@@ -74,6 +82,27 @@ GigaChat Pro for `build`/`explore`/`general`, Ultra for `plan`, Max for `review`
 Russian-language quality — ladder degradation doesn't touch `rolePrompts`, only which model fills
 the role). Renamed from `russian-recruiter` because the ladder mechanism is generic and this
 profile is useful for any Russian-language task, not just recruiting.
+
+## `deepseek` (logical profile) — Go or OpenRouter, now with a real ladder per gateway
+
+`/oc_deepseek` is a logical profile with no file of its own: it resolves to `deepseek-go.json`
+or `deepseek-openrouter.json` via the VM-wide go/openrouter toggle (`src/opencode-go-toggle.js`).
+Until 2026-09-26 both files were a single flat `{"model": ...}` — one uniform model per gateway,
+no ladder, so the only possible response to a failure was flipping the whole team's gateway.
+The "Bad Request on the top rung" bug exposed the gap: when `opencode-go/deepseek-v4.1-flash`
+intermittently rejected a request, there was nothing to degrade to within the gateway.
+
+Both files now carry a real per-role ladder on their own gateway, ending on a `mimo-v2.6-flash`
+sibling (the owner's chosen analogue for the flaky deepseek rung):
+
+- `deepseek-go.json`: `opencode-go/deepseek-v4.1-flash` → `opencode-go/deepseek-v4-flash`
+  (or `-v4-pro` for `plan`/`review`) → `opencode-go/mimo-v2.6-flash`
+- `deepseek-openrouter.json`: `openrouter/z-ai/glm-5.3-flash` → `openrouter/deepseek/deepseek-v4-flash-0731`
+  → `openrouter/xiaomi/mimo-v2.6-flash`
+
+Behaviour consequence: a failing rung now degrades **within the same gateway** first; the VM-wide
+toggle flip is reserved for a genuine account-wide Go quota hit (`noteFailure` classifies it as
+`quota` on an `opencode-go/*` model) or when the gateway's ladder itself has no usable rung left.
 
 ## Retired profiles
 

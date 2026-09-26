@@ -1297,18 +1297,28 @@ function buildOcCapabilitiesBlock(secrets) {
 // attempt, reusing the same ladder/toggle state the classified path already writes to — no new
 // state file. claude/codex have no alternative provider today (real scope boundary, not an
 // oversight — see SESSION-CRASH-RETRY-SPEC.md §2.4), so this is a no-op for those engines.
-function forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek, ocRole = 'build' }) {
-  if (engine !== 'opencode' || !ocProfileName) return null;
-  if (ocProfileIsDeepseek) {
-    const from = opencodeGoToggle.getMode();
-    const to = opencodeGoToggle.forceFlip();
-    return to !== from ? `провайдер OpenCode переключён ${from}→${to}` : null;
-  }
+//
+// `escalate` (default true) false means "this is an early same-model retry, don't move off the
+// rung yet" — the caller passes false for the first attempts of a transient per-rung fault
+// ("Bad Request") so the SAME model is retried up to MAX_INCOMPLETE_RETRIES times before the
+// alternative is tried (owner 2026-09-26: "три ретрая не сработали → соседняя модель").
+function forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek, ocRole = 'build', escalate = true }) {
+  if (!escalate || engine !== 'opencode' || !ocProfileName) return null;
+  // Both deepseek-gateway profiles carry a real ladder now (2026-09-26) — advance to the next
+  // rung on the same gateway first (deepseek-v4.1-flash → deepseek-v4-flash/pro → mimo-v2.6-flash).
+  // The VM-wide go↔openrouter flip was the old last resort when the profile had only one model;
+  // it stays available when the ladder itself is exhausted (forceAdvance leaves the last rung,
+  // resolveModel degrades to it, and the next task's classified quota path can still flip).
   // P3b: alternate the rung of the role this run actually used (default `build`).
   const model = ocProfileOverrides?.agent?.[ocRole]?.model || ocProfileOverrides?.model;
   if (model) {
     opencodeLadder.forceAdvance(ocProfileName, ocRole, model);
     return `модель «${model}» отложена — пробую следующую ступень лестницы`;
+  }
+  if (ocProfileIsDeepseek) {
+    const from = opencodeGoToggle.getMode();
+    const to = opencodeGoToggle.forceFlip();
+    return to !== from ? `провайдер OpenCode переключён ${from}→${to}` : null;
   }
   return null;
 }
@@ -2293,13 +2303,20 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
 
   // Shared "deepseek" OpenCode profile (issue #1096): on a Go quota hit, degrade the gateway —
   // first rotate to a spare service-account key (opencode-go-keys.js) and stay on Go; only once
-  // every key is exhausted flip the VM-wide go/openrouter toggle. deepseek-go/deepseek-openrouter
-  // each carry a real ladder now, but the Go subscription's quota is account-wide per key across
-  // the whole team, not per-model, so "try the next rung" doesn't apply here the way it does for
-  // max/value. A successful rotation/flip retries the SAME task; the retry re-resolves the
-  // "deepseek" profile (see ocProfileIsDeepseek above) and picks up the new key or
-  // deepseek-openrouter. Falls through to the generic ladder block below when the failure isn't
-  // a Go-quota hit (e.g. the OpenRouter side itself failed) so it's still reported normally.
+  // every key is exhausted flip the VM-wide go/openrouter toggle. The Go subscription's quota is
+  // account-wide per key across the whole team, not per-model, so a GENUINE quota hit must NOT
+  // burn the rest of the Go ladder against a dead gateway ("try the next rung" doesn't apply the
+  // way it does for max/value). A successful rotation/flip retries the SAME task; the retry
+  // re-resolves the "deepseek" profile (see ocProfileIsDeepseek above) and picks up the new key
+  // or deepseek-openrouter.
+  //
+  // Every OTHER per-rung fault (a "Bad Request: {model:...}" on the top rung, a 5xx, a bare crash)
+  // must NOT flip the gateway and must NOT dead-end: it falls through to the generic ladder block
+  // below, which advances to the next rung of the SAME gateway's ladder (deepseek-v4.1-flash →
+  // deepseek-v4-flash/pro → mimo-v2.6-flash). That block used to be unreachable for deepseek
+  // because both profile files were single-uniform-model — with no ladder to degrade through, the
+  // only option was the toggle flip. Both files carry a real ladder now (2026-09-26), so a dead
+  // top rung degrades in place instead of dragging the whole team's gateway across to OpenRouter.
   if (engine === 'opencode' && ocProfileIsDeepseek) {
     const failedModel = ocActiveModel;
     const flipped = opencodeGoToggle.noteFailure(failedModel, preLadderText);
@@ -2338,11 +2355,24 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       });
       return { queuedRetry };
     }
+    // Not a Go quota hit — fall through to the generic ladder block below, which now has real
+    // rungs to advance through for both deepseek-gateway profile files.
   }
 
   if (engine === 'opencode' && ocProfileName) {
     const verdict = opencodeLadder.recordFailure(ocProfileName, ocRole, ocActiveModel, preLadderText);
     if (verdict) {
+      // Intermittent per-rung fault ("Bad Request") — the rung is NOT marked exhausted. Leave it
+      // to the generic mid-task retry below, which retries the SAME model (bounded by
+      // MAX_INCOMPLETE_RETRIES = 3) before forceOpencodeAlternation moves the task to the sibling
+      // rung. Only a quota/rate-limit or a context overflow justifies skipping the rung right away.
+      if (verdict.class === 'transient') {
+        _recordFailureAttempt(executionId, {
+          taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: verdict.model,
+          errorText: preLadderText, action: 'transient_same_rung_retry',
+        });
+        // fall through to the generic incomplete-retry path below
+      } else {
       // The request itself didn't fit this rung's context window — try the next rung for THIS
       // task only (contextSkipModels, not a persisted/shared exhaustion — see recordFailure's
       // 'context' branch), and once the ladder runs out, say so explicitly instead of silently
@@ -2448,6 +2478,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       executionHistory.finalizeExecution(executionId, 'BLOCKED');
       return exhaustedMsg;
     }
+    }
   }
 
   // Detect an auth/quota failure for the current engine. Claude and Codex additionally get ONE
@@ -2524,11 +2555,23 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // completion event. Previously this dead-ended immediately with "напиши продолжай"; now it
   // retries the same task/session on the same engine, bounded by MAX_INCOMPLETE_RETRIES with the
   // shared backoff schedule, before handing it back to a human.
-  if (incomplete && !resumedAfterRestart && !restartShutdown && incompleteRetryAttempts < MAX_INCOMPLETE_RETRIES) {
+  //
+  // For an intermittent per-rung fault like "Bad Request" the first MAX_INCOMPLETE_RETRIES
+  // attempts stay on the SAME model (a flaky rung is often just flaky once), and one extra
+  // attempt is allowed on the ALTERNATIVE rung (forceOpencodeAlternation advances the ladder on
+  // that last retry only) — owner 2026-09-26: "три ретрая не сработали → соседняя модель".
+  // The extra slot only exists for OpenCode, whose ladder has a real alternative model; for
+  // claude/codex forceOpencodeAlternation is a no-op, so a 4th retry would just repeat the same
+  // failure with no way to differ (and would break the "capped at 3" contract those paths had).
+  const altRetryBudget = engine === 'opencode' ? 1 : 0;
+  if (incomplete && !resumedAfterRestart && !restartShutdown && incompleteRetryAttempts < MAX_INCOMPLETE_RETRIES + altRetryBudget) {
     const nextAttempt = incompleteRetryAttempts + 1;
-    const delayMs = getRetryDelayMs(nextAttempt) || 0;
-    const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek, ocRole });
-    const retryMsg = `🔄 Работа прервана (${incompleteReason}) — пробую ещё раз (${nextAttempt}/${MAX_INCOMPLETE_RETRIES})${altNote ? `, ${altNote}` : ''}…`;
+    const delayMs = getRetryDelayMs(Math.min(nextAttempt, MAX_INCOMPLETE_RETRIES)) || 0;
+    const escalate = engine === 'opencode' && nextAttempt > MAX_INCOMPLETE_RETRIES;
+    const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek, ocRole, escalate });
+    const retryMsg = escalate
+      ? `🔄 Не помогло и после ${MAX_INCOMPLETE_RETRIES} попыток — пробую на альтернативной модели${altNote ? ` (${altNote})` : ''}…`
+      : `🔄 Работа прервана (${incompleteReason}) — пробую ещё раз (${nextAttempt}/${MAX_INCOMPLETE_RETRIES})${altNote ? `, ${altNote}` : ''}…`;
     if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, retryMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, retryMsg, threadId));
     else await tgSend(BOT_TOKEN, chatId, retryMsg, threadId);
     if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, retryMsg);
