@@ -34,16 +34,54 @@ test('opencode without a resolved profile is a no-op (nothing to alternate)', ()
   assert.equal(forceOpencodeAlternation({ engine: 'opencode', ocProfileName: null, ocProfileOverrides: null, ocProfileIsDeepseek: false }), null);
 });
 
-test('deepseek profile flips the go/openrouter toggle and returns a user-facing note', () => {
+test('deepseek profile with a resolved rung advances its OWN ladder (same gateway), not the VM toggle', () => {
   const { forceOpencodeAlternation } = freshModule();
   const opencodeGoToggle = require('../src/opencode-go-toggle');
+  const opencodeLadder = require('../src/opencode-ladder');
+  const fs = require('node:fs');
+  const path = require('node:path');
   assert.equal(opencodeGoToggle.getMode(), 'go');
   const note = forceOpencodeAlternation({
     engine: 'opencode', ocProfileName: 'deepseek-go',
     ocProfileOverrides: { model: 'opencode-go/deepseek-v4.1-flash' }, ocProfileIsDeepseek: true,
   });
+  // 2026-09-26: both deepseek-gateway profiles carry a real ladder, so escalation advances to the
+  // next rung on the SAME gateway (deepseek-v4.1-flash → deepseek-v4-flash) instead of dragging
+  // the whole team's VM toggle across to OpenRouter for one flaky rung.
+  assert.match(note, /следующую ступень лестницы/);
+  assert.equal(opencodeGoToggle.getMode(), 'go', 'the VM-wide toggle must NOT flip when a same-gateway sibling rung exists');
+  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.opencode', 'profiles', 'deepseek-go.json'), 'utf8'));
+  assert.notEqual(opencodeLadder.resolveModel(raw, 'deepseek-go', 'build'), 'opencode-go/deepseek-v4.1-flash',
+    'the failed rung must be skipped on the next resolve');
+});
+
+test('deepseek profile with no resolved rung falls back to flipping the VM toggle', () => {
+  const { forceOpencodeAlternation } = freshModule();
+  const opencodeGoToggle = require('../src/opencode-go-toggle');
+  assert.equal(opencodeGoToggle.getMode(), 'go');
+  const note = forceOpencodeAlternation({
+    engine: 'opencode', ocProfileName: 'deepseek-go',
+    ocProfileOverrides: null, ocProfileIsDeepseek: true,
+  });
   assert.match(note, /go→openrouter/);
   assert.equal(opencodeGoToggle.getMode(), 'openrouter');
+});
+
+test('escalate:false leaves the rung untouched (early same-model retries must not move off it)', () => {
+  const { forceOpencodeAlternation } = freshModule();
+  const opencodeGoToggle = require('../src/opencode-go-toggle');
+  const opencodeLadder = require('../src/opencode-ladder');
+  assert.equal(forceOpencodeAlternation({
+    engine: 'opencode', ocProfileName: 'max',
+    ocProfileOverrides: { model: 'anthropic/claude-opus' }, ocProfileIsDeepseek: false, escalate: false,
+  }), null);
+  assert.equal(opencodeLadder.resolveModel({ ladder: { build: ['anthropic/claude-opus', 'anthropic/claude-sonnet'] } }, 'max', 'build'),
+    'anthropic/claude-opus', 'an early same-model retry must not have advanced the ladder');
+  assert.equal(forceOpencodeAlternation({
+    engine: 'opencode', ocProfileName: 'deepseek-go',
+    ocProfileOverrides: { model: 'opencode-go/deepseek-v4.1-flash' }, ocProfileIsDeepseek: true, escalate: false,
+  }), null);
+  assert.equal(opencodeGoToggle.getMode(), 'go');
 });
 
 test('ladder profile marks the current model exhausted and returns a user-facing note', () => {

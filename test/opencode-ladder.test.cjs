@@ -231,3 +231,41 @@ test('real free profile: every role ladder ends on a paid rung, not another :fre
     assert.ok(!lastRung.endsWith(':free'), `${role}'s last rung (${lastRung}) must be a paid model — if every :free rung is rate-limited/dead, there must be one guaranteed-to-work fallback left`);
   }
 });
+
+test('classifyError recognizes an intermittent "Bad Request" model rejection as its own transient class', () => {
+  const { mod } = freshModule();
+  // Observed live 2026-09-25 on opencode-go/deepseek-v4.1-flash: the top rung intermittently
+  // rejects the request while its siblings serve fine. This must NOT skip the rung immediately —
+  // retrying the same model is the point (owner: "частенько багует, нужны ретраи грамотные").
+  const v = mod.classifyError('❌ OpenCode ошибка: Bad Request: {"model":"deepseek-v4.1-flash"}');
+  assert.equal(v.class, 'transient');
+  const v2 = mod.classifyError('Bad Request: {"model":"deepseek-v4.1-flash"}');
+  assert.equal(v2.class, 'transient');
+  // A more specific signal in the same string still wins (429/usage limit → quota, not transient).
+  assert.equal(mod.classifyError('Bad Request: rate limit exceeded').class, 'quota');
+});
+
+test('recordFailure does NOT persist exhaustion for a transient Bad Request — retry the same rung first', () => {
+  const { mod } = freshModule();
+  const verdict = mod.recordFailure('p', 'build', 'flaky-model', 'Bad Request: {"model":"flaky-model"}');
+  assert.deepEqual(verdict, { class: 'transient', model: 'flaky-model', alertNeeded: false });
+  assert.equal(mod.resolveModel({ ladder: { build: ['flaky-model', 'sibling'] } }, 'p', 'build'), 'flaky-model',
+    'a transient Bad Request must not poison the rung for other tasks');
+});
+
+test('deepseek-go profile: top rung is deepseek-v4.1-flash, degrading to deepseek and mimo siblings on the same Go gateway', () => {
+  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.opencode', 'profiles', 'deepseek-go.json'), 'utf8'));
+  assert.ok(Array.isArray(raw.ladder?.build) && raw.ladder.build.length >= 2,
+    'deepseek-go must now carry a real ladder — the old single-uniform-model shape could only flip the gateway');
+  assert.equal(raw.ladder.build[0], 'opencode-go/deepseek-v4.1-flash');
+  assert.ok(raw.ladder.build.includes('opencode-go/mimo-v2.6-flash'),
+    'the sibling alternative for a flaky deepseek rung must be a same-gateway model (mimo-v2.6-flash)');
+  for (const rung of raw.ladder.build) assert.ok(rung.startsWith('opencode-go/'), `deepseek-go rung ${rung} must stay on the Go gateway`);
+});
+
+test('deepseek-openrouter profile: real ladder on the OpenRouter gateway with a mimo sibling', () => {
+  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.opencode', 'profiles', 'deepseek-openrouter.json'), 'utf8'));
+  assert.ok(Array.isArray(raw.ladder?.build) && raw.ladder.build.length >= 2);
+  assert.equal(raw.ladder.build[0], 'openrouter/z-ai/glm-5.3-flash');
+  assert.ok(raw.ladder.build.includes('openrouter/xiaomi/mimo-v2.6-flash'));
+});
