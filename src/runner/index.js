@@ -1608,6 +1608,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // разбор того же запроса — прежний ответ прикладываем как контекст. clarify (❓): рамку
   // задаёт CLARIFY-блок промпта, задачу не трогаем. Без mode — задача как есть.
   if (forceClaude && activeSessionId && sessionExists) {
+    // A ⚡ side session (src/quick-reply.js) becomes a real dialog once escalated.
+    sessions.promoteSideSession(user.workDir, activeSessionId);
     const sess = sessions.getSession(user.workDir, activeSessionId);
     if (!task) task = sess?.lastUserMessage || '';
     if (task && sess && explicitMode === 'deep') {

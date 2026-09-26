@@ -36,13 +36,14 @@ function quickExchangeSessionId(username, chatId, threadId, task) {
 
 // Stores task+reply in a side session and returns its id (null if it can't be stored).
 // No chatId on create: the chat's current session must stay the user's real dialog.
+// sideSession: kept out of the session index until escalated (session-store.promoteSideSession).
 function recordQuickExchange(workDir, { username, chatId, threadId = null, audience, projectId = null, task, reply }) {
   if (!workDir || !String(task || '').trim() || isEmptyQuickReply(reply)) return null;
   try {
     if (!fs.existsSync(workDir)) return null;
     const id = quickExchangeSessionId(username, chatId, threadId, task);
     if (sessions.getSession(workDir, id)) sessions.appendUserMessage(workDir, id, task);
-    else sessions.createSession(workDir, { task, id, projectId, audience });
+    else sessions.createSession(workDir, { task, id, projectId, audience, sideSession: true });
     sessions.appendReply(workDir, id, typeof reply === 'string' ? reply : String(reply.hint || ''));
     return id;
   } catch (e) {
