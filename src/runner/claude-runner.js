@@ -187,7 +187,7 @@ function readOcAgentModels() {
 
 // Build the argv for the selected engine (claude/codex/opencode).
 // Returns [bin, args].
-function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user = {}, cwd, resumeSessionId = null }) {
+function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, opencodeModel, mcpConfig, systemPromptFile, user = {}, cwd, resumeSessionId = null, ocRole = null }) {
   const opencodeModelResolved = opencodeModel || process.env.OPENCODE_MODEL || null;
   // `cwd` is the runner-resolved code dir (see resolveEngineCwd); falling back to
   // user.cwd/user.workDir keeps callers that don't pass it (hermes, tests) working.
@@ -225,6 +225,10 @@ function buildEngineCommand({ engine, prompt, systemPromptText, ocSystemPrompt, 
       // branch is a no-op. On a stale/unknown id the run fails and the runner falls back to a
       // fresh context-rebuild (see resumeFallbackDone in runner/index.js).
       ...(resumeSessionId ? ['--session', resumeSessionId] : []),
+      // P3b: a durable contract step names the OpenCode agent role it resolved to
+      // (explore/review/build), so the run actually uses that role's ladder rung.
+      // Omitted for every non-contract caller → historical argv unchanged.
+      ...(ocRole ? ['--agent', ocRole] : []),
       '--format', 'json',
       '--auto',
       ...(opencodeModelResolved ? ['-m', opencodeModelResolved] : []),

@@ -64,11 +64,14 @@ const rule = t => log(`\n=== ${t} ===`);
   // Fake validation layer: the engineering playbook's programmatic keys + an LLM
   // judge for the 12 self-reported agent keys. Deterministic CI/merge file/exec
   // validators are NOT exercised here — they need a real GitHub PR + token.
+  // (P3d follow-up #1449: the playbook now names the registered vocabulary, so
+  // these are the real keys; the deterministic path is proven separately by
+  // test/gtd-durable-wiring.test.cjs case 18.)
   const registryFake = {
-    tests_lint_regression_green: async () => ({ status: 'pass', subject: {}, evidence: { exit_code: 0 } }),
+    command_exit_zero: async () => ({ status: 'pass', subject: {}, evidence: { exit_code: 0 } }),
     pr_opened: async () => ({ status: 'pass', subject: {}, evidence: { pr: 'https://github.com/x/y/pull/1' } }),
-    ci_and_staging_green: async () => ({ status: 'pass', subject: {}, evidence: { checks: [] } }),
-    merged_and_deployed: async () => ({ status: 'pass', subject: {}, evidence: { merged: true } }),
+    ci_green: async () => ({ status: 'pass', subject: {}, evidence: { checks: [] } }),
+    merged: async () => ({ status: 'pass', subject: {}, evidence: { merged: true } }),
   };
   const llmValidate = async (ctx) => ({ status: 'pass', reason: `judge accepted ${ctx.key}` });
 
@@ -113,14 +116,17 @@ const rule = t => log(`\n=== ${t} ===`);
   for (const s of firedSteps) log(`   [${s.engine}${s.ocProfile ? '/' + s.ocProfile : ''}]${s.forceClaude ? ' (forceClaude)' : ''} role=${s.ocRole} — ${s.title}`);
   log(`runTask invocations=${firedSteps.length}; programmatic items in plan=4 → expected agent fires=12`);
 
-  rule('4. Hop 6 — what prod does TODAY with the real registry and no OPENROUTER key');
+  rule('4. Hop 6 — a programmatic step under the REAL registry with the registered vocabulary');
   const r2 = await registry.callTool('task_create', {
-    goal: 'deterministic CI check (no validator registered)',
+    goal: 'deterministic CI check (command_exit_zero)',
     user_value: 'uv',
-    acceptance_criteria: [{ id: 'crit-ci', description: 'c', validations: [{ step: 'ci', validation: { tests_lint_regression_green: true } }] }],
-    items: [{ title: 'Run tests, lint and regression checks', stage: 'build', execution_kind: 'programmatic', validation: { tests_lint_regression_green: true } }],
+    acceptance_criteria: [{ id: 'crit-ci', description: 'c', validations: [{ step: 'ci', validation: { command_exit_zero: 'true' } }] }],
+    items: [{ title: 'Run tests, lint and regression checks', stage: 'build', execution_kind: 'programmatic', validation: { command_exit_zero: 'true' } }],
   });
   const t2 = r2.task.id;
+  // command_exit_zero spawns with cwd = the profile workspace; make it exist so the
+  // sim proves the verdict (this is the only rule that actually shells out).
+  fs.mkdirSync(path.join(process.env.USERS_DIR, 'audit-u'), { recursive: true });
   await registry.callTool('task_update', { task_id: t2, status: 'active' });
   await G.runDueDurable({ secrets: {}, now: Date.now(), isTaskRunning: () => false,
     runTask: async () => { throw new Error('programmatic step must not run an engine'); } });
@@ -128,7 +134,7 @@ const rule = t => log(`\n=== ${t} ===`);
   const v2 = store.listValidations(t2, 'audit-u');
   log(`item.status=${it2.status} attempt_count=${it2.attempt_count}/${it2.max_attempts}`);
   log(`recorded verdict: ${v2.map(v => `${v.validator}=${v.status} ${v.evidence_json}`).join(' | ')}`);
-  log(`task.status=${store.getTask(t2, 'audit-u').status} (a programmatic step cannot pass without a registered validator or an LLM key)`);
+  log(`task.status=${store.getTask(t2, 'audit-u').status} (registered command_exit_zero passes with no model)`);
 
   rule('4b. Hop 6 — the REAL deterministic validators on the two "objective" CI/merge keys');
   const { createDefaultRegistry } = require(path.join(REPO, 'src/playbook-validators.js'));
@@ -140,12 +146,14 @@ const rule = t => log(`\n=== ${t} ===`);
     return null;
   };
   const realReg = createDefaultRegistry({ ghToken: () => 'fake-token', ghFetch });
-  for (const key of ['ci_green', 'ci_and_staging_green', 'merged', 'pr_merged', 'merged_and_deployed']) {
+  for (const key of ['ci_green', 'ci_and_staging_green', 'merged', 'pr_merged', 'merged_and_deployed', 'pr_opened']) {
     const r = await realReg[key]({ task: taskArg, item, profileId: 'audit-u', projectDir: ROOT, validation: true, key });
     log(`${key.padEnd(22)} → ${r.status} ${JSON.stringify(r.evidence)}`);
   }
   log('=> even with a working GitHub token, *_staging_green / *_deployed are permanently');
-  log('   inconclusive (no staging/deploy health signal exists); they only ever pass via the LLM judge.');
+  log('   inconclusive (no staging/deploy health signal exists); the engineering playbook no');
+  log('   longer names them (#1449 dropped those halves — the deterministic set is');
+  log('   command_exit_zero + pr_opened + ci_green + merged).');
 
   rule('SUMMARY');
   log(`work-dir snapshot: ${ROOT}`);

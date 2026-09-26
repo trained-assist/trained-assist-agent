@@ -257,7 +257,7 @@ Task(durable item): [programmatic] Run tests, lint and regression checks
 - Успех/провал определяется кодом возврата, а не суждением модели
 
 **Validation:**
-- `tests_lint_regression_green`
+- `command_exit_zero: "npm run check && npm test"` — код возврата, не суждение модели
 - `execution_kind=programmatic` → `executor_role/minimum_model_level/context_budget = null`
   (в `checklist.md` печатается `[programmatic]`)
 - Ни одна programmatic-проверка не порождает Claude-сессию для «оценки» результата
@@ -276,12 +276,14 @@ Task(durable item): [programmatic] Open PR
   бот-оператор получает статус через существующие каналы
 
 **Validation:**
-- `pr_opened`, ветка не `main` (pre-push hook не пропустит)
-- URL PR сохранён как evidence шага (🔵 P3d)
+- `pr_opened` — детерминированный GitHub-валидатор (`#1449`): подтверждает
+  существование PR из ссылки в шаге/цели либо ищет PR по `repo/head-ветке`,
+  взятой из git-checkout проекта. Никакого LLM.
+- URL PR сохраняется как evidence шага
 
 ---
 
-### Шаг 12 — Programmatic: ожидание CI/staging и починка провалов
+### Шаг 12 — Programmatic: ожидание CI и починка провалов
 
 ```
 Task(durable item): [programmatic] Wait for CI and staging; repair failures
@@ -294,7 +296,7 @@ Task(durable item): [programmatic] Wait for CI and staging; repair failures
 - Провал CI чинится и перезапускается
 
 **Validation:**
-- `ci_and_staging_green`
+- `ci_green`
 - `delay_after_sec` уважается store'ом (due_at = now + delay)
 - Провал ожидания → `failed`, не бесконечный `pending`
 
@@ -314,8 +316,19 @@ Task(durable item): [programmatic] Merge and deploy
 - После провала деплоя — откат на предыдущий релиз (симлинк)
 
 **Validation:**
-- `merged_and_deployed`
+- `merged`
 - Применён правильный deploy-путь (PR→CI→automerged→deploy), без прямого пуша в `main`
+
+### Product decision — staging/deploy halves dropped (#1449)
+
+Единого health-сигнала «staging зелёный» / «задеплоено» across репозиториев нет,
+поэтому детерминированные ключи `ci_and_staging_green` / `merged_and_deployed`
+**больше не требуются** плейбуком. Осталось `ci_green` + `merged` — то, что реально
+проверяется GitHub API без модели. Сам деплой по-прежнему входит в процесс шага 13,
+но его *верификация* (проверка живого сценария) — за агентом на шаге 14
+(`user_scenario_verified`), а не за programmatic-ключом. Валидаторы
+`ci_and_staging_green` / `merged_and_deployed` остаются в реестре для плейбуков,
+которые позже заведут настоящий сигнал.
 
 ---
 
@@ -443,6 +456,13 @@ Task(durable item): [reviewer/doctor/medium] Finalize only with current acceptan
 До schema v2 эквивалент — писать имя команды/действия в `instructions` шага (валидно
 сегодня, но не машиночитаемо). Резолв `runner` в исполнение — это отдельный слайс; поле
 только декларирует контракт.
+
+> **#1449 (P3d follow-up):** объективно-проверяемая половина шага уже машиночитаема —
+> это `validation`-ключи (`command_exit_zero`, `pr_opened`, `ci_green`, `merged`),
+> исполняемые детерминированным реестром `src/playbook-validators.js`. Для шага 10
+> `command_exit_zero` и запускает команду, и валидирует её код возврата; шаги 11–13
+> проверяют уже созданные внешние артефакты (PR/CI/merge). Поле `runner` остаётся
+> отдельным предложением для действий, которые нужны *до* проверки.
 
 ---
 

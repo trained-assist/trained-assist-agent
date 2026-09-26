@@ -367,8 +367,10 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     runTask({
       taskId: `durable-${task.profile_id}-${item.id.slice(0, 8)}-${fireNow}`,
       user: { id: null, name: task.profile_id, username: task.profile_id, workDir },
-      task: prompt, forceClaude: true, engine: step.engine, secrets, internalGtd: true,
-      ocProfile: step.ocProfile || null, contextSkipModels: step.skipModels,
+      // P3b: forceClaude is only meaningful for a Claude step (it widens context +
+      // skips quick answers). An OpenCode step must not be treated as Claude.
+      task: prompt, forceClaude: step.engine === 'claude', engine: step.engine, secrets, internalGtd: true,
+      ocProfile: step.ocProfile || null, ocRole: step.ocRole || null, contextSkipModels: step.skipModels,
       stepTimeoutMs,
     }).then(async reply => {
       const said = typeof reply === 'string' ? reply : '';
