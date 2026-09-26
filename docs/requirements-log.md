@@ -211,6 +211,17 @@
 | ✅ реализовано | mode-aware без изменений валидаторов | Строгость уже закодирована при записи (P3d-1b LLM-вердикты; P3d-1c fast-pass skip = `pass` + `evidence {skipped:true, reason, mode}`). Гейт требует лишь `pass`, поэтому skip удовлетворяет его, но остаётся видимым в audit trail. |
 | ✅ реализовано | Тесты | Unit (`durable-task-store.test.js`): блок при missing/fail/inconclusive, pass всех строк, игнор строк другого `contract_revision`, fast-pass skip виден и проходит, `updateTask`/`completeTask` не обходят гейт, legacy-задачи не затронуты, критерий без declared-validations ничего не гейтит. Wiring (`gtd-durable-wiring.test.cjs` кейс 17): `runDueDurable` финализирует только через гейт; все items done + unmet validation → задача остаётся `active`. `NODE_ENV=development npx eslint src` → 0. |
 
+## 2026-09-26 — playbooks P3d follow-up: детерминированные programmatic-шаги + докрутка P3b роли (#1449)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | `playbooks/development.json` — детерминированная лексика | 4 programmatic-шага переведены на зарегистрированные ключи: «Run tests…» → `command_exit_zero: "npm run check && npm test"`, «Open PR» → `pr_opened`, «Wait for CI…» → `ci_green`, «Merge and deploy» → `merged`. Ключи `tests_lint_regression_green` (незарегистрированный) и вечно-`inconclusive` `ci_and_staging_green`/`merged_and_deployed` из плейбука убраны. |
+| ✅ реализовано | `pr_opened` валидатор | Детерминированный GitHub-валидатор в `src/playbook-validators.js`: (1) подтверждает существование PR из ссылки в шаге/цели; (2) ищет PR по `repo`+`head`-ветке из validation-спеки; (3) иначе определяет repo/ветку из git-checkout проекта (`defaultGitInfo`, инъектируемый). Нет токена/референса → `inconclusive`; нет PR → `fail`. Зарегистрирован в `createDefaultRegistry` (`gitInfo` тоже инъектируется). |
+| ✅ реализовано | Product decision — staging/deploy половины | Единого health-сигнала «staging/deploy зелёный» across репозиториев нет — эти половины убраны из контракта плейбука (сами валидаторы `ci_and_staging_green`/`merged_and_deployed` остаются в реестре). Живая проверка сценария — по-прежнему на агенте (шаг 14). Задокументировано в `docs/user-scenarios/engineering/01-development-playbook.md`. |
+| ✅ реализовано | P3b — `ocRole` доведён до рантайма | `_runTask` принимает `ocRole` (дефолт `build`): `buildEngineCommand` добавляет `--agent <role>` для OpenCode, лестница/`setLastOcModel`/`recordFailure`/`forceOpencodeAlternation` работают с ролью шага, а не жёстко `build`. Без переданного `ocRole` argv и поведение прежние. |
+| ✅ реализовано | P3b — `forceClaude` по движку | `runDueDurable` ставит `forceClaude: step.engine === 'claude'` (OpenCode-шаг больше не трактуется как Claude). Legacy durable (движок claude) — без изменений. |
+| ✅ реализовано | Тесты | Wiring кейс 18: реальный `playbooks/development.json` под `programmatic` с fake GitHub (`ghFetch`/`ghToken`/`gitInfo`) + fake `command_exit_zero`, без LLM — все 4 programmatic-вердикта `pass`, план финализируется, 12 agent-шагов, 0 LLM-вызовов. Кейс 19: `ocRole` доходит до `runTask` (researcher→explore, reviewer→review, doctor→claude) и `forceClaude` false для opencode/true для claude. Unit: `pr_opened` (5 кейсов), `--agent` в `native-resume-command.test.cjs`. Sim перезапущен (`docs/audits/playbook-prod-readiness-sim.out`). `NODE_ENV=development npx eslint src` → 0. |
+
 ## 2026-09-26 — OpenCode Go: пул ключей и ротация (основной + резервный)
 
 | Статус | Требование | Описание |
