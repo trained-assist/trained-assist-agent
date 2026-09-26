@@ -3,7 +3,7 @@
 //         scheduleFromChecklist, maybeSchedule, runDue progress-check.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createRequire } from 'module';
@@ -314,6 +314,17 @@ describe('scheduleFromChecklist', () => {
       try { rmSync(bigProj, { recursive: true, force: true }); } catch {}
     }
   });
+
+  it('takes originalTask from the active (newest) section, not the first Goal', async () => {
+    const G = freshG();
+    const wd = makeUserDir(baseDir, 'u1');
+    makeChecklist(projDir, 'Goal: old goal\n- [x] old done\n\nGoal: current goal\n- [ ] do it\n');
+    const rec = await G.scheduleFromChecklist({ workDir: wd, sessionId: 's-act', username: 'u1', projectDir: projDir });
+    expect(rec).not.toBeNull();
+    expect(rec.originalTask).toBe('current goal');
+    // maxIterations from the active section only: 1 unchecked → max(3, 3) = 3
+    expect(rec.maxIterations).toBe(G.DEFAULT_MAX_ITERATIONS);
+  });
 });
 
 // ── maybeSchedule ─────────────────────────────────────────────────────────────
@@ -504,6 +515,23 @@ describe('runDue — progress-check', () => {
     expect(after.status).toBe('closed');
     expect(after.closedReason).toBe('done');
   });
+
+  it('closes with awaiting-human (not escalated) when the run reports blocked-on-human', async () => {
+    const G = freshG();
+    const userDir = makeUserDir(baseDir, 'u1');
+    makeRec(userDir, { consecutiveNoProgress: 1 });
+
+    await G.runDue({
+      secrets: {}, baseUsersDir: baseDir, now: 200,
+      isTaskRunning: () => false,
+      getSession: () => ({ ownerChatId: '7', summary: {} }),
+      runTask: async () => 'осталось только живое подтверждение\nGTD: blocked-on-human',
+    });
+
+    const after = G.readGtd(userDir, 's-prog');
+    expect(after.status).toBe('closed');
+    expect(after.closedReason).toBe('awaiting-human');
+  });
 });
 
 // ── settleResumedGtd (GTD turn resumed after a restart) ───────────────────────
@@ -530,6 +558,14 @@ describe('settleResumedGtd', () => {
     G.writeGtd(workDir, rec());
     G.settleResumedGtd(workDir, 's-1', 'слишком сложно\nGTD: escalated');
     expect(G.readGtd(workDir, 's-1').closedReason).toBe('complexity-escalated');
+  });
+
+  it('closes with awaiting-human (not escalated) on GTD: blocked-on-human', () => {
+    G.writeGtd(workDir, rec());
+    G.settleResumedGtd(workDir, 's-1', 'дальше только живая проверка в чате\nGTD: blocked-on-human');
+    const after = G.readGtd(workDir, 's-1');
+    expect(after.status).toBe('closed');
+    expect(after.closedReason).toBe('awaiting-human');
   });
 
   it('keeps the record open and pushes dueAt out when not done', () => {
@@ -621,5 +657,132 @@ describe('mirrorGtdChecklist', () => {
       username: 'u1', sessionId: 's-1', checklist: { goal: 'g', items: [{ text: 'a', done: false }] }, rec: {},
     });
     expect(calls).toBe(1);
+  });
+});
+
+// ── readChecklist: multi-Goal journal (active section only) ───────────────────
+// Regression for the PR #1422 incident: a checklist.md accumulates one Goal
+// section per task (append-only). readChecklist used to glue ALL sections'
+// items and take the FIRST Goal, so GTD tracked a long-done goal and fed the
+// whole project backlog into the reopen prompt → the agent refused three times
+// and GTD closed complexity-escalated.
+
+describe('readChecklist — multi-Goal active section', () => {
+  let dir;
+  beforeEach(() => { dir = mkTmp(); });
+  afterEach(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
+
+  const MULTI = [
+    'Goal: old finished goal',      // 0
+    '- [x] old done 1',             // 1
+    '- [x] old done 2',             // 2
+    '',                             // 3
+    '## drift note',                // 4
+    '- [x] drift done',             // 5
+    '',                             // 6
+    'Goal: current goal',           // 7
+    '- [ ] current open 1',         // 8
+    '- [ ] current open 2',         // 9
+    '',                             // 10
+    'Goal: newest finished goal',   // 11
+    '- [x] newest done',            // 12
+  ].join('\n');
+
+  it('returns only the last section with items — not the first Goal, not glued', () => {
+    const G = freshG();
+    makeChecklist(dir, MULTI);
+    const cl = G.readChecklist(dir);
+    expect(cl.goal).toBe('newest finished goal');
+    expect(cl.items.map(i => i.text)).toEqual(['newest done']);
+  });
+
+  it('never mixes items from older sections into the active one', () => {
+    const G = freshG();
+    makeChecklist(dir, MULTI);
+    const cl = G.readChecklist(dir);
+    expect(cl.items.some(i => /old done|current open|drift/.test(i.text))).toBe(false);
+  });
+
+  it('records each item file line for exact write-back', () => {
+    const G = freshG();
+    makeChecklist(dir, MULTI);
+    const cl = G.readChecklist(dir);
+    expect(cl.items[0].line).toBe(12);
+  });
+
+  it('stays backward-compatible for a single-section checklist', () => {
+    const G = freshG();
+    makeChecklist(dir, 'Goal: only goal\n- [x] done\n- [ ] pending\n');
+    const cl = G.readChecklist(dir);
+    expect(cl.goal).toBe('only goal');
+    expect(cl.items.map(i => i.text)).toEqual(['done', 'pending']);
+  });
+
+  it('treats a flat checklist without any Goal as a single section', () => {
+    const G = freshG();
+    makeChecklist(dir, '- [ ] a\n- [x] b\n');
+    const cl = G.readChecklist(dir);
+    expect(cl.goal).toBeNull();
+    expect(cl.items.map(i => i.text)).toEqual(['a', 'b']);
+  });
+
+  it('falls back to the last declared goal when no checkbox exists', () => {
+    const G = freshG();
+    makeChecklist(dir, 'Goal: first\n\nGoal: second\n');
+    const cl = G.readChecklist(dir);
+    expect(cl.goal).toBe('second');
+    expect(cl.items).toEqual([]);
+  });
+});
+
+// ── writeChecklistDone: section isolation ─────────────────────────────────────
+// Line-addressed write-back is what makes the scoping safe: flipping by
+// sequential index would map the active section onto the first N checkboxes in
+// the file, i.e. clobber an older section.
+
+describe('writeChecklistDone — section isolation', () => {
+  let dir;
+  beforeEach(() => { dir = mkTmp(); });
+  afterEach(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
+
+  it('flips only the active section lines, leaving older sections untouched', () => {
+    const G = freshG();
+    makeChecklist(dir, 'Goal: old\n- [ ] old open\n\nGoal: new\n- [ ] new open\n');
+    const cl = G.readChecklist(dir); // active = 'new'
+    expect(cl.goal).toBe('new');
+    G.writeChecklistDone(dir, cl.items.map(i => ({ ...i, done: true })));
+    const raw = readFileSync(join(dir, 'checklist.md'), 'utf8');
+    expect(raw).toContain('- [ ] old open'); // older section not clobbered
+    expect(raw).toContain('- [x] new open');
+  });
+
+  it('preserves non-checkbox text (headings, Goal lines, notes)', () => {
+    const G = freshG();
+    makeChecklist(dir, 'Goal: keep me\nnote line\n- [ ] item\n');
+    const cl = G.readChecklist(dir);
+    G.writeChecklistDone(dir, cl.items.map(i => ({ ...i, done: true })));
+    const raw = readFileSync(join(dir, 'checklist.md'), 'utf8');
+    expect(raw).toContain('Goal: keep me');
+    expect(raw).toContain('note line');
+    expect(raw).toContain('- [x] item');
+  });
+
+  it('falls back to sequential order for items without a recorded line', () => {
+    const G = freshG();
+    makeChecklist(dir, '- [ ] one\n- [ ] two\n');
+    G.writeChecklistDone(dir, [{ text: 'one', done: true }, { text: 'two', done: false }]);
+    const raw = readFileSync(join(dir, 'checklist.md'), 'utf8');
+    expect(raw).toContain('- [x] one');
+    expect(raw).toContain('- [ ] two');
+  });
+});
+
+// ── buildReopenMessage: human-blocked terminal ────────────────────────────────
+
+describe('buildReopenMessage — blocked-on-human signal', () => {
+  it('tells the agent to signal blocked-on-human instead of escalating', () => {
+    const G = freshG();
+    const msg = G.buildReopenMessage({ iterations: 1, maxIterations: 4, originalTask: 'x', projectDir: null });
+    expect(msg).toContain('GTD: blocked-on-human');
   });
 });

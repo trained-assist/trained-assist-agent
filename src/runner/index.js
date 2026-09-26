@@ -5,11 +5,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { writeMcpConfig } = require('../browser');
+const { getDefaultSourceRuntime } = require('../mcp-source-runtime');
 const sessions = require('../session-store');
 const { getCurrentSessionId, setCurrentSessionId } = require('../session-store');
 const projects = require('../projects');
 const { isAuthError, setAuthFailedFlag, clearAuthFailedFlag } = require('../auth-flag');
-const { isTerminalQuickCrash } = require('../engine-crash-policy');
+const { isTerminalQuickCrash, engineFallbackNotice, engineAuthNotice } = require('../engine-crash-policy');
 const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
 const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
@@ -815,8 +816,8 @@ function _hasProactiveResults(dataDir, username, vacancyId) {
 // actualModel: the model the just-finished run really used (claudeModel from the engine
 // stream). Optional — callers that don't have it (tests, older paths) fall back to env.
 function buildContextCard(username, workDir, chatId, actualModel = null, threadId = null) {
-  const services = username ? listConnectedServices(username) : [];
-  if (!services || !services.length) return null;
+  // Built even with nothing connected: the card always carries the chat's current project.
+  const services = (username && listConnectedServices(username)) || [];
 
   // Build service labels, merging inline details where available
   const gcConfig = path.join(TOKENS_ROOT, String(username), 'getcourse', 'config.json');
@@ -834,18 +835,23 @@ function buildContextCard(username, workDir, chatId, actualModel = null, threadI
   const illustrateFlagPath = path.join(workDir, 'contexts', 'illustrate', '.enabled');
   if (fs.existsSync(illustrateFlagPath)) serviceLabels.push('🎨 иллюстрации');
 
-  const lines = ['📌 Контекст', '', `🔗 Подключено: ${serviceLabels.join(' · ')}`];
+  const lines = ['📌 Контекст', ''];
 
-  // Chat's project (issue #1312, «чат = проект»): every new session of this chat goes
-  // into it. Pinned = explicit user choice; otherwise the last-used one.
+  // Chat's CURRENT project — first line of the card. The bot never asks which project
+  // (owner decision 2026-09-26): silence keeps it, /project changes it.
   try {
-    // Show the line ONLY when a new session really goes there without asking (#1318):
-    // pinned, or the profile's single project. ≥2 projects and no pin → the bot will ask,
-    // so a «📁 Проект» line would be a lie.
     const d = chatId ? projects.decideNewSessionProject(workDir, chatId, undefined, undefined, threadId) : null;
     const pmeta = d && d.action === 'auto' ? d.project : null;
-    if (pmeta) lines.push(`📁 Проект: ${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''} · сменить: /project`);
+    const name = pmeta ? `${pmeta.name}${pmeta.type && pmeta.type !== 'generic' ? ` · ${pmeta.label}` : ''}` : (d ? projects.DEFAULT_PROJECT_NAME : null);
+    // Brand-new profile (no project yet, nothing connected): no card — a /ping must not
+    // spawn a pinned message. The first real run creates «Все подряд», then the card shows.
+    if (!pmeta && !serviceLabels.length) return null;
+    if (name) {
+      lines.push(`📁 Проект: ${name}`);
+      lines.push('/project — список, перейти на другой, добавить новый');
+    }
   } catch (e) { console.warn('[runner] project pin line:', e.message); }
+  if (serviceLabels.length) lines.push(`🔗 Подключено: ${serviceLabels.join(' · ')}`);
 
   // HH: active vacancy(ies) + ATS config / scoring status.
   // A profile can track several vacancies at once (active_vacancies[], see 90-hh.js);
@@ -1372,16 +1378,18 @@ function resolveRunSession(sessions, getCurrent, { workDir, sessionId, chatId, a
       // foreign session as unavailable here and fall through to THIS chat's own current
       // session, or start fresh. The foreign session is left untouched so the other chat
       // keeps its context. liveChatId (was ownerChatId): read-compat with pre-rename files.
+      // Same for forum topics (#1409): the conversation is the pair (Telegram chat,
+      // message_thread_id) — a session of a sibling topic in the same group is foreign too.
       const attachedChatId = existing.liveChatId ?? existing.ownerChatId;
-      if (attachedChatId && String(attachedChatId) !== String(chatId)) {
+      if (!sessions.belongsToConversation(existing, chatId, threadId)) {
         activeSessionId = null;
       } else {
         // Legacy / unattached session (#489): a null liveChatId would otherwise let ANY
-        // chat adopt it and mix contexts. Claim it for the current chat on first touch.
-        if (!attachedChatId && chatId) {
-          sessions.claimLiveChatId(workDir, sessionId, chatId);
+        // chat adopt it and mix contexts. Claim it for the current chat (and topic) on first touch.
+        if (chatId && (!attachedChatId || sessions.threadOf(existing) === undefined)) {
+          sessions.claimLiveChatId(workDir, activeSessionId, chatId, sessions.normThreadId(threadId));
         }
-        contextSessionId = sessionId;
+        contextSessionId = activeSessionId;
       }
     }
   }
@@ -1390,7 +1398,11 @@ function resolveRunSession(sessions, getCurrent, { workDir, sessionId, chatId, a
     // No usable explicit session (none given, or a foreign one was dropped above) —
     // continue the most recent one for THIS chat (within 4h), or start a fresh session.
     const currentId = getCurrent(workDir, chatId, audience, threadId);
-    if (currentId && sessions.getSession(workDir, currentId)) {
+    const current = currentId && sessions.getSession(workDir, currentId);
+    if (current && (!chatId || sessions.belongsToConversation(current, chatId, threadId))) {
+      if (chatId && sessions.threadOf(current) === undefined) {
+        sessions.claimLiveChatId(workDir, currentId, chatId, sessions.normThreadId(threadId));
+      }
       activeSessionId = currentId;
       contextSessionId = currentId;
     }
@@ -1430,7 +1442,7 @@ function scheduleGtdAfterRun({ internalGtd, activeSessionId, explicitMode, task,
     .catch(e => { console.warn('[gtd] schedule:', e.message); return null; });
 }
 
-async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, webExactSession = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false }) {
+async function _runTask({ taskId, user, task: rawTask, context, engine: acceptedEngine = null, userMessageRecorded = false, initiatedAt = null, threadId = null, sessionId, contextFromSession, forceClaude, forceNew = false, webExactSession = false, initialMsgId, pinnedMsgId, secrets, continuationCount = 0, retryCount = 0, outputCallback = null, internalGtd = false, mode = null, projectId = null, projectPicked = false, newProjectName = null, engineFallbackDone = false, ladderAttempt = 0, contextSkipModels = [], resumedAfterRestart = false, resumeAttempts = 0, incompleteRetryAttempts = 0, executionId = randomUUID(), lastAttemptError = null, resumeSessionId = null, resumeFallbackDone = false, stepTimeoutMs = null, ocProfile: forcedOcProfile = null }) {
   // Strip @botname suffix from slash commands once at intake so all INTENT regexes match cleanly.
   let task = rawTask ? rawTask.replace(/^(\/\S+?)@\S+/, '$1') : rawTask;
   // Явный режим ответа из inline-кнопки: 'deep' (⏻ проработка, sticky) | 'clarify'
@@ -1500,6 +1512,18 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (sourceCtx) sessionContext = context ? `${sourceCtx}\n\n${context}` : sourceCtx;
   }
 
+  // Fresh session in a chat with recent history (4h window expired / new topic):
+  // session-scoped context is empty, so without this the model has no idea what
+  // the user said an hour ago in the SAME chat ("с той задачей разобрались…").
+  // Compact reference block of the chat's last 24h across its other sessions.
+  if (!sessionExists && !contextFromSession && chatId && !webExactSession) {
+    try {
+      const recentBlock = require('../chat-history').buildRecentChatBlock(
+        path.join(user.workDir, 'sessions'), chatId, { excludeSessionId: activeSessionId, threadId: sessions.normThreadId(threadId) });
+      if (recentBlock) sessionContext = sessionContext ? `${recentBlock}\n\n${sessionContext}` : recentBlock;
+    } catch (e) { console.warn('[runner] recent chat block:', e.message); }
+  }
+
   // ── Project binding (always on — no opt-in gate) ────────────────────────────
   // Every session lives inside a typed PROJECT (see projects.js): its cwd is the
   // project folder and the project's PROFILE.md domain rules fold into the system
@@ -1509,9 +1533,8 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // Continuing session -> keep the project stored on the session (never re-ask).
   // New session:
   //   - gateway already resolved the choice -> opts.projectId is passed in -> bind it.
-  //   - otherwise decideNewSessionProject: auto (1 project) / create default (0) /
-  //     ask (≥2, gateway should have asked first) -> safe fallback to active/most-recent
-  //     so we never block silently here.
+  //   - otherwise decideNewSessionProject: pinned → last used → default «Все подряд»
+  //     (created if missing). Never asks; the result becomes the chat's current project.
   let boundProjectId = null;
   let pinProject = false; // explicit user choice → becomes the chat's pinned project (#1312)
   try {
@@ -1800,8 +1823,32 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // the system prompt is folded into the prompt text instead.
   const engine = acceptedEngine || profiles.getEngine(user.workDir, chatId);
 
+  // Host MCP source runtime (PR2b, issue #1358): inert unless MCP_SKILL_SOURCES_CONFIG
+  // names an enabled source — prepareRun() is then a no-op returning null, so
+  // production behaviour is unchanged until an admin activates a source. When active,
+  // it materializes per-run adapter server descriptors (a revocable broker capability
+  // scoped to this one run) that get merged into the engine's .mcp.json below.
+  const sourceRuntime = getDefaultSourceRuntime();
+  let sourceRun = null;
+  if (sourceRuntime.enabled) {
+    try {
+      sourceRun = await sourceRuntime.prepareRun({
+        hostRunBinding: {
+          engineRunId: taskId, rootTaskId: taskId, profileId: user.username,
+          projectId: boundProjectId || null, trigger: 'user',
+          origin: (!user.id || user.id === 0) ? 'web' : 'telegram',
+          resourceBindingVersion: 'v1',
+        },
+        runtimeDir: path.join(user.workDir, '.mcp-runs', taskId),
+      });
+    } catch (e) { console.warn('[runner] mcp source runtime prepareRun:', e.message); }
+  }
+
   // Write per-user MCP config — gives Claude access only to this user's Chrome profile
-  const mcpConfig = writeMcpConfig(user.workDir, user.username, { userName: user.name, userHandle: user.username, sessionFilePath });
+  // (plus any per-run adapter servers materialized above).
+  const mcpConfig = writeMcpConfig(user.workDir, user.username, {
+    userName: user.name, userHandle: user.username, extraServers: sourceRun?.servers,
+  });
 
   // Strip ANTHROPIC_API_KEY so Claude uses OAuth from ~/.claude/.credentials.json.
   // The API key account is out of credits; OAuth (Mac subscription) has no per-token billing.
@@ -1883,7 +1930,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   let ocProfileIsDeepseek = false;
   if (engine === 'opencode') {
     try {
-      ocProfileName = profiles.getOcProfile(user.workDir);
+      // P3b: a durable step may pin an explicit OpenCode profile from its contract
+      // (bachelor/master → value/max). Otherwise the profile's own choice wins.
+      ocProfileName = forcedOcProfile || profiles.getOcProfile(user.workDir);
       ocProfileIsDeepseek = ocProfileName === 'deepseek';
       if (ocProfileIsDeepseek) ocProfileName = opencodeGoToggle.resolveProfileName();
       ocProfileOverrides = opencodeLadder.buildOcProfileOverrides(ocProfileName, undefined, { skipModels: contextSkipModels });
@@ -1909,29 +1958,42 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // and the progress edits; this block interprets its result: on timeout →
   // auto-continuation (needs runTask recursion, so it stays in the runner),
   // otherwise the post-processing below (retry, incomplete detection, usage).
-  const engineResult = await runEngineProcess({
-    engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
-    cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
-    restartShutdown: () => restartShutdown,
-    activeTimers, tgEdit, tgSend, outputCallback,
-    consumePendingStop: () => consumePendingStop(user.username, activeSessionId),
-    engineBin, engineArgs, mcpConfig, ocProfileOverrides,
-    cwd: codeCwd,
-    // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
-    // same 30s tick claude-runner.js already runs for the inactivity check, so a
-    // future watchdog (step 2+) can tell "still alive, just slow" apart from "the
-    // OS process died and nobody ever wrote a terminal state". savePendingTask does
-    // a partial merge ({...previous, ...params}) so this only touches the one field.
-    onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
-    // Persist the engine's native session id the moment it appears (#1234): to the durable
-    // session record (source of truth for resume) AND the pending journal (read by
-    // resumePendingTasks before the session is loaded). Written mid-run so a deploy SIGKILL
-    // can't lose it — that is exactly the restart case resume exists for.
-    onEngineSessionId: (sid) => {
-      if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
-      savePendingTask(taskId, { engineSessionId: sid, engine });
-    },
-  });
+  let engineResult;
+  try {
+    engineResult = await runEngineProcess({
+      engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
+      cleanEnv, userTokens, sessionFilePath, sessionId: activeSessionId,
+      restartShutdown: () => restartShutdown,
+      activeTimers, tgEdit, tgSend, outputCallback,
+      consumePendingStop: () => consumePendingStop(user.username, activeSessionId),
+      engineBin, engineArgs, mcpConfig, ocProfileOverrides,
+      cwd: codeCwd,
+      // Watchdog step 1a (issue #942 [011]): heartbeat the pending-task journal on the
+      // same 30s tick claude-runner.js already runs for the inactivity check, so a
+      // future watchdog (step 2+) can tell "still alive, just slow" apart from "the
+      // OS process died and nobody ever wrote a terminal state". savePendingTask does
+      // a partial merge ({...previous, ...params}) so this only touches the one field.
+      onHeartbeat: () => savePendingTask(taskId, { lastHeartbeatAt: Date.now() }),
+      // Persist the engine's native session id the moment it appears (#1234): to the durable
+      // session record (source of truth for resume) AND the pending journal (read by
+      // resumePendingTasks before the session is loaded). Written mid-run so a deploy SIGKILL
+      // can't lose it — that is exactly the restart case resume exists for.
+      onEngineSessionId: (sid) => {
+        if (activeSessionId) sessions.setEngineSessionId(user.workDir, activeSessionId, engine, sid);
+        savePendingTask(taskId, { engineSessionId: sid, engine });
+      },
+      // P3a: a durable step's declared wall-clock budget. undefined/null keeps the
+      // historical fixed 40-min cap.
+      timeoutMs: stepTimeoutMs,
+    });
+  } finally {
+    // The engine process has exited (or failed to start) by the time runEngineProcess
+    // settles — release the run's broker capability + materialized adapter files right
+    // away rather than holding them until _runTask's (many) later return points. A
+    // timeout continuation re-runs runTask with a new taskId, so it gets its own
+    // prepareRun/release cycle — this one's job ends here regardless of outcome.
+    if (sourceRun) sourceRun.release();
+  }
   const {
     fullOutput, lastAssistantMsg, claudeResult, claudeErrorText, engineSessionId, terminalSuccess,
     claudeUsage, opencodeUsage, opencodeBreakdown, claudeModel,
@@ -1951,6 +2013,21 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     if (activeSessionId && partialText) {
       sessions.appendReply(user.workDir, activeSessionId, `[${inactivityKill ? 'прервано: молчал 5 мин' : 'прервано таймаутом'}]\n${partialText}`);
       setCurrentSessionId(user.workDir, activeSessionId, chatId, audience, threadId);
+    }
+
+    // P3a durable step: a run carrying its own `stepTimeoutMs` is a single step
+    // with a declared budget + its own retry budget (max_attempts), owned by the
+    // durable executor. Never auto-continue it 10× — overrunning the step budget
+    // is a step failure. Returning no DURABLE marker lets runDueDurable's failure
+    // branch fail the item and retry per max_attempts.
+    if (stepTimeoutMs) {
+      _recordFailureAttempt(executionId, {
+        taskId, projectId, sessionId: activeSessionId, engine,
+        errorText: `step timeout: ${Math.round(stepTimeoutMs / 1000)}s budget exhausted`,
+        action: 'step_failed',
+      });
+      executionHistory.finalizeExecution(executionId, 'FAILED');
+      return;
     }
 
     if (continuationCount < MAX_CONTINUATIONS) {
@@ -2202,26 +2279,32 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // the ladder never degrades, even though the raw error was a clean quota hit.
   const preLadderText = codexErrorMsg || claudeResult || fullOutput.text || result;
 
-  // Shared "deepseek" OpenCode profile (issue #1096): flip the VM-wide go/openrouter toggle
-  // instead of the per-role ladder above — deepseek-go/deepseek-openrouter are each a single
-  // uniform model (no ladder to degrade through within the profile), and the Go subscription's
-  // quota is account-wide across the whole team, not per-model, so "try the next rung" doesn't
-  // apply here the way it does for max/value. A successful flip retries the SAME task; the
-  // retry re-resolves the "deepseek" profile (see ocProfileIsDeepseek above) and picks up
+  // Shared "deepseek" OpenCode profile (issue #1096): on a Go quota hit, degrade the gateway —
+  // first rotate to a spare service-account key (opencode-go-keys.js) and stay on Go; only once
+  // every key is exhausted flip the VM-wide go/openrouter toggle. deepseek-go/deepseek-openrouter
+  // each carry a real ladder now, but the Go subscription's quota is account-wide per key across
+  // the whole team, not per-model, so "try the next rung" doesn't apply here the way it does for
+  // max/value. A successful rotation/flip retries the SAME task; the retry re-resolves the
+  // "deepseek" profile (see ocProfileIsDeepseek above) and picks up the new key or
   // deepseek-openrouter. Falls through to the generic ladder block below when the failure isn't
   // a Go-quota hit (e.g. the OpenRouter side itself failed) so it's still reported normally.
   if (engine === 'opencode' && ocProfileIsDeepseek) {
     const failedModel = ocProfileOverrides?.model;
     const flipped = opencodeGoToggle.noteFailure(failedModel, preLadderText);
     if (flipped && ladderAttempt < opencodeLadder.MAX_LADDER_ATTEMPTS) {
+      // Still on Go ⇒ noteFailure rotated to a spare key (service-account key pool); otherwise it
+      // gave up on the gateway and flipped to OpenRouter. Message must match which one happened.
+      const onGo = opencodeGoToggle.getMode() === 'go';
       const newProfile = opencodeGoToggle.resolveProfileName();
-      const switchMsg = `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
+      const switchMsg = onGo
+        ? `⚠️ OpenCode Go (${failedModel}) исчерпал лимит ключа — переключаюсь на резервный ключ Go, пробую снова.`
+        : `⚠️ OpenCode Go (${failedModel}) исчерпал лимит — общий тумблер на этой VM переключён на OpenRouter (профиль «deepseek» → ${newProfile}), пробую снова. Автовозврат на Go через ~5ч или вручную: /oc_go.`;
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, switchMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, switchMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, switchMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, switchMsg);
       _recordFailureAttempt(executionId, {
         taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: failedModel,
-        errorText: preLadderText, action: 'deepseek_go_toggle_flip',
+        errorText: preLadderText, action: onGo ? 'deepseek_go_key_rotation' : 'deepseek_go_toggle_flip',
       });
       const queuedRetry = runTask({
         initiatedAt, threadId,
@@ -2380,7 +2463,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
     const engineLabel = engine === 'codex' ? 'Codex' : engine === 'opencode' ? 'OpenCode' : 'Claude Code';
 
     if ((engine === 'claude' || engine === 'codex') && !engineFallbackDone) {
-      const fallbackMsg = `⚠️ ${engineLabel} потерял авторизацию — автоматически переключаюсь на OpenCode для этой задачи.`;
+      const fallbackMsg = engineFallbackNotice(engineLabel, authClass);
       if (msgId) await tgEdit(BOT_TOKEN, chatId, msgId, fallbackMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId));
       else await tgSend(BOT_TOKEN, chatId, fallbackMsg, threadId);
       if (activeSessionId) sessions.appendReply(user.workDir, activeSessionId, fallbackMsg);
@@ -2408,7 +2491,7 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       return { queuedRetry };
     }
 
-    const authMsg = `⚠️ Авторизация ${engineLabel} истекла — оператор уже уведомлён, скоро починим.`;
+    const authMsg = engineAuthNotice(engineLabel, authClass);
     if (msgId) {
       await tgEdit(BOT_TOKEN, chatId, msgId, authMsg, { reply_markup: { inline_keyboard: inputInspectionRows(initialMsgId, activeSessionId) } }).catch(() => tgSend(BOT_TOKEN, chatId, authMsg, threadId));
     } else {
@@ -2591,7 +2674,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   const contextDisabled = fs.existsSync(path.join(user.workDir, '.context_disabled'));
   if (!contextDisabled) {
     const card = buildContextCard(user.username, user.workDir, chatId, claudeModel, threadId);
-    if (card) updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
+    // Awaited (after the answer is already delivered): the run ends with the card settled,
+    // so no card send leaks past the run — every user now has a project card.
+    if (card) await updateContextPin(BOT_TOKEN, chatId, user.workDir, card, pinnedMsgId, threadId).catch(() => {});
   }
 
   // Schedule durable GTD checks after terminal delivery (extracted to

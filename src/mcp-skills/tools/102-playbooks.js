@@ -1,12 +1,45 @@
 'use strict';
 
-// MCP surface for the Playbook registry (Playbook v1, issue #1372 — slice P0).
-// Read-only: list visible playbooks and get a full playbook + prompt render.
-// Authoring (playbook_draft/edit/save) and execution (playbook_run) are later
-// slices and deliberately absent here. Resolution is profile custom → domain
-// sibling repo → system repo; see src/playbook-store.js for the rules.
+// MCP surface for Playbooks (Playbook v1, issue #1372).
+//   P0: playbook_list / playbook_get (read-only registry).
+//   P1: playbook_draft / playbook_edit / playbook_save (authoring via Hermes).
+//   P2: playbook_run (compile a playbook + goal into a durable draft plan).
+// Resolution is profile custom → domain sibling repo → system repo; see
+// src/playbook-store.js. Authoring follows the flow draft → (edit)* → save:
+// the draft is a durable profile-scope file, save() validates it and promotes
+// it to ~/users/<profile>/playbooks/<id>.json with a bumped version. Repo
+// ("system") playbooks are immutable here — they change through a PR.
+// Execution itself (activating/running a plan) is a later slice.
 
-const { PlaybookStore, renderPlaybook } = require('../../playbook-store');
+const { PlaybookStore, renderPlaybook, playbookError } = require('../../playbook-store');
+const { createPlaybookAuthoring } = require('../../playbook-authoring');
+const { compilePlaybook } = require('../../playbook-compiler');
+
+const authoring = createPlaybookAuthoring();
+
+// Authoring rejects a missing profile loudly; playbook_run must do the same so
+// an unscoped call can never resolve a different profile's playbooks.
+function requireUser(ctx) {
+  const username = ctx && ctx.userId;
+  if (typeof username !== 'string' || !username.trim()) {
+    throw playbookError('USER_REQUIRED', 'username (profile id) обязателен');
+  }
+  return username;
+}
+
+// Forward ALL arguments (args AND ctx) — dropping ctx silently sent
+// username=undefined into the authoring layer, which wrote into a literal
+// "users/undefined/" profile. Caught by the live smoke test.
+function safe(fn) {
+  return async (...allArgs) => {
+    try {
+      return await fn(...allArgs);
+    } catch (error) {
+      if (error && error.code) return { error: error.message, code: error.code };
+      throw error;
+    }
+  };
+}
 
 module.exports = {
   tools: {
@@ -23,21 +56,137 @@ module.exports = {
     playbook_get: {
       description:
         'Get a full playbook by id (optionally pinned to an exact version) plus a human-readable prompt render. ' +
+        'Pass draft=true to read an unsaved authoring draft instead of the resolved playbook. ' +
         'Resolution: profile custom → domain sibling repo → system repo. Read-only.',
       inputSchema: {
         type: 'object',
-        required: ['id'],
         properties: {
           id: { type: 'string', description: 'Playbook id, e.g. "development"' },
           version: { type: 'integer', minimum: 1, description: 'Pin an exact version; omit for the resolved one' },
+          draft: { type: 'boolean', description: 'Read the unsaved draft of this id (authoring), not the saved playbook' },
           vars: { type: 'object', description: 'Optional template values for {goal}, {error}, ... used only in the render' },
         },
+        required: ['id'],
       },
-      handler: async ({ id, version, vars }, ctx) => {
+      handler: async ({ id, version, draft, vars }, ctx) => {
+        if (draft) {
+          const stored = authoring.readDraft(ctx?.userId, id);
+          if (!stored) return { error: `draft not found: ${id}` };
+          return { draft: stored, render: renderPlaybook(stored, vars || {}) };
+        }
         const playbook = new PlaybookStore({ profileId: ctx?.userId }).get(id, version);
         if (!playbook) return { error: `playbook not found: ${id}` };
         return { playbook, render: renderPlaybook(playbook, vars || {}) };
       },
+    },
+
+    playbook_draft: {
+      description:
+        'Author a new Playbook v1 from a natural-language process description: Hermes rewrites it into the ' +
+        'validated playbook contract (house meta-patterns: mandatory machine-checkable validation per agent step, ' +
+        'executor role/model-level/budget instead of concrete models, programmatic steps for objective checks). ' +
+        'Returns the draft (profile scope) + prompt render; the draft is stored durably, nothing is promoted to a ' +
+        'real playbook until playbook_save. Use based_on to start from an existing playbook.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          description: { type: 'string', description: 'The process described in the user’s own words' },
+          based_on: { type: 'string', description: 'Optional existing playbook id to start from' },
+          model: { type: 'string', description: 'Optional OpenRouter fallback model for Hermes' },
+          vars: { type: 'object', description: 'Optional template values used only in the render' },
+        },
+        required: ['description'],
+      },
+      handler: safe(({ description, based_on, model, vars }, ctx) =>
+        authoring.draft({ username: ctx?.userId, description, based_on, model, vars })),
+    },
+
+    playbook_edit: {
+      description:
+        'Edit an existing playbook (or its unsaved draft) from a natural-language instruction, via Hermes. ' +
+        'Returns the updated draft, a prompt render and a structural diff. Editing a system playbook produces a ' +
+        'profile-scope draft that overrides it once saved — the repo file is never touched.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          playbook_id: { type: 'string', description: 'Playbook id (or draft id) to edit' },
+          instruction: { type: 'string', description: 'What to change, in the user’s own words' },
+          model: { type: 'string', description: 'Optional OpenRouter fallback model for Hermes' },
+          vars: { type: 'object', description: 'Optional template values used only in the render' },
+        },
+        required: ['playbook_id', 'instruction'],
+      },
+      handler: safe(({ playbook_id, instruction, model, vars }, ctx) =>
+        authoring.edit({ username: ctx?.userId, playbook_id, instruction, model, vars })),
+    },
+
+    playbook_save: {
+      description:
+        'Promote an authoring draft to a saved custom playbook in the caller profile ' +
+        '(~/users/<profile>/playbooks/<id>.json), validating it and bumping its version above any playbook it ' +
+        'overrides. Repo ("system") playbooks cannot be saved here — they change through a PR. The draft is ' +
+        'consumed on success.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          playbook_id: { type: 'string', description: 'Id of the draft to save' },
+          vars: { type: 'object', description: 'Optional template values used only in the render' },
+        },
+        required: ['playbook_id'],
+      },
+      handler: safe(({ playbook_id, vars }, ctx) =>
+        authoring.save({ username: ctx?.userId, playbook_id, vars })),
+    },
+
+    playbook_run: {
+      description:
+        'Compile a saved Playbook v1 into a concrete durable plan: bind the playbook to a goal, render every step, pin ' +
+        '{playbook_id, playbook_version} and persist one draft plan through the same atomic task_create path ' +
+        '(user_value rendered from the template; acceptance_criteria derived from the step validations when omitted). ' +
+        'The result is a DRAFT plan — stored, not executed; editing the playbook later never mutates a plan already pinned ' +
+        'to its version. Repo/draft playbooks must be saved first (resolution sees saved playbooks only).',
+      inputSchema: {
+        type: 'object',
+        required: ['playbook_id', 'goal'],
+        properties: {
+          playbook_id: { type: 'string', description: 'Saved playbook id, e.g. "development"' },
+          goal: { type: 'string', description: 'Concrete goal for this run (substituted into {goal}/{input})' },
+          version: { type: 'integer', minimum: 1, description: 'Pin an exact version; omit for the resolved one' },
+          user_value: { type: 'string', description: 'Override the rendered user_value_template' },
+          acceptance_criteria: { type: 'array', minItems: 1, items: { type: 'object' }, description: 'Goal-specific criteria; derived from step validations when omitted' },
+          vars: { type: 'object', description: 'Extra template values for {placeholder} rendering' },
+          project_id: { type: 'string', description: 'Optional project to bind the plan (and its checklist.md projection) to' },
+          session_id: { type: 'string', description: 'Optional session to attach the plan to' },
+        },
+      },
+      handler: safe(async ({ playbook_id, goal, version, user_value, acceptance_criteria, vars, project_id, session_id }, ctx) => {
+        const profileId = requireUser(ctx);
+        const playbook = new PlaybookStore({ profileId }).get(playbook_id, version);
+        if (!playbook) throw playbookError('PLAYBOOK_NOT_FOUND', `плейбук «${playbook_id}» не найден`);
+        const compiled = compilePlaybook(playbook, { goal, vars, acceptance_criteria, user_value });
+        // Persist through task_create so reference checks, the atomic SQLite
+        // transaction and the checklist projection stay in one place.
+        const { task_create } = require('./101-durable-tasks').tools;
+        const persisted = await task_create.handler({
+          goal: compiled.goal,
+          user_value: compiled.user_value,
+          acceptance_criteria: compiled.acceptance_criteria,
+          items: compiled.items,
+          playbook_id: playbook.id,
+          playbook_version: playbook.version,
+          project_id: project_id || undefined,
+          session_id: session_id || undefined,
+        }, ctx);
+        return {
+          task: persisted.task,
+          items: persisted.items,
+          projection: persisted.projection,
+          projection_warning: persisted.projection_warning,
+          playbook: { id: playbook.id, version: playbook.version, scope: playbook.scope, source: playbook.source },
+          summary: { stages: playbook.stages.length, items: compiled.items.length },
+          render: renderPlaybook(playbook, { ...(vars || {}), input: goal, goal }),
+        };
+      }),
     },
 
   },

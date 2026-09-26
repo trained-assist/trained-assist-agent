@@ -10,7 +10,8 @@
 //
 // Workflow:
 //   1. ba_clarify_requirements / ba_write_spec (62-business-analyst.js) — before any of this
-//   2. dev_workspace_setup — clone repo to agent-data/dev/<owner>_<repo>/
+//   2. dev_workspace_setup — spawn an isolated per-task git worktree via the sibling
+//      trained-assist-engineering workspace library (engineering_spawn_workspace)
 //   3. Claude edits files with native Read/Edit/Write tools
 //   4. Claude runs tests via bash (npm test, pytest, etc.)
 //   5. Claude commits + pushes via bash; creates PR via github_create_pr
@@ -18,15 +19,11 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { readTokenValue } = require('../../token-value');
 const os   = require('os');
 const { spawnSync } = require('child_process');
 
 const USER_ID = process.env.USER_ID || '';
-
-function getDevDir() {
-  const dataDir = process.env.AGENT_DATA_DIR || path.join(os.homedir(), 'agent-data');
-  return path.join(dataDir, 'dev');
-}
 
 function getToken() {
   const tok = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
@@ -34,7 +31,7 @@ function getToken() {
   if (USER_ID) {
     try {
       const p = path.join(os.homedir(), 'agent-tokens', USER_ID, 'github');
-      if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+      if (fs.existsSync(p)) return readTokenValue(fs.readFileSync(p, 'utf8'));
     } catch {}
   }
   throw new Error('GitHub токен не подключён. Вызови connect({ service: "github" }) чтобы получить ссылку для ввода токена.');
@@ -75,6 +72,121 @@ function run(cmd, args, opts = {}) {
   return (result.stdout || '').trim();
 }
 
+// ---------------------------------------------------------------------------
+// Isolated per-task workspaces (issue #1418, D1)
+//
+// `dev_workspace_setup` no longer clones into one shared per-VM tree.
+// It delegates to the sibling trained-assist-engineering workspace library
+// (`spawnWorkspaceForTask`), which forks an isolated git worktree + branch
+// (`eng/<principal>-<rootTaskId>`) off a per-repository mirror. One workspace per
+// (principal, repository, rootTaskId) — two tasks never share a tree or branch.
+// ---------------------------------------------------------------------------
+
+// Default location of the sibling checkout. `ENGINEERING_WORKSPACE_LIB` is a
+// test seam (mirrors registry.js's TOOLS_DIR override) so the redirect wiring can
+// be exercised without the sibling cloned; production always uses the default.
+function engineeringLibPath() {
+  return process.env.ENGINEERING_WORKSPACE_LIB
+    || path.join(__dirname, '..', '..', '..', '..', 'trained-assist-engineering', 'src', 'workspace');
+}
+
+// Required lazily: a missing sibling must not crash the whole MCP server at
+// require time — only the call that actually needs it fails, with a clear error.
+function spawnWorkspaceForTask(deps) {
+  let lib;
+  try {
+    lib = require(engineeringLibPath());
+  } catch (e) {
+    throw new Error(`engineering workspace library unavailable (${engineeringLibPath()}): ${e.message}`);
+  }
+  return lib.spawnWorkspaceForTask(deps);
+}
+
+// `owner/repo` → clone URL; a full git URL or local path is passed through as-is
+// (lets tests and on-VM local mirrors work without a GitHub round-trip).
+function repositoryUrlOf(repo) {
+  if (/^(?:[a-z][a-z0-9+.-]*:\/\/|git@|\/)/i.test(repo)) return repo;
+  return `https://github.com/${repo}.git`;
+}
+
+// The engineering library clones with whatever git credentials the process has.
+// Rather than embedding the token in a persisted remote URL (the leak #1418
+// removes), inject it for the duration of the synchronous spawn as an ephemeral
+// git credential helper: token stays in env, never on disk. Reset the helper
+// list first so an inherited global helper cannot shadow this profile's token.
+const GIT_TOKEN_HELPER = '!f() { test "$1" = get && printf "username=x-access-token\\npassword=%s\\n" "$AGENT_GIT_TOKEN"; }; f';
+
+function withGitCredentials(token, fn) {
+  if (!token) return fn();
+  const overrides = {
+    GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_CONFIG_VALUE_0: '',
+    GIT_CONFIG_KEY_1: 'credential.helper',
+    GIT_CONFIG_VALUE_1: GIT_TOKEN_HELPER,
+    AGENT_GIT_TOKEN: token,
+  };
+  const saved = {};
+  for (const key of Object.keys(overrides)) {
+    saved[key] = process.env[key];
+    process.env[key] = overrides[key];
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function spawnTaskWorkspace({ repositoryUrl, rootTaskId, token }) {
+  if (!USER_ID) throw new Error('Не удалось определить профиль (USER_ID) для изолированного workspace.');
+  return withGitCredentials(token, () => spawnWorkspaceForTask({
+    principal: USER_ID,
+    repositoryUrl,
+    rootTaskId,
+    workspaceRoot: process.env.ENGINEERING_WORKSPACE_ROOT || undefined,
+    mirrorsRoot: process.env.ENGINEERING_MIRRORS_ROOT || undefined,
+  }));
+}
+
+function prepareWorkspace(codePath) {
+  run('git', ['config', 'user.email', 'agent@recruiter-assistant.ru'], { cwd: codePath });
+  run('git', ['config', 'user.name', 'AI Agent'], { cwd: codePath });
+  // Useful on its own (not part of the isolation fix) — kept from the old flow.
+  installGitHooks(codePath);
+}
+
+function detectDependencies(wsPath) {
+  let deps = 'none';
+  const depsLog = [];
+  if (fs.existsSync(path.join(wsPath, 'package.json'))) {
+    const pkgManager = fs.existsSync(path.join(wsPath, 'yarn.lock')) ? 'yarn' :
+                       fs.existsSync(path.join(wsPath, 'pnpm-lock.yaml')) ? 'pnpm' : 'npm';
+    try {
+      run(pkgManager, pkgManager === 'npm' ? ['ci', '--prefer-offline'] : ['install'], { cwd: wsPath, timeout: 180_000 });
+      deps = pkgManager;
+      depsLog.push(`${pkgManager} install OK`);
+    } catch (e) {
+      depsLog.push(`${pkgManager} install failed: ${e.message}`);
+    }
+  } else if (fs.existsSync(path.join(wsPath, 'requirements.txt'))) {
+    try {
+      run('pip', ['install', '-r', 'requirements.txt', '-q'], { cwd: wsPath, timeout: 180_000 });
+      deps = 'pip';
+      depsLog.push('pip install OK');
+    } catch (e) {
+      depsLog.push(`pip install failed: ${e.message}`);
+    }
+  } else if (fs.existsSync(path.join(wsPath, 'Cargo.toml'))) {
+    deps = 'cargo';
+    depsLog.push('Cargo project detected — run `cargo build` when ready');
+  }
+  return { deps, depsLog };
+}
+
 module.exports = {
   isReady: () => {
     if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) return true;
@@ -86,135 +198,48 @@ module.exports = {
   tools: {
 
     dev_workspace_setup: {
-      description: 'Clone a GitHub repo to the VM and prepare it for development: git clone, configure credentials for push, detect and install dependencies (npm/pip/cargo). Returns the workspace path. After this, Claude can edit files directly and run tests via bash.',
+      description: 'Prepare an isolated development workspace for a GitHub repo: forks a per-task git worktree + branch (eng/<profile>-<task>) via the engineering workspace library, configures git identity, and detects/installs dependencies (npm/pip/cargo). Returns the workspace path. Two calls with different task labels get separate trees and branches. After this, Claude can edit files directly and run tests via bash.',
       inputSchema: {
         type: 'object',
         required: ['repo'],
         properties: {
-          repo: { type: 'string', description: 'owner/repo (e.g. acme/my-app)' },
-          branch: { type: 'string', description: 'Branch to checkout after clone (default: repo default branch)' },
+          repo: { type: 'string', description: 'owner/repo (e.g. acme/my-app), or a full git URL / local path' },
+          branch: { type: 'string', description: 'Human-readable task/branch label for this workspace. Becomes the branch eng/<profile>-<branch>. Defaults to the repo name.' },
         },
       },
       handler: async ({ repo, branch }) => {
         const token = getToken();
-        const devDir = getDevDir();
-        fs.mkdirSync(devDir, { recursive: true });
-
-        const safeName = repo.replace('/', '_').replace(/[^a-zA-Z0-9_.-]/g, '-');
-        const wsPath = path.join(devDir, safeName);
-
-        // If already cloned — update instead of re-cloning
-        if (fs.existsSync(path.join(wsPath, '.git'))) {
-          try {
-            run('git', ['fetch', '--all'], { cwd: wsPath });
-            if (branch) {
-              run('git', ['checkout', branch], { cwd: wsPath });
-              run('git', ['pull', '--ff-only'], { cwd: wsPath });
-            } else {
-              run('git', ['pull', '--ff-only'], { cwd: wsPath });
-            }
-            installGitHooks(wsPath);
-            return { workspace: wsPath, status: 'updated', repo, branch: branch || 'default' };
-          } catch (e) {
-            // If pull fails (dirty), still return workspace so Claude can inspect
-            return { workspace: wsPath, status: 'exists_dirty', note: e.message };
-          }
-        }
-
-        // Clone with token in URL for auth
-        const cloneUrl = `https://x-access-token:${token}@github.com/${repo}.git`;
-        run('git', ['clone', cloneUrl, wsPath], { timeout: 120_000 });
-
-        // Replace remote URL with token-embedded version for push (stores in .git/config only)
-        run('git', ['remote', 'set-url', 'origin', `https://x-access-token:${token}@github.com/${repo}.git`], { cwd: wsPath });
-
-        // Configure git identity (needed for commits)
-        run('git', ['config', 'user.email', 'agent@recruiter-assistant.ru'], { cwd: wsPath });
-        run('git', ['config', 'user.name', 'AI Agent'], { cwd: wsPath });
-
-        // Block commits/pushes to main/master before Claude ever gets a shell here
-        installGitHooks(wsPath);
-
-        if (branch) {
-          run('git', ['checkout', '-b', branch, `origin/${branch}`], { cwd: wsPath });
-        }
-
-        // Detect and install dependencies
-        let deps = 'none';
-        const depsLog = [];
-        if (fs.existsSync(path.join(wsPath, 'package.json'))) {
-          const pkgManager = fs.existsSync(path.join(wsPath, 'yarn.lock')) ? 'yarn' :
-                             fs.existsSync(path.join(wsPath, 'pnpm-lock.yaml')) ? 'pnpm' : 'npm';
-          try {
-            run(pkgManager, pkgManager === 'npm' ? ['ci', '--prefer-offline'] : ['install'], { cwd: wsPath, timeout: 180_000 });
-            deps = pkgManager;
-            depsLog.push(`${pkgManager} install OK`);
-          } catch (e) {
-            depsLog.push(`${pkgManager} install failed: ${e.message}`);
-          }
-        } else if (fs.existsSync(path.join(wsPath, 'requirements.txt'))) {
-          try {
-            run('pip', ['install', '-r', 'requirements.txt', '-q'], { cwd: wsPath, timeout: 180_000 });
-            deps = 'pip';
-            depsLog.push('pip install OK');
-          } catch (e) {
-            depsLog.push(`pip install failed: ${e.message}`);
-          }
-        } else if (fs.existsSync(path.join(wsPath, 'Cargo.toml'))) {
-          deps = 'cargo';
-          depsLog.push('Cargo project detected — run `cargo build` when ready');
-        }
-
+        const rootTaskId = branch || repo.split('/').filter(Boolean).pop() || 'dev-workspace';
+        const result = spawnTaskWorkspace({
+          repositoryUrl: repositoryUrlOf(repo),
+          rootTaskId,
+          token,
+        });
+        const workspace = result.codePath;
+        prepareWorkspace(workspace);
+        const { deps, depsLog } = detectDependencies(workspace);
         return {
-          workspace: wsPath,
-          status: 'cloned',
+          workspace,
+          codePath: workspace,
+          workspaceId: result.workspaceId,
+          status: result.status,
           repo,
-          branch: branch || 'default',
+          branch: result.branch,
           deps,
           deps_log: depsLog,
           next_steps: [
-            `cd ${wsPath}  # work in this directory`,
-            'git checkout -b feat/your-feature-name  # create feature branch — direct commits/pushes to main are hook-blocked',
+            `cd ${workspace}  # isolated worktree for this task — work here`,
             '# ... edit files, run tests ...',
             'git add -p && git commit -m "feat: ..."',
-            'git push -u origin feat/your-feature-name',
+            `git push -u origin ${result.branch}`,
             '# Then call github_create_pr to open the PR',
           ],
         };
       },
     },
 
-    dev_workspace_list: {
-      description: 'List repos that have been cloned to the VM for development. Shows workspace path, last commit, and current branch.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => {
-        const devDir = getDevDir();
-        if (!fs.existsSync(devDir)) return { workspaces: [], dev_dir: devDir };
-
-        const entries = fs.readdirSync(devDir, { withFileTypes: true })
-          .filter(e => e.isDirectory() && fs.existsSync(path.join(devDir, e.name, '.git')));
-
-        const workspaces = entries.map(e => {
-          const wsPath = path.join(devDir, e.name);
-          let branch = '?';
-          let lastCommit = '?';
-          let remote = '?';
-          try {
-            branch = run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: wsPath });
-            lastCommit = run('git', ['log', '-1', '--format=%h %s (%ar)'], { cwd: wsPath });
-            const remoteUrl = run('git', ['remote', 'get-url', 'origin'], { cwd: wsPath });
-            // Strip token from URL for display
-            remote = remoteUrl.replace(/https:\/\/[^@]+@/, 'https://');
-          } catch {}
-          return { name: e.name, path: wsPath, branch, last_commit: lastCommit, remote };
-        });
-
-        return { workspaces, dev_dir: devDir, count: workspaces.length };
-      },
-    },
-
     dev_new_repo: {
-      description: 'Create a new GitHub repository, then clone it locally. Use when the user wants to start a project from scratch and doesn\'t have an existing repo.',
+      description: 'Create a new GitHub repository, then prepare an isolated per-task workspace for it. Use when the user wants to start a project from scratch and doesn\'t have an existing repo.',
       inputSchema: {
         type: 'object',
         required: ['name'],
@@ -258,29 +283,28 @@ module.exports = {
         const repoData = await res.json();
         const fullName = repoData.full_name;
 
-        // Clone locally
-        const devDir = getDevDir();
-        fs.mkdirSync(devDir, { recursive: true });
-        const safeName = fullName.replace('/', '_');
-        const wsPath = path.join(devDir, safeName);
-
-        const cloneUrl = `https://x-access-token:${token}@github.com/${fullName}.git`;
-        run('git', ['clone', cloneUrl, wsPath], { timeout: 60_000 });
-        run('git', ['remote', 'set-url', 'origin', `https://x-access-token:${token}@github.com/${fullName}.git`], { cwd: wsPath });
-        run('git', ['config', 'user.email', 'agent@recruiter-assistant.ru'], { cwd: wsPath });
-        run('git', ['config', 'user.name', 'AI Agent'], { cwd: wsPath });
+        // Fork an isolated per-task workspace off the freshly created repo
+        const result = spawnTaskWorkspace({
+          repositoryUrl: `https://github.com/${fullName}.git`,
+          rootTaskId: name,
+          token,
+        });
+        const workspace = result.codePath;
+        prepareWorkspace(workspace);
 
         return {
           repo: fullName,
           url: repoData.html_url,
-          workspace: wsPath,
-          status: 'created_and_cloned',
+          workspace,
+          codePath: workspace,
+          workspaceId: result.workspaceId,
+          branch: result.branch,
+          status: 'created',
           next_steps: [
-            `cd ${wsPath}`,
-            'git checkout -b feat/initial-setup',
+            `cd ${workspace}`,
             '# ... add files, write code ...',
             'git add . && git commit -m "feat: initial implementation"',
-            'git push -u origin feat/initial-setup',
+            `git push -u origin ${result.branch}`,
             '# Then call github_create_pr',
           ],
         };

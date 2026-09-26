@@ -25,9 +25,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 const { USERS_ROOT } = require('./data-paths');
 const { atomicJson } = require('./atomic-json');
+const { resolveGithubToken } = require('./github-token');
 
 const REPO = process.env.BUGS_COLLECTOR_REPO || process.env.BUG_REPORT_REPO || 'trained-assist/trained-assist-agent';
 const QUIET_MS = Number(process.env.BUGS_COLLECTOR_QUIET_MS || 3 * 60 * 1000);
@@ -233,15 +233,10 @@ async function llmIssue({ entry, profile, input, apiKey, model = MODEL }) {
 }
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
+// Env first (GITHUB_ISSUES_TOKEN/GH_TOKEN), then the credential file — never the
+// token embedded in the git remote URL (see src/github-token.js).
 function resolveToken() {
-  if (process.env.GITHUB_ISSUES_TOKEN) return process.env.GITHUB_ISSUES_TOKEN;
-  if (process.env.GH_TOKEN) return process.env.GH_TOKEN;
-  try {
-    const url = execSync('git config --get remote.origin.url', { cwd: path.join(__dirname, '..') }).toString().trim();
-    const m = url.match(/:\/\/[^:@/]+:([^@]+)@/) || url.match(/x-access-token:([^@]+)@/);
-    if (m) return m[1];
-  } catch { /* no token available */ }
-  return null;
+  return resolveGithubToken();
 }
 
 async function ghFindExisting(marker, token, repo = REPO) {

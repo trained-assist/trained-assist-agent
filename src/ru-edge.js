@@ -27,7 +27,7 @@ const TOKENS_ROOT = process.env.AGENT_TOKENS_DIR || process.env.AGENT_TOKENS_ROO
 const USERS_ROOT = process.env.USERS_DIR || path.join(os.homedir(), 'users');
 
 let GIT_COMMIT = 'unknown';
-try { GIT_COMMIT = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim().slice(0, 7); } catch {}
+try { const sha = require('./release-info').getReleaseSha(); if (sha) GIT_COMMIT = sha.slice(0, 7); } catch {}
 
 function readChatId(username) {
   try { return fs.readFileSync(path.join(TOKENS_ROOT, String(username), '.chatid'), 'utf8').trim() || null; }

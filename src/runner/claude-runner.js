@@ -65,6 +65,20 @@ const editLanded = result => !!(result && result.ok && !result.skipped);
 const WARN_TIMEOUT_MS  = 38 * 60 * 1000; // 38 min — graceful SIGTERM + Telegram warning before hard kill
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 min silence → kill + auto-restart (all engines)
 
+// Per-run hard timeout (P3a durable step budget, `execution_timeout_seconds`).
+// Clamped to the global cap so a step can only ever shorten, never extend, the
+// engine's wall-clock budget. The graceful warning fires 2 min before the kill,
+// floored at 30s so a very short budget still gets a warning beat. No option /
+// a non-positive value keeps the historical fixed 40-min / 38-min pair.
+function computeEngineTimeoutMs(timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return { hardTimeoutMs: CLAUDE_TIMEOUT_MS, warnTimeoutMs: WARN_TIMEOUT_MS };
+  }
+  const hardTimeoutMs = Math.min(timeoutMs, CLAUDE_TIMEOUT_MS);
+  const warnTimeoutMs = Math.max(30_000, hardTimeoutMs - 2 * 60 * 1000);
+  return { hardTimeoutMs, warnTimeoutMs };
+}
+
 const TG_API = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
 // Reads the per-user .mcp.json (written by writeMcpConfig) and returns its mcpServers map.
@@ -94,6 +108,20 @@ function codexMcpArgs(mcpConfig) {
     if (srv.env) args.push('-c', `mcp_servers.${name}.env=${tomlInlineTable(srv.env)}`);
   }
   return args;
+}
+
+// claude and opencode MCP servers inherit the engine process env; codex does NOT — it spawns
+// them with only a fixed whitelist (HOME/PATH/USER/…) + the configured `env` (verified live,
+// codex-cli 0.154). So under codex every MCP tool lost the run identity the runner sets (user,
+// chat, session file, task, per-user tokens): get_chat_history answered "AGENT_USER_ID not set".
+// Forward exactly the engine env's names via `env_vars` (by NAME — values never hit argv),
+// inserted before the trailing prompt arg, so codex MCP sees what claude/opencode MCP see.
+function withCodexMcpEnvForwarding(engineArgs, mcpConfig, envNames) {
+  const names = [...new Set(envNames)].filter(n => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n));
+  const servers = Object.entries(loadMcpServers(mcpConfig)).filter(([, srv]) => srv.command);
+  if (!names.length || !servers.length || !engineArgs.length) return engineArgs;
+  const extra = servers.flatMap(([name]) => ['-c', `mcp_servers.${name}.env_vars=${JSON.stringify(names)}`]);
+  return [...engineArgs.slice(0, -1), ...extra, engineArgs[engineArgs.length - 1]];
 }
 
 // Single source of truth for the engine process working directory. runner/index.js
@@ -283,16 +311,15 @@ async function runEngineProcess(opts) {
     engine, taskId, chatId, thinkingStart, msgId, BOT_TOKEN, secrets, user, threadId,
     cleanEnv, userTokens, sessionFilePath, sessionId, restartShutdown, activeTimers, consumePendingStop = null,
     tgEdit, tgSend, outputCallback, engineBin, engineArgs, cwd, env, mcpConfig,
-    ocProfileOverrides, onHeartbeat, onEngineSessionId,
+    ocProfileOverrides, onHeartbeat, onEngineSessionId, timeoutMs = null,
   } = opts;
+  const { hardTimeoutMs, warnTimeoutMs } = computeEngineTimeoutMs(timeoutMs);
   // Forum topics (#255): fresh progress/warning sends stay in the originating topic.
   // Only new messages need it; edits target an existing message already in the topic.
   const runThreadId = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
   const sendT = (token, chat, text, extra = {}) => tgSend(token, chat, text, extra, runThreadId);
 
-  const proc = spawn(engineBin, engineArgs, {
-    cwd,
-    env: {
+  const engineEnv = {
       ...cleanEnv,
       ...userTokens,
       AGENT_USER_ID: String(user.username),
@@ -312,7 +339,13 @@ async function runEngineProcess(opts) {
       // opencode's config file goes to user.workDir (outside the code cwd) — see
       // writeOpencodeMcpConfig for why it must never land in the git worktree.
       ...(engine === 'opencode' && mcpConfig ? { OPENCODE_CONFIG: writeOpencodeMcpConfig(user.workDir || os.tmpdir(), mcpConfig, ocProfileOverrides) } : {}),
-    },
+  };
+  const spawnArgs = engine === 'codex' && mcpConfig
+    ? withCodexMcpEnvForwarding(engineArgs, mcpConfig, Object.keys(engineEnv))
+    : engineArgs;
+  const proc = spawn(engineBin, spawnArgs, {
+    cwd,
+    env: engineEnv,
     // codex exec and opencode run both block on open stdin — close it explicitly.
     // claude doesn't read stdin in --print mode.
     // opencode waits 3s for stdin data before proceeding — use 'pipe' + immediate .end()
@@ -713,29 +746,31 @@ async function runEngineProcess(opts) {
   }
   try {
     await new Promise((resolve, reject) => {
-      // 38 min: graceful SIGTERM + warn user. Claude Code handles SIGTERM by finishing current step and exiting.
-      // timedOut is set here so that if Claude exits voluntarily after SIGTERM, the close handler still
-      // triggers auto-continuation (not just when SIGKILL fires at 40 min).
+      // warn fires 2 min before the hard cap (default 38 min; shorter for a P3a
+      // step budget): graceful SIGTERM + warn user. Claude Code handles SIGTERM by
+      // finishing current step and exiting. timedOut is set here so that if Claude
+      // exits voluntarily after SIGTERM, the close handler still triggers
+      // auto-continuation (not just when SIGKILL fires at the hard cap).
       const warnTimer = setTimeout(() => {
         timedOut = true;
         console.log(`[${taskId}] timeout warning — sending SIGTERM, 2 min left`);
         try { proc.kill('SIGTERM'); } catch {}
-        const warnMin = Math.round(WARN_TIMEOUT_MS / 60000);
+        const warnMin = Math.round(warnTimeoutMs / 60000);
         const engineLabel = engine === 'codex' ? 'Кодекс' : engine === 'opencode' ? 'OpenCode' : 'Клод';
         sendT(BOT_TOKEN, chatId,
           `⚠️ ${engineLabel} работает уже ${warnMin} минут — через 2 мин задача принудительно завершится.\n` +
           `Получил сигнал завершить текущий шаг и вывести итоги.`
         ).catch(() => {});
-      }, WARN_TIMEOUT_MS);
+      }, warnTimeoutMs);
 
-      // 40 min: hard kill (SIGTERM already sent at 38 min, SIGKILL now)
+      // Hard kill (SIGTERM already sent at warn, SIGKILL now)
       sessionState.killFn = () => {
         timedOut = true;
         clearTimeout(warnTimer);
         try { proc.kill('SIGKILL'); } catch (e) { console.warn('[runner] SIGKILL:', e.message); }
-        reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
+        reject(new Error(`claude timed out after ${hardTimeoutMs / 1000}s`));
       };
-      sessionState.killTimer = setTimeout(sessionState.killFn, CLAUDE_TIMEOUT_MS);
+      sessionState.killTimer = setTimeout(sessionState.killFn, hardTimeoutMs);
 
       // Inactivity check: if no stdout for 5 min, kill + auto-restart (works for all engines).
       // Checked every 30s; lastOutputAt updated on any raw stdout chunk before JSON parsing.
@@ -840,8 +875,10 @@ module.exports = {
   resolveEngineCwd,
   formatToolActivity,
   readOcAgentModels,
+  computeEngineTimeoutMs,
   // exposed for tests — MCP translation helpers (codex/opencode wiring)
   codexMcpArgs,
+  withCodexMcpEnvForwarding,
   writeOpencodeMcpConfig,
   // exposed for tests — ⛔/➕ button delivery gate (issue: flag used to flip
   // before confirming the edit landed, permanently hiding buttons after one

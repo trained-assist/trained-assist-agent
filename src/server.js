@@ -105,7 +105,7 @@ const NARROW_BOTS = {
 const VM_NAME = process.env.VM_NAME || 'unknown';
 let RUNTIME_REVISION = 'unknown';
 let GIT_COMMIT = 'unknown';
-try { RUNTIME_REVISION = execSync('git rev-parse HEAD', { cwd: __dirname }).toString().trim(); GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
+try { RUNTIME_REVISION = require('./release-info').getReleaseSha(); if (RUNTIME_REVISION) GIT_COMMIT = RUNTIME_REVISION.slice(0, 7); } catch {}
 
 const { classifyMessage, CLASSIFY_MAX_AGE_MS } = require('./classify-message');
 const { checkCompleteness } = require('./intake-gate');
@@ -1196,43 +1196,10 @@ ${recent || '(пока нет)'}
         const countByProject = {};
         for (const s of allSess) if (s.projectId) countByProject[s.projectId] = (countByProject[s.projectId] || 0) + 1;
 
-        let d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience, decisionThreadId);
-        // Pinned chat, but the task is confidently about another project → ask (suggested
-        // first, pinned second) instead of binding silently. Any doubt keeps the pin.
-        if (d.action === 'auto' && d.pinned && taskParam && (process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY)) {
-          try {
-            const match = require('./project-match');
-            const all = projects.listProjects(workDir, audience);
-            const verdict = await match.classifyTaskProject(taskParam, all, { pinnedId: d.project.id });
-            d = match.applyMismatch(d, verdict, { allProjects: all });
-            if (d.mismatch) console.log(`[project-decision] pin mismatch: ${d.mismatch.pinned} → ${d.mismatch.suggested} (${d.mismatch.confidence})`);
-          } catch (e) { console.warn('[project-decision] mismatch check:', e.message); }
-        }
+        const d = projects.decideNewSessionProject(workDir, chatId, countByProject, audience, decisionThreadId);
+        // No project-mismatch classifier any more: the bot never asks «какой проект?»
+        // (owner decision 2026-09-26). Misfiled sessions are regrouped later by reproject.
         const out = { action: d.action, active: d.active || null, pinned: d.pinned ? d.project.id : null };
-        if (d.mismatch) out.mismatch = d.mismatch;
-
-        // Data gap fix: a project's 3-sense summary used to be generated ONLY in the
-        // sessions-list intent for the ACTIVE project, so at picker time most projects
-        // had none → the picker read as a terse "первые-слова" name. Generate the missing/
-        // stale ones here (bounded, short timeout, best-effort) so the picker reads richly.
-        if (d.action === 'ask') {
-          try {
-            const orK = process.env.OPENROUTER_API_KEY;
-            if (orK) {
-              const { generateProjectSummary } = require('./project-summary');
-              const stale = d.choices.filter(p => projects.needsSummary(p, countByProject[p.id] || 0));
-              await Promise.all(stale.slice(0, 8).map(async (p) => {
-                const projSess = allSess.filter(s => s.projectId === p.id);
-                const rsum = await generateProjectSummary(projSess, { apiKey: orK, timeoutMs: 4000 });
-                if (rsum) {
-                  projects.setProjectSummary(workDir, p.id, rsum, projSess.length);
-                  if (!p.nameLocked && rsum.name) p.name = rsum.name;
-                  p.summary = rsum.summary;
-                }
-              }));
-            }
-          } catch (e) { console.warn('[project-decision] summary enrich:', e.message); }
-        }
 
         const enrich = (p) => ({
           id: p.id, name: p.name, type: p.type || 'generic', label: p.label || p.name,
@@ -1241,7 +1208,6 @@ ${recent || '(пока нет)'}
           lastAt: p.lastAt || 0,
         });
         if (d.action === 'auto') out.choices = [enrich(d.project)];
-        else if (d.action === 'ask') out.choices = d.choices.map(enrich);
         else out.choices = [];
         return json(res, 200, out);
       } catch (e) {

@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
-const { validateItem } = require('./durable-task-plan');
+const { validateItem, declaredValidations } = require('./durable-task-plan');
 
 const TASK_STATUSES = ['draft', 'paused', 'blocked', 'active', 'done', 'failed', 'cancelled'];
 const ITEM_STATUSES = ['pending', 'running', 'waiting', 'done', 'failed', 'skipped'];
@@ -15,6 +15,12 @@ const TIERS = ['free', 'standard', 'strong'];
 const TIER_RANK = { free: 0, standard: 1, strong: 2 };
 
 function nowMs() { return Date.now(); }
+
+function describeMissing(missing) {
+  return missing
+    .map(m => `${m.criterion_id}/${m.validator}=${m.got == null ? 'missing' : m.got}`)
+    .join(', ');
+}
 
 class DurableTaskStore {
   constructor(dbPath) {
@@ -158,8 +164,16 @@ class DurableTaskStore {
   updateTask(id, profileId, patch) {
     const task = this.getTask(id, profileId);
     if (!task) return null;
-    if (task.acceptance_criteria_json && ['active', 'done'].includes(patch.status)) {
-      throw new Error('Plan execution/finalization requires validated runtime (not enabled yet)');
+    // P3d-2: a contract plan may only become 'done' through the finalization
+    // gate — every declared (criterion, validator) needs a matching 'pass' row
+    // at the current contract revision. This is the ONE write path: the executor
+    // calls finalizePlan, which enforces the same gate, so there is no raw-SQL
+    // bypass left.
+    if (task.acceptance_criteria_json && patch.status === 'done') {
+      const missing = this._finalizationMissing(task);
+      if (missing.length) {
+        throw new Error(`Plan finalization blocked: unmet validations — ${describeMissing(missing)}`);
+      }
     }
     const allowed = ['goal', 'status', 'project_id'];
     const sets = [];
@@ -194,6 +208,50 @@ class DurableTaskStore {
     })();
   }
 
+  /**
+   * Which declared (criterion, validator) pairs lack a current 'pass' row. Only
+   * rows at the task's current contract_revision count; the latest row per pair
+   * wins (a retry that later passes overrides an earlier fail). `got` is the
+   * latest status, or null when no row exists at all.
+   */
+  _finalizationMissing(task) {
+    const revision = task.contract_revision || 1;
+    const latest = new Map();
+    for (const row of this.listValidations(task.id, task.profile_id)) {
+      if ((row.contract_revision || 1) !== revision) continue;
+      latest.set(`${row.criterion_id}\u0000${row.validator}`, row);
+    }
+    const missing = [];
+    for (const declared of declaredValidations(task)) {
+      const row = latest.get(`${declared.criterion_id}\u0000${declared.validator}`);
+      if (!row || row.status !== 'pass') {
+        missing.push({ criterion_id: declared.criterion_id, validator: declared.validator, got: row ? row.status : null });
+      }
+    }
+    return missing;
+  }
+
+  /**
+   * P3d-2 finalization gate. A contract plan becomes 'done' only when every
+   * declared validation has a matching 'pass' row at the current
+   * contract_revision; otherwise nothing changes and the unmet pairs are
+   * returned. Mode-awareness (deterministic vs LLM vs explicit fast-pass skip)
+   * is already encoded at record time — a fast-pass skip is stored as 'pass'
+   * with evidence {skipped:true}, so it satisfies the gate while staying visible.
+   */
+  finalizePlan(taskId, profileId) {
+    const task = this.getTask(taskId, profileId);
+    if (!task) return { finalized: false, missing: [], reason: 'task-not-found' };
+    if (task.status === 'done') return { finalized: true };
+    const missing = this._finalizationMissing(task);
+    if (missing.length) return { finalized: false, missing };
+    this.db.transaction(() => {
+      this._prep(`UPDATE durable_tasks SET status = 'done', updated_at = ?, revision = revision + 1
+        WHERE id = ? AND profile_id = ?`).run(nowMs(), taskId, profileId);
+    })();
+    return { finalized: true };
+  }
+
   // ── Items ──────────────────────────────────────────────────────────────
   createTaskItem({ id, task_id, position = 0, title, execution_tier = 'free',
                    delay_after_sec = 0, due_at = null }) {
@@ -226,7 +284,9 @@ class DurableTaskStore {
   updateTaskItem(id, patch, profileId) {
     if (!this._itemOwnedBy(id, profileId)) return null;
     const allowed = ['title', 'status', 'current_tier', 'delay_after_sec', 'due_at',
-                     'last_execution_id', 'last_error'];
+                     'wait_deadline_at', 'last_execution_id', 'last_error',
+                     // P3d-1c: per-step validation_mode override (nullable; DB CHECK enforces the enum)
+                     'validation_mode'];
     const sets = [];
     const args = [];
     for (const k of allowed) {
@@ -298,6 +358,10 @@ class DurableTaskStore {
   /**
    * Mark an item done. If the next sibling exists, arm it: delay_after_sec <= 300
    * keeps it immediately runnable (due_at = now); longer delays set waiting+due_at.
+   * A waiting sibling also gets a `wait_deadline_at` — one full delay window past
+   * its due time. If it is still waiting beyond that (the run that should have
+   * claimed it never did), `expireWaitingDeadlines` fails it instead of letting a
+   * stuck waiter defer forever.
    */
   completeItem(id, profileId, { executionId = null } = {}) {
     return this.db.transaction(() => {
@@ -309,13 +373,38 @@ class DurableTaskStore {
       const next = this._prep(`SELECT * FROM task_items WHERE task_id = ? AND status = 'pending'
         ORDER BY position LIMIT 1`).get(item.task_id);
       if (next) {
-        const due = next.delay_after_sec > 300 ? now + next.delay_after_sec * 1000
+        const waiting = next.delay_after_sec > 300;
+        const due = waiting ? now + next.delay_after_sec * 1000
           : (next.delay_after_sec > 0 ? now : null);
-        this._prep(`UPDATE task_items SET status = ?, due_at = ?, updated_at = ? WHERE id = ?`)
-          .run(next.delay_after_sec > 300 ? 'waiting' : 'pending', due, now, next.id);
+        const waitDeadline = waiting ? due + next.delay_after_sec * 1000 : null;
+        this._prep(`UPDATE task_items SET status = ?, due_at = ?, wait_deadline_at = ?,
+            updated_at = ? WHERE id = ?`)
+          .run(waiting ? 'waiting' : 'pending', due, waitDeadline, now, next.id);
       }
       this._bump(item.task_id);
       return this.getTaskItem(id);
+    })();
+  }
+
+  /**
+   * Fail `waiting` items whose declared wait deadline has passed (P3a). Chosen
+   * outcome is `failed`, not `pending`: `wait_deadline_at` is an upper bound on
+   * an external wait (CI/deploy/re-entrancy backoff) — re-pending it would defer
+   * forever, which is exactly what the deadline exists to prevent. A failed item
+   * is terminal for the item budget and visible to the recovery slice (P3c).
+   * Returns the number of items expired.
+   */
+  expireWaitingDeadlines(now = nowMs()) {
+    return this.db.transaction(() => {
+      const rows = this._prep(`SELECT id, task_id FROM task_items
+        WHERE status = 'waiting' AND wait_deadline_at IS NOT NULL AND wait_deadline_at <= ?`)
+        .all(now);
+      for (const row of rows) {
+        this._prep(`UPDATE task_items SET status = 'failed', last_error = ?, updated_at = ?
+          WHERE id = ?`).run('wait deadline expired', now, row.id);
+        this._bump(row.task_id);
+      }
+      return rows.length;
     })();
   }
 
@@ -329,6 +418,64 @@ class DurableTaskStore {
       this._bump(item.task_id);
       return this.getTaskItem(id);
     })();
+  }
+
+  // ── Validation results + item evidence (P3d) ───────────────────────────
+  /**
+   * Append one machine-checked validation verdict (task_validation_results).
+   * The write is anchored to the parent task's owner: `profile_id` is optional
+   * for the caller but, when passed, must match — no cross-profile write.
+   * `subject_json` / `evidence_json` are already-serialized JSON strings.
+   */
+  recordValidation({ task_id, profile_id = null, task_item_id = null, execution_id = null,
+    criterion_id, contract_revision = 1, validator, status, subject_json = null, evidence_json = null }) {
+    if (!task_id) throw new Error('task_id is required');
+    if (!criterion_id) throw new Error('criterion_id is required');
+    if (!validator) throw new Error('validator is required');
+    if (!['pass', 'fail', 'inconclusive'].includes(status)) throw new Error(`invalid validation status: ${status}`);
+    const task = this._prep('SELECT id, profile_id FROM durable_tasks WHERE id = ?').get(task_id);
+    if (!task) throw new Error(`task not found: ${task_id}`);
+    if (profile_id && task.profile_id !== profile_id) throw new Error('validation ownership mismatch');
+    const id = crypto.randomUUID();
+    this._prep(`INSERT INTO task_validation_results
+        (id, task_id, task_item_id, execution_id, criterion_id, contract_revision, validator,
+         status, subject_json, evidence_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, task_id, task_item_id, execution_id, criterion_id, contract_revision, validator,
+        status, subject_json, evidence_json, nowMs());
+    return this.getValidation(id);
+  }
+
+  getValidation(id) {
+    return this._prep('SELECT * FROM task_validation_results WHERE id = ?').get(id) || null;
+  }
+
+  /** All validation rows for a task, profile-scoped, oldest first. */
+  listValidations(taskId, profileId) {
+    return this._prep(`SELECT v.* FROM task_validation_results v
+      JOIN durable_tasks t ON t.id = v.task_id
+      WHERE v.task_id = ? AND t.profile_id = ?
+      ORDER BY v.rowid`).all(taskId, profileId);
+  }
+
+  /**
+   * Attach step evidence (and a completion timestamp) to an item. Kept separate
+   * from completeItem: `evidence_json` / `completed_at` are contract-plan fields,
+   * while completeItem stays the legacy status transition.
+   */
+  setItemEvidence(itemId, profileId, { evidence_json = null, completed_at = null } = {}) {
+    if (!this._itemOwnedBy(itemId, profileId)) return null;
+    const sets = ['updated_at = ?'];
+    const args = [nowMs()];
+    if (evidence_json !== null) { sets.push('evidence_json = ?'); args.push(evidence_json); }
+    if (completed_at !== null) { sets.push('completed_at = ?'); args.push(completed_at); }
+    args.push(itemId);
+    this.db.transaction(() => {
+      this._prep(`UPDATE task_items SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+      const item = this.getTaskItem(itemId);
+      this._bump(item.task_id);
+    })();
+    return this.getTaskItem(itemId);
   }
 
   progressSummary(taskId, profileId) {
@@ -383,13 +530,25 @@ class DurableTaskStore {
   }
 
   // ── Executions (minimal history) ───────────────────────────────────────
+  /**
+   * Start an execution and count the attempt. attempt_count is bumped here (not
+   * in claimNextRunnable) on purpose: a claim that only defers to a busy session
+   * is not a real attempt — only a step that actually starts executing is. The
+   * per-step budget reads attempt_count against `max_attempts`.
+   */
   startExecution({ id, task_id, task_item_id = null, session_id = null,
                    engine = null, model = null, tier = null }) {
-    this._prep(`INSERT INTO executions
-        (id, task_id, task_item_id, session_id, engine, model, tier, status, started_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
-      .run(id, task_id, task_item_id, session_id, engine, model, tier, nowMs());
-    return this.getExecution(id);
+    return this.db.transaction(() => {
+      if (task_item_id) {
+        this._prep(`UPDATE task_items SET attempt_count = attempt_count + 1, updated_at = ?
+          WHERE id = ?`).run(nowMs(), task_item_id);
+      }
+      this._prep(`INSERT INTO executions
+          (id, task_id, task_item_id, session_id, engine, model, tier, status, started_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
+        .run(id, task_id, task_item_id, session_id, engine, model, tier, nowMs());
+      return this.getExecution(id);
+    })();
   }
 
   finishExecution(id, { status, error_class = null, error_text = null }) {

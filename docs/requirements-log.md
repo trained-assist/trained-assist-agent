@@ -79,6 +79,7 @@
 | ✅ реализовано | **Infra manifest + CI sync check** | `infra/env-manifest.json` — единый источник правды для всех секретов. `scripts/check-env-sync.js` валидирует ci.yml в CI. |
 | ✅ реализовано | **Деплой на push в main** | ci.yml: deploy-jobs принимают merge.result == success ИЛИ push to main — больше не нужно PR чтобы задеплоить hotfix. |
 | ✅ реализовано | **Manual Deploy workflow** | `workflow_dispatch` без PR: GitHub → Actions → Manual Deploy → выбор таргета gcp/ru/both. |
+| ✅ реализовано | **Деплой из релиз-каталога, а не из рабочего дерева** (issue #1391) | Прод больше не запускается из git-дерева. CI собирает смерженный SHA в immutable root-owned `~/agent-releases/<sha>/` (`git archive` + `npm ci`), атомарно переключает симлинк `~/agent-master`; `assist-agent`, `ru-edge` и `weeek-session-refresh` работают с `WorkingDirectory=~/agent-master`. Репозиторий — только git-источник: сессии могут свободно делать в нём checkout/commit, не влияя на прод. Откат = переключение симлинка на прошлый релиз (GC держит 3). Код деплоя запускается из архива целевого SHA, а не из дерева. Убраны правила, лечившие «прод == рабочее дерево»: `live-dir-guard.sh` и проверки грязного дерева/detached-HEAD в `deploy-preflight.sh` (осталась только проверка ancestor `origin/main`). Тесты: `test/live-dir-deploy.test.cjs`. |
 | ✅ реализовано | **Health endpoint: vm + commit** | `/health` возвращает `{ vm: "gcp-main", commit: "abc1234" }` — сразу видно что на каком VM. |
 | ✅ реализовано | **Test isolation (AGENT_TOKENS_ROOT)** | `src/user-tokens.js` читает `AGENT_TOKENS_ROOT` env var — тесты больше не трогают реальный `~/agent-tokens/`. PR #201. |
 | ✅ реализовано | **Token-notify dedupe + полная изоляция токенов** | Флуд дубликатов в чатах (инцидент 2026-09-24): автоматические/повторные сохранения токенов через `POST /tokens` слали одну и ту же фразу в чат десятки раз. Введён `src/tg-notice-dedupe.js` — идентичное сообщение в тот же чат подавляется в окне 10 мин (`TG_NOTICE_DEDUPE_MS`). Плюс `data-paths.js` теперь признаёт и `AGENT_TOKENS_ROOT` (алиас `AGENT_TOKENS_DIR`), а `runner/index.js` пишет `.chatid`/токены через `TOKENS_ROOT` — раньше хардкод `~/agent-tokens` обходил изоляцию тестов и залил 12k тест-профилей в прод. |
@@ -137,3 +138,85 @@
 - Session/project pointers: `get/setCurrentSessionId`, `createSession`, `resolveChatSession`, `get/setActiveProjectId`, `get/setPinnedProjectId`, `decideNewSessionProject`, `resolveRunProject`, `logical pin line` accept an optional valid `threadId` — topic-scoped filenames, legacy names unchanged without one.
 - GTD: records persist `threadId`; `_tgNotify` sends into the originating topic; `clearGtdForChat(workDir, chatId, threadId)` and delayed fire/close notifications stay topic-scoped. Restart/resume already preserved `threadId` via the pending journal.
 - Tests: `test/forum-topics-isolation.test.cjs` (tgSend + ownership + session/project/pin pointer scoping). Existing deterministic suites green (`runner-index-contract`, `task-stop-ownership`, `audience-scope`, `pin-state`, `gtd-*`, `tg-stream`, `projects-*`, `session-store-recency`, `run-ingress` topic routing).
+
+## 2026-09-25 — playbooks P3a: activation + per-step budget (durable executor, #1372)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | Активация contract-плана | `DurableTaskStore.updateTask` больше не блокирует `draft→active`: гейт сужен до `done` (финализация остаётся на P3d — нужна per-criterion валидация). `task_update status=active` — явный шаг активации. |
+| ✅ реализовано | `attempt_count` на старте шага | Инкремент в `startExecution` (а не в `claimNextRunnable`): claim, который лишь уступил занятой сессии, — не попытка. `retryFailedItem` читает свежее значение против `max_attempts`. |
+| ✅ реализовано | Бюджет шага | Все failure-ветки `runDueDurable` (маркер failed / нет маркера / crash движка) идут через `retryFailedItem`: retry пока `attempt_count < max_attempts`, затем item остаётся `failed` — бесконечный pending исключён. Crash не эскалирует tier. |
+| ✅ реализовано | `expireWaitingDeadlines(now)` | Истёкшие `waiting` (по `wait_deadline_at`) → `failed`, не `pending`: дедлайн — верхняя граница внешнего ожидания; re-pending означал бы «откладывать вечно». Вызывается в `claimNextDurableItem` до reconcile/claim, поэтому истёкший waiter не выдаётся повторно. `completeItem` проставляет `wait_deadline_at` (due + один delay-окно) для долгих delay. |
+| ✅ реализовано | `execution_timeout_seconds` в таймаут движка | `runDueDurable` прокидывает `stepTimeoutMs` → `_runTask` → `runEngineProcess` (clamp ≤ 40 мин; warn за 2 мин). Шаг с `stepTimeoutMs` не авто-продолжается (`MAX_CONTINUATIONS`): перерасход бюджета = провал шага, ретраит durable-слой. |
+| ✅ реализовано | Тесты | `durable-task-store` (expire/attempt/активация), `gtd-durable-wiring` (max_attempts исчерпан → failed; истёкший waiter не переиспользуется; stepTimeoutMs), `durable-plan-persistence` (draft→active, done gated), `claude-runner.smoke` (clamp бюджета). Legacy `gtd/*.json` не тронут. |
+| 🔵 планируется | P3b/P3c/P3d | Резолв движка/модели по `executor_role`/`minimum_model_level`/`context_budget`; recovery через `failure-classifier`→`recovery-policy`; `task_validation_results` + `evidence_json` и разблокировка финализации. |
+
+## 2026-09-26 — playbooks P3b: резолв шага в движок/модель (#1372)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | `src/playbook-executor.js` | Чистый `resolveStepExecution(item)`: `executor_role`+`minimum_model_level` (эскалированный `current_model_level` выигрывает) → `{engine, ocProfile, ocRole}`. Programmatic → без движка; legacy/без контракта → `defaultEngine` (claude). Карта `level→{engine,profile}` — данные, override через `PLAYBOOK_LEVEL_MAP`. |
+| ✅ реализовано | Проводка в `runDueDurable` | Contract-план резолвит шаг (bachelor→opencode/value, master→opencode/max, doctor→claude) и прокидывает `engine`/`ocProfile`/`contextSkipModels`; legacy durable — прежний claude. Рабочая директория шага = `userWorkDir(profile_id)` вместо `null` (последний ронял `writeMcpConfig` на `path.join(null)`). |
+| ✅ реализовано | `ocProfile` override в runner | `_runTask` принимает явный `ocProfile`, приоритет над `profiles.getOcProfile(workDir)` — durable-шаг может пинить лестницу. Без новых opts поведение прежнее. |
+| ✅ реализовано | Тесты | `tests/unit/playbook-executor.test.js` (9 кейсов); `gtd-durable-wiring` — contract-шаг несёт `opencode/value` + рабочую директорию, legacy остаётся `claude`. |
+| 🔵 планируется | P3c/P3d/P4 | `ocRole` пока возвращается, но per-role degradation/recovery — P3c; programmatic-шаги всё ещё идут промптом (P3d); хуки — P4; `context_budget`→`skipModels` — no-op до реестра контекстов. |
+
+## 2026-09-26 — engineering-skills sibling mount + D1 dev_workspace_setup redirect (#1418)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | Sibling-mount `engineering-skills` | `src/browser.js` `writeMcpConfig()` регистрирует `engineering-skills` из sibling-чекаута `trained-assist-engineering` — тем же existence-gated паттерном, что `hh-skills`/`freelance-skills`. `mcpToolEnv` уже несёт `USER_ID`, который sibling читает как host-derived `principal` (сверено с engineering#6). |
+| ✅ реализовано | D1: `dev_workspace_setup` → per-task workspace | Тул делегирует в sibling `spawnWorkspaceForTask`: изолированный worktree + ветка `eng/<profile>-<task>` на `(profile, repo, task)`. Больше нет общего per-VM клона, `git fetch`/`pull`, и токена в persistent origin URL. |
+| ✅ реализовано | Токен без записи на диск | GitHub-токен прокидывается только на время синхронного spawn'а как эфемерный git credential helper (`GIT_CONFIG_*` env: сброс списка + helper) — в URL/конфиг не попадает. |
+| ✅ реализовано | Удалён legacy shared-dir путь | `dev_workspace_list` (читал только общий каталог, вызовов нет) удалён; `dev_new_repo` создаёт репо и форкает per-task workspace; `getDevDir()`/`AGENT_DATA_DIR/dev` удалены отдельным коммитом (redirect и удаление независимо ревертабельны). `installGitHooks` сохранён. |
+| ✅ реализовано | Тесты | `tests/browser.test.js` — gating `engineering-skills` (present/absent), зеркалит hh-skills; `tests/dev-workspace-setup.test.js` — redirect wiring (fake-lib через `ENGINEERING_WORKSPACE_LIB`), два разных task-лейбла → два отдельных worktree/ветки, passthrough full URL/local path, отсутствие `AGENT_DATA_DIR/dev`; реальный sibling-чекаут, два worktree. `npm run check` + новый lint зелёные. |
+
+## 2026-09-26 — правила тестов и CI для доменных skill-репо
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | **Единые правила тестов доменных репо** (`docs/domain-skill-repo-test-rules.md`) | Обязательный контракт для `trained-assist-<domain>-skill`: 3 слоя CI (contract/behavior/guards), детерминированный replay-гейт на модели `scripts/staging/*`, mock'ать ровно 2 рубежа (LLM + внешняя сеть), никогда — регистратор/сервис. CI = replay, staging = живой прогон + LLM-судья (настоящий control plane через `MCP_SKILL_SOURCES_CONFIG`, не мок). DoD-чеклист. Ссылки на test-kit кирпичи. |
+| 🔵 планируется | **`@trained-assist/mcp-skill-testkit`** | Извлечь `scripts/staging/*` + `tests/helpers/mcp.js` + `fake-provider-mcp.js` в общий пакет (Phase 2; Phase 1 — вендоринг в доменных репо). |
+| 🔵 планируется | **Issue во всех репо** | Завести issue со ссылкой на правила в каждом репо (agent, tg-bot, web, recruiting/hh, engineering, freelance, exhibition, sales, checklist). |
+
+## 2026-09-26 — playbooks P3d-1b: `validation_mode` + LLM-валидатор + softening (#1372, PR #1431)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | `validation_mode` enum | `programmatic` \| `programmatic+llm` \| `programmatic+llm-fastpass`. Приоритет: `execution_policy_json.validation_mode` (per-plan) > env `PLAYBOOK_VALIDATION_MODE` > дефолт `programmatic+llm`. Хелпер `resolveValidationMode()` в `src/playbook-validators.js`, используется в `runDueDurable`. Невалидное значение на любом уровне игнорируется (fall-through). |
+| ✅ реализовано | LLM-валидатор | `evaluateItemValidationsModeAware`: детерминированные валидаторы идут первыми; LLM зовётся только когда ключ не зарегистрирован или вердикт `inconclusive`. Дешёвый OpenRouter (`PLAYBOOK_VALIDATION_MODEL`, дефолт `google/gemini-2.5-flash`), строгий JSON `{status,reason}`, `AbortSignal.timeout` ~15s; ошибка/битый JSON → `inconclusive` (никогда не слепой pass). Контекст: цель задачи, шаг+инструкции, ключ+значение, evidence, ограниченная выжимка repo-доков. Инъекция `llmValidate` — тесты не ходят в сеть. |
+| ✅ реализовано | `user_value_*` через repo-сценарий | Промпт явно разрешает принять ссылочный scenario-док (value statement + ≥2 упорядоченных шага) как доказательство. |
+| ✅ реализовано | `programmatic+llm-fastpass` | Отдельный (более мягкий) промпт: осмотреться, терпеть тривиальные пропуски, дополнить контекст; всё ещё не слепой pass. Значение selectable. |
+| ✅ реализовано | Softening auto-resolver | Промпт-гайд + ограниченный детерминированный пост-чек: `fail` из-за отсутствующей явной ссылки при наличии близкого эквивалента (напр. PR-ссылка) понижается до `inconclusive` с эквивалентом в evidence — не авто-pass, не скрывает причину. |
+| ✅ реализовано | Тесты | `tests/unit/playbook-validators-mode.test.js`: (a) `programmatic` не зовёт LLM; (b) `+llm` зовёт только для unregistered/inconclusive и пишет вердикт; (c) throw/invalid/bad-JSON/non-ok → `inconclusive`; (d) приоритет plan>env>default; fastpass; softening. `gtd-durable-wiring` кейсы 12/13: `user_value_written` проходит через инъектированный LLM под `programmatic+llm`, остаётся `inconclusive` под `programmatic`. P3d-1 тесты зелёные; `npx eslint src` → 0. |
+| ✅ реализовано | P3d-2 | Финализация: `finalizePlan` + гейт в `updateTask` (слайс P3d-2, см. секцию ниже). |
+
+## 2026-09-26 — playbooks P3d-1c: agent-chosen per-step mode + fast-pass escape (#1372)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | Per-step `validation_mode` | Nullable колонка `task_items.validation_mode` (миграция `durable-task-migrations.js`, CHECK по enum) + разрешена в `updateTaskItem` whitelist. Приоритет `resolveValidationMode`: per-step > per-plan (`execution_policy_json.validation_mode`) > env `PLAYBOOK_VALIDATION_MODE` > дефолт `programmatic+llm`. |
+| ✅ реализовано | Agent выбирает режим | Новый MCP-тул `task_item_update(item_id, validation_mode)`; step-промпт показывает `Step id`, текущий режим, доступные значения и рекомендует `programmatic+llm`. Колбэк завершения перечитывает item, поэтому выбранный в рантайме per-step режим учитывается. |
+| ✅ реализовано | Явный fast-pass escape | Под `programmatic+llm-fastpass` шаг может пропустить проверку финальной строкой `VALIDATION: fastpass-skip: <reason>`. Пропуск пишется в `task_validation_results` как `status:'pass'` + `evidence_json {skipped:true, reason, mode}` по каждому объявленному ключу (либо одна строка `fastpass-skip`, если ключей нет) — никогда не тихий pass. Пропускаются и детерминированные валидаторы (в этом и смысл escape), но пропуск всегда записан. Маркер учитывается только при effective-режиме fastpass; programmatic-шаги (без модели) пропускать не могут. |
+| ✅ реализовано | Тесты | `gtd-durable-wiring` кейсы 14–16: (14) маркер пишет skip с причиной и не зовёт ни реестр, ни LLM; (15) per-step override перебивает план; (16) обычные pass/fail/inconclusive под `+llm` не затронуты, а fastpass сам по себе — не auto-skip. Unit: приоритет per-step в `resolveValidationMode`, `parseFastpassSkip`; MCP: `task_item_update` (+ изоляция профиля). P3d-1/1b зелёные; `NODE_ENV=development npx eslint src` → 0. |
+| ✅ реализовано | P3d-2 | Финализация: `finalizePlan` + гейт в `updateTask` (см. секцию P3d-2 ниже). |
+
+## 2026-09-26 — playbooks P3d-2: гейт финализации по validation_mode (#1372)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | `DurableTaskStore.finalizePlan(taskId, profileId)` | Contract-план становится `done` только если каждое объявленное (criterion_id, validator) имеет строку `task_validation_results` со `status='pass'` на текущем `contract_revision`. Иначе — `{finalized:false, missing:[{criterion_id, validator, got}]}`, статус не меняется. Повторный вызов на уже `done` идемпотентен. |
+| ✅ реализовано | Единая схема criterion_id | `criterionIdForItem` + `declaredValidations` вынесены в `src/durable-task-plan.js` — исполнитель (запись строк) и гейт (чтение строк) используют одно определение, без дрейфа. |
+| ✅ реализовано | `updateTask status='done'` через гейт | Для contract-плана `updateTask`/`completeTask` бросают `Plan finalization blocked: unmet validations — …` при невыполненных проверках. Сырой SQL-обход в `runDueDurable` заменён на `store.finalizePlan(...)`; при блокировке — явный warn со списком недостающих пар. |
+| ✅ реализовано | mode-aware без изменений валидаторов | Строгость уже закодирована при записи (P3d-1b LLM-вердикты; P3d-1c fast-pass skip = `pass` + `evidence {skipped:true, reason, mode}`). Гейт требует лишь `pass`, поэтому skip удовлетворяет его, но остаётся видимым в audit trail. |
+| ✅ реализовано | Тесты | Unit (`durable-task-store.test.js`): блок при missing/fail/inconclusive, pass всех строк, игнор строк другого `contract_revision`, fast-pass skip виден и проходит, `updateTask`/`completeTask` не обходят гейт, legacy-задачи не затронуты, критерий без declared-validations ничего не гейтит. Wiring (`gtd-durable-wiring.test.cjs` кейс 17): `runDueDurable` финализирует только через гейт; все items done + unmet validation → задача остаётся `active`. `NODE_ENV=development npx eslint src` → 0. |
+
+## 2026-09-26 — OpenCode Go: пул ключей и ротация (основной + резервный)
+
+| Статус | Требование | Описание |
+|--------|-----------|----------|
+| ✅ реализовано | Два ключа на VM | Новый секрет `OPENCODE_GO_API_KEYS` — comma-separated пул (первый = активный/основной), добавлен в `infra/env-manifest.json` и `ci.yml` printf. Fallback на одиночный `OPENCODE_GO_API_KEY` сохранён, поэтому VM без пула работает как раньше. |
+| ✅ реализовано | Ротация при исчерпании лимита | `src/opencode-go-keys.js`: при Go-quota `opencode-go-toggle.noteFailure()` сначала переписывает `~/.local/share/opencode/auth.json` на следующий не-исчерпанный ключ и остаётся на Go; к OpenRouter флипает только когда все ключи сожжены. Источник активного ключа — сам `auth.json` (нет рассинхрона); исчерпание (TTL ~5ч, как окно сброса Go) — в `~/.config/opencode/go-keys-state.json`. |
+| ✅ реализовано | Сообщение пользователю | Runner различает два случая по `getMode()`: «переключаюсь на резервный ключ Go» против «тумблер на OpenRouter»; action в execution-history — `deepseek_go_key_rotation` / `deepseek_go_toggle_flip`. |
+| ✅ реализовано | Деплой | `infra/opencode-switch-profile.sh` пишет в auth.json первый ключ пула (иначе fallback на старый сингл). |
+| ✅ реализовано | Тесты | 5 новых кейсов в `test/opencode-go-toggle.test.cjs` (readPool, ротация + остаётся на Go, флип после исчерпания всех ключей, TTL/`null` при всех сожжённых, no-op на одном ключе). `npm run check`, `check-env-sync`, `runner-index-contract`, `opencode-alternation-wiring` — зелёные. |

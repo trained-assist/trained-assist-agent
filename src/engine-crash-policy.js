@@ -40,4 +40,29 @@ function isTerminalQuickCrash({ exitCode, timedOut, outputLength, hasResult, eng
   return true;
 }
 
-module.exports = { isTerminalQuickCrash, engineCanFallBack, QUICK_CRASH_MAX_OUTPUT };
+// Human-facing wording for a provider-unusable failure. A QUOTA / RATE_LIMIT hit is NOT lost
+// credentials (spec §7): the engine's auth is fine, it is out of budget for a while. The
+// auth-flag split already stopped treating the two as one — but the MESSAGE the runner sends was
+// still hardcoded to "потерял авторизацию" for every class, so a user behind an exhausted Codex
+// plan was told his login had broken (observed 2026-09-25: live errorText "You've hit your usage
+// limit … try again at Sep 29th", failureClass QUOTA, surfaced as "Codex потерял авторизацию").
+// Class-aware wording keeps the message honest and actionable.
+function isQuotaLikeClass(failureClass) {
+  return failureClass === 'QUOTA' || failureClass === 'RATE_LIMIT';
+}
+
+function engineFallbackNotice(engineLabel, failureClass) {
+  const reason = isQuotaLikeClass(failureClass) ? 'упёрся в лимит' : 'потерял авторизацию';
+  return `⚠️ ${engineLabel} ${reason} — автоматически переключаюсь на OpenCode для этой задачи.`;
+}
+
+function engineAuthNotice(engineLabel, failureClass) {
+  return isQuotaLikeClass(failureClass)
+    ? `⚠️ ${engineLabel} временно упёрся в лимит — оператор уже уведомлён, скоро починим.`
+    : `⚠️ Авторизация ${engineLabel} истекла — оператор уже уведомлён, скоро починим.`;
+}
+
+module.exports = {
+  isTerminalQuickCrash, engineCanFallBack, QUICK_CRASH_MAX_OUTPUT,
+  isQuotaLikeClass, engineFallbackNotice, engineAuthNotice,
+};

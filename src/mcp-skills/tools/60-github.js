@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { readTokenValue } = require('../../token-value');
 
 const GH_API = 'https://api.github.com';
 const USER_ID = process.env.USER_ID || '';
@@ -19,7 +20,7 @@ function getToken() {
   if (USER_ID) {
     try {
       const p = path.join(os.homedir(), 'agent-tokens', USER_ID, 'github');
-      if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+      if (fs.existsSync(p)) return readTokenValue(fs.readFileSync(p, 'utf8'));
     } catch {}
   }
   throw new Error(

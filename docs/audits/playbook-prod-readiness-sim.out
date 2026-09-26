@@ -1,0 +1,56 @@
+
+=== 0. MCP autodiscovery — are playbook_* tools registered and callable? ===
+playbook_* tools discovered: playbook_list, playbook_get, playbook_draft, playbook_edit, playbook_save, playbook_run
+durable tools discovered  : task_create, task_item_add, task_list, task_get, task_update, task_item_update, task_item_complete
+
+=== 1. Hop 1+2+3: playbook_run via the MCP handler → compile → DRAFT plan ===
+task.id=f4d3ac76-3b0b-484a-8d55-e42e8235cf53
+task.status=draft  playbook=development@1
+items=16  summary={"stages":5,"items":16}
+first item contract: {"title":"Define user value","stage":"frame","execution_kind":"agent","executor_role":"researcher","minimum_model_level":"bachelor","context_budget":"small"}
+
+=== 2. Hop 4a: DRAFT is not executed (tick runs before activation) ===
+fires while draft = 0 (expect 0); task.status=draft
+
+=== 2b. Hop 4b: activation through the real MCP task_update handler ===
+task.status after task_update = active
+
+=== 3. Hop 4+5+6+7: drive durable ticks to completion (injected registry + LLM + engine) ===
+state before fast-forwarding the waiter: 0:done 1:done 2:done 3:done 4:done 5:done 6:done 7:done 8:done 9:done 10:done 11:waiting 12:done 13:done 14:done 15:done
+→ position 12 "Merge and deploy" is already done while position 11 "Wait for CI…" is still waiting: later steps are NOT blocked by an earlier delay-gated step.
+(fast-forwarded the delay_after_sec=600 waiter into the past to emulate elapsed wall-clock)
+task reached terminal status=done after tick 2
+final task.status=done
+items: 16/16 done
+validation rows=16 (pass=16, fail=0, inconclusive=0)
+engine steps fired (proves per-step resolution + that programmatic did NOT spawn an engine):
+   [opencode/value] (forceClaude) role=null — Define user value
+   [opencode/value] (forceClaude) role=null — Record acceptance criteria
+   [opencode/max] (forceClaude) role=null — Define validation
+   [opencode/value] (forceClaude) role=null — Research or reproduce the problem
+   [opencode/max] (forceClaude) role=null — Identify root cause when needed
+   [opencode/max] (forceClaude) role=null — Design the smallest change
+   [opencode/max] (forceClaude) role=null — Check risks and rollback
+   [opencode/max] (forceClaude) role=null — Split implementation into small slices
+   [opencode/max] (forceClaude) role=null — Implement
+   [opencode/max] (forceClaude) role=null — Verify the actual user scenario
+   [opencode/max] (forceClaude) role=null — Observe when needed
+   [claude] (forceClaude) role=null — Finalize only with current acceptance evidence
+runTask invocations=12; programmatic items in plan=4 → expected agent fires=12
+
+=== 4. Hop 6 — what prod does TODAY with the real registry and no OPENROUTER key ===
+item.status=pending attempt_count=1/3
+recorded verdict: tests_lint_regression_green=inconclusive {"source":"llm","reason":"no-openrouter-key"}
+task.status=active (a programmatic step cannot pass without a registered validator or an LLM key)
+
+=== 4b. Hop 6 — the REAL deterministic validators on the two "objective" CI/merge keys ===
+ci_green               → pass {"checks":[{"name":"ci","status":"completed","conclusion":"success"}]}
+ci_and_staging_green   → inconclusive {"checks":[{"name":"ci","status":"completed","conclusion":"success"}],"reason":"staging-unverified"}
+merged                 → pass {"merged_at":"2026-09-26T00:00:00Z","merge_commit_sha":null}
+pr_merged              → pass {"merged_at":"2026-09-26T00:00:00Z","merge_commit_sha":null}
+merged_and_deployed    → inconclusive {"merged_at":"2026-09-26T00:00:00Z","merge_commit_sha":null,"reason":"deploy-unverified"}
+=> even with a working GitHub token, *_staging_green / *_deployed are permanently
+   inconclusive (no staging/deploy health signal exists); they only ever pass via the LLM judge.
+
+=== SUMMARY ===
+work-dir snapshot: /var/folders/1m/v4ljzvzx5x566w1r067w5vmw0000gn/T/pb-audit-sim-QQ6mSl

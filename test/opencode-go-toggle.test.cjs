@@ -5,13 +5,19 @@ const os = require('node:os');
 const path = require('node:path');
 
 // Isolated OPENCODE_GO_MODE_FILE per test run — same pattern as test/opencode-ladder.test.cjs —
-// so this never touches the real ~/.config/opencode/go-mode.json.
+// so this never touches the real ~/.config/opencode/go-mode.json. Also isolates the key-pool
+// module's auth/state files and clears the pool env so the rotation path is opt-in per test.
 function freshModule() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-go-toggle-test-'));
   process.env.OPENCODE_GO_MODE_FILE = path.join(dir, 'go-mode.json');
+  process.env.OPENCODE_GO_KEYS_STATE_FILE = path.join(dir, 'go-keys-state.json');
+  process.env.OPENCODE_GO_AUTH_FILE = path.join(dir, 'auth.json');
+  delete process.env.OPENCODE_GO_API_KEYS;
+  delete process.env.OPENCODE_GO_API_KEY;
   delete require.cache[require.resolve('../src/opencode-go-toggle')];
   delete require.cache[require.resolve('../src/opencode-ladder')];
-  return { mod: require('../src/opencode-go-toggle'), dir };
+  delete require.cache[require.resolve('../src/opencode-go-keys')];
+  return { mod: require('../src/opencode-go-toggle'), dir, keys: require('../src/opencode-go-keys') };
 }
 
 test('defaults to go mode with no state file', () => {
@@ -92,4 +98,62 @@ test('forceFlip marks the switch as auto (eligible for AUTO_REVERT_MS), not a st
   const state = JSON.parse(fs.readFileSync(mod.STATE_FILE, 'utf8'));
   assert.equal(state.switchedBy, 'auto');
   assert.ok(state.autoRevertAt);
+});
+
+// --- Key-pool rotation (owner 2026-09-26: "два ключа, основной и резервный") ---
+
+test('key pool: readPool splits comma/whitespace values and falls back to the single key', () => {
+  const { keys } = freshModule();
+  process.env.OPENCODE_GO_API_KEYS = 'oc_a, oc_b oc_c';
+  assert.deepEqual(keys.readPool(), ['oc_a', 'oc_b', 'oc_c']);
+  delete process.env.OPENCODE_GO_API_KEYS;
+  process.env.OPENCODE_GO_API_KEY = 'oc_only';
+  assert.deepEqual(keys.readPool(), ['oc_only']);
+  delete process.env.OPENCODE_GO_API_KEY;
+  assert.deepEqual(keys.readPool(), []);
+});
+
+test('noteFailure rotates to the spare Go key and stays on Go (no gateway flip)', () => {
+  const { mod, dir, keys } = freshModule();
+  process.env.OPENCODE_GO_API_KEYS = 'oc_primary,oc_backup';
+  fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ 'opencode-go': { type: 'api', key: 'oc_primary' } }));
+
+  const handled = mod.noteFailure('opencode-go/deepseek-v4.1-flash', 'Go usage limit exceeded');
+
+  assert.equal(handled, true);
+  assert.equal(mod.getMode(), 'go', 'stays on the Go gateway');
+  assert.equal(keys.writeActiveKey(), 'oc_backup', 'auth.json now holds the spare key');
+  const auth = JSON.parse(fs.readFileSync(path.join(dir, 'auth.json'), 'utf8'));
+  assert.equal(auth['opencode-go'].key, 'oc_backup');
+});
+
+test('noteFailure flips to openrouter once every Go key is exhausted', () => {
+  const { mod, dir, keys } = freshModule();
+  process.env.OPENCODE_GO_API_KEYS = 'oc_primary,oc_backup';
+  fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ 'opencode-go': { type: 'api', key: 'oc_primary' } }));
+
+  assert.equal(mod.noteFailure('opencode-go/deepseek-v4.1-flash', 'usage limit'), true);
+  assert.equal(keys.writeActiveKey(), 'oc_backup');
+  // Second quota hit on the (now active) backup key: nothing left to rotate to → gateway flip.
+  assert.equal(mod.noteFailure('opencode-go/deepseek-v4.1-flash', 'usage limit'), true);
+  assert.equal(mod.getMode(), 'openrouter');
+  assert.equal(mod.resolveProfileName(), 'deepseek-openrouter');
+});
+
+test('rotate marks the active key exhausted with a TTL and returns null when all keys are burned', () => {
+  const { keys, dir } = freshModule();
+  process.env.OPENCODE_GO_API_KEYS = 'oc_primary,oc_backup';
+  fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ 'opencode-go': { type: 'api', key: 'oc_primary' } }));
+
+  assert.deepEqual(keys.rotate(), { fromIndex: 0, toIndex: 1 });
+  assert.equal(keys.rotate(), null, 'both keys burned → nothing to rotate to');
+  const state = JSON.parse(fs.readFileSync(keys.STATE_FILE, 'utf8'));
+  assert.ok(state.exhausted['0'] > Date.now() && state.exhausted['1'] > Date.now());
+});
+
+test('rotate is a no-op with a single key (legacy VM without a provisioned pool)', () => {
+  const { keys, dir } = freshModule();
+  process.env.OPENCODE_GO_API_KEYS = 'oc_primary';
+  fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ 'opencode-go': { type: 'api', key: 'oc_primary' } }));
+  assert.equal(keys.rotate(), null);
 });

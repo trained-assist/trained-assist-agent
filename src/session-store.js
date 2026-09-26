@@ -55,7 +55,30 @@ function saveIndex(workDir, sessions) {
  *  `audience` scopes the session to a bot/surface (e.g. 'recruiter') sharing the same
  *  username+chatId (see AUDIENCE-SCOPE-SPEC). Defaults to 'default' — omitting it, or
  *  passing 'default' explicitly, is byte-for-byte identical to the pre-audience behavior. */
-function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience, threadId = null }) {
+// Telegram forum topic = the update's `message_thread_id` (#1409). Only a positive
+// integer is a topic; anything else means "no topic" (private chat / non-forum group).
+function normThreadId(t) {
+  const n = typeof t === 'string' && /^\d+$/.test(t) ? Number(t) : t;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// The topic a session belongs to. `undefined` = legacy record written before #1409
+// (topic unknown); `null` = explicitly no topic; number = that forum topic.
+function threadOf(session) {
+  if (!session || !Object.prototype.hasOwnProperty.call(session, 'messageThreadId')) return undefined;
+  return normThreadId(session.messageThreadId);
+}
+
+// Does `session` belong to the conversation (telegramChatId, message_thread_id)?
+// A foreign chat or a foreign topic → false. Legacy topic-less records match on chat only.
+function belongsToConversation(session, chatId, threadId) {
+  const attached = session?.liveChatId ?? session?.ownerChatId;
+  if (attached && String(attached) !== String(chatId)) return false;
+  const t = threadOf(session);
+  return t === undefined || t === normThreadId(threadId);
+}
+
+function createSession(workDir, { task, id: providedId, chatId, projectId = null, audience, threadId }) {
   const id = providedId || `s-${Date.now()}`;
   const topic = task.slice(0, 80).replace(/\s+/g, ' ').trim();
   const now = Date.now();
@@ -73,6 +96,10 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
   const full = {
     ...meta,
     liveChatId: chatId || null, // chat the session is currently attached to (renamed from ownerChatId; roams via /sessions)
+    // Telegram `message_thread_id` of the forum topic (#1409). Written only when the caller
+    // knows it (null = no topic); an omitted threadId leaves the topic unknown (legacy
+    // semantics) instead of wrongly pinning the session to "no topic".
+    ...(threadId !== undefined && chatId ? { messageThreadId: normThreadId(threadId) } : {}),
     projectId: projectId || null,
     messages: [{ role: 'user', content: task, at: now }],
   };
@@ -84,7 +111,7 @@ function createSession(workDir, { task, id: providedId, chatId, projectId = null
   // freshly-created session orphaned: getCurrentSessionId returns null, the next
   // message spawns a brand-new context-blind session, and the accumulated ТЗ is lost
   // (issue #531). setCurrentSessionId is idempotent with the later runner calls.
-  if (chatId) setCurrentSessionId(workDir, id, chatId, audience, threadId);
+  if (chatId) setCurrentSessionId(workDir, id, chatId, audience, threadId ?? null);
 
   return id;
 }
@@ -239,17 +266,23 @@ function setCurrentSessionId(workDir, id, chatId, audience, threadId = null) {
  * or null on failure / when chatId is falsy.
  * (Renamed from claimOwnerChatId; reads the pre-rename ownerChatId as a fallback.)
  */
-function claimLiveChatId(workDir, id, chatId) {
+function claimLiveChatId(workDir, id, chatId, threadId) {
   if (!id || !chatId) return null;
   try {
     const fp = sessionFilePath(workDir, id);
     if (!fs.existsSync(fp)) return null;
     const full = JSON.parse(fs.readFileSync(fp, 'utf8'));
     const current = full.liveChatId ?? full.ownerChatId; // read-compat: pre-rename files store ownerChatId
-    if (current) return current; // already attached — leave as-is
-    full.liveChatId = chatId;
-    atomicWrite(fp, JSON.stringify(full, null, 2));
-    return chatId;
+    let dirty = false;
+    if (!current) { full.liveChatId = chatId; dirty = true; }
+    // Legacy record with an unknown topic (#1409): pin it to the first topic that
+    // touches it, so a sibling topic of the same forum group can no longer adopt it.
+    if (threadId !== undefined && threadOf(full) === undefined && (!current || String(current) === String(chatId))) {
+      full.messageThreadId = normThreadId(threadId);
+      dirty = true;
+    }
+    if (dirty) atomicWrite(fp, JSON.stringify(full, null, 2));
+    return current || chatId;
   } catch (e) {
     console.warn('[session-store] claimLiveChatId:', e.message);
     return null;
@@ -279,7 +312,9 @@ function resolveChatSession(workDir, sessionId, chatId, audience, threadId = nul
   if (sessionId && getSession(workDir, sessionId)) return sessionId;
   if (chatId) {
     const pointerId = getCurrentSessionId(workDir, chatId, audience, threadId);
-    if (pointerId && getSession(workDir, pointerId)) return pointerId;
+    const pointed = pointerId && getSession(workDir, pointerId);
+    // A topic pointer that leads into another topic's session (the pre-#1409 bleed) is not ours.
+    if (pointed && belongsToConversation(pointed, chatId, threadId)) return pointerId;
   }
   return null;
 }
@@ -414,7 +449,7 @@ function archiveSessions(workDir, sessionIds) {
 
 module.exports = {
   createSession, appendUserMessage, appendReply, listSessions, getSession, buildContext,
-  getCurrentSessionId, setCurrentSessionId, claimLiveChatId, resolveChatSession, archiveSessions, setSummary, needsSummary,
+  getCurrentSessionId, setCurrentSessionId, claimLiveChatId, normThreadId, threadOf, belongsToConversation, resolveChatSession, archiveSessions, setSummary, needsSummary,
   getLastOcModel, setLastOcModel, setSessionProject,
   getEngineSessionId, setEngineSessionId,
   // Back-compat alias for the pre-rename name (see PROFILE-RENAME-SPEC.md); remove once no caller uses it.

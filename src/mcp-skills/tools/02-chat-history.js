@@ -1,8 +1,9 @@
 'use strict';
 
 const fs = require('fs');
-const path = require('path');
 const { sessionsDirPath } = require('../../data-paths');
+const chatHistory = require('../../chat-history');
+const { threadOf } = require('../../session-store');
 
 /**
  * get_chat_history — retrieve conversation history from previous sessions
@@ -38,6 +39,14 @@ function resolveCurrentChatId() {
   return session.liveChatId ?? session.ownerChatId ?? null;
 }
 
+// Forum topic of the current session (#1409): history stays inside this topic.
+// undefined = unknown (legacy session / no session file) → no topic filter.
+function resolveCurrentThreadId() {
+  const sessionFile = process.env.AGENT_SESSION_FILE;
+  if (!sessionFile) return undefined;
+  return threadOf(readSession(sessionFile));
+}
+
 function resolveCurrentSessionId() {
   const sessionFile = process.env.AGENT_SESSION_FILE;
   if (!sessionFile) return null;
@@ -54,10 +63,12 @@ module.exports = {
   tools: {
     get_chat_history: {
       description:
-        'Load conversation history from PREVIOUS sessions in the same Telegram chat. ' +
+        'Load conversation history from PREVIOUS sessions in the same Telegram chat ' +
+        '(and the same forum topic, when the chat is a forum group). ' +
         'Returns sessions and messages from earlier conversations with this user in this chat, ' +
         'excluding the current session. Use when the user references something from a past conversation ' +
-        'or you need context that predates the current session.',
+        'or you need context that predates the current session. Sessions are returned most-recent first; ' +
+        'use since_hours (6/24) to get "what was said in this chat in the last N hours".',
       inputSchema: {
         type: 'object',
         properties: {
@@ -76,6 +87,12 @@ module.exports = {
               'Max messages per session to return (default 20, max 100). ' +
               'Returns the most recent messages within each session.',
           },
+          since_hours: {
+            type: 'number',
+            description:
+              'Only messages from the last N hours (e.g. 6 or 24), across ALL sessions of this chat. ' +
+              'Sessions with no messages in the window are skipped.',
+          },
           include_current: {
             type: 'boolean',
             description:
@@ -88,6 +105,7 @@ module.exports = {
         sessions_limit = 3,
         msg_limit = 20,
         include_current = false,
+        since_hours,
       } = {}) => {
         const sessionsDir = resolveSessionsDir();
         if (!sessionsDir) return { error: 'AGENT_USER_ID not set' };
@@ -100,59 +118,37 @@ module.exports = {
               'Pass chat_id explicitly.',
           };
         }
-
-        const currentSessionId = resolveCurrentSessionId();
         const targetChatStr = String(targetChatId);
-
-        // Scan all session files in the directory (same pattern as session_search)
-        let files;
-        try {
-          files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
-        } catch {
+        const currentChatId = resolveCurrentChatId();
+        // Topic filter only for the current conversation's own chat; an explicit other
+        // chat_id has no known topic.
+        const threadId = currentChatId != null && String(currentChatId) === targetChatStr
+          ? resolveCurrentThreadId() : undefined;
+        if (!fs.existsSync(sessionsDir)) {
           return { sessions: [], total: 0, chat_id: targetChatStr, note: 'No sessions directory' };
         }
 
-        const matched = [];
-        const cap = Math.min(Math.max(1, sessions_limit), 10);
-        const msgCap = Math.min(Math.max(1, msg_limit), 100);
-
-        for (const file of files) {
-          if (matched.length >= cap) break;
-
-          const session = readSession(path.join(sessionsDir, file));
-          if (!session) continue;
-          if (!include_current && session.id === currentSessionId) continue;
-
-          const sessionChatId = String(session.liveChatId ?? session.ownerChatId ?? '');
-          if (sessionChatId !== targetChatStr) continue;
-
-          const allMsgs = session.messages || [];
-          const recentMsgs = allMsgs.slice(-msgCap);
-
-          matched.push({
-            session_id: session.id,
-            topic: session.topic || '',
-            created_at: formatTime(session.createdAt),
-            last_at: formatTime(session.lastAt),
-            total_messages: allMsgs.length,
-            returned_messages: recentMsgs.length,
-            messages: recentMsgs.map(m => ({
-              role: m.role,
-              text: m.content,
-              at: formatTime(m.at),
-            })),
-          });
-        }
-
-        // Sort by lastAt descending (most recent first)
-        matched.sort((a, b) => {
-          const ta = a.last_at ? new Date(a.last_at).getTime() : 0;
-          const tb = b.last_at ? new Date(b.last_at).getTime() : 0;
-          return tb - ta;
+        // Most-recently-active first; the limit applies AFTER sorting (see chat-history.js).
+        const found = chatHistory.chatSessions(sessionsDir, targetChatStr, {
+          sinceHours: Number(since_hours) > 0 ? Number(since_hours) : null,
+          threadId,
+          excludeSessionId: include_current ? null : resolveCurrentSessionId(),
+          sessionsLimit: Math.min(Math.max(1, Number(sessions_limit) || 3), 10),
+          msgLimit: Math.min(Math.max(1, Number(msg_limit) || 20), 100),
         });
+        const matched = found.map(s => ({
+          session_id: s.id,
+          topic: s.topic,
+          created_at: formatTime(s.createdAt),
+          last_at: formatTime(s.lastAt),
+          total_messages: s.totalMessages,
+          returned_messages: s.messages.length,
+          messages: s.messages.map(m => ({ role: m.role, text: m.content, at: formatTime(m.at) })),
+        }));
 
         return {
           chat_id: targetChatStr,
+          since_hours: Number(since_hours) > 0 ? Number(since_hours) : undefined,
           sessions: matched,
           total: matched.length,
           note: matched.length === 0

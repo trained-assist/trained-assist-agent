@@ -7,7 +7,10 @@ const assert = require('node:assert/strict');
 // engine_fallback_to_opencode branch that the SAME error already triggered on exit 0.
 // isTerminalQuickCrash must return false (→ fall through to the fallback path) for a
 // provider-unusable error on an engine that can still fall back.
-const { isTerminalQuickCrash, engineCanFallBack } = require('../src/engine-crash-policy');
+const {
+  isTerminalQuickCrash, engineCanFallBack,
+  isQuotaLikeClass, engineFallbackNotice, engineAuthNotice,
+} = require('../src/engine-crash-policy');
 
 const CODEX_QUOTA = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 29th, 2026 10:49 PM.";
 const CLAUDE_AUTH = 'Not logged in · Please run /login';
@@ -60,4 +63,34 @@ test('engineCanFallBack mirrors the fallback-branch guard', () => {
   assert.equal(engineCanFallBack('claude', false), true);
   assert.equal(engineCanFallBack('codex', true), false);
   assert.equal(engineCanFallBack('opencode', false), false);
+});
+
+// Regression for the 2026-09-25 message conflation: a Codex QUOTA hit (live errorText
+// "You've hit your usage limit … try again at Sep 29th") was surfaced to the user as
+// "Codex потерял авторизацию" — the auth-flag split made the FLAG honest but the MESSAGE was
+// still hardcoded. The wording must follow the failure class, not assume credentials.
+test('isQuotaLikeClass groups QUOTA and RATE_LIMIT, not AUTH', () => {
+  assert.equal(isQuotaLikeClass('QUOTA'), true);
+  assert.equal(isQuotaLikeClass('RATE_LIMIT'), true);
+  assert.equal(isQuotaLikeClass('AUTH'), false);
+  assert.equal(isQuotaLikeClass(undefined), false);
+});
+
+test('quota fallback notice says "лимит", never "потерял авторизацию"', () => {
+  const msg = engineFallbackNotice('Codex', 'QUOTA');
+  assert.match(msg, /упёрся в лимит/);
+  assert.doesNotMatch(msg, /авторизац/i);
+  assert.match(msg, /переключаюсь на OpenCode/);
+});
+
+test('auth fallback notice keeps the credential wording', () => {
+  const msg = engineFallbackNotice('Claude Code', 'AUTH');
+  assert.match(msg, /потерял авторизацию/);
+  assert.doesNotMatch(msg, /лимит/);
+});
+
+test('terminal (no-fallback) notice is class-aware too', () => {
+  assert.match(engineAuthNotice('Codex', 'QUOTA'), /временно упёрся в лимит/);
+  assert.doesNotMatch(engineAuthNotice('Codex', 'QUOTA'), /авторизац/i);
+  assert.match(engineAuthNotice('OpenCode', 'AUTH'), /Авторизация OpenCode истекла/);
 });

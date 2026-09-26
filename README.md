@@ -306,6 +306,15 @@ Set in repo **Settings → Secrets and variables → Actions**:
 
 **Normal flow:** PR → CI → auto squash-merge → deploy to both VMs.
 
+**How deploy selects the running code (release model, #1391):** CI never resets a
+live working tree. It builds the merged SHA into an immutable, root-owned
+`~/agent-releases/<sha>/` (`git archive` + `npm ci`) and atomically repoints the
+`~/agent-master` symlink at it; both services run with
+`WorkingDirectory=~/agent-master`. The repo checkout is only a git source — sessions
+may work in it (checkout/commit) without affecting prod. Rollback = repoint the
+symlink to a previous release. Old releases are garbage-collected (3 kept).
+Deploy code itself is run from the target SHA, not from the worktree.
+
 **Emergency / manual deploy** (no PR needed):
 1. Merge your change to main first (or it's already there)
 2. GitHub → Actions → **Manual Deploy** → Run workflow → choose target (`gcp` / `ru` / `both`)
@@ -325,7 +334,9 @@ sudo journalctl -u assist-agent --no-pager -n 50
 # Common causes:
 # - "Required secret missing: TELEGRAM_BOT_TOKEN" → secret not in GCP SM or secrets.env
 # - Port 8080 already in use → sudo fuser -k 8080/tcp && sudo systemctl restart assist-agent
-# - git reset --hard failed → git stash && git reset --hard origin/main
+# - bad release deployed → repoint the symlink to the previous release, then restart:
+#   ls -1dt ~/agent-releases/*/ ; sudo ln -sfn ~/agent-releases/<prev-sha> ~/agent-master.new
+#   sudo mv -T ~/agent-master.new ~/agent-master && sudo systemctl restart assist-agent
 ```
 
 ## Setup
@@ -547,7 +558,9 @@ Enforced in CI (`ci.yml` → "Recruiter/HH tools must call OpenRouter, not spawn
 | `src/engine-health.js` | Per-engine operational health (`healthy`/`degraded`/`unavailable`) in SQLite, separate from credentials (`auth-flag.js`) and failure history (`execution-history.js`). `markEngineSuccess` self-heals on success; `markEngineFailure` escalates at `ENGINE_UNAVAILABLE_AFTER_FAILURES`. Only class `AUTH` is credential-invalid. |
 | `src/readiness.js` | `computeReadiness()` for `GET /readiness` — data dir writable, execution-owner lock present, ≥1 engine usable. A single unavailable engine does not make the server unready. |
 | `src/failure-classifier.js` | Deterministic + cheap-LLM classifier mapping error text onto the fixed `FAILURE_CLASSES` enum (`failure-taxonomy.js`). Feeds `engine-health.js` and `execution-history.js`. |
-| `src/mcp-skill-generation.js` | PR1 of the approved-MCP-source runtime wiring (issue #1367, design §12): pure generation compiler (`compileSourceGeneration`), `SessionMcpPlan` (`planSessionMcp`), full resolved generation snapshot + `RunBinding` materialization (`materializeSessionMcp`, contracts in `contracts/mcp-skill-runtime.schema.json`), operator status snapshot (`providerStatus`) and `acquireProvider` integrity API. No production mount — provider start/adapter/ActionBroker are later PRs. |
+| `src/mcp-skill-generation.js` | PR1 of the approved-MCP-source runtime wiring (issue #1367, design §12): pure generation compiler (`compileSourceGeneration`), `SessionMcpPlan` (`planSessionMcp`), full resolved generation snapshot + `RunBinding` materialization (`materializeSessionMcp`, contracts in `contracts/mcp-skill-runtime.schema.json`), operator status snapshot (`providerStatus`) and `acquireProvider` integrity API. |
+| `src/mcp-action-broker.js`, `src/mcp-provider-journal.js` | PR2 (issue #1358/#1374): the narrow `ActionBroker` an adapter process talks to over a Unix socket (single execution owner — writes through `ActionExecutions`, never a second SQLite writer) and the provider lease journal (`scripts/mcp-provider-adapter.js` is the adapter entry point spawned per source). |
+| `src/mcp-source-runtime.js` | PR2b host wiring (issue #1358/#1374): process-wide singleton (`getDefaultSourceRuntime()`) combining one compiled generation + one `ActionBroker` + per-run `SessionMcpPlan`/`RunBinding` materialization. `prepareRun({hostRunBinding, runtimeDir})` returns adapter server descriptors to merge into the engine's `.mcp.json`, or `null` when the run has no external servers. Inert by default (`enabled:false`, `prepareRun` a no-op) unless `MCP_SKILL_SOURCES_CONFIG` names an enabled source — production behaviour is unchanged until an admin activates one. Wired into `writeMcpConfig`'s `extraServers` (`src/browser.js`, merged via `mergeAdapterServers` — never shadows a core server name) from both `runner/index.js` and `hermes-tools-run.js`; `sourceRun.release()` runs in a `finally` right after the engine process exits. Because every engine (claude/codex/opencode) already derives its own MCP wiring from that one `.mcp.json`, no engine-specific code was needed — see `tests/mcp-source-runtime-engine-wiring.test.js`. |
 | `scripts/refresh-weeek-session.js` | Refreshes `WEEEK_APP_COOKIE` in the Cloudflare Worker secret. Flow: capture cookies from Chrome via CDP → headless Playwright fallback → CF REST API update → Telegram alert on failure. Run manually or via `weeek-session-refresh.service`. |
 
 ### Quick answers — prefer instant replies over calling Claude

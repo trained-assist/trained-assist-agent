@@ -26,8 +26,15 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { readTokenValue } = require('./token-value');
 const { DurableTaskStore } = require('./durable-task-store');
-const { durableTaskDbPath } = require('./data-paths');
+const { criterionIdForItem } = require('./durable-task-plan');
+const { durableTaskDbPath, userWorkDir, projectDir: projectDirPath } = require('./data-paths');
+const { resolveStepExecution } = require('./playbook-executor');
+const {
+  evaluateItemValidationsModeAware, resolveValidationMode, getDefaultRegistry, DEFAULT_VALIDATION_MODE,
+  parseValidation, FASTPASS_SKIP_MODE, parseFastpassSkip,
+} = require('./playbook-validators');
 
 // ── Разумные дефолты (небольшие, но осмысленные) ────────────────────────────
 const DEFAULT_ETA_MIN = 60;   // через сколько минут после завершения проверить
@@ -131,20 +138,135 @@ function reconcileOrphanedRunning(store = durableStore(), { now = Date.now() } =
 // Profile ids that own runnable items right now, mapped to their claimable
 // items. Legacy GTD scans per-profile directories; the store is profile-keyed,
 // so we invert: claim globally, then resolve the profile per item.
-function claimNextDurableItem(store = durableStore()) {
-  reconcileOrphanedRunning(store);
+function claimNextDurableItem(store = durableStore(), { now = Date.now() } = {}) {
+  // Expired waiters must fail BEFORE reconcile/claim can hand them out again —
+  // otherwise a 'waiting' step whose deadline passed defers forever.
+  store.expireWaitingDeadlines(now);
+  reconcileOrphanedRunning(store, { now });
   return store.claimNextRunnable();
 }
 
 
 const FRESH_CLAIM_GRACE_MS = 30 * 1000; // just-claimed items: let the claiming tick run them
-const DURABLE_MAX_ATTEMPTS = 3;
+
+// A failed item retries until its declared `max_attempts` are spent (P3a: the
+// per-step budget the compiler writes into the item). Tier escalation still
+// happens on each retry (legacy durable tasks); once attempts are exhausted the
+// item stays 'failed' — never re-pended forever. The recovery slice (P3c) owns
+// what happens after a step has genuinely exhausted its budget.
+// `itemId` is re-read fresh because startExecution already bumped attempt_count.
+// `escalate` is false for engine/env crashes: a crash is not an item-quality
+// signal, so it retries at the same tier until the attempt budget is spent.
+function retryFailedItem(store, itemId, profileId, { retryDelayMs = 0, escalate = true } = {}) {
+  const item = store.getTaskItem(itemId);
+  if (!item) return { retried: false, attempts: 0, maxAttempts: 0 };
+  const attempts = item.attempt_count || 0;
+  const maxAttempts = item.max_attempts || 1;
+  if (attempts >= maxAttempts) return { retried: false, attempts, maxAttempts };
+  if (escalate) store.escalateItem(itemId, profileId); // legacy tier ladder; also sets pending
+  store.updateTaskItem(itemId, { status: 'pending', due_at: Date.now() + retryDelayMs }, profileId);
+  return { retried: true, attempts, maxAttempts };
+}
+
+// Evaluate an item's declared validations through the registry and persist each
+// verdict as a task_validation_results row (profile-scoped). Returns the raw
+// results so the caller can decide complete vs fail. A validator that throws is
+// recorded as inconclusive — a broken check must not look like a pass.
+// `validationMode` (P3d-1b) selects whether an inconclusive deterministic verdict
+// may be decided by the injectable cheap LLM validator.
+async function recordItemValidations(store, { task, item, executionId, registry, projectDir, validationMode = DEFAULT_VALIDATION_MODE, llmValidate = null }) {
+  let results;
+  try {
+    results = await evaluateItemValidationsModeAware(item, {
+      task, profileId: task.profile_id, projectDir, registry, mode: validationMode, llmValidate,
+    });
+  } catch (e) {
+    results = [{ key: '*', status: 'inconclusive', subject: null, evidence: { reason: 'evaluator-error', error: e.message } }];
+  }
+  for (const r of results) {
+    try {
+      store.recordValidation({
+        task_id: task.id, profile_id: task.profile_id, task_item_id: item.id, execution_id: executionId,
+        criterion_id: criterionIdForItem(task, item, r.key),
+        contract_revision: task.contract_revision || 1,
+        validator: r.key, status: r.status,
+        subject_json: r.subject == null ? null : JSON.stringify(r.subject),
+        evidence_json: r.evidence == null ? null : JSON.stringify(r.evidence),
+      });
+    } catch (e) {
+      console.error(`[gtd-durable] recordValidation ${item.id.slice(0, 8)} ${r.key}:`, e.message);
+    }
+  }
+  return results;
+}
+
+// P3d-1c: the explicit fast-pass escape. Under `programmatic+llm-fastpass` a step
+// may bypass its validations when the full check is too heavy / is breaking
+// something / an urgent fix is needed. The bypass is never silent: every declared
+// validation is still written to `task_validation_results` — status 'pass' but
+// evidence carrying {skipped:true, reason, mode} — so the audit trail shows the
+// skipped check. A step with no declared validation still gets one row so the
+// bypass itself is recorded. Deterministic validators ARE skippable here: the
+// point of the escape is to unblock, and the recorded reason (not a hidden fail)
+// is what keeps it honest. Only the agent (non-programmatic) path can skip — a
+// programmatic step has no model to decide.
+function recordFastpassSkip(store, { task, item, executionId, reason }) {
+  const raw = item && item.validation_json != null ? item.validation_json : item && item.validation;
+  const keys = Object.keys(parseValidation(raw));
+  const validators = keys.length ? keys : ['fastpass-skip'];
+  for (const key of validators) {
+    try {
+      store.recordValidation({
+        task_id: task.id, profile_id: task.profile_id, task_item_id: item.id, execution_id: executionId,
+        criterion_id: criterionIdForItem(task, item, key),
+        contract_revision: task.contract_revision || 1,
+        validator: key, status: 'pass',
+        subject_json: JSON.stringify({ key }),
+        evidence_json: JSON.stringify({ skipped: true, reason, mode: FASTPASS_SKIP_MODE }),
+      });
+    } catch (e) {
+      console.error(`[gtd-durable] recordFastpassSkip ${item.id.slice(0, 8)} ${key}:`, e.message);
+    }
+  }
+  return validators;
+}
+
+// All items finished → close the task. Legacy (non-contract) tasks close by
+// fiat; a contract plan must pass the P3d-2 finalization gate: every declared
+// validation needs a matching 'pass' row (fast-pass skips are stored as pass).
+function settleTaskCompletion(store, task) {
+  const progress = store.progressSummary(task.id, task.profile_id);
+  if (!(progress.total > 0 && progress.finished >= progress.total)) return;
+  if (!task.acceptance_criteria_json) {
+    store.completeTask(task.id, task.profile_id, 'done');
+    console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
+    return;
+  }
+  const res = store.finalizePlan(task.id, task.profile_id);
+  if (res.finalized) {
+    console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
+    return;
+  }
+  const missing = (res.missing || [])
+    .map(m => `${m.criterion_id}/${m.validator}=${m.got == null ? 'missing' : m.got}`)
+    .join(', ');
+  console.warn(`[gtd-durable] finalization blocked: ${task.id.slice(0, 8)} — unmet validations: ${missing}`);
+}
 
 // Fire a claimed durable item through the same pipeline as legacy GTD fires.
-// Contract plans (draft, with acceptance_criteria) stay unclaimable by design —
-// activation is a later slice's decision, not this wiring's.
-async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK }) {
+// Contract plans are executable once explicitly activated (P3a: draft→active via
+// task_update); they stay unclaimable while draft. The step honors the item's
+// own max_attempts / execution_timeout_seconds. delay_after_sec / wait_deadline_at
+// shape when the store hands the item out (see durable-task-store.completeItem /
+// expireWaitingDeadlines).
+async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now(), maxFires = MAX_FIRES_PER_TICK, registry = null, llmValidate = null }) {
   const store = durableStore();
+  const validators = registry || getDefaultRegistry();
+  // A programmatic step that fails is retried synchronously inside this pass
+  // (no engine round-trip). Its re-pended due_at lands in the same tick, so
+  // without this guard claimNextRunnable could hand it straight back and
+  // double-fire it. Items fired as agent runs are 'running' and never re-claimed.
+  const claimedThisPass = new Set();
   let fired = 0;
   for (;;) {
     if (fired >= maxFires) return fired;
@@ -152,12 +274,19 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     if (!item) return fired;
     const task = store.db.prepare('SELECT * FROM durable_tasks WHERE id = ?').get(item.task_id);
     if (!task) { store.failItem(item.id, '__system__', { error: 'task vanished' }); continue; }
+    // P3d-1b/1c: per-step > per-plan policy > env > default programmatic+llm.
+    const validationMode = resolveValidationMode({ task, item });
+    if (claimedThisPass.has(item.id)) {
+      store.updateTaskItem(item.id, { status: 'waiting', due_at: Date.now() + FRESH_CLAIM_GRACE_MS }, task.profile_id);
+      continue;
+    }
+    claimedThisPass.add(item.id);
 
     // Re-entrancy: a live session for this task must not be double-fired.
     const sessionRow = store.db.prepare(
       'SELECT session_id FROM task_sessions WHERE task_id = ? AND active = 1').get(task.id);
     if (sessionRow && isTaskRunning(null, sessionRow.session_id)) {
-      // release the claim — put back to pending with a short re-try delay
+      // release the claim — put back to waiting with a short re-try delay
       store.updateTaskItem(item.id, { status: 'waiting', due_at: now + FRESH_CLAIM_GRACE_MS }, task.profile_id);
       continue;
     }
@@ -167,66 +296,136 @@ async function runDueDurable({ secrets, runTask, isTaskRunning, now = Date.now()
     const executionId = `exec-${item.id.slice(0, 8)}-${now}`;
     store.startExecution({ id: executionId, task_id: task.id, task_item_id: item.id, session_id: sessionRow?.session_id || null, tier: item.current_tier });
 
+    // P3b: contract plans resolve the step's contract to a concrete engine/profile;
+    // legacy (non-contract) durable items keep the pre-P3b default engine.
+    const step = task.acceptance_criteria_json
+      ? resolveStepExecution(item)
+      : { executionKind: 'agent', engine: 'claude', ocProfile: null, ocRole: null, skipModels: [] };
+    // A durable step has no session chat but DOES have a profile workspace. Passing
+    // it (instead of null) is both correct context and required: writeMcpConfig
+    // path.join()s the workDir, so null crashed every real durable fire.
+    const workDir = userWorkDir(task.profile_id);
+    // Deterministic checks (file_exists / command_exit_zero) resolve against the
+    // plan's project dir; a project-less plan falls back to the profile workspace.
+    const itemProjectDir = task.project_id ? projectDirPath(task.profile_id, task.project_id) : workDir;
+
+    // P3d-1: a programmatic step is executed deterministically — never spawned as
+    // an agent prompt. Its `validation` keys are evaluated by the registry, each
+    // verdict recorded, and the step completes only when every check passes.
+    if (step.executionKind === 'programmatic') {
+      const results = await recordItemValidations(store, {
+        task, item, executionId, registry: validators, projectDir: itemProjectDir, validationMode, llmValidate,
+      });
+      const allPass = results.length > 0 && results.every(r => r.status === 'pass');
+      store.setItemEvidence(item.id, task.profile_id, {
+        evidence_json: JSON.stringify({ validations: results.map(r => ({ key: r.key, status: r.status, evidence: r.evidence })) }),
+        completed_at: allPass ? Date.now() : null,
+      });
+      if (allPass) {
+        store.completeItem(item.id, task.profile_id, { executionId });
+        store.finishExecution(executionId, { status: 'success' });
+        console.log(`[gtd-durable] programmatic item done: ${item.id.slice(0, 8)}`);
+      } else {
+        const failedKeys = results.filter(r => r.status !== 'pass').map(r => r.key).join(', ');
+        store.failItem(item.id, task.profile_id, {
+          executionId, error: `programmatic validation not passed: ${failedKeys || 'no validations'}`,
+        });
+        store.finishExecution(executionId, { status: 'failed', error_class: 'validation', error_text: failedKeys.slice(0, 500) });
+        const r = retryFailedItem(store, item.id, task.profile_id, { escalate: false, retryDelayMs: FRESH_CLAIM_GRACE_MS });
+        if (r.retried) console.log(`[gtd-durable] programmatic retry ${item.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
+        else console.log(`[gtd-durable] programmatic item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${item.id.slice(0, 8)}`);
+      }
+      settleTaskCompletion(store, task);
+      continue;
+    }
+
     const prompt = [
       '[DURABLE TASK — auto-execution]',
       `Task: ${task.goal}`,
       `Step (${item.position + 1}/${store.progressSummary(task.id, task.profile_id).total}): ${item.title}`,
+      `Step id: ${item.id}`,
       item.instructions ? `\nInstructions: ${item.instructions}` : '',
-      item.validation && Object.keys(item.validation).length
-        ? `\nValidation (must pass before completion): ${JSON.stringify(item.validation)}` : '',
-      '\nВыполни этот шаг. Если шаг выполнен и проверка прошла — ответь финальной строкой: DURABLE: done.',
+      item.validation_json
+        ? `\nValidation (must pass before completion): ${item.validation_json}` : '',
+      '\nПроверка шага (validation_mode). Текущий режим шага: ' + validationMode + '.',
+      'Ты можешь выбрать режим для этого шага через task_item_update(item_id: "<Step id>", validation_mode: "...").',
+      'Режимы: "programmatic" — только детерминированные проверки; "programmatic+llm" — детерминированные + дешёвый LLM-судья; "programmatic+llm-fastpass" — самый мягкий.',
+      'Настоятельно рекомендуется "programmatic+llm" (полная проверка) — особенно на дешёвых моделях: не пропускай проверку молча.',
+      'Fast-pass — это ЗАПИСЫВАЕМЫЙ escape hatch, а не тихий обход. Только в режиме "programmatic+llm-fastpass" ты можешь пропустить проверку, если она слишком тяжёлая, ломает работу или нужен срочный фикс — добавь финальной строкой: VALIDATION: fastpass-skip: <причина>. Пропуск попадёт в audit trail с причиной.',
+      'Выполни этот шаг. Если шаг выполнен и проверка прошла — ответь финальной строкой: DURABLE: done.',
       'Если шаг не удался — опиши ошибку и ответь финальной строкой: DURABLE: failed: <причина>.',
     ].filter(Boolean).join('\n');
 
     const itemSnap = { ...item };
     const fireNow = now;
+    // P3a: the step's own wall-clock budget. `stepTimeoutMs` makes claude-runner
+    // hard-kill this run at that budget (clamped to the 40-min global cap) and
+    // suppresses auto-continuation — a step that overruns is a step failure to be
+    // retried per max_attempts, not vaguely continued 10×.
+    const stepTimeoutMs = Number.isFinite(item.execution_timeout_seconds) && item.execution_timeout_seconds > 0
+      ? item.execution_timeout_seconds * 1000 : null;
     runTask({
       taskId: `durable-${task.profile_id}-${item.id.slice(0, 8)}-${fireNow}`,
-      user: { id: null, name: task.profile_id, username: task.profile_id, workDir: null },
-      task: prompt, forceClaude: true, engine: 'claude', secrets, internalGtd: true,
-    }).then(reply => {
+      user: { id: null, name: task.profile_id, username: task.profile_id, workDir },
+      task: prompt, forceClaude: true, engine: step.engine, secrets, internalGtd: true,
+      ocProfile: step.ocProfile || null, contextSkipModels: step.skipModels,
+      stepTimeoutMs,
+    }).then(async reply => {
       const said = typeof reply === 'string' ? reply : '';
       if (/DURABLE:\s*done/i.test(said)) {
+        // P3d-1: record the step's validations (registered → verdict, self-reported
+        // → inconclusive) + the reply as evidence BEFORE completing the item, so a
+        // finalizer that reads rows (P3d-2) never sees a completed step with no
+        // verdict. The tick is fire-and-forget: this runs in the run's completion
+        // callback, not on the tick's critical path.
+        // P3d-1c: re-read the item so a per-step validation_mode the agent set
+        // during the run is honoured, and allow the fast-pass escape under that mode.
+        try {
+          const freshItem = store.getTaskItem(itemSnap.id) || itemSnap;
+          const mode = resolveValidationMode({ task, item: freshItem });
+          const skipReason = mode === FASTPASS_SKIP_MODE ? parseFastpassSkip(said) : null;
+          if (skipReason) {
+            recordFastpassSkip(store, { task, item: freshItem, executionId, reason: skipReason });
+            console.log(`[gtd-durable] fastpass skip ${itemSnap.id.slice(0, 8)}: ${skipReason}`);
+          } else {
+            await recordItemValidations(store, {
+              task, item: itemSnap, executionId, registry: validators, projectDir: itemProjectDir,
+              validationMode: mode, llmValidate,
+            });
+          }
+          store.setItemEvidence(itemSnap.id, task.profile_id, {
+            evidence_json: JSON.stringify({ reply: said.slice(0, 4000) }), completed_at: Date.now(),
+          });
+        } catch (e) {
+          console.error(`[gtd-durable] recordValidations ${itemSnap.id.slice(0, 8)}:`, e.message);
+        }
         store.completeItem(itemSnap.id, task.profile_id, { executionId });
         store.finishExecution(executionId, { status: 'success' });
         console.log(`[gtd-durable] item done: ${itemSnap.id.slice(0, 8)}`);
       } else if (/DURABLE:\s*failed/i.test(said)) {
         store.failItem(itemSnap.id, task.profile_id, { executionId, error: said.slice(0, 500) });
         store.finishExecution(executionId, { status: 'failed', error_text: said.slice(0, 500) });
-        // tier escalation: retry at the next level until the ceiling
-        const esc = store.escalateItem(itemSnap.id, task.profile_id);
-        if (esc && esc.current_tier !== itemSnap.current_tier) {
-          store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() }, task.profile_id);
-          console.log(`[gtd-durable] escalated ${itemSnap.id.slice(0, 8)} → ${esc.current_tier}`);
-        } else {
-          console.log(`[gtd-durable] item failed at ceiling tier: ${itemSnap.id.slice(0, 8)}`);
-        }
+        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
+        if (r.retried) console.log(`[gtd-durable] retry ${itemSnap.id.slice(0, 8)} (${r.attempts}/${r.maxAttempts})`);
+        else console.log(`[gtd-durable] item failed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
       } else {
-        // no terminal marker — treat as failure and escalate (bounded by DURABLE_MAX_ATTEMPTS via escalation ceiling)
+        // no terminal marker — treat as failure, bounded by the item's own max_attempts
         store.failItem(itemSnap.id, task.profile_id, { executionId, error: 'no DURABLE terminal marker in reply' });
         store.finishExecution(executionId, { status: 'failed', error_class: 'no-marker' });
-        const esc = store.escalateItem(itemSnap.id, task.profile_id);
-        if (esc && esc.current_tier !== itemSnap.current_tier) {
-          store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() }, task.profile_id);
-        }
+        const r = retryFailedItem(store, itemSnap.id, task.profile_id);
+        if (!r.retried) console.log(`[gtd-durable] item failed (no marker), budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
       }
       // Keep the task row's revision ticking so projections/UI notice progress.
-      const progress = store.progressSummary(task.id, task.profile_id);
-      if (progress.total > 0 && progress.finished >= progress.total) {
-        // updateTask's activation gate blocks contract-plan finalization on
-        // purpose; the runtime gate for that is a later slice. Finalize via the
-        // same SQL the gate protects for legacy tasks only.
-        if (!task.acceptance_criteria_json) store.completeTask(task.id, task.profile_id, 'done');
-        else store.db.prepare('UPDATE durable_tasks SET status=?, updated_at=? WHERE id=?').run('done', Date.now(), task.id);
-        console.log(`[gtd-durable] task complete: ${task.id.slice(0, 8)}`);
-      }
+      settleTaskCompletion(store, task);
     }).catch(e => {
       console.error(`[gtd-durable] runTask ${itemSnap.id.slice(0, 8)}:`, e.message);
       store.failItem(itemSnap.id, task.profile_id, { executionId, error: e.message.slice(0, 500) });
       store.finishExecution(executionId, { status: 'failed', error_class: 'run-crash', error_text: e.message.slice(0, 500) });
-      // do NOT escalate on crash (engine/env problem, not item problem) — leave
-      // pending so the next tick retries the same tier (bounded by attempts?):
-      store.updateTaskItem(itemSnap.id, { status: 'pending', due_at: Date.now() + 5 * 60 * 1000 }, task.profile_id);
+      // Engine/env crash: same bounded retry as a marker failure, but without
+      // tier escalation (a crash is not an item-quality signal) — just re-pend up
+      // to the item's attempt budget; after it is spent the item stays failed.
+      const r = retryFailedItem(store, itemSnap.id, task.profile_id, { retryDelayMs: 5 * 60 * 1000, escalate: false });
+      if (!r.retried) console.log(`[gtd-durable] item crashed, budget spent (${r.attempts}/${r.maxAttempts}): ${itemSnap.id.slice(0, 8)}`);
     });
   }
 }
@@ -348,19 +547,39 @@ function listGtd(workDir) {
 // Живёт в корне ПРОЕКТА (projectDir, см. projects.js), не в user.workDir —
 // это артефакт конкретной задачи, а не профиля. Читается ЗАНОВО на каждой
 // итерации (не кэшируется в gtd-записи), чтобы видеть отмеченные пункты.
+//
+// Файл — это ЖУРНАЛ: каждая новая задача дописывается новой `Goal:`-секцией в
+// конец. Поэтому активна ровно одна секция — последняя по порядку в файле, у
+// которой есть пункты; только её goal и items и возвращаются. Раньше пункты
+// ВСЕХ секций склеивались в один список, а goal брался из ПЕРВОЙ секции: GTD
+// вёл давно закрытую цель и вкидывал агенту весь бэклог проекта (инцидент
+// PR #1422 — агент трижды ответил «это не входит», GTD закрылся
+// complexity-escalated). Append-only порядок — надёжный признак «текущей»
+// секции; старые (в т.ч. отложенные) секции больше не воскрешаются.
+//
+// Каждый пункт несёт `line` (0-based номер строки в файле) — writeChecklistDone
+// правит чекбоксы ровно по этим строкам; иначе отметка активной секции
+// наложилась бы на первые N чекбоксов более старой секции.
 function readChecklist(projectDir) {
   if (!projectDir) return null;
   let raw;
   try { raw = fs.readFileSync(path.join(projectDir, CHECKLIST_FILE), 'utf8'); } catch { return null; }
-  const items = [];
-  let goal = null;
-  for (const line of raw.split('\n')) {
-    const item = line.match(/^\s*-\s*\[([ xX])\]\s*(.+)$/);
-    if (item) { items.push({ text: item[2].trim(), done: item[1].toLowerCase() === 'x' }); continue; }
-    const g = line.match(/^\s*#*\s*goal:\s*(.+)$/i);
-    if (g && !goal) goal = g[1].trim();
+  const lines = raw.split('\n');
+  const sections = [];
+  let cur = { goal: null, items: [] };
+  sections.push(cur);
+  for (let i = 0; i < lines.length; i++) {
+    const g = lines[i].match(/^\s*#*\s*goal:\s*(.+)$/i);
+    if (g) { cur = { goal: g[1].trim(), items: [] }; sections.push(cur); continue; }
+    const item = lines[i].match(/^\s*-\s*\[([ xX])\]\s*(.+)$/);
+    if (item) cur.items.push({ text: item[2].trim(), done: item[1].toLowerCase() === 'x', line: i });
   }
-  return { goal, items };
+  for (let s = sections.length - 1; s >= 0; s--) {
+    if (sections[s].items.length) return { goal: sections[s].goal, items: sections[s].items };
+  }
+  // Ни одного чекбокса — отдаём последний объявленный goal (fallback для
+  // originalTask) с пустыми items.
+  return { goal: sections[sections.length - 1].goal, items: [] };
 }
 
 // Незакрытые пункты + цель, для инъекции в reopen-промпт вместо усечённого task.
@@ -537,7 +756,7 @@ const PR_REF_RE = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/;
 function _ghToken(username) {
   try {
     const p = path.join(TOKENS_ROOT, String(username), 'github');
-    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+    if (fs.existsSync(p)) return readTokenValue(fs.readFileSync(p, 'utf8'));
   } catch { /* no token on disk */ }
   return null;
 }
@@ -583,20 +802,34 @@ async function checklistCheapPrecheck(checklist, { username } = {}) {
   return { changed, items };
 }
 
-// Флипает только чекбоксы (по порядку встречи в файле), не трогая остальной текст —
-// безопасно для произвольного содержимого checklist.md (заголовки, Goal:, заметки).
+// Флипает только чекбоксы, не трогая остальной текст — безопасно для
+// произвольного содержимого checklist.md (заголовки, Goal:, заметки).
+// Пункты из readChecklist несут `line` — правим ровно эти строки. Порядковый
+// проход по всему файлу наложил бы активную секцию на первые её чекбоксы в
+// начале файла, т.е. затёр бы чужую (старшую) секцию. Для items без линии
+// (легаси-вызовы, тесты) остаётся прежний порядковый фолбэк.
 function writeChecklistDone(projectDir, items) {
   const fp = path.join(projectDir, CHECKLIST_FILE);
   let raw;
   try { raw = fs.readFileSync(fp, 'utf8'); } catch { return false; }
-  let idx = 0;
-  const lines = raw.split('\n').map(line => {
-    const m = line.match(/^(\s*-\s*\[)([ xX])(\]\s*)(.+)$/);
-    if (!m) return line;
-    const upd = items[idx]; idx++;
-    if (!upd) return line;
-    return `${m[1]}${upd.done ? 'x' : ' '}${m[3]}${m[4]}`;
-  });
+  const doneRe = /^(\s*-\s*\[)([ xX])(\]\s*)(.+)$/;
+  const lines = raw.split('\n');
+  if (items.length && items.every(it => Number.isInteger(it.line))) {
+    for (const it of items) {
+      const m = lines[it.line] && lines[it.line].match(doneRe);
+      if (!m) continue;
+      lines[it.line] = `${m[1]}${it.done ? 'x' : ' '}${m[3]}${m[4]}`;
+    }
+  } else {
+    let idx = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(doneRe);
+      if (!m) continue;
+      const upd = items[idx]; idx++;
+      if (!upd) continue;
+      lines[i] = `${m[1]}${upd.done ? 'x' : ' '}${m[3]}${m[4]}`;
+    }
+  }
   try { _atomicWrite(fp, lines.join('\n')); return true; }
   catch (e) { console.error('[gtd] writeChecklistDone:', e.message); return false; }
 }
@@ -645,6 +878,7 @@ function buildReopenMessage(rec) {
       : '• Если нет — сделай ещё одну попытку (можно другим путём, чем прошлая). ПЕРЕД работой создай GitHub issue на то, что собираешься сделать'
         + '\n  (или подними уже открытый issue с прошлого шага и двигай его), потом выполни. В конце напиши строкой: GTD: continue',
     '• Если задача оказалась существенно сложнее первоначальной оценки (нужно намного больше кода, затрагивает много новых компонентов) — не усложняй. Напиши строкой: GTD: escalated',
+    '• Если всё оставшееся — шаг, который может сделать ТОЛЬКО человек (живая проверка в чате, ручное решение), НЕ эскалируй и не выдумывай себе работу. Напиши строкой: GTD: blocked-on-human',
     '',
     summary || `Исходная задача: ${rec.originalTask || '(см. историю сессии)'}`,
   ].join('\n');
@@ -652,6 +886,10 @@ function buildReopenMessage(rec) {
 
 const DONE_RE      = /GTD:\s*done/i;
 const ESCALATED_RE = /GTD:\s*escalated/i;
+// Последний шаг — за человеком (живая проверка/ручное решение): GTD не может его
+// доделать и НЕ должен закрывать это как «задача сложнее, чем думали» — иначе
+// авто-цикл вхолостую жжёт попытки и врёт про сложность.
+const BLOCKED_RE   = /GTD:\s*blocked[-_ ]?on[-_ ]?human|GTD:\s*жд[её]т\s+человека/i;
 
 // Итог GTD-итерации, перезапущенной после рестарта (resumePendingTasks): исходный
 // .then() из runDue умер вместе с процессом, поэтому «GTD: done» некому разобрать —
@@ -662,6 +900,7 @@ function settleResumedGtd(workDir, sessionId, reply, { now = Date.now() } = {}) 
   const said = typeof reply === 'string' ? reply : '';
   if (DONE_RE.test(said)) rec.closedReason = 'done';
   else if (ESCALATED_RE.test(said)) rec.closedReason = 'complexity-escalated';
+  else if (BLOCKED_RE.test(said)) rec.closedReason = 'awaiting-human';
   else { rec.dueAt = now + rec.etaMinutes * 60 * 1000; writeGtd(workDir, rec); return rec; }
   rec.status = 'closed';
   writeGtd(workDir, rec);
@@ -864,6 +1103,7 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
         const said = typeof reply === 'string' ? reply : '';
         const doneNow      = DONE_RE.test(said);
         const escalatedNow = ESCALATED_RE.test(said);
+        const blockedNow   = BLOCKED_RE.test(said);
         // Запись исчезла (сессия удалена / user-stop → clearGtd) — НЕ воскрешаем её
         // записью in-memory снапшота: намеренно закрытое должно остаться закрытым.
         const fresh = readGtd(workDir, _recSnap.sessionId);
@@ -881,6 +1121,16 @@ async function _runDueInner({ secrets, baseUsersDir, isTaskRunning, runTask, get
             `⚠️ GTD остановлен — задача оказалась сложнее первоначальной оценки.\n`
             + `Агент остановил попытки (было ${fresh.iterations}), чтобы не усложнять.\n`
             + `Рассмотрите задачу отдельно: ${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}`,
+            _recSnap.threadId
+          ).catch(() => {});
+        } else if (blockedNow) {
+          fresh.status = 'closed'; fresh.closedReason = 'awaiting-human';
+          writeGtd(workDir, fresh);
+          console.log(`[gtd] closed ${_recSnap.sessionId}: awaiting-human`);
+          _tgNotify(routeSecrets?.TELEGRAM_BOT_TOKEN, chatId,
+            `⏳ GTD остановлен — дальше только шаг за тобой (живая проверка/ручное действие).\n`
+            + `Задача: «${(fresh.originalTask || '').slice(0, 200) || '(см. сессию)'}»\n`
+            + `Авто-доведение выключено, чтобы не гонять попытки вхолостую.`,
             _recSnap.threadId
           ).catch(() => {});
         } else if (fresh.iterations >= fresh.maxIterations) {
@@ -929,7 +1179,8 @@ module.exports = {
   readGtd, writeGtd, clearGtd, clearAllGtd, clearGtdForChat, listGtd, settleResumedGtd,
   readChecklist, checklistSummary, computeMaxIterations,
   checklistCheapPrecheck, writeChecklistDone, mirrorGtdChecklist, CHECKLIST_API_BASE, checklistAutologinUrl,
-  durableStore, runDueDurable, reconcileOrphanedRunning, claimNextDurableItem,
+  _ghToken, _ghFetch,
+  durableStore, runDueDurable, reconcileOrphanedRunning, claimNextDurableItem, retryFailedItem,
   tickHeartbeat, countOpenLegacy, durableItemCounts,
   DEFAULT_ETA_MIN, DEFAULT_MAX_ITERATIONS, ETA_MIN_CLAMP, ETA_MAX_CLAMP,
   CHECKLIST_FILE, CHECKLIST_MAX_ITERATIONS, MAX_FIRES_PER_TICK, FIRE_LEASE_MS,

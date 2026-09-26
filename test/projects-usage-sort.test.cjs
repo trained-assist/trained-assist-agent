@@ -35,11 +35,10 @@ ok(sorted[2].id === untouched.id, 'zero-count project sorts last');
 const recencyOnly = projects.sortByUsage(projects.listProjects(workDir), undefined);
 ok(recencyOnly[0].id === rare.id, 'no count map -> recency order preserved (rare.id has the newest lastAt)');
 
-// decideNewSessionProject must thread the count map into its 'ask' choices in the
-// same order sortByUsage produces, not the raw listProjects (recency) order.
+// Replaced 2026-09-26: decideNewSessionProject never asks, so there are no 'ask' choices
+// to order. Three projects, none pinned/used/default → create the default «Все подряд».
 const decision = projects.decideNewSessionProject(workDir, 'chat1', countByProject);
-ok(decision.action === 'ask', 'three projects -> ask');
-ok(decision.choices[0].id === frequent.id, 'decideNewSessionProject orders choices by usage, not recency');
+ok(decision.action === 'create' && decision.name === 'Все подряд', 'three projects, no default -> create «Все подряд», never ask');
 
 // Tie-break: equal counts fall back to lastAt desc.
 const tieCounts = { [frequent.id]: 5, [rare.id]: 5, [untouched.id]: 5 };

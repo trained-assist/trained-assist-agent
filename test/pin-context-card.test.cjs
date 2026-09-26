@@ -28,7 +28,11 @@ function withFakeConnectedService(username) {
 {
   const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'pin-card-'));
   const card = buildContextCard('nobody-' + Date.now(), wd, 1);
-  ok(card === null, 'no pin when nothing is connected');
+  ok(card === null, 'no pin for a brand-new profile (no project, nothing connected)');
+  // Added 2026-09-26: once a project exists the card carries it even with nothing connected.
+  require('../src/projects').createProject(wd, { type: 'generic', name: 'Все подряд' });
+  const card2 = buildContextCard('nobody-' + Date.now(), wd, 1);
+  ok(/📁 Проект: Все подряд\n\/project — список/.test(card2 || '') && !/Подключено/.test(card2 || ''), 'nothing connected + a project → card shows the current project, no services line');
 }
 
 // 2. OpenCode engine — model must come from THIS workDir's profile (profiles.getOcProfile),

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { mergeAdapterServers } = require('./mcp-source-runtime');
 
 // Services whose cookies we know how to inject into Playwright
 const COOKIE_DOMAINS = {
@@ -73,8 +74,13 @@ function buildStorageState(tokensDir) {
 /**
  * Writes per-user .mcp.json with Playwright MCP scoped to this user's Chrome profile.
  * If the user has captured service cookies (via Chrome extension), injects them via --storage-state.
+ *
+ * `extraServers` (optional): adapter server descriptors materialized by the host MCP
+ * source runtime (src/mcp-source-runtime.js, PR2b) for this one run — e.g. an engineering
+ * skill source. Merged in via mergeAdapterServers(), which never lets an extra server
+ * shadow a core name (playwright, trained-skills, hh-skills, freelance-skills).
  */
-function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath } = {}) {
+function writeMcpConfig(workDir, userId, { userName, userHandle, extraServers } = {}) {
   // Note: --user-data-dir creates a persistent context, which is incompatible
   // with --storage-state (Playwright limitation). We rely on --storage-state
   // for both cookie injection and session persistence. Per-user isolation is
@@ -143,7 +149,11 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath
     ...(process.env.GCP_REGION      ? { GCP_REGION:      process.env.GCP_REGION }      : {}),
     ...(userName       ? { AGENT_USER_NAME:    userName }       : {}),
     ...(userHandle     ? { AGENT_USER_HANDLE: userHandle }     : {}),
-    ...(sessionFilePath ? { AGENT_SESSION_FILE: sessionFilePath } : {}),
+    // NO AGENT_SESSION_FILE here: .mcp.json is ONE file per profile, rewritten by every run,
+    // and config env overrides the engine's env — parallel sessions of a profile (different
+    // chats) would read each other's session file and get_chat_history would answer for the
+    // wrong chat. Per-run identity travels in the engine process env only (runEngineProcess;
+    // codex via env_vars in codexMcpArgs).
   };
 
   const config = {
@@ -180,6 +190,25 @@ function writeMcpConfig(workDir, userId, { userName, userHandle, sessionFilePath
       args: [freelanceSkillIndex],
       env: mcpToolEnv,
     };
+  }
+
+  // Engineering skill lives in the sibling trained-assist-engineering checkout
+  // (issue #1418), same existence-gated pattern as hh-skills/freelance-skills.
+  // Its tools read host-derived `principal` from USER_ID (already in mcpToolEnv),
+  // never from the tool-call arguments.
+  const engineeringSkillIndex = path.join(__dirname, '..', '..', 'trained-assist-engineering', 'src', 'mcp-skills', 'index.js');
+  if (fs.existsSync(engineeringSkillIndex)) {
+    config.mcpServers['engineering-skills'] = {
+      command: 'node',
+      args: [engineeringSkillIndex],
+      env: mcpToolEnv,
+    };
+  }
+
+  if (extraServers && Object.keys(extraServers).length > 0) {
+    const { merged, skipped } = mergeAdapterServers(config.mcpServers, extraServers);
+    config.mcpServers = merged;
+    if (skipped.length > 0) console.warn('[browser] extraServers skipped (core name shadow):', skipped.join(', '));
   }
 
   const configPath = path.join(workDir, '.mcp.json');
