@@ -95,15 +95,32 @@ if ! ls "$HOME/.cache/ms-playwright/chromium"* 2>/dev/null | grep -q chromium; t
   (cd "$RELEASE_DIR" && npx playwright install chromium --with-deps 2>&1 | tail -5) || true
 fi
 
+# Sibling MCP servers go live the moment their checkout moves (sessions spawn them by
+# path), so a new sibling revision must pass the host's MCP contract (#1481: tool
+# results are never empty) BEFORE the reset; a violating revision keeps the old one.
+sync_sibling_checked() {
+  local dir="$1" probe
+  if ! git -C "$dir" fetch --quiet origin main 2>/dev/null; then
+    echo "  ⚠️  update failed — keeping existing checkout"; return 0
+  fi
+  probe="$(mktemp -d)"
+  if git -C "$dir" archive origin/main src | tar -x -C "$probe" &&
+     node "$RELEASE_DIR/scripts/check-mcp-conformance.js" "$probe"; then
+    git -C "$dir" reset --quiet --hard origin/main 2>/dev/null ||
+      echo "  ⚠️  update failed — keeping existing checkout"
+  else
+    echo "  ⚠️  $(basename "$dir") origin/main violates the MCP contract — keeping $(git -C "$dir" rev-parse --short HEAD)"
+  fi
+  rm -rf "$probe"
+}
+
 echo "==> Ensuring trained-assist-hh-skill sibling checkout exists (feeds the HH skill fallback)..."
 if [ ! -d "$HH_SKILL_DIR/.git" ]; then
   HH_SKILL_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's#/trained-assist-agent\(\.git\)\?$#/trained-assist-hh-skill.git#')
   echo "  Cloning $HH_SKILL_DIR..."
   git clone --quiet "$HH_SKILL_URL" "$HH_SKILL_DIR" || echo "  ⚠️  clone failed — hh skill fallback will be unavailable until fixed"
 else
-  git -C "$HH_SKILL_DIR" fetch --quiet origin main 2>/dev/null &&
-    git -C "$HH_SKILL_DIR" reset --quiet --hard origin/main 2>/dev/null ||
-    echo "  ⚠️  update failed — keeping existing checkout"
+  sync_sibling_checked "$HH_SKILL_DIR"
 fi
 # Releases resolve the sibling as <release>/../../trained-assist-hh-skill, i.e.
 # <releases>/trained-assist-hh-skill — link that to the canonical checkout.
@@ -116,9 +133,7 @@ if [ ! -d "$ENGINEERING_DIR/.git" ]; then
   echo "  Cloning $ENGINEERING_DIR..."
   git clone --quiet "$ENGINEERING_URL" "$ENGINEERING_DIR" || echo "  ⚠️  clone failed — engineering_spawn_workspace will be unavailable until fixed"
 else
-  git -C "$ENGINEERING_DIR" fetch --quiet origin main 2>/dev/null &&
-    git -C "$ENGINEERING_DIR" reset --quiet --hard origin/main 2>/dev/null ||
-    echo "  ⚠️  update failed — keeping existing checkout"
+  sync_sibling_checked "$ENGINEERING_DIR"
 fi
 # Same resolution depth as trained-assist-hh-skill above: both browser.js's
 # sibling mount (2 levels up from src/) and 61-dev.js's engineeringLibPath()
