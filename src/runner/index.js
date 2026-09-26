@@ -2534,11 +2534,14 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // attempts stay on the SAME model (a flaky rung is often just flaky once), and one extra
   // attempt is allowed on the ALTERNATIVE rung (forceOpencodeAlternation advances the ladder on
   // that last retry only) — owner 2026-09-26: "три ретрая не сработали → соседняя модель".
-  const altRetryBudget = 1;
+  // The extra slot only exists for OpenCode, whose ladder has a real alternative model; for
+  // claude/codex forceOpencodeAlternation is a no-op, so a 4th retry would just repeat the same
+  // failure with no way to differ (and would break the "capped at 3" contract those paths had).
+  const altRetryBudget = engine === 'opencode' ? 1 : 0;
   if (incomplete && !resumedAfterRestart && !restartShutdown && incompleteRetryAttempts < MAX_INCOMPLETE_RETRIES + altRetryBudget) {
     const nextAttempt = incompleteRetryAttempts + 1;
     const delayMs = getRetryDelayMs(Math.min(nextAttempt, MAX_INCOMPLETE_RETRIES)) || 0;
-    const escalate = nextAttempt > MAX_INCOMPLETE_RETRIES;
+    const escalate = engine === 'opencode' && nextAttempt > MAX_INCOMPLETE_RETRIES;
     const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek, escalate });
     const retryMsg = escalate
       ? `🔄 Не помогло и после ${MAX_INCOMPLETE_RETRIES} попыток — пробую на альтернативной модели${altNote ? ` (${altNote})` : ''}…`
