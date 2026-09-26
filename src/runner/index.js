@@ -681,6 +681,8 @@ function runTask(opts) {
   if (!opts.forceClaude && isPreQueueQuickIntent((opts.task || '').trim())) {
     const quick = getQuickAnswer(opts.task, opts.user.username, opts.user.workDir, false, opts.user.id, opts.user.telegramUserId, opts.user.audience || 'default', runThreadId);
     if (quick) {
+      // Never invisible: an accepted task answered here leaves no other trace (#1479).
+      console.log('[%s] pre-queue quick-answer len=%d', opts.taskId, quick.length);
       const msg = `⚡ ${quick}`;
       const botToken = opts.secrets?.TELEGRAM_BOT_TOKEN || opts.secrets?.BOT_TOKEN;
       const chatId = opts.user.id;
