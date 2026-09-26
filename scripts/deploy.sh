@@ -33,6 +33,7 @@ TARGET="${DEPLOY_TARGET_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}"
 RELEASE_DIR="$RELEASES_DIR/$TARGET"
 HH_SKILL_DIR="${HH_SKILL_DIR:-$AGENT_HOME/trained-assist-hh-skill}"
 ENGINEERING_DIR="${ENGINEERING_DIR:-$AGENT_HOME/trained-assist-engineering}"
+FREELANCE_SKILL_DIR="${FREELANCE_SKILL_DIR:-$AGENT_HOME/trained-assist-freelance-skill}"
 export REPO_DIR RELEASES_DIR CURRENT_LINK SERVICE
 
 if [ "${ASSIST_DEPLOY_LOCKED:-}" != 1 ]; then
@@ -140,6 +141,19 @@ fi
 # (4 levels up from src/mcp-skills/tools/) land on <releases>/, since a release
 # dir itself is one path segment (<releases>/<sha>/src/...).
 $SUDO ln -sfn "$ENGINEERING_DIR" "$RELEASES_DIR/trained-assist-engineering"
+
+# Freelance skill: same sibling pattern (server.js / browser.js resolve
+# <release>/../../trained-assist-freelance-skill). Was never synced nor linked for
+# releases, so live freelance lagged main and releases could not resolve it (#1481).
+echo "==> Ensuring trained-assist-freelance-skill sibling checkout exists..."
+if [ ! -d "$FREELANCE_SKILL_DIR/.git" ]; then
+  FREELANCE_SKILL_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's#/trained-assist-agent\(\.git\)\?$#/trained-assist-freelance-skill.git#')
+  echo "  Cloning $FREELANCE_SKILL_DIR..."
+  git clone --quiet "$FREELANCE_SKILL_URL" "$FREELANCE_SKILL_DIR" || echo "  ⚠️  clone failed — freelance skill will be unavailable until fixed"
+else
+  sync_sibling_checked "$FREELANCE_SKILL_DIR"
+fi
+$SUDO ln -sfn "$FREELANCE_SKILL_DIR" "$RELEASES_DIR/trained-assist-freelance-skill"
 
 echo "==> Validating and applying nginx config ($DEPLOY_ENV)..."
 REPO_DIR="$RELEASE_DIR" bash "$RELEASE_DIR/scripts/deploy-nginx.sh"
