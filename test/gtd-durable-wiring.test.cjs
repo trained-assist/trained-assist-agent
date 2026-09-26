@@ -579,6 +579,11 @@ function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
     const r = store.createPlan({
       profile_id: 'u1', goal: 'role wiring', user_value: 'uv',
       acceptance_criteria: [{ description: 'c' }],
+      // Deterministic mode: under strict positional ordering the next step only
+      // becomes claimable after this step's completion callback runs, so the
+      // callback must not block on the default cheap-LLM judge (case 18 already
+      // covers validation; this case isolates role wiring).
+      execution_policy: { validation_mode: 'programmatic' },
       items: [
         { title: 'research', execution_kind: 'agent', executor_role: 'researcher', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } },
         { title: 'review', execution_kind: 'agent', executor_role: 'reviewer', minimum_model_level: 'master', context_budget: 'medium', validation: { command: 'true' } },
@@ -603,6 +608,57 @@ function activeContractTask(G, { goal, items, sessionId, executionPolicy }) {
       `role: reviewer→opencode/review, forceClaude=false (got ${JSON.stringify(shape(opts[1]))})`);
     ok(opts[2] && opts[2].engine === 'claude' && !opts[2].ocRole && opts[2].forceClaude === true,
       `role: doctor→claude, forceClaude=true (got ${JSON.stringify(shape(opts[2]))})`);
+  }
+
+  // 20. strict positional ordering (#1450): a 3-item plan with a delay-gated step
+  // fires strictly 1→2→3 through runDueDurable. The delayed step also proves the
+  // injected `now` drives due_at selection — the tick is advanced to the waiter's
+  // own due_at, not the wall clock, so the case is deterministic.
+  {
+    const G20 = freshStore('20');
+    const store = G20.durableStore();
+    const r = store.createPlan({
+      profile_id: 'u1', goal: 'positional smoke', user_value: 'uv',
+      acceptance_criteria: [{ description: 'c' }],
+      execution_policy: { validation_mode: 'programmatic' },
+      items: [
+        { title: 'one', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } },
+        { title: 'two', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' }, delay_after_sec: 600 },
+        { title: 'three', execution_kind: 'agent', executor_role: 'developer', minimum_model_level: 'bachelor', context_budget: 'small', validation: { command: 'true' } },
+      ],
+    });
+    store.updateTask(r.task.id, 'u1', { status: 'active' });
+    const order = [];
+    const tick = (now) => G20.runDueDurable({
+      secrets: {}, now, isTaskRunning: () => false, maxFires: 5,
+      runTask: async (o) => { order.push(o.task.match(/Step \(\d+\/\d+\): (\w+)/)[1]); return 'DURABLE: done'; },
+    });
+
+    await tick(Date.now());
+    await drain();
+    let items = store.listTaskItems(r.task.id, 'u1');
+    ok(order.join(',') === 'one',
+      `positional: only step 1 fires before the delay gate (got ${order.join(',')})`);
+    ok(items[0].status === 'done' && items[1].status === 'waiting' && items[2].status === 'pending',
+      `positional: after step 1 — done/waiting/pending (got ${items.map(i => i.status).join('/')})`);
+
+    // Not-yet-due waiter blocks step 3 even though step 3 has no delay.
+    const due = items[1].due_at;
+    await tick(due - 1);
+    await drain();
+    ok(order.join(',') === 'one',
+      `positional: a not-yet-due predecessor blocks the successor (got ${order.join(',')})`);
+
+    await tick(due);
+    await drain();
+    ok(order.join(',') === 'one,two',
+      `positional: waiter fires once now reaches its due_at (got ${order.join(',')})`);
+
+    await tick(due);
+    await drain();
+    ok(order.join(',') === 'one,two,three',
+      `positional: step 3 fires only after step 2 is done (got ${order.join(',')})`);
+    ok(store.getTask(r.task.id, 'u1').status === 'done', 'positional: plan finalizes after strict 1→2→3');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

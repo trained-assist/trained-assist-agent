@@ -88,15 +88,68 @@ describe('DurableTaskStore', () => {
     expect(b.wait_deadline_at).toBeGreaterThan(b.due_at);
   });
 
-  it('expireWaitingDeadlines fails only waiting items past their deadline', () => {
+  it('strict positional ordering: a 3-item plan runs 1→2→3 across a delay gate', () => {
     const s = tmpStore();
     s.createTask({ id: 't', profile_id: 'p', goal: 'g' });
-    s.createTaskItem({ id: 'expired', task_id: 't', position: 1, title: 'expired' });
-    s.createTaskItem({ id: 'alive', task_id: 't', position: 2, title: 'alive' });
-    s.createTaskItem({ id: 'undated', task_id: 't', position: 3, title: 'undated' });
-    s.updateTaskItem('expired', { status: 'waiting', wait_deadline_at: Date.now() - 1000 }, 'p');
-    s.updateTaskItem('alive', { status: 'waiting', wait_deadline_at: Date.now() + 60_000 }, 'p');
-    s.updateTaskItem('undated', { status: 'waiting' }, 'p'); // no deadline → never expires
+    s.createTaskItem({ id: 'a', task_id: 't', position: 1, title: 'a' });
+    s.createTaskItem({ id: 'b', task_id: 't', position: 2, title: 'b', delay_after_sec: 3600 });
+    s.createTaskItem({ id: 'c', task_id: 't', position: 3, title: 'c' });
+
+    expect(s.claimNextRunnable().id).toBe('a');
+    s.completeItem('a', 'p');
+    // b is now waiting out its delay; c (later, no delay) must not jump the queue.
+    expect(s.claimNextRunnable()).toBeNull();
+    const b = s.getTaskItem('b');
+    expect(b.status).toBe('waiting');
+    // Fast-forward the waiter: b is now due, c is still blocked behind b.
+    s.updateTaskItem('b', { due_at: b.due_at - 3600 * 1000, wait_deadline_at: null }, 'p');
+    expect(s.claimNextRunnable().id).toBe('b');
+    s.completeItem('b', 'p');
+    expect(s.claimNextRunnable().id).toBe('c');
+  });
+
+  it('strict positional ordering: waiting and failed predecessors block the successor', () => {
+    const s = tmpStore();
+    s.createTask({ id: 't', profile_id: 'p', goal: 'g' });
+    s.createTaskItem({ id: 'a', task_id: 't', position: 1, title: 'a' });
+    s.createTaskItem({ id: 'b', task_id: 't', position: 2, title: 'b' });
+
+    s.updateTaskItem('a', { status: 'waiting', due_at: Date.now() + 1_000_000 }, 'p');
+    expect(s.claimNextRunnable()).toBeNull();
+    s.updateTaskItem('a', { status: 'failed' }, 'p');
+    expect(s.claimNextRunnable()).toBeNull();
+    // Only a terminal predecessor unblocks the successor.
+    s.updateTaskItem('a', { status: 'skipped' }, 'p');
+    expect(s.claimNextRunnable().id).toBe('b');
+  });
+
+  it('claimNextRunnable honors an injected now for due_at selection', () => {
+    const s = tmpStore();
+    s.createTask({ id: 't', profile_id: 'p', goal: 'g' });
+    s.createTaskItem({ id: 'i', task_id: 't', title: 'x', due_at: 1_000_000 });
+    expect(s.claimNextRunnable(999_999)).toBeNull();
+    const claimed = s.claimNextRunnable(1_000_000);
+    expect(claimed.id).toBe('i');
+    expect(claimed.status).toBe('running');
+  });
+
+  it('expireWaitingDeadlines fails only waiting items past their deadline', () => {
+    const s = tmpStore();
+    // One task per waiter: sibling position ordering (a failed position-1 blocks
+    // the tail) would otherwise mask what this case tests — that expiry fails
+    // exactly the overdue waiter before the next claim can hand it out again.
+    const waiters = [
+      ['expired', Date.now() - 1000],
+      ['alive', Date.now() + 60_000],
+      ['undated', null], // no deadline → never expires
+    ];
+    for (const [id, deadline] of waiters) {
+      s.createTask({ id: `t-${id}`, profile_id: 'p', goal: 'g' });
+      s.createTaskItem({ id, task_id: `t-${id}`, title: id });
+      s.updateTaskItem(id, deadline === null
+        ? { status: 'waiting' }
+        : { status: 'waiting', wait_deadline_at: deadline }, 'p');
+    }
 
     expect(s.expireWaitingDeadlines()).toBe(1);
     expect(s.getTaskItem('expired').status).toBe('failed');

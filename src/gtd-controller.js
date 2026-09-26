@@ -143,7 +143,8 @@ function claimNextDurableItem(store = durableStore(), { now = Date.now() } = {})
   // otherwise a 'waiting' step whose deadline passed defers forever.
   store.expireWaitingDeadlines(now);
   reconcileOrphanedRunning(store, { now });
-  return store.claimNextRunnable();
+  // Thread the injected tick time through so due_at selection is deterministic.
+  return store.claimNextRunnable(now);
 }
 
 
