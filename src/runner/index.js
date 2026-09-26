@@ -13,7 +13,7 @@ const { isAuthError, setAuthFailedFlag, clearAuthFailedFlag } = require('../auth
 const { isTerminalQuickCrash, engineFallbackNotice, engineAuthNotice } = require('../engine-crash-policy');
 const opencodeLadder = require('../opencode-ladder');
 const opencodeGoToggle = require('../opencode-go-toggle');
-const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs } = require('../retry-policy');
+const { MAX_RETRIES: MAX_INCOMPLETE_RETRIES, getRetryDelayMs, isTestMode } = require('../retry-policy');
 const { recordUsage } = require('../usage-store');
 const { classifyDeterministic: classifyFailureDeterministic } = require('../failure-classifier');
 const executionHistory = require('../execution-history');
@@ -2326,6 +2326,11 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // the ladder never degrades, even though the raw error was a clean quota hit.
   const preLadderText = codexErrorMsg || claudeResult || fullOutput.text || result;
 
+  // Set only when the current rung failed with a transient per-model fault ("Bad Request"): the
+  // shared per-model backoff (issue #1467) then decides how long to wait before retrying the SAME
+  // model (15s → 30s → 60s …), instead of the generic crash backoff in the retry branch below.
+  let transientRetryDelayMs = null;
+
   // Shared "deepseek" OpenCode profile (issue #1096): on a Go quota hit, degrade the gateway —
   // first rotate to a spare service-account key (opencode-go-keys.js) and stay on Go; only once
   // every key is exhausted flip the VM-wide go/openrouter toggle. The Go subscription's quota is
@@ -2394,6 +2399,9 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
       // MAX_INCOMPLETE_RETRIES = 3) before forceOpencodeAlternation moves the task to the sibling
       // rung. Only a quota/rate-limit or a context overflow justifies skipping the rung right away.
       if (verdict.class === 'transient') {
+        // Shared per-model backoff already recorded the failure; carry its retry delay down to the
+        // generic retry branch so the SAME model is retried on that short schedule.
+        if (Number.isFinite(verdict.retryAfterMs)) transientRetryDelayMs = verdict.retryAfterMs;
         _recordFailureAttempt(executionId, {
           taskId, projectId, sessionId: activeSessionId, webExactSession, engine: 'opencode', model: verdict.model,
           errorText: preLadderText, action: 'transient_same_rung_retry',
@@ -2584,16 +2592,22 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
   // shared backoff schedule, before handing it back to a human.
   //
   // For an intermittent per-rung fault like "Bad Request" the first MAX_INCOMPLETE_RETRIES
-  // attempts stay on the SAME model (a flaky rung is often just flaky once), and one extra
-  // attempt is allowed on the ALTERNATIVE rung (forceOpencodeAlternation advances the ladder on
-  // that last retry only) — owner 2026-09-26: "три ретрая не сработали → соседняя модель".
+  // attempts stay on the SAME model, retried on the model's own short exponential backoff
+  // (transientRetryDelayMs, issue #1467), and one extra attempt is allowed on the ALTERNATIVE rung
+  // (forceOpencodeAlternation advances the ladder on that last retry only) — owner 2026-09-26:
+  // "три ретрая не сработали → соседняя модель".
   // The extra slot only exists for OpenCode, whose ladder has a real alternative model; for
   // claude/codex forceOpencodeAlternation is a no-op, so a 4th retry would just repeat the same
   // failure with no way to differ (and would break the "capped at 3" contract those paths had).
   const altRetryBudget = engine === 'opencode' ? 1 : 0;
   if (incomplete && !resumedAfterRestart && !restartShutdown && incompleteRetryAttempts < MAX_INCOMPLETE_RETRIES + altRetryBudget) {
     const nextAttempt = incompleteRetryAttempts + 1;
-    const delayMs = getRetryDelayMs(Math.min(nextAttempt, MAX_INCOMPLETE_RETRIES)) || 0;
+    // A transient per-model fault carries its own backoff (15s → 30s → 60s …): retry the same
+    // model on that schedule. Everything else (bare crash, dropped connection) keeps the generic
+    // crash backoff. TEST_MODE collapses both to milliseconds so retry tests stay fast.
+    const delayMs = (transientRetryDelayMs != null && !isTestMode())
+      ? transientRetryDelayMs
+      : (getRetryDelayMs(Math.min(nextAttempt, MAX_INCOMPLETE_RETRIES)) || 0);
     const escalate = engine === 'opencode' && nextAttempt > MAX_INCOMPLETE_RETRIES;
     const altNote = forceOpencodeAlternation({ engine, ocProfileName, ocProfileOverrides, ocProfileIsDeepseek, ocRole, escalate });
     const retryMsg = escalate
@@ -2677,6 +2691,15 @@ async function _runTask({ taskId, user, task: rawTask, context, engine: accepted
         clearAuthFailedFlag(engine);
       } catch (e) {
         console.warn('[runner] engine-health self-heal failed:', e.message);
+      }
+    }
+    // A successful OpenCode run also clears this model's shared health (issue #1467) — a transient
+    // backoff (15s → 30s → 60s …) must not linger after the model has demonstrably recovered.
+    if (engine === 'opencode' && ocActiveModel) {
+      try {
+        opencodeLadder.recordSuccess(ocActiveModel);
+      } catch (e) {
+        console.warn('[runner] model-health success reset failed:', e.message);
       }
     }
   }
